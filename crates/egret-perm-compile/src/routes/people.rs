@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::{PermHttpError, PermState};
 use crate::people::{
-    list_people_via, read_group_via, read_role_via, read_user_via, GroupPrincipal, ListKind,
-    PeopleFilter, PeopleList, RolePrincipal, UserPrincipal,
+    list_people_via, principal_members_via, read_group_via, read_role_via, read_user_via,
+    GroupPrincipal, ListKind, PeopleFilter, PeopleList, RolePrincipal, UserPrincipal,
 };
 
 /// The default page size, and the largest one a caller may ask for.
@@ -308,4 +308,164 @@ pub(super) async fn read_role(
     let role = snapshot!(st, |conn| read_role_via(conn, &name));
     role.map(Json)
         .ok_or_else(|| PermHttpError::Missing(format!("No role is named {name}.")))
+}
+
+// ---------------------------------------------------------------------------
+// POST /perm/explain/principal (Task 4, spec §4.3, P5, P6)
+// ---------------------------------------------------------------------------
+
+/// At most this many members are evaluated per request (P5).
+pub const EXPLAIN_MEMBER_LIMIT: usize = 200;
+
+/// A group or a role, as a grant principal stores it.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ExplainPrincipalRef {
+    pub kind: egret_perm::PrincipalKind,
+    pub r#ref: String,
+}
+
+/// "Can this group or role do `action` on `target`?", answered as its
+/// members' answers. **Nothing about membership is caller-supplied**: the
+/// members are read by the server, as `ExplainSubject` reads nothing but a
+/// user name.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ExplainPrincipalRequest {
+    pub principal: ExplainPrincipalRef,
+    pub action: egret_perm::Action,
+    pub target: egret_perm::Scope,
+}
+
+/// One evaluated member: exactly `POST /perm/explain`'s answer for them.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberVerdict {
+    pub user_id: Uuid,
+    pub label: String,
+    pub username: String,
+    pub result: super::ExplainResponse,
+}
+
+/// Why a member was not evaluated.
+#[derive(Debug, Clone, Copy, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotEvaluatedReason {
+    /// No `users.username`: no engine knows this person, so there is no
+    /// request any engine could make for them.
+    NoUsername,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberNotEvaluated {
+    pub user_id: Uuid,
+    pub label: String,
+    pub reason: NotEvaluatedReason,
+}
+
+/// The members' answers. There is no overall verdict (P5): a group's access
+/// is its members' access, and they can differ.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainPrincipalResponse {
+    /// Every member, with or without a username.
+    pub members_total: usize,
+    /// [`EXPLAIN_MEMBER_LIMIT`].
+    pub limit: usize,
+    /// More members with a username than `limit`: the rest were not evaluated
+    /// (`membersTotal - evaluated - notEvaluated` of them).
+    pub truncated: bool,
+    /// Sorted by username; the first `limit` members with one.
+    pub evaluated: Vec<MemberVerdict>,
+    /// Every member with no username, sorted by label.
+    pub not_evaluated: Vec<MemberNotEvaluated>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/explain/principal",
+    tag = "perm",
+    request_body = ExplainPrincipalRequest,
+    responses(
+        (status = 200, description = "Each member of the group or role (as the compiler reads them) evaluated as a user over the artifacts each engine downloads, exactly as `/perm/explain` answers for that user. At most 200 are evaluated, sorted by username; members with no username are listed as not evaluated. There is no overall verdict", body = ExplainPrincipalResponse),
+        (status = 400, description = "The principal is `public`, a workspace, a user (ask `/perm/explain`), or a group or role no one has; or the target is refused as `/perm/explain` refuses it", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission, or a workspace-scoped impersonation overlay asking about a catalog that workspace is not assigned", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn explain_principal(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<ExplainPrincipalRequest>,
+) -> Result<Json<ExplainPrincipalResponse>, PermHttpError> {
+    use egret_perm::PrincipalKind;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let name = body.principal.r#ref.as_str();
+    match body.principal.kind {
+        PrincipalKind::User => {
+            return Err(PermHttpError::BadRequest(
+                "a user is explained by POST /perm/explain; this route takes a group or a role"
+                    .to_string(),
+            ))
+        }
+        PrincipalKind::WorkspaceMembers => {
+            return Err(PermHttpError::BadRequest(
+                "a workspace is not explained here: ask about one of its members with \
+                 POST /perm/explain"
+                    .to_string(),
+            ))
+        }
+        PrincipalKind::Group if name == egret_perm::PUBLIC_GROUP => {
+            return Err(PermHttpError::BadRequest(
+                "public is everyone and has no members to list: ask about one user with \
+                 POST /perm/explain"
+                    .to_string(),
+            ))
+        }
+        PrincipalKind::Group | PrincipalKind::Role => {}
+    }
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    super::check_explain_target(&mut conn, &p, &body.target).await?;
+    let Some(members) = principal_members_via(&mut conn, body.principal.kind, name).await? else {
+        return Err(PermHttpError::BadRequest(format!(
+            "no {} is named {name}",
+            body.principal.kind.as_str()
+        )));
+    };
+    let members_total = members.len();
+    let (mut named, unnamed): (Vec<_>, Vec<_>) =
+        members.into_iter().partition(|m| m.username.is_some());
+    named.sort_by(|a, b| (&a.username, a.user_id).cmp(&(&b.username, b.user_id)));
+    let truncated = named.len() > EXPLAIN_MEMBER_LIMIT;
+    named.truncate(EXPLAIN_MEMBER_LIMIT);
+    let usernames: Vec<String> = named
+        .iter()
+        .map(|m| m.username.clone().unwrap_or_default())
+        .collect();
+    let results = super::explain_users(&mut conn, &usernames, body.action, &body.target).await?;
+    let evaluated = named
+        .into_iter()
+        .zip(results)
+        .map(|(m, result)| MemberVerdict {
+            user_id: m.user_id,
+            label: m.label,
+            username: m.username.unwrap_or_default(),
+            result,
+        })
+        .collect();
+    let not_evaluated = unnamed
+        .into_iter()
+        .map(|m| MemberNotEvaluated {
+            user_id: m.user_id,
+            label: m.label,
+            reason: NotEvaluatedReason::NoUsername,
+        })
+        .collect();
+    Ok(Json(ExplainPrincipalResponse {
+        members_total,
+        limit: EXPLAIN_MEMBER_LIMIT,
+        truncated,
+        evaluated,
+        not_evaluated,
+    }))
 }

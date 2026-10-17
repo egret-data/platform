@@ -1323,3 +1323,52 @@ pub async fn read_role_via(
         clearances,
     }))
 }
+
+/// The members a group or role principal stands for, as the compiler reads
+/// them ([`group_members_via`], [`role_holders_via`]), for
+/// `POST /perm/explain/principal` (spec §4.3: "Members come from §4.1, read by
+/// the server"). `None` when no group or role has `name`. `public` is not a
+/// group with members and is the caller's to refuse.
+pub(crate) async fn principal_members_via(
+    conn: &mut sqlx::PgConnection,
+    kind: PrincipalKind,
+    name: &str,
+) -> Result<Option<Vec<MemberRef>>, CompileError> {
+    let ids: BTreeSet<Uuid> = match kind {
+        PrincipalKind::Group => {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE name = $1)")
+                    .bind(name)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(db)?;
+            if !exists {
+                return Ok(None);
+            }
+            group_members_via(conn, &[name.to_string()])
+                .await?
+                .into_iter()
+                .map(|m| m.user_id)
+                .collect()
+        }
+        PrincipalKind::Role => {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM roles WHERE name = $1)")
+                    .bind(name)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(db)?;
+            if !exists {
+                return Ok(None);
+            }
+            role_holders_via(conn, &[name.to_string()])
+                .await?
+                .into_iter()
+                .map(|h| h.user_id)
+                .collect()
+        }
+        PrincipalKind::User | PrincipalKind::WorkspaceMembers => return Ok(None),
+    };
+    let ids: Vec<Uuid> = ids.into_iter().collect();
+    member_refs_via(conn, &ids).await.map(Some)
+}

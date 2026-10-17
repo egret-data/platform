@@ -91,7 +91,10 @@ use crate::trigger::{
 mod error;
 mod people;
 pub use error::PermHttpError;
-pub use people::{PeoplePage, PeopleQuery, PersonKind, PersonRow};
+pub use people::{
+    ExplainPrincipalRequest, ExplainPrincipalResponse, PeoplePage, PeopleQuery, PersonKind,
+    PersonRow, EXPLAIN_MEMBER_LIMIT,
+};
 
 /// State for the `perm` router. Both stores must reach the SAME physical
 /// Postgres database — `perm.*` and `policy.*` are two schemas in it, and the
@@ -137,6 +140,7 @@ pub fn perm_router() -> Router<PermState> {
         .route("/perm/people/roles/{name}", get(people::read_role))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
+        .route("/perm/explain/principal", post(people::explain_principal))
         .route("/perm/compile/{service_id}", post(compile))
         .route(
             "/perm/policies/services/{service_id}/classify",
@@ -181,6 +185,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         people::read_user,
         people::read_group,
         people::read_role,
+        people::explain_principal,
         preview,
         explain,
         compile,
@@ -209,6 +214,12 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::people::ClearanceFact,
         crate::people::EngineClearance,
         crate::people::EgretClearance,
+        people::ExplainPrincipalRequest,
+        people::ExplainPrincipalRef,
+        people::ExplainPrincipalResponse,
+        people::MemberVerdict,
+        people::MemberNotEvaluated,
+        people::NotEvaluatedReason,
         NewGrant,
         NewRule,
         PreviewRequest,
@@ -1952,9 +1963,30 @@ async fn explain(
     Json(body): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    validate_explain_target(&body.target)?;
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    confine_to_overlay_workspace(&mut conn, &p, body.target.catalog_id).await?;
+    check_explain_target(&mut conn, &p, &body.target).await?;
+    let mut out = explain_users(
+        &mut conn,
+        std::slice::from_ref(&body.subject.user),
+        body.action,
+        &body.target,
+    )
+    .await?;
+    Ok(Json(out.remove(0)))
+}
+
+/// What `explain` refuses before evaluating anything, shared with
+/// `POST /perm/explain/principal` so the two cannot refuse differently:
+/// the target's shape ([`validate_explain_target`]), an impersonation
+/// overlay's workspace ([`confine_to_overlay_workspace`]), and a catalog id
+/// nothing has.
+pub(crate) async fn check_explain_target(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    target: &Scope,
+) -> Result<(), PermHttpError> {
+    validate_explain_target(target)?;
+    confine_to_overlay_workspace(conn, p, target.catalog_id).await?;
     // **The catalog has to EXIST, and that is a different refusal from the one
     // below it.** `services_for_catalog_via` answers "which profiles bind this
     // catalog" with a `WHERE ea.catalog_id = $1` join, so a uuid naming no
@@ -1976,7 +2008,7 @@ async fn explain(
     // deliberately scoped to one profile's engines, so it cannot answer "does this
     // row exist at all" — and making it do so would re-merge the two questions
     // this guard exists to separate.
-    if catalog_names_for_ids_via(&mut conn, &[body.target.catalog_id])
+    if catalog_names_for_ids_via(conn, &[target.catalog_id])
         .await?
         .is_empty()
     {
@@ -1985,10 +2017,27 @@ async fn explain(
              resource that does not exist. (A catalog that DOES exist but that no \
              engine profile serves is a different thing, and is answered with the \
              `no_profile_serves_the_catalog` outcome rather than refused.)",
-            body.target.catalog_id
+            target.catalog_id
         )));
     }
 
+    Ok(())
+}
+
+/// `explain`'s evaluation for each of `users`, in order: one
+/// [`ExplainResponse`] per username, exactly what `POST /perm/explain`
+/// answers for that user (it calls this with one). The per-profile inputs —
+/// the served artifact, its service-def, the catalog name, the plugin version
+/// and the tag resolution — are computed ONCE and every username is evaluated
+/// against the same ones, so a group's members are answered from one download
+/// per profile (spec §4.3, P5). The target must already have passed
+/// [`check_explain_target`].
+pub(crate) async fn explain_users(
+    conn: &mut sqlx::PgConnection,
+    users: &[String],
+    action: Action,
+    target: &Scope,
+) -> Result<Vec<ExplainResponse>, PermHttpError> {
     // ONE resolution for the whole response, not one per profile: the levels it
     // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
     // `ServiceTags::from_assignments` writes, which do not vary by engine (that
@@ -1997,7 +2046,7 @@ async fn explain(
     // renamed). The resolution is a property of the target, so computing it once
     // also removes any way for two profiles to be answered from two tag sets.
     let (resolved_tags, tag_resolution_declined) =
-        explain_tag_inputs(resolved_tags_for_target(&mut *conn, &body.target).await?);
+        explain_tag_inputs(resolved_tags_for_target(&mut *conn, target).await?);
     // The tag set as the steward reads it, derived from the resolution above and
     // from nothing else — Task 8's F4/F5. It was a second query
     // (`tag_keys_for_resource_via`, `tags.key`, exact-match) and the browser
@@ -2016,9 +2065,9 @@ async fn explain(
         .map(resolved_tags_for_display)
         .unwrap_or_default();
 
-    let mut profiles: Vec<ExplainProfile> = Vec::new();
-    for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
-        let svc = get_service_by_id_via(&mut conn, service_id).await?;
+    let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
+    for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
+        let svc = get_service_by_id_via(&mut *conn, service_id).await?;
         // A profile this compiler does not target (a tag service, anything
         // else) has no engine whose plugin downloads it as a RESOURCE policy
         // set, so there is no per-engine answer to give for it. Same
@@ -2032,26 +2081,26 @@ async fn explain(
         // version of egret's default image for the type when none is. Several bound engines of one profile are
         // refused to disagree — a profile is evaluated at ONE version here, and
         // a guess between two would be an evaluation nobody measured.
-        let plugin_version = profile_plugin_version(&mut conn, service_id, engine).await?;
+        let plugin_version = profile_plugin_version(&mut *conn, service_id, engine).await?;
         // The compiler's own reachability test: a catalog absent from this map
         // is out of scope for this profile, and a request naming it would be
         // built from a catalog name this profile's policies never mention.
-        let Some(catalog_name) = catalogs_for_service_via(&mut conn, service_id)
+        let Some(catalog_name) = catalogs_for_service_via(&mut *conn, service_id)
             .await?
             .into_iter()
-            .find(|c| c.id == body.target.catalog_id)
+            .find(|c| c.id == target.catalog_id)
             .map(|c| c.name)
         else {
             continue;
         };
 
-        let artifact = served_artifact_via(&mut conn, &svc).await?;
+        let artifact = served_artifact_via(&mut *conn, &svc).await?;
         // `ServiceDef::parse` of the envelope's OWN `serviceDef`, not of a def
         // looked up separately: the plugin evaluates against the def it was
         // handed, and the tag block's def (which the tag-policy tier check also
         // consults) travels inside the same envelope.
         let service_def = ServiceDef::parse(&artifact.service_def);
-        let resource = request_resource(engine, &catalog_name, &body.target);
+        let resource = request_resource(engine, &catalog_name, target);
         // `EngineConfig::without_super_users()` records a fact about egret's
         // own provisioning, and an unknown super-user list would make every
         // decision unknowable (`isSuperUser` is checked before any policy and
@@ -2100,89 +2149,6 @@ async fn explain(
             ..EngineConfig::without_super_users()
         };
 
-        // The masked-read question, asked only where a mask can be the answer.
-        // Asked BEFORE the accesses, because on StarRocks it decides whether
-        // the column's access is consulted at all (Task 12, C2).
-        let mask = if body.action == Action::Read
-            && engine == EngineType::StarRocks
-            && body.target.column.is_some()
-        {
-            let request = AccessRequest {
-                user: body.subject.user.clone(),
-                groups: BTreeSet::new(),
-                roles: BTreeSet::new(),
-                access_type: "select".to_string(),
-                resource: resource.clone(),
-                owner: None,
-                // StarRocks has no tag service: no tag can reach a mask.
-                resolved_tags: None,
-            };
-            let decision = egret_ranger_eval::eval::evaluate_data_mask(
-                &artifact,
-                &request,
-                &service_def,
-                &config,
-            );
-            let attribution = match &decision {
-                MaskDecision::Masked(m) => attribution_for_name(&mut *conn, &m.policy_name).await?,
-                MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
-            };
-            Some(ExplainMask {
-                access_type: "select".to_string(),
-                decision: WireMaskDecision::from(&decision),
-                attribution,
-            })
-        } else {
-            None
-        };
-        // StarRocks asks no access decision for a column whose deciding mask
-        // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
-        // `mask` is only ever `Some` for a StarRocks column read.
-        let masked_read_skips_access = engine == EngineType::StarRocks
-            && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
-
-        let mut accesses = Vec::new();
-        for access_type in engine_accesses(body.action, engine)? {
-            let request = AccessRequest {
-                user: body.subject.user.clone(),
-                // **Both empty, and that is the answer, not a shortcut.** See
-                // `ExplainSubject`: no engine egret provisions can match a
-                // Ranger `roles` or `groups` entry, so sending either would
-                // report an access no engine grants.
-                groups: BTreeSet::new(),
-                roles: BTreeSet::new(),
-                access_type: access_type.to_string(),
-                resource: resource.clone(),
-                // egret does not track a table's Ranger `{OWNER}`. `None` makes
-                // a decision that depends on one `Undecidable` rather than a
-                // guess in either direction.
-                owner: None,
-                // egret's own resolution, or `None` where
-                // `resolved_tags_for_target` declined — never
-                // `tag_keys_for_resource_via`'s `tags`, which is the
-                // attribution list and is both the wrong identifier
-                // (`tags.key`) and the wrong breadth (no roll-up). `None` here
-                // still means "the caller did not resolve", which the evaluator
-                // refuses with `TagsUnresolved`; it is never the empty set,
-                // which is the measured narrowing.
-                resolved_tags: resolved_tags.clone(),
-            };
-            let decision =
-                egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-            if masked_read_skips_access && access_type == "select" {
-                continue;
-            }
-            // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
-            // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
-            // and a `PoolConnection` does not — inference needs the deref.
-            let attribution = attribution_for(&mut *conn, &decision).await?;
-            accesses.push(ExplainAccess {
-                access_type: access_type.to_string(),
-                decision: WireDecision::from(&decision),
-                attribution,
-            });
-        }
-
         // Read off the artifact THIS profile's plugin downloads — the same
         // `artifact_via` the verdicts above were computed from, so the count and
         // the answers cannot be about different downloads. A profile with no
@@ -2190,28 +2156,117 @@ async fn explain(
         // whose block is present but empty (`bind_trino_profile` creates exactly
         // that): in both cases no tag policy of any kind can decide here.
         let tag_policies_in_download = artifact.tag_policies.len();
-        profiles.push(ExplainProfile {
-            service_id,
-            service_name: svc.name,
-            engine: WireEngineType::from(ranger_engine(engine)),
-            accesses,
-            tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
-            tag_policies_in_download,
-            mask,
-            masked_read_skips_access,
-        });
+        for (i, user) in users.iter().enumerate() {
+            // The masked-read question, asked only where a mask can be the answer.
+            // Asked BEFORE the accesses, because on StarRocks it decides whether
+            // the column's access is consulted at all (Task 12, C2).
+            let mask = if action == Action::Read
+                && engine == EngineType::StarRocks
+                && target.column.is_some()
+            {
+                let request = AccessRequest {
+                    user: user.clone(),
+                    groups: BTreeSet::new(),
+                    roles: BTreeSet::new(),
+                    access_type: "select".to_string(),
+                    resource: resource.clone(),
+                    owner: None,
+                    // StarRocks has no tag service: no tag can reach a mask.
+                    resolved_tags: None,
+                };
+                let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                    &artifact,
+                    &request,
+                    &service_def,
+                    &config,
+                );
+                let attribution = match &decision {
+                    MaskDecision::Masked(m) => {
+                        attribution_for_name(&mut *conn, &m.policy_name).await?
+                    }
+                    MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
+                };
+                Some(ExplainMask {
+                    access_type: "select".to_string(),
+                    decision: WireMaskDecision::from(&decision),
+                    attribution,
+                })
+            } else {
+                None
+            };
+            // StarRocks asks no access decision for a column whose deciding mask
+            // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
+            // `mask` is only ever `Some` for a StarRocks column read.
+            let masked_read_skips_access = engine == EngineType::StarRocks
+                && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
+
+            let mut accesses = Vec::new();
+            for access_type in engine_accesses(action, engine)? {
+                let request = AccessRequest {
+                    user: user.clone(),
+                    // **Both empty, and that is the answer, not a shortcut.** See
+                    // `ExplainSubject`: no engine egret provisions can match a
+                    // Ranger `roles` or `groups` entry, so sending either would
+                    // report an access no engine grants.
+                    groups: BTreeSet::new(),
+                    roles: BTreeSet::new(),
+                    access_type: access_type.to_string(),
+                    resource: resource.clone(),
+                    // egret does not track a table's Ranger `{OWNER}`. `None` makes
+                    // a decision that depends on one `Undecidable` rather than a
+                    // guess in either direction.
+                    owner: None,
+                    // egret's own resolution, or `None` where
+                    // `resolved_tags_for_target` declined — never
+                    // `tag_keys_for_resource_via`'s `tags`, which is the
+                    // attribution list and is both the wrong identifier
+                    // (`tags.key`) and the wrong breadth (no roll-up). `None` here
+                    // still means "the caller did not resolve", which the evaluator
+                    // refuses with `TagsUnresolved`; it is never the empty set,
+                    // which is the measured narrowing.
+                    resolved_tags: resolved_tags.clone(),
+                };
+                let decision =
+                    egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
+                if masked_read_skips_access && access_type == "select" {
+                    continue;
+                }
+                // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
+                // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
+                // and a `PoolConnection` does not — inference needs the deref.
+                let attribution = attribution_for(&mut *conn, &decision).await?;
+                accesses.push(ExplainAccess {
+                    access_type: access_type.to_string(),
+                    decision: WireDecision::from(&decision),
+                    attribution,
+                });
+            }
+
+            per_user[i].push(ExplainProfile {
+                service_id,
+                service_name: svc.name.clone(),
+                engine: WireEngineType::from(ranger_engine(engine)),
+                accesses,
+                tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
+                tag_policies_in_download,
+                mask,
+                masked_read_skips_access,
+            });
+        }
     }
 
-    let outcome = if profiles.is_empty() {
-        ExplainOutcome::NoProfileServesTheCatalog
-    } else {
-        ExplainOutcome::PerProfile
-    };
-    Ok(Json(ExplainResponse {
-        outcome,
-        profiles,
-        tag_resolution_declined,
-    }))
+    Ok(per_user
+        .into_iter()
+        .map(|profiles| ExplainResponse {
+            outcome: if profiles.is_empty() {
+                ExplainOutcome::NoProfileServesTheCatalog
+            } else {
+                ExplainOutcome::PerProfile
+            },
+            profiles,
+            tag_resolution_declined: tag_resolution_declined.clone(),
+        })
+        .collect())
 }
 
 /// Everything `explain` refuses about its target's SHAPE, in one pure function
