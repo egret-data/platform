@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { TriangleAlert } from "lucide-react";
 import {
   useControlPlaneGovernanceListCatalogs,
   useControlPlaneGovernanceObjectLineage,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { GovernanceCatalog, LineageReader, LineageTableRef, ViewLineageInfo } from "@/api/generated/model";
+import { ApiError } from "@/api/client";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -41,13 +43,20 @@ function Lineage({ path, catalog }: { path: ObjectPath; catalog: GovernanceCatal
   const lineage = useControlPlaneGovernanceObjectLineage(
     catalog.id,
     { schema: path.schema ?? "", table: path.object ?? "" },
-    { query: { retry: false } },
+    // Fresh for a while, so opening this tab right after Overview reuses its answer instead of asking again.
+    { query: { retry: false, staleTime: 30_000 } },
   );
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const known = new Set(catalogsQ.data?.status === 200 ? catalogsQ.data.data.map((c) => c.name) : []);
 
-  if (lineage.isError) return <TabError what="lineage" onRetry={() => void lineage.refetch()} />;
-  if (lineage.data?.status !== 200) return <ListSkeleton rows={4} cols={3} />;
+  if (lineage.isError) {
+    const detail = lineage.error instanceof ApiError ? lineage.error.message : undefined;
+    return <TabError what="lineage" detail={detail} onRetry={() => void lineage.refetch()} />;
+  }
+  // The page's own catalog gate already failed if the list did; wait for it here too, so a reader never shows unlinked and then linked.
+  if (lineage.data?.status !== 200 || catalogsQ.data?.status !== 200) {
+    return <ListSkeleton rows={4} cols={3} />;
+  }
   const { readers, readersIncomplete, view } = lineage.data.data;
   const linkable = (name: string) => known.has(name);
 
@@ -57,6 +66,7 @@ function Lineage({ path, catalog }: { path: ObjectPath; catalog: GovernanceCatal
       <Section title="Read by">
         {readersIncomplete ? (
           <Alert>
+            <TriangleAlert aria-hidden />
             <AlertDescription>{`This list may be incomplete. ${readersIncomplete.detail}`}</AlertDescription>
           </Alert>
         ) : null}

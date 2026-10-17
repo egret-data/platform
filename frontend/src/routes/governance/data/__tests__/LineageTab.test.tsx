@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -189,8 +190,25 @@ describe("Lineage tab", () => {
   it("shows an error with a retry, never an empty state", async () => {
     serveData(fixture({ "c-ice|sales|orders": { status: 504, body: { error: "timed out" } } }));
     open(TABLE);
-    expect(await within(panel()).findByText("The lineage could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(
+      await within(panel()).findByText("The lineage could not be loaded. Retry, or reload the page. timed out"),
+    ).toBeInTheDocument();
     expect(within(panel()).getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(within(panel()).queryByText("No view or materialized view reads this table")).not.toBeInTheDocument();
+  });
+
+  it("shows the server's message on a 503", async () => {
+    serveData(fixture({ "c-ice|sales|orders": { status: 503, body: { error: "warehouse unavailable" } } }));
+    open(TABLE);
+    expect(await within(panel()).findByText(/warehouse unavailable/)).toBeInTheDocument();
+  });
+
+  it("asks for lineage once when Overview is opened and then the Lineage tab", async () => {
+    const { lineageCalls } = serveData(fixture({ "c-ice|sales|v_orders": ok({ readers: [], view: null }) }));
+    open("/governance/data/ice/sales/v_orders");
+    await within(panel()).findByText("egret has no security mode or lineage recorded for this object.");
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Lineage" }));
+    await within(panel()).findByText("egret has no lineage recorded for this object.");
+    expect(lineageCalls).toEqual(["c-ice|sales|v_orders"]);
   });
 });

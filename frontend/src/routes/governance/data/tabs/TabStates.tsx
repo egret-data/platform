@@ -12,11 +12,11 @@ export function failedText(what: string): string {
 }
 
 /** A tab's (or a section's) error: what failed, and a retry. Never an empty state. */
-export function TabError({ what, onRetry }: { what: string; onRetry: () => void }) {
+export function TabError({ what, onRetry, detail }: { what: string; onRetry: () => void; detail?: string }) {
   return (
     <Alert variant="destructive">
       <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-        <span>{failedText(what)}</span>
+        <span>{failedText(what)}{detail ? ` ${detail}` : ""}</span>
         <Button variant="outline" size="sm" onClick={onRetry}>
           <RotateCw aria-hidden />
           Retry
