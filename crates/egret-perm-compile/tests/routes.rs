@@ -38,6 +38,9 @@ use egret_perm::PermStore;
 // `391c3c3a6` — see their ⚠ paragraphs, and
 // `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`.
 use egret_perm_compile::routes::{confine_rule_selector, confine_to_overlay_workspace};
+
+#[path = "support/pausing.rs"]
+mod pausing;
 use egret_perm_compile::{perm_router, PermHttpError, PermState};
 use egret_policy::{PolicyStore, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX};
 use http_body_util::BodyExt;
@@ -3161,6 +3164,107 @@ async fn a_group_grant_reaches_its_members_in_the_artifact_and_in_explain() {
             "{subject}: explain must answer what the engine enforces; body: {body}"
         );
     }
+}
+
+/// **J-F3 Task 1b, fix round 1 — Scenario 2: a grant on a group written while
+/// a member is being removed.** No grant names group `G` yet. An admin's
+/// `remove_member(G, U)` is parked right after computing its affected set — EMPTY,
+/// because nothing names `G`. A steward then creates "allow `G`".
+///
+/// Without a per-group lock the grant compiled while `U` was still a member
+/// (the remove had not committed), committed, and the remove then committed
+/// with no recompile because its affected set was empty: `U` stays granted by a
+/// group they have left — fail-OPEN. With the lock, `write_grant` takes `G`'s
+/// lock before its profile locks, waits for the remove, and compiles a group of
+/// nobody.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_on_a_group_written_during_a_member_remove_does_not_name_the_removed_member() {
+    use pausing::{Pausing, Stage};
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let group = unique("race-grant");
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("insert group");
+    let member = known_user(&f, unique("raceleaver")).await;
+    let member_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&member)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("member id");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(member_id)
+        .bind(group_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("membership");
+
+    let (pausing, h) = Pausing::new(Stage::AfterAffected);
+    let pausing = Arc::new(pausing);
+    let remove = {
+        let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+        let pausing = pausing.clone();
+        tokio::spawn(async move {
+            groups
+                .remove_member(group_id, egret_core::UserId(member_id), &*pausing)
+                .await
+        })
+    };
+    h.reached
+        .await
+        .expect("remove parked after its (empty) affected set");
+
+    let mut body = grant_body(f.catalog_id, "unused");
+    body["principals"] = json!({ "include": [{ "kind": "group", "ref": group }], "exclude": [] });
+    let mut post = {
+        let app = f.app();
+        let token = token.clone();
+        tokio::spawn(async move {
+            into_json(
+                app.oneshot(req("POST", "/perm/grants", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        })
+    };
+    let early = tokio::time::timeout(std::time::Duration::from_millis(800), &mut post)
+        .await
+        .ok();
+    let post_waited = early.is_none();
+    let _ = h.go.send(());
+    remove.await.expect("join").expect("remove");
+    let (status, created) = match early {
+        Some(done) => done,
+        None => post.await,
+    }
+    .expect("join");
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let grant_id = created["id"].as_str().expect("grant id").to_string();
+
+    let compiled: Option<Value> = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(format!("{COMPILER_GRANT_PREFIX}{grant_id}"))
+    .fetch_optional(&f.db.pool)
+    .await
+    .expect("read");
+    assert!(
+        !compiled
+            .as_ref()
+            .map(|b| b.to_string().contains(&member))
+            .unwrap_or(false),
+        "{member} left the group before either write committed, so no policy may name them: \
+         {compiled:?}"
+    );
+    assert!(
+        post_waited,
+        "the grant write must wait on the group's lock while the remove holds it"
+    );
 }
 
 /// `explain` resolves the target's tags itself — it never made the caller

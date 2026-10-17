@@ -956,6 +956,28 @@ impl WriteOutcome {
     }
 }
 
+/// Take `egret_auth::groups`' per-group membership lock for every non-`public`
+/// group named in `sets` (include and exclude), sorted — J-F3 Task 1b, fix
+/// round 1. Called by every model write that can newly name a group (grant and
+/// rule create, patch, preview, and the migration) BEFORE its profile locks, so
+/// the lock order is the one `egret_auth::groups`' module doc fixes: group
+/// locks, then profile locks ascending. `public` is never expanded, so no
+/// membership write ever depends on it and it is not locked.
+pub(crate) async fn lock_named_groups<'a>(
+    conn: &mut sqlx::PgConnection,
+    sets: impl IntoIterator<Item = &'a PrincipalSet>,
+) -> Result<(), PermHttpError> {
+    let names: Vec<String> = sets
+        .into_iter()
+        .flat_map(|s| s.include.iter().chain(s.exclude.iter()))
+        .filter(|p| p.kind == PrincipalKind::Group && p.r#ref != egret_perm::PUBLIC_GROUP)
+        .map(|p| p.r#ref.clone())
+        .collect();
+    egret_auth::groups::lock_group_names_via(conn, &names)
+        .await
+        .map_err(PermHttpError::db)
+}
+
 /// Create (`id: None`) or patch in place (`id: Some(_)`) one grant on the
 /// caller's open transaction, recompiling every profile the write can change.
 /// Neither begins nor commits: the caller owns both, which is what lets the
@@ -1088,6 +1110,21 @@ pub(crate) async fn write_grant(
 
     let new_services = affected_services_for_grant(tx, &g).await?;
     let services = merge_service_ids(&old_services, &new_services);
+
+    // **J-F3 Task 1b, fix round 1: the per-group lock, before any profile
+    // lock.** A group compiles to its members, and a membership write decides
+    // which profiles to recompile by reading which grants name the group. If
+    // this grant newly names `G` while a REMOVE from `G` is in flight, that
+    // REMOVE may have read "nothing names G" and will recompile nothing, while
+    // this write compiles with the leaver still a member: they stay granted.
+    // Taking `G`'s lock here makes the two serialise — see
+    // `egret_auth::groups`' module doc, "Two concurrent writers", for the
+    // lock order (group locks, then profile locks) this keeps.
+    lock_named_groups(
+        tx,
+        [&g.principals].into_iter().chain(old_principals.as_ref()),
+    )
+    .await?;
 
     // The affected set is derived from the grant's own catalog, so it can be
     // resolved (and locked) before the row is written — and it MUST be, or
@@ -1265,6 +1302,9 @@ pub(crate) async fn write_rule(
     let new_services = affected_services_for_rule(tx, &r).await?;
     let services = merge_service_ids(&old_services, &new_services);
 
+    // The per-group lock, for the same reason and in the same position as in
+    // `write_grant`: an exemption naming a group compiles to its members.
+    lock_named_groups(tx, [&r.exempt].into_iter().chain(old_exempt.as_ref())).await?;
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {

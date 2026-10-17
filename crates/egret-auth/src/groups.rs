@@ -12,11 +12,14 @@
 //! members' stored usernames at compile time, exactly as SP4c did for roles —
 //! and that enumeration is stale the moment a row of `user_groups` changes.
 //!
-//! The staleness is not symmetric. A missed ADD denies a new member (annoying).
-//! A missed REMOVE leaves the removed member named in every policy their group
-//! reaches: still granted by an allow, still exempt from a mask, still SUBTRACTED
-//! from a deny — a breach that egret's own UI cannot show, because the
-//! `user_groups` row it reads was written correctly.
+//! A missed recompile fails OPEN in BOTH directions, depending on where the
+//! group is named. A missed REMOVE leaves the ex-member in every policy their
+//! group reaches: still granted by an allow, still exempt from a mask, still
+//! SUBTRACTED from a deny. A missed ADD leaves the new member out: harmless on
+//! an allow (they are merely not granted yet), but on a deny include it means
+//! the deny does not reach them, and on an exclude or an exemption it means the
+//! subtract or the exemption does. Either is a breach egret's own UI cannot
+//! show, because the `user_groups` row it reads was written correctly.
 //!
 //! # Why the recompile is a port and not a call
 //!
@@ -39,13 +42,64 @@
 //! the compiler refuses to let a new caller omit. There is deliberately no
 //! no-op implementation in this crate for the same reason.
 //!
-//! The order every writer follows is the one
-//! `egret_perm_compile::role_membership::with_recompile` documents: name the
-//! affected groups, take every profile lock ASCENDING
+//! The order every writer follows extends the one
+//! `egret_perm_compile::role_membership::with_recompile` documents: advisory
+//! locks (below), name the affected groups, take every profile lock ASCENDING
 //! ([`GroupMembershipRecompiler::lock_affected_in_tx`]), write, recompile on
 //! the same transaction ([`GroupMembershipRecompiler::recompile_in_tx`]), and
 //! commit only if the recompile succeeded — a committed membership change whose
 //! policies were never rewritten is worse than a refused one.
+//!
+//! # Two concurrent writers: the advisory locks (fix round 1)
+//!
+//! Profile locks alone do not serialise a membership write against everything
+//! it races, because WHICH profiles to lock is itself decided by reads, and a
+//! read under READ COMMITTED is a prediction that a concurrent commit can
+//! falsify. Two such falsifications were found, both fail-OPEN:
+//!
+//! 1. **The moved set was predicted from an unlocked read of the user's
+//!    groups.** A login read `U`'s groups while an admin's REMOVE of `U` from
+//!    `G` was uncommitted, saw `G`, predicted "nothing moved", locked nothing —
+//!    then re-inserted `(U, G)` after the REMOVE had recompiled `G` without
+//!    `U`. And `hard_delete` read `U`'s groups, a concurrent ADD to `G`
+//!    committed, and the delete's cascade removed `(U, G)` without recompiling
+//!    `G`, leaving the deleted username in `G`'s allow.
+//! 2. **The affected set was predicted from an unlocked read of the MODEL.** A
+//!    REMOVE computed "no grant names `G`", while a concurrent "allow `G`"
+//!    compiled with `U` still a member and committed; the REMOVE then committed
+//!    with nothing to recompile, and `U` stayed granted.
+//!
+//! So every writer of `user_groups` takes, before ANY read it predicts from:
+//!
+//! - a **per-user** lock ([`lock_member_users_via`]) for every user whose rows
+//!   it changes — serialising all writers of one user's memberships, so the
+//!   groups a writer reads for that user cannot change until it commits; and
+//! - a **per-group** lock ([`HeldGroupLocks`]) for every group NAME whose
+//!   membership it changes. `egret_perm_compile`'s grant and rule writes (and
+//!   the migration) take the same per-group lock for every group they name,
+//!   so a model write that newly names `G` and a membership write on `G`
+//!   cannot interleave: whichever runs second sees the first committed.
+//!
+//! **Lock order, everywhere: user locks, then group locks, then profile locks
+//! ascending, then rows.** A grant or rule write takes no user lock, so it
+//! enters at the second step. Group NAMES are read before they are locked (a
+//! writer holding only an id must read the name to lock it), so each writer
+//! re-reads after locking and locks again until the set is stable — a rename or
+//! delete holding the old name's lock makes the reader wait, and the re-read
+//! then sees the new name. Locks taken in that second pass are not globally
+//! ordered with the first; Postgres detects the resulting deadlock (advisory
+//! locks are in its wait graph) and aborts one transaction, which is the
+//! fail-closed outcome and a retry away from success.
+//!
+//! **Key space.** Both use the TWO-`int4` form of `pg_advisory_xact_lock`,
+//! which Postgres keeps disjoint from the single-`bigint` form every other
+//! advisory lock in this codebase uses (`roles.rs`, `egret-machine-idp`,
+//! `egret-workflow`, `egret-catalog-engine`, `view_tags.rs`, `egret-test-db`:
+//! all `pg_advisory*_lock($bigint)` or `hashtextextended(…)`), with the first
+//! key a namespace ([`MEMBERSHIP_USER_LOCK_SPACE`],
+//! [`MEMBERSHIP_GROUP_LOCK_SPACE`]) and the second `hashtext` of the user id or
+//! group name. A hash collision only makes two unrelated writers wait for each
+//! other. Transaction-scoped, so a lock cannot outlive the write it guards.
 
 use egret_core::{Result, UserId};
 use egret_metastore::Db;
@@ -100,6 +154,91 @@ pub(crate) async fn group_names_of_user_in_tx(
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)
+}
+
+/// First key of the per-USER membership lock (module doc, "Two concurrent
+/// writers"). Two-`int4` key space; no other code uses it.
+pub const MEMBERSHIP_USER_LOCK_SPACE: i32 = 0x4A46_3301;
+/// First key of the per-GROUP membership lock, keyed by group NAME — the key
+/// grants and rule exemptions store.
+pub const MEMBERSHIP_GROUP_LOCK_SPACE: i32 = 0x4A46_3302;
+
+/// Take the per-user membership lock for every id in `user_ids`, sorted, on
+/// `conn`'s transaction. The FIRST lock any `user_groups` writer takes.
+pub async fn lock_member_users_via(
+    conn: &mut sqlx::PgConnection,
+    user_ids: &[Uuid],
+) -> std::result::Result<(), sqlx::Error> {
+    let mut ids = user_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(MEMBERSHIP_USER_LOCK_SPACE)
+            .bind(id.to_string())
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Take the per-group membership lock for every name in `names`, sorted, on
+/// `conn`'s transaction. Taken by every `user_groups` writer for the groups it
+/// changes, and by `egret_perm_compile`'s grant/rule writes for every group
+/// they name — always before any profile lock (module doc).
+pub async fn lock_group_names_via(
+    conn: &mut sqlx::PgConnection,
+    names: &[String],
+) -> std::result::Result<(), sqlx::Error> {
+    let mut names = names.to_vec();
+    names.sort();
+    names.dedup();
+    for name in names {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(MEMBERSHIP_GROUP_LOCK_SPACE)
+            .bind(name)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// The group locks one transaction holds, so a writer can lock what it read,
+/// re-read, and lock again until the set is stable (module doc).
+#[derive(Default)]
+pub struct HeldGroupLocks(std::collections::BTreeSet<String>);
+
+impl HeldGroupLocks {
+    /// Lock every name in `names` not already held. `true` when anything new
+    /// was locked — the caller's reads predate that lock and must be redone.
+    pub async fn cover<'a>(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        names: impl IntoIterator<Item = &'a String>,
+    ) -> Result<bool> {
+        let new: Vec<String> = names
+            .into_iter()
+            .filter(|n| !self.0.contains(*n))
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return Ok(false);
+        }
+        lock_group_names_via(conn, &new).await.map_err(db_err)?;
+        self.0.extend(new);
+        Ok(true)
+    }
+}
+
+/// How many lock-and-re-read passes a writer makes before giving up. Each pass
+/// that locks something new is caused by a concurrent rename or membership
+/// change landing between a read and its lock; two in a row is already rare.
+pub(crate) const MAX_LOCK_PASSES: usize = 8;
+
+pub(crate) fn unstable() -> egret_core::Error {
+    egret_core::Error::Internal(anyhow::anyhow!(
+        "the groups this membership write touches kept changing under it; retry"
+    ))
 }
 
 /// A stored group row (local or synced from OIDC).
@@ -184,33 +323,49 @@ impl GroupRepo {
         recompiler: &dyn GroupMembershipRecompiler,
     ) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // Fix round 1: no other writer of this user's rows may commit between
+        // the reads below and this transaction's commit (module doc).
+        lock_member_users_via(&mut tx, &[user_id.0])
+            .await
+            .map_err(db_err)?;
 
-        let before: Vec<(String, String)> = sqlx::query_as(
-            "SELECT g.name, g.source FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
-             WHERE ug.user_id = $1",
-        )
-        .bind(user_id.0)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        let claimed: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
-                .bind(names)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        let before_set: std::collections::BTreeSet<String> =
-            before.iter().map(|(n, _)| n.clone()).collect();
-        let after_set: std::collections::BTreeSet<String> = before
-            .iter()
-            .filter(|(_, source)| source != "oidc")
-            .map(|(n, _)| n.clone())
-            .chain(claimed)
-            .collect();
-        let moved: Vec<String> = before_set
-            .symmetric_difference(&after_set)
-            .cloned()
-            .collect();
+        let mut held = HeldGroupLocks::default();
+        let mut passes = 0;
+        let moved: Vec<String> = loop {
+            let before: Vec<(String, String)> = sqlx::query_as(
+                "SELECT g.name, g.source FROM user_groups ug \
+                 JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = $1",
+            )
+            .bind(user_id.0)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            let claimed: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
+                    .bind(names)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            let before_set: std::collections::BTreeSet<String> =
+                before.iter().map(|(n, _)| n.clone()).collect();
+            let after_set: std::collections::BTreeSet<String> = before
+                .iter()
+                .filter(|(_, source)| source != "oidc")
+                .map(|(n, _)| n.clone())
+                .chain(claimed)
+                .collect();
+            let moved: Vec<String> = before_set
+                .symmetric_difference(&after_set)
+                .cloned()
+                .collect();
+            if !held.cover(&mut tx, &moved).await? {
+                break moved;
+            }
+            passes += 1;
+            if passes >= MAX_LOCK_PASSES {
+                return Err(unstable());
+            }
+        };
 
         let services = if moved.is_empty() {
             Vec::new()
@@ -279,18 +434,29 @@ impl GroupRepo {
         recompiler: &dyn GroupMembershipRecompiler,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let old: Option<String> =
-            sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        let Some(old) = old else {
-            // Nothing to rename (oidc-sourced or absent): the UPDATE below would
-            // match no row, so there is nothing to lock or recompile.
-            return Ok(0);
+        let mut held = HeldGroupLocks::default();
+        let mut passes = 0;
+        let names = loop {
+            let old: Option<String> =
+                sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            let Some(old) = old else {
+                // Nothing to rename (oidc-sourced or absent): the UPDATE below
+                // would match no row, so there is nothing to recompile.
+                return Ok(0);
+            };
+            let names = vec![old, name.to_string()];
+            if !held.cover(&mut tx, &names).await? {
+                break names;
+            }
+            passes += 1;
+            if passes >= MAX_LOCK_PASSES {
+                return Err(unstable());
+            }
         };
-        let names = vec![old, name.to_string()];
         let services = recompiler.lock_affected_in_tx(&mut tx, &names).await?;
         let rows = sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
             .bind(id)
@@ -320,14 +486,25 @@ impl GroupRepo {
         recompiler: &dyn GroupMembershipRecompiler,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let name: Option<String> =
-            sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        let Some(name) = name else {
-            return Ok(0);
+        let mut held = HeldGroupLocks::default();
+        let mut passes = 0;
+        let name = loop {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            let Some(name) = name else {
+                return Ok(0);
+            };
+            if !held.cover(&mut tx, std::slice::from_ref(&name)).await? {
+                break name;
+            }
+            passes += 1;
+            if passes >= MAX_LOCK_PASSES {
+                return Err(unstable());
+            }
         };
         let services = recompiler
             .lock_affected_in_tx(&mut tx, std::slice::from_ref(&name))
@@ -371,7 +548,9 @@ impl GroupRepo {
     }
 
     /// The one shape both directions share, so the order cannot drift between
-    /// them: name → lock → write → recompile (only if a row changed) → commit.
+    /// them: user lock → group lock (re-read until the name is stable) →
+    /// affected profiles locked → write → recompile (only if a row changed) →
+    /// commit.
     /// A group id that does not exist skips the lock and lets the write answer
     /// (the INSERT's FK refuses it, the DELETE matches nothing), as
     /// `egret_perm_compile::role_membership` treats an unresolvable role.
@@ -383,11 +562,27 @@ impl GroupRepo {
         recompiler: &dyn GroupMembershipRecompiler,
     ) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
-            .bind(group_id)
-            .fetch_optional(&mut *tx)
+        lock_member_users_via(&mut tx, &[user_id.0])
             .await
             .map_err(db_err)?;
+        let mut held = HeldGroupLocks::default();
+        let mut passes = 0;
+        let name: Option<String> = loop {
+            let name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
+                .bind(group_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            match &name {
+                Some(n) if held.cover(&mut tx, std::slice::from_ref(n)).await? => {
+                    passes += 1;
+                    if passes >= MAX_LOCK_PASSES {
+                        return Err(unstable());
+                    }
+                }
+                _ => break name,
+            }
+        };
         let services = match &name {
             Some(n) => {
                 recompiler

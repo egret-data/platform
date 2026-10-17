@@ -1666,7 +1666,8 @@ pub async fn affected_services_for_workspace_members(
 /// longer names.
 ///
 /// **ONE function, the UNION of every consumer of the group expansion.** There
-/// are exactly two, both reading the one `crate::members::group_usernames`:
+/// are exactly two, both expanded by the one group arm of
+/// `crate::members::expand_enumerated_principals`:
 ///
 /// - **Grants**, include or exclude: catalog-scoped, exactly like
 ///   [`affected_services_for_grant`].

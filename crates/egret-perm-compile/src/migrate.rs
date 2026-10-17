@@ -949,6 +949,20 @@ pub(crate) async fn migrate_in_tx(
     // Review I-4: a first recompile writes into each member's TAG service, and
     // every engine-bound profile naming that tag service downloads the result.
     affected = with_tag_service_sharers(tx, &affected).await?;
+    // J-F3 Task 1b, fix round 1: the per-group lock for every group the
+    // migrated grants and rules name, BEFORE the profile locks below. Each
+    // `write_grant`/`write_rule` takes it again (re-entrant), but by then this
+    // transaction already holds profile locks, and taking a group lock after a
+    // profile lock is the inverted order `egret_auth::groups`' module doc
+    // forbids.
+    let mut named: Vec<&egret_perm::PrincipalSet> = Vec::new();
+    for (_, _, c) in &plan {
+        match c {
+            Candidates::Grants(gs) => named.extend(gs.iter().map(|g| &g.principals)),
+            Candidates::Rules(rs) => named.extend(rs.iter().map(|r| &r.exempt)),
+        }
+    }
+    crate::routes::lock_named_groups(tx, named).await?;
     lock_services_in_tx(tx, &merge_service_ids(&affected, &[service_id])).await?;
     // Review M-1: the first check ran before the lock; a concurrent migration
     // that created one of these names has committed by now if it shares a

@@ -298,7 +298,24 @@ impl UserRepo {
         recompiler: &dyn crate::groups::GroupMembershipRecompiler,
     ) -> Result<Option<(String, String)>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let groups = crate::groups::group_names_of_user_in_tx(&mut tx, target.0).await?;
+        // Fix round 1: hold this user's membership lock, so no ADD can commit
+        // between reading their groups and the DELETE that removes them
+        // (`crate::groups`' module doc, "Two concurrent writers").
+        crate::groups::lock_member_users_via(&mut tx, &[target.0])
+            .await
+            .map_err(db_err)?;
+        let mut held = crate::groups::HeldGroupLocks::default();
+        let mut passes = 0;
+        let groups = loop {
+            let groups = crate::groups::group_names_of_user_in_tx(&mut tx, target.0).await?;
+            if !held.cover(&mut tx, &groups).await? {
+                break groups;
+            }
+            passes += 1;
+            if passes >= crate::groups::MAX_LOCK_PASSES {
+                return Err(crate::groups::unstable());
+            }
+        };
         let services = if groups.is_empty() {
             Vec::new()
         } else {

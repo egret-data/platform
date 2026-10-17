@@ -42,6 +42,16 @@
 //! - `UserRepo::hard_delete` — the control plane's user delete and the Data
 //!   API's service-account delete (`user_groups.user_id` cascades too).
 //!
+//! **Races (fix round 1).** Every one of those writers first takes
+//! `egret_auth::groups`' per-user and per-group advisory locks, and
+//! `crate::routes::write_grant` / `write_rule` (and the migration) take the
+//! per-group lock for every group they name — all before any profile lock. The
+//! argument, the key space and the lock order are in `egret_auth::groups`'
+//! module doc, "Two concurrent writers"; `tests/group_races.rs` and
+//! `tests/routes.rs`
+//! (`a_grant_on_a_group_written_during_a_member_remove_does_not_name_the_removed_member`)
+//! drive each race as a deterministic interleaving.
+//!
 //! Each takes the port as a required argument; `egret-bin` wires
 //! [`PermGroupRecompiler`] into the two states that hold one
 //! (`OidcRoutesState`, `DataApiState`), and the control plane passes it
