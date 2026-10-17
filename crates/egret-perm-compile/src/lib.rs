@@ -93,7 +93,7 @@ pub mod migrate;
 pub mod overlap;
 // J-F3: every principal ref a grant or rule names must name someone egret
 // knows, or a deny/exclude on it fails open — see that module's doc comment.
-pub(crate) mod principal_refs;
+pub mod principal_refs;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;

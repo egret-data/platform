@@ -125,6 +125,10 @@ pub fn perm_router() -> Router<PermState> {
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
         .route("/perm/overlaps", get(list_overlaps))
+        .route(
+            "/perm/unresolved-principals",
+            get(list_unresolved_principals),
+        )
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
@@ -166,6 +170,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         patch_rule,
         delete_rule,
         list_overlaps,
+        list_unresolved_principals,
         preview,
         explain,
         compile,
@@ -177,6 +182,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     components(schemas(
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
+        crate::principal_refs::UnresolvedPrincipal,
         NewGrant,
         NewRule,
         PreviewRequest,
@@ -1554,6 +1560,37 @@ async fn list_overlaps(
         .await
         .map_err(PermHttpError::db)?;
     let report = crate::overlap::stored_overlaps_via(&mut tx).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(report))
+}
+
+/// Every stored grant principal and rule exemption whose ref matches nobody
+/// (J-F3 Task 2, design R5/R6). Writes refuse such a ref since J-F3 Task 1; a
+/// row stored before that, or naming a principal deleted since, is listed
+/// here, never rewritten.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/unresolved-principals",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, any exclude); an existing group with no members is listed with status `empty` and never fails open", body = Vec<crate::principal_refs::UnresolvedPrincipal>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_unresolved_principals(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<crate::principal_refs::UnresolvedPrincipal>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot, as `list_overlaps`.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let report = crate::principal_refs::unresolved_principals_via(&mut tx).await?;
     tx.rollback().await.map_err(PermHttpError::db)?;
     Ok(Json(report))
 }

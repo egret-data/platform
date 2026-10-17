@@ -7898,6 +7898,60 @@
         }
       }
     },
+    "/api/control-plane/perm/unresolved-principals": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Every stored grant principal and rule exemption whose ref matches nobody\n(J-F3 Task 2, design R5/R6). Writes refuse such a ref since J-F3 Task 1; a\nrow stored before that, or naming a principal deleted since, is listed\nhere, never rewritten.",
+        "operationId": "list_unresolved_principals",
+        "responses": {
+          "200": {
+            "description": "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, any exclude); an existing group with no members is listed with status `empty` and never fails open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UnresolvedPrincipal"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/permissions": {
       "get": {
         "tags": [
@@ -48356,6 +48410,69 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "UnresolvedPrincipal": {
+        "type": "object",
+        "description": "One stored grant principal or rule exemption whose ref matches nobody.",
+        "required": [
+          "source",
+          "id",
+          "kind",
+          "ref",
+          "position",
+          "status",
+          "reason",
+          "failsOpen"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "`\"grant\"` or `\"rule\"`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The grant's or the rule's id."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rule's name; `null` for a grant (a grant has none)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`user`, `group`, `role` or `workspace_members`."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The ref as stored, byte-for-byte — the string the compiled policy names."
+          },
+          "position": {
+            "type": "string",
+            "description": "`\"include\"` or `\"exclude\"` (of the grant's `principals`, or of the rule's\n`exempt`)."
+          },
+          "effect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The grant's `allow` / `deny`; `null` for a rule exemption."
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"unresolved\"`: the ref names nobody egret knows. `\"empty\"`: it names a\ngroup that exists and has no members, so it matches nobody TODAY."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it matches nobody, as a sentence an author can act on."
+          },
+          "failsOpen": {
+            "type": "boolean",
+            "description": "Matching nobody here makes the compiled policy allow MORE than the model\nstates: an unresolved ref in a deny grant's include, or in any exclude\n(a grant's or a rule exemption's). An allow include or an exemption\ninclude matching nobody fails closed, and an `empty` group never fails\nopen: nobody is in it, so matching nobody is exactly its meaning."
           }
         }
       },

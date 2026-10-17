@@ -76,7 +76,9 @@
 //! denies everyone who does — and refusing every later edit of the row (even an
 //! actions-only one) until the author removed it would be. The accepted
 //! trade-off: a bad ref stored BEFORE this check existed also survives a patch
-//! unchanged; Task 2's report lists such rows. A user ref that is empty or a reserved engine principal is
+//! unchanged; Task 2's report ([`unresolved_principals_via`], `GET
+//! /perm/unresolved-principals`, and a startup `warn!` per fail-open row)
+//! lists such rows. A user ref that is empty or a reserved engine principal is
 //! left to `validate_user_ref`, which already refuses both with a sentence of its
 //! own.
 
@@ -137,7 +139,14 @@ pub(crate) async fn resolve_principal_refs(
             if kept.contains(p) {
                 continue;
             }
-            if let Some(why) = resolve_one(conn, p).await? {
+            let found = match lookup(conn, p).await? {
+                Lookup::Found { canonical } => {
+                    p.r#ref = canonical;
+                    None
+                }
+                Lookup::Unknown(why) => Some(why),
+            };
+            if let Some(why) = found {
                 unknown.push(Unknown {
                     kind: p.kind,
                     r#ref: p.r#ref.clone(),
@@ -170,17 +179,38 @@ pub(crate) async fn resolve_principal_refs(
     Err(PermHttpError::BadRequest(msg))
 }
 
-/// `None` when `p` resolves (rewriting a username to its stored spelling);
-/// `Some(reason)` when it names nobody.
-async fn resolve_one(
-    conn: &mut PgConnection,
-    p: &mut Principal,
-) -> Result<Option<String>, PermHttpError> {
+/// What one ref resolves to, read without writing anything — the single
+/// per-kind rule both the write path ([`resolve_principal_refs`]) and the
+/// stored-row report ([`unresolved_principals_via`]) apply.
+enum Lookup {
+    /// It names someone egret knows. `canonical` is the spelling to store: the
+    /// ref itself for every kind but `user`, whose stored username can differ
+    /// from the ref in case.
+    Found { canonical: String },
+    /// It names nobody; the reason, as a sentence an author can act on.
+    Unknown(String),
+}
+
+fn found(p: &Principal) -> Lookup {
+    Lookup::Found {
+        canonical: p.r#ref.clone(),
+    }
+}
+
+fn unknown_if(missing: bool, p: &Principal, why: impl FnOnce() -> String) -> Lookup {
+    if missing {
+        Lookup::Unknown(why())
+    } else {
+        found(p)
+    }
+}
+
+async fn lookup(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHttpError> {
     match p.kind {
-        PrincipalKind::User => resolve_user(conn, p).await,
+        PrincipalKind::User => lookup_user(conn, p).await,
         PrincipalKind::Group => {
             if p.r#ref == PUBLIC_GROUP {
-                return Ok(None);
+                return Ok(found(p));
             }
             let found: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE name = $1)")
@@ -188,7 +218,9 @@ async fn resolve_one(
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(PermHttpError::db)?;
-            Ok((!found).then(|| "no group has this name".to_string()))
+            Ok(unknown_if(!found, p, || {
+                "no group has this name".to_string()
+            }))
         }
         PrincipalKind::Role => {
             let found: bool =
@@ -197,7 +229,7 @@ async fn resolve_one(
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(PermHttpError::db)?;
-            Ok((!found).then(|| {
+            Ok(unknown_if(!found, p, || {
                 "no role has this name — a role is expanded into its holders at compile \
                  time, and a name with no role expands to nobody"
                     .to_string()
@@ -205,7 +237,9 @@ async fn resolve_one(
         }
         PrincipalKind::WorkspaceMembers => {
             let Ok(id) = p.r#ref.parse::<Uuid>() else {
-                return Ok(Some("a workspace ref is a workspace id".to_string()));
+                return Ok(Lookup::Unknown(
+                    "a workspace ref is a workspace id".to_string(),
+                ));
             };
             let found: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workspaces WHERE id = $1)")
@@ -213,21 +247,20 @@ async fn resolve_one(
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(PermHttpError::db)?;
-            Ok((!found).then(|| "no workspace has this id".to_string()))
+            Ok(unknown_if(!found, p, || {
+                "no workspace has this id".to_string()
+            }))
         }
     }
 }
 
-/// A `user` ref must equal a stored `users.username` (case-insensitively; it is
-/// rewritten to the stored spelling). Tried as a username FIRST: a username is a
-/// `[a-z0-9_-]` slug, so a uuid-shaped string can be a real one.
-async fn resolve_user(
-    conn: &mut PgConnection,
-    p: &mut Principal,
-) -> Result<Option<String>, PermHttpError> {
+/// A `user` ref must equal a stored `users.username` (case-insensitively; the
+/// stored spelling is returned as the canonical one). Tried as a username FIRST:
+/// a username is a `[a-z0-9_-]` slug, so a uuid-shaped string can be a real one.
+async fn lookup_user(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHttpError> {
     // Left to `validate_user_ref`, which refuses both with its own sentence.
     if p.r#ref.is_empty() || egret_core::engine_principals::is_reserved_engine_username(&p.r#ref) {
-        return Ok(None);
+        return Ok(found(p));
     }
     let canonical: Option<String> =
         sqlx::query_scalar("SELECT username::text FROM users WHERE username = $1::citext")
@@ -235,9 +268,8 @@ async fn resolve_user(
             .fetch_optional(&mut *conn)
             .await
             .map_err(PermHttpError::db)?;
-    if let Some(name) = canonical {
-        p.r#ref = name;
-        return Ok(None);
+    if let Some(canonical) = canonical {
+        return Ok(Lookup::Found { canonical });
     }
 
     // Not a username. If it is a user's id or email, say whose username to use —
@@ -259,7 +291,7 @@ async fn resolve_user(
     } else {
         ("", None)
     };
-    Ok(Some(match row {
+    Ok(Lookup::Unknown(match row {
         Some(Some(username)) => format!(
             "this is a user's {what}, and an engine knows a person only by their username — \
              use {username:?}"
@@ -272,6 +304,211 @@ async fn resolve_user(
                  email or an id"
             .to_string(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// The report of STORED refs that match nobody (J-F3 Task 2, design R5/R6)
+// ---------------------------------------------------------------------------
+
+/// One stored grant principal or rule exemption whose ref matches nobody.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedPrincipal {
+    /// `"grant"` or `"rule"`.
+    pub source: String,
+    /// The grant's or the rule's id.
+    pub id: Uuid,
+    /// The rule's name; `null` for a grant (a grant has none).
+    pub name: Option<String>,
+    /// `user`, `group`, `role` or `workspace_members`.
+    pub kind: String,
+    /// The ref as stored, byte-for-byte — the string the compiled policy names.
+    pub r#ref: String,
+    /// `"include"` or `"exclude"` (of the grant's `principals`, or of the rule's
+    /// `exempt`).
+    pub position: String,
+    /// The grant's `allow` / `deny`; `null` for a rule exemption.
+    pub effect: Option<String>,
+    /// `"unresolved"`: the ref names nobody egret knows. `"empty"`: it names a
+    /// group that exists and has no members, so it matches nobody TODAY.
+    pub status: String,
+    /// Why it matches nobody, as a sentence an author can act on.
+    pub reason: String,
+    /// Matching nobody here makes the compiled policy allow MORE than the model
+    /// states: an unresolved ref in a deny grant's include, or in any exclude
+    /// (a grant's or a rule exemption's). An allow include or an exemption
+    /// include matching nobody fails closed, and an `empty` group never fails
+    /// open: nobody is in it, so matching nobody is exactly its meaning.
+    pub fails_open: bool,
+}
+
+/// What one stored `(kind, ref)` resolves to, for the report.
+#[derive(Clone)]
+enum Stored {
+    Resolves,
+    Empty,
+    Unresolved(String),
+}
+
+/// **Every stored grant principal and rule exemption whose ref matches
+/// nobody**, ordered by source, id, position, kind and ref. Reads only; the
+/// caller should hold a read-only transaction.
+///
+/// Each ref goes through [`lookup`], the same per-kind rule the write path
+/// refuses with, so "the report lists it" and "a write naming it is refused"
+/// cannot drift apart. Two things only the report adds:
+///
+/// - **A `user` ref the lookup finds only by case** (`Analyst` for `analyst`)
+///   is unresolved here, where the write path would have rewritten it: a
+///   stored row is compiled byte-for-byte (`crate::grants`' module doc) and
+///   compared byte-for-byte downstream, so on an engine it names nobody.
+/// - **A group that exists with no members** is `empty`: since J-F3 Task 1b
+///   a non-`public` group compiles to its members' usernames through
+///   `user_groups` (`crate::members::expand_enumerated_principals`, the same
+///   join read here), so it matches nobody, but correctly — never fails open.
+///
+/// A role with no holders or a workspace with no members also expands to
+/// nobody; the design names only the group case, so those resolve here.
+pub async fn unresolved_principals_via(
+    conn: &mut PgConnection,
+) -> Result<Vec<UnresolvedPrincipal>, PermHttpError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        source: String,
+        id: Uuid,
+        name: Option<String>,
+        kind: String,
+        r#ref: String,
+        position: String,
+        effect: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT 'grant' AS source, g.id, NULL::text AS name, gp.kind::text AS kind, gp.ref, \
+                gp.mode::text AS position, g.effect::text AS effect \
+           FROM perm.grant_principals gp JOIN perm.grants g ON g.id = gp.grant_id \
+         UNION ALL \
+         SELECT 'rule', r.id, r.name, re.kind::text, re.ref, re.mode::text, NULL \
+           FROM perm.rule_exemptions re JOIN perm.rules r ON r.id = re.rule_id \
+         ORDER BY source, id, position, kind, ref",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+
+    // One lookup per distinct (kind, ref): one deleted user excluded from fifty
+    // grants is one read, not fifty.
+    let mut seen: std::collections::HashMap<(String, String), Stored> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(kind) = PrincipalKind::parse(&row.kind) else {
+            // The column is the `perm.principal_kind` enum; a value this build
+            // cannot name is a schema/code mismatch, not a ref to report.
+            return Err(PermHttpError::db(format!(
+                "unknown perm.principal_kind {:?}",
+                row.kind
+            )));
+        };
+        let key = (row.kind.clone(), row.r#ref.clone());
+        let stored = match seen.get(&key) {
+            Some(s) => s.clone(),
+            None => {
+                let p = Principal {
+                    kind,
+                    r#ref: row.r#ref.clone(),
+                };
+                let s = classify_stored(conn, &p).await?;
+                seen.insert(key, s.clone());
+                s
+            }
+        };
+        let (status, reason) = match stored {
+            Stored::Resolves => continue,
+            Stored::Empty => ("empty", "this group exists and has no members".to_string()),
+            Stored::Unresolved(why) => ("unresolved", why),
+        };
+        let fails_open = status == "unresolved"
+            && (row.position == "exclude" || row.effect.as_deref() == Some("deny"));
+        out.push(UnresolvedPrincipal {
+            source: row.source,
+            id: row.id,
+            name: row.name,
+            kind: row.kind,
+            r#ref: row.r#ref,
+            position: row.position,
+            effect: row.effect,
+            status: status.to_string(),
+            reason,
+            fails_open,
+        });
+    }
+    Ok(out)
+}
+
+async fn classify_stored(conn: &mut PgConnection, p: &Principal) -> Result<Stored, PermHttpError> {
+    match lookup(conn, p).await? {
+        Lookup::Unknown(why) => Ok(Stored::Unresolved(why)),
+        Lookup::Found { canonical } if canonical != p.r#ref => Ok(Stored::Unresolved(format!(
+            "this matches the username {canonical:?} only case-insensitively, and the compiled \
+             policy names the ref byte-for-byte — an engine sees {canonical:?}, never this \
+             spelling"
+        ))),
+        Lookup::Found { .. } if p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP => {
+            // The join `crate::members::expand_enumerated_principals` expands
+            // a group through.
+            let has_members: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM user_groups ug \
+                                  JOIN groups g ON g.id = ug.group_id \
+                                  JOIN users u ON u.id = ug.user_id \
+                                 WHERE g.name = $1)",
+            )
+            .bind(&p.r#ref)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+            Ok(if has_members {
+                Stored::Resolves
+            } else {
+                Stored::Empty
+            })
+        }
+        Lookup::Found { .. } => Ok(Stored::Resolves),
+    }
+}
+
+/// **The startup pass** (design R5): one `warn!` per stored ref that fails
+/// OPEN, read in one read-only snapshot. Returns the rows it logged. Logs ids,
+/// kind, ref and position only — nothing a principal set holds is secret.
+///
+/// Best-effort by design: the caller logs an error and boots anyway, because
+/// the rows are already being served and refusing to start would not unserve
+/// them. `GET /api/control-plane/perm/unresolved-principals` is where an
+/// operator acts on them.
+pub async fn warn_fail_open_principals(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<UnresolvedPrincipal>, PermHttpError> {
+    let mut tx = pool.begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let report = unresolved_principals_via(&mut tx).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    let open: Vec<UnresolvedPrincipal> = report.into_iter().filter(|r| r.fails_open).collect();
+    for r in &open {
+        tracing::warn!(
+            source = %r.source,
+            id = %r.id,
+            kind = %r.kind,
+            principal_ref = %r.r#ref,
+            position = %r.position,
+            effect = r.effect.as_deref().unwrap_or("-"),
+            "a stored principal ref matches nobody where that FAILS OPEN: the compiled policy \
+             allows more than the model states. See GET /api/control-plane/perm/\
+             unresolved-principals"
+        );
+    }
+    Ok(open)
 }
 
 fn dedup_keeping_first(list: &mut Vec<Principal>) {
