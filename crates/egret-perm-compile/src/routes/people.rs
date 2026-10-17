@@ -26,9 +26,13 @@ pub struct PeopleQuery {
     /// a group's or role's name. `%` and `_` are literal.
     #[serde(default)]
     pub q: Option<String>,
-    /// Exact, case-insensitive username lookup. `kind=user` only.
+    /// Exact, case-insensitive username lookup. `kind=user` only. Finds a
+    /// service account whatever `includeServiceAccounts` says.
     #[serde(default)]
     pub username: Option<String>,
+    /// `kind=user` only: list service accounts too. Default false.
+    #[serde(default, rename = "includeServiceAccounts")]
+    pub include_service_accounts: Option<bool>,
     /// Page size; default 50, at most 200 (a larger value is capped).
     #[serde(default)]
     pub limit: Option<i64>,
@@ -55,7 +59,8 @@ pub struct PersonRow {
     pub key: String,
     /// User: name, else email. Group or role: its name.
     pub label: String,
-    /// User: email. Group: `local` or `oidc`. Role: every scope defining the
+    /// User: email, or `service account` for a service account. Group:
+    /// `local` or `oidc`. Role: every scope defining the
     /// name, sorted and joined with ", " (`platform, workspace`).
     pub detail: Option<String>,
     /// The user's stored engine username, or null when none is allocated yet.
@@ -65,6 +70,14 @@ pub struct PersonRow {
     /// holding the role is not counted; engines do not apply it). Null for a
     /// user. The same reads the compiler expands these principals with.
     pub member_count: Option<i64>,
+    /// Group or role: how many of `memberCount` have no username yet. A role
+    /// holder without one is not named on any engine. A group member without
+    /// one is named only once a grant naming the group is compiled (which
+    /// allocates it). Null for a user.
+    pub without_username: Option<i64>,
+    /// Whether the row is a Data API service account (users only; false
+    /// otherwise). Engines enforce grants on it like on any user.
+    pub service_account: bool,
 }
 
 /// A page of the People index and how many rows match in all.
@@ -85,8 +98,8 @@ fn non_empty(s: &Option<String>) -> Option<&str> {
     tag = "perm",
     params(PeopleQuery),
     responses(
-        (status = 200, description = "Users, groups or roles, filtered and paged. Users exclude service accounts and are sorted by label; groups and roles by name. A role is one row per name, whatever scopes define it. Group member and role holder counts are the compiler's own membership reads", body = PeoplePage),
-        (status = 400, description = "`kind` missing or not `user`, `group` or `role`; `username` with a kind other than `user`; or a negative `limit` or `offset`", body = ErrorBody),
+        (status = 200, description = "Users, groups or roles, filtered and paged. Users exclude service accounts unless `includeServiceAccounts=true` or `username` is given (a service account row is marked `serviceAccount`), and are sorted by label; groups and roles by name. A role is one row per name, whatever scopes define it. Group member and role holder counts are the compiler's own membership reads", body = PeoplePage),
+        (status = 400, description = "`kind` missing or not `user`, `group` or `role`; `username` or `includeServiceAccounts` with a kind other than `user`; or a negative `limit` or `offset`", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -114,6 +127,11 @@ pub(super) async fn list_people(
             "username applies to kind=user only".to_string(),
         ));
     }
+    if qp.include_service_accounts.is_some() && kind != ListKind::User {
+        return Err(PermHttpError::BadRequest(
+            "includeServiceAccounts applies to kind=user only".to_string(),
+        ));
+    }
     let limit = qp.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = qp.offset.unwrap_or(0);
     if limit < 0 || offset < 0 {
@@ -125,6 +143,7 @@ pub(super) async fn list_people(
         kind,
         q: non_empty(&qp.q),
         username,
+        include_service_accounts: qp.include_service_accounts.unwrap_or(false),
         limit: limit.min(MAX_LIMIT),
         offset,
     };
@@ -145,14 +164,19 @@ pub(super) async fn list_people(
                 .map(|u| PersonRow {
                     kind: PersonKind::User,
                     key: u.id.to_string(),
-                    label: if u.name.is_empty() {
-                        u.email.clone()
-                    } else {
-                        u.name
+                    label: match u.name.trim() {
+                        "" => u.email.clone(),
+                        name => name.to_string(),
                     },
-                    detail: Some(u.email),
+                    detail: Some(if u.service_account {
+                        "service account".to_string()
+                    } else {
+                        u.email
+                    }),
                     username: u.username,
                     member_count: None,
+                    without_username: None,
+                    service_account: u.service_account,
                 })
                 .collect(),
             total,
@@ -166,6 +190,8 @@ pub(super) async fn list_people(
                     detail: Some(g.source),
                     username: None,
                     member_count: Some(g.member_count),
+                    without_username: Some(g.without_username),
+                    service_account: false,
                 })
                 .collect(),
             total,
@@ -179,6 +205,8 @@ pub(super) async fn list_people(
                     detail: Some(r.scopes.join(", ")),
                     username: None,
                     member_count: Some(r.holder_count),
+                    without_username: Some(r.without_username),
+                    service_account: false,
                 })
                 .collect(),
             total,

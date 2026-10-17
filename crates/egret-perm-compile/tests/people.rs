@@ -219,8 +219,9 @@ async fn users_are_listed_with_and_without_a_username_and_q_matches_name_email_a
         Some(&format!("alice_{t}")),
     )
     .await;
-    // No name: the label falls back to the email. No username yet.
-    let bob = insert_user(&e.db.pool, &format!("bob_{t}@egret.local"), "", None).await;
+    // A whitespace-only name is no name: the label falls back to the email.
+    // No username yet.
+    let bob = insert_user(&e.db.pool, &format!("bob_{t}@egret.local"), " \t ", None).await;
     // Matched by name only: the email and username do not contain the tag.
     let carol_name = format!("Carol {t}");
     let carol = insert_user(
@@ -239,8 +240,9 @@ async fn users_are_listed_with_and_without_a_username_and_q_matches_name_email_a
         Some(&dave_username),
     )
     .await;
-    // A service account is a `users` row but never a person (migration 0119):
-    // a human-facing list excludes it.
+    // A service account (migration 0119) is left out of browsing by default;
+    // `a_service_account_is_found_by_username_listed_on_request_and_marked`
+    // covers the other half.
     sqlx::query(
         "INSERT INTO users (provider, email, name, username) VALUES ('service', $1, $1, $1)",
     )
@@ -276,6 +278,8 @@ async fn users_are_listed_with_and_without_a_username_and_q_matches_name_email_a
             "detail": format!("alice_{t}@egret.local"),
             "username": format!("alice_{t}"),
             "memberCount": null,
+            "withoutUsername": null,
+            "serviceAccount": false,
         }),
         "exactly these fields — no password, session, permission or login data"
     );
@@ -367,6 +371,8 @@ async fn groups_are_listed_with_their_source_and_direct_member_count() {
                 "detail": "local",
                 "username": null,
                 "memberCount": 2,
+                "withoutUsername": 1,
+                "serviceAccount": false,
             },
             {
                 "kind": "group",
@@ -375,6 +381,8 @@ async fn groups_are_listed_with_their_source_and_direct_member_count() {
                 "detail": "oidc",
                 "username": null,
                 "memberCount": 0,
+                "withoutUsername": 0,
+                "serviceAccount": false,
             },
         ]),
         "sorted by name"
@@ -456,6 +464,8 @@ async fn a_role_is_listed_once_per_name_with_every_scope_and_its_live_allow_hold
                 "detail": "platform, workspace",
                 "username": null,
                 "memberCount": 2,
+                "withoutUsername": 1,
+                "serviceAccount": false,
             },
             {
                 "kind": "role",
@@ -464,6 +474,8 @@ async fn a_role_is_listed_once_per_name_with_every_scope_and_its_live_allow_hold
                 "detail": "workspace",
                 "username": null,
                 "memberCount": 0,
+                "withoutUsername": 0,
+                "serviceAccount": false,
             },
         ])
     );
@@ -535,6 +547,9 @@ async fn a_kind_outside_user_group_role_is_a_400() {
         "kind=",
         "",
         "kind=user&limit=-1",
+        "kind=group&username=x",
+        "kind=role&username=x",
+        "kind=group&includeServiceAccounts=true",
         "kind=user&offset=-1",
     ] {
         let (status, body) = get(&e, &e.admin, query).await;
@@ -558,4 +573,70 @@ async fn the_list_is_gated_on_policy_read() {
     }
     let (status, _) = get(&e, "not-a-session", "kind=user").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_service_account_is_found_by_username_listed_on_request_and_marked() {
+    let Some(e) = env().await else { return };
+    let t = tag();
+    let svc: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) \
+         VALUES ('service', $1, $2, $3) RETURNING id",
+    )
+    .bind(format!("svc_{t}@service.local"))
+    .bind(format!("Invoker {t}"))
+    .bind(format!("svc_{t}"))
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("service account");
+    let human = insert_user(&e.db.pool, &format!("hum_{t}@egret.local"), "Human", None).await;
+
+    let marked = json!({
+        "kind": "user",
+        "key": svc.to_string(),
+        "label": format!("Invoker {t}"),
+        "detail": "service account",
+        "username": format!("svc_{t}"),
+        "memberCount": null,
+        "withoutUsername": null,
+        "serviceAccount": true,
+    });
+
+    // Browsing leaves it out by default, and `total` agrees with the items.
+    let browse = page(&e, &format!("kind=user&q={t}")).await;
+    assert_eq!(keys(&browse), vec![human.to_string()], "{browse}");
+    assert_eq!(browse["total"], json!(1));
+
+    // On request it is listed, marked.
+    let all = page(&e, &format!("kind=user&q={t}&includeServiceAccounts=true")).await;
+    assert_eq!(all["total"], json!(2), "{all}");
+    let row = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == json!(svc.to_string()))
+        .cloned()
+        .expect("listed with the flag");
+    assert_eq!(row, marked);
+
+    // A username lookup always finds it, without the flag and with it false.
+    for query in [
+        format!("kind=user&username=SVC_{}", t.to_uppercase()),
+        format!("kind=user&username=svc_{t}&includeServiceAccounts=false"),
+    ] {
+        let found = page(&e, &query).await;
+        assert_eq!(found["total"], json!(1), "{query}: {found}");
+        assert_eq!(found["items"], json!([marked.clone()]), "{query}");
+    }
+
+    // A role it holds counts it, and the Users tab can now show every holder
+    // that count stands for.
+    let role: Uuid = insert_role(&e.db.pool, "platform", &format!("svcrole_{t}")).await;
+    insert_grant(
+        &e.db.pool, "user", svc, role, "platform", None, "allow", false,
+    )
+    .await;
+    let roles = page(&e, &format!("kind=role&q=svcrole_{t}")).await;
+    assert_eq!(roles["items"][0]["memberCount"], json!(1), "{roles}");
+    assert_eq!(roles["items"][0]["withoutUsername"], json!(0), "{roles}");
 }
