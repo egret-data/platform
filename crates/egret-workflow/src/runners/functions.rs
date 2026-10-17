@@ -64,7 +64,8 @@
 //! # A refusal is a feature
 //!
 //! The eight that are refused (twelve until W9a Task 4) say so in a sentence
-//! naming the function, what it needs and the package that will implement it. **The oracle cannot check
+//! naming the function, what it needs and the package that will implement it
+//! (`secret`, Confined, and `http`, Unsupported, name no package). **The oracle cannot check
 //! any of that**: their corpus entries are `compare: "error-class"`, which any
 //! failure satisfies — including `unknown function: secret is unknown`, which
 //! is what egret said before this task. See [`not_implemented`] and

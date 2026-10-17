@@ -1,6 +1,6 @@
 # Workflow follow-ups, group A: a timed-out StarRocks statement does stop; `http()` is refused for good
 
-**Status:** designed 2026-10-17, not built. Every claim about egret's code was checked in the worktree `egret-grpa` at `4f6cafec` (main, after #683) and is cited `path:line` from the repository root.
+**Status:** built and verified 2026-10-17. Every claim about egret's code was checked in the worktree `egret-grpa` at `4f6cafec` (main, after #683) and is cited `path:line` from the repository root.
 
 **Programme spec:** `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9 (the note on names owned by no row) and §11 question 3.
 
@@ -25,6 +25,7 @@ On the pinned `starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4…`, a private cont
 - For reference, not adopted (§1.3): `query_timeout` (default 300) and `insert_timeout` (default 14400) both exist; `SET query_timeout = 2` ends `LONG_SQL` at 2 s with `ERROR 5024 (53400): Query reached its timeout of 2 seconds, …`; an `INSERT … SELECT` obeys only `insert_timeout` (`query_timeout = 2` alone let it run 159 s).
 - Positive control: the three tests each assert they saw the statement running before the drop, so a probe that cannot see it cannot pass. Needles: `egret-deadline-probe` (SELECT), `INSERT INTO egret_drop_probe.t` (INSERT), `egret-params-deadline-probe` (parameterised SELECT, binary protocol).
 - Probe hygiene: StarRocks strips `/* */` comments from `Info`, so a marker must be in the SQL text itself; a raw `mysql_async` probe connection needs `prefer_socket(false)`.
+- Scope: the plugin-host path's StarRocks claims (`docs/en/specs/2026-09-29-workflow-w5b-kestra-plugin-host-design.md:107,116,172`, `crates/egret-workflow/oracle-exec/README.md:9265`, programme spec EN `:509` "a StarRocks query is not") are about Kestra's `kill()` over Connector/J on the plugin host; they were measured before the StarRocks 4.1.6 upgrade (#666), are not re-measured here, and are left to group B.
 
 So the claim in §1.1 is false on 4.1.6, for every path egret uses. The objection that kept the session variable out (*"would begin failing queries that succeed today"*, `handlers/sql.rs:562-565`) is moot as well.
 

@@ -5183,6 +5183,7 @@ one-direction test and break every deliberate skip.
    > (disassembled from `/app/plugins/*.jar` in the pinned image). **Kestra's
    > own SQL task stops the remote statement; `egret.sql` does not** — a
    > `timeout: PT10S` on a one-hour StarRocks query runs the full hour here.
+   > *(Corrected 2026-10-17: on StarRocks 4.1.6 the statement is cancelled when egret drops the connection at the budget — measured; see docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md §1.2.)*
    > What keeps the refusal is cost and scope, not the artifact: the port verb
    > would buy a true cancel only on Trino, which `query_max_run_time` already
    > bounds, because on StarRocks the token is honoured only cooperatively

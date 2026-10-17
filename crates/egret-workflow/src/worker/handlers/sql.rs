@@ -535,8 +535,9 @@ impl TaskHandler for Sql {
     /// the hazard is.** On StarRocks the token is honoured only *cooperatively
     /// inside the row drain* — `connector/starrocks.rs`'s `drain_rows` checks
     /// `cancel.is_cancelled()` between rows — so a query still executing before
-    /// its first row is untouched, and breaking out of the loop tells StarRocks
-    /// nothing. A real cancel there needs `KILL QUERY <id>` issued on a **second
+    /// its first row is untouched, and breaking out of the loop does not cancel
+    /// the statement by itself; it ends when the connection is dropped (measured
+    /// on 4.1.6). An early cancel there needs `KILL QUERY <id>` issued on a **second
     /// connection**, which no connector does. So the change with the widest
     /// blast radius would deliver a true cancel only on Trino, which is
     /// **already** bounded by the `query_max_run_time` this handler sends. That

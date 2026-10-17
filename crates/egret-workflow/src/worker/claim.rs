@@ -1733,8 +1733,12 @@ enum Leased<T> {
 ///
 /// # What dropping `work` does, per handler
 ///
-/// The four core handlers hold nothing. `egret.sql`'s query keeps running on
-/// its engine (a dropped future tells a MySQL-protocol engine nothing).
+/// The four core handlers hold nothing. `egret.sql`'s statement is not stopped
+/// by the drop itself, but the drop closes its connection: StarRocks 4.1.6
+/// cancels the statement after that (measured 2026-10-17, pinned by
+/// `starrocks_cancels_{a_select,an_insert,a_parameterised_select}_when_egret_drops_it`
+/// in `egret-query/tests/connector_starrocks.rs`), and Trino is bounded by the
+/// `query_max_run_time` the handler sends.
 /// `DockerRunner` (`egret.container`, `egret.script.python`) kills its
 /// `docker start --attach` CLI (`kill_on_drop`), which does **not** stop the
 /// container, and its `rm --force` never runs: the container is left for the

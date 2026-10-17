@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế 2026-10-17, chưa xây. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-grpa` tại `4f6cafec` (main, sau #683) và được trích dẫn `path:line` từ gốc repo.
+**Trạng thái:** đã xây và kiểm chứng 2026-10-17. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-grpa` tại `4f6cafec` (main, sau #683) và được trích dẫn `path:line` từ gốc repo.
 
 **Spec chương trình:** `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9 (ghi chú về các tên không gói nào sở hữu) và §11 câu 3.
 
@@ -27,6 +27,7 @@ Trên `starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4…` đã ghim, container ri
 - Để tham khảo, không áp dụng (§1.3): `query_timeout` (mặc định 300) và `insert_timeout` (mặc định 14400) đều tồn tại; `SET query_timeout = 2` kết thúc `LONG_SQL` ở 2 s với `ERROR 5024 (53400): Query reached its timeout of 2 seconds, …`; `INSERT … SELECT` chỉ tuân theo `insert_timeout` (chỉ đặt `query_timeout = 2` thì nó chạy 159 s).
 - Đối chứng dương: cả ba test đều assert đã thấy statement đang chạy trước khi drop, nên probe không nhìn thấy statement thì không thể xanh. Needle: `egret-deadline-probe` (SELECT), `INSERT INTO egret_drop_probe.t` (INSERT), `egret-params-deadline-probe` (SELECT có tham số, binary protocol).
 - Lưu ý khi đo: StarRocks bỏ comment `/* */` khỏi `Info`, nên marker phải nằm trong chính text SQL; kết nối `mysql_async` thô để dò cần `prefer_socket(false)`.
+- Phạm vi: các khẳng định về StarRocks của đường plugin-host (`docs/en/specs/2026-09-29-workflow-w5b-kestra-plugin-host-design.md:107,116,172`, `crates/egret-workflow/oracle-exec/README.md:9265`, spec chương trình EN `:509` "a StarRocks query is not") nói về `kill()` của Kestra qua Connector/J trên plugin host; chúng được đo trước khi nâng StarRocks 4.1.6 (#666), không đo lại ở đây, và để cho nhóm B.
 
 Vậy khẳng định ở §1.1 sai trên 4.1.6, với mọi đường egret dùng. Lý do từng giữ biến phiên ở ngoài (*"sẽ làm hỏng query hôm nay chạy được"*, `handlers/sql.rs:562-565`) cũng không còn ý nghĩa.
 
