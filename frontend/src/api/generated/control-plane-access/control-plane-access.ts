@@ -1737,6 +1737,11 @@ export type controlPlaneAccessAddGroupMemberResponse404 = {
   status: 404
 }
 
+export type controlPlaneAccessAddGroupMemberResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneAccessAddGroupMemberResponse500 = {
   data: ErrorBody
   status: 500
@@ -1745,7 +1750,7 @@ export type controlPlaneAccessAddGroupMemberResponse500 = {
 export type controlPlaneAccessAddGroupMemberResponseSuccess = (controlPlaneAccessAddGroupMemberResponse204) & {
   headers: Headers;
 };
-export type controlPlaneAccessAddGroupMemberResponseError = (controlPlaneAccessAddGroupMemberResponse401 | controlPlaneAccessAddGroupMemberResponse403 | controlPlaneAccessAddGroupMemberResponse404 | controlPlaneAccessAddGroupMemberResponse500) & {
+export type controlPlaneAccessAddGroupMemberResponseError = (controlPlaneAccessAddGroupMemberResponse401 | controlPlaneAccessAddGroupMemberResponse403 | controlPlaneAccessAddGroupMemberResponse404 | controlPlaneAccessAddGroupMemberResponse409 | controlPlaneAccessAddGroupMemberResponse500) & {
   headers: Headers;
 };
 

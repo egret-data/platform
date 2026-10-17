@@ -218,3 +218,70 @@ async fn every_membership_writer_calls_the_recompile_port() {
     assert_eq!(groups.delete_local(gid, &rc).await.unwrap(), 1);
     assert_eq!(rc.take(), vec![Call::Lock(vec![renamed]), Call::Recompile]);
 }
+
+/// Design R4: an OIDC group's membership is owned by the identity provider.
+/// An admin ADD is refused with `Conflict` before any profile lock or
+/// recompile and writes no row — it would be undone at the next login of an
+/// OIDC user, and never undone for a local user, whom no login reaches. A
+/// REMOVE stays allowed: it fails closed and serves as an emergency revoke
+/// until the user's next login, so it still recompiles. An add to a LOCAL
+/// group is unchanged.
+#[tokio::test]
+async fn an_admin_add_to_an_oidc_group_is_refused_and_a_remove_is_not() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+    let rc = Recorder::default();
+    let uid = users
+        .insert_local(&format!("{}@test.local", uniq("r4")), "R", "x")
+        .await
+        .unwrap();
+    let oidc = uniq("t_oidc_group");
+    let oidc_gid = groups.upsert_oidc_group(&oidc).await.unwrap();
+    let is_member = |gid: uuid::Uuid| {
+        let groups = &groups;
+        async move { groups.members_of(gid).await.unwrap().contains(&uid.0) }
+    };
+
+    let err = groups.add_member(oidc_gid, uid, &rc).await.unwrap_err();
+    match err {
+        egret_core::Error::Conflict(msg) => assert_eq!(
+            msg,
+            "Cannot add members to an OIDC-synced group; its membership is owned by the identity provider"
+        ),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    assert!(!is_member(oidc_gid).await, "a refused add writes no row");
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "a refused add locks no profile and recompiles nothing"
+    );
+
+    // A row the login sync wrote: the admin can still remove it.
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid.0)
+        .bind(oidc_gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    groups.remove_member(oidc_gid, uid, &rc).await.unwrap();
+    assert!(!is_member(oidc_gid).await, "the remove deleted the row");
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![oidc.clone()]), Call::Recompile],
+        "the remove recompiles what the group reaches"
+    );
+
+    let local = uniq("t_local_group");
+    let local_gid = groups.create_local(&local).await.unwrap();
+    groups.add_member(local_gid, uid, &rc).await.unwrap();
+    assert!(
+        is_member(local_gid).await,
+        "an add to a local group still works"
+    );
+    assert_eq!(rc.take(), vec![Call::Lock(vec![local]), Call::Recompile]);
+}

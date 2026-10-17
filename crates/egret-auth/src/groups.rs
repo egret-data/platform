@@ -576,6 +576,15 @@ impl GroupRepo {
 
     /// Add a user to a group (idempotent), recompiling every policy the group
     /// reaches in the same transaction (module doc).
+    ///
+    /// **Refused with `Conflict` on an OIDC-sourced group (design R4).** That
+    /// group's membership is owned by the identity provider: an admin add
+    /// would be undone at the next login of an OIDC user (the sync replaces
+    /// their OIDC rows) and never undone for a local user, whom no login
+    /// reaches — a member the IdP never named, holding every role and policy
+    /// the group reaches. With R1 (the sync writes OIDC groups only) this
+    /// makes a row's provenance follow from its group's source. The console
+    /// already offers no add on such a group; this is the server half.
     pub async fn add_member(
         &self,
         group_id: Uuid,
@@ -589,6 +598,10 @@ impl GroupRepo {
     /// Remove a user from a group (idempotent), recompiling in the same
     /// transaction — the direction that fails OPEN when it is missed (module
     /// doc).
+    ///
+    /// Allowed on an OIDC-sourced group, unlike [`Self::add_member`] (design
+    /// R4): a remove fails closed, so it serves as an emergency revoke until
+    /// the user's next login re-applies the IdP's claim.
     pub async fn remove_member(
         &self,
         group_id: Uuid,
@@ -620,11 +633,26 @@ impl GroupRepo {
         let mut held = HeldGroupLocks::default();
         let mut passes = 0;
         let name: Option<String> = loop {
-            let name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
-                .bind(group_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
+            let row: Option<(String, String)> =
+                sqlx::query_as("SELECT name, source FROM groups WHERE id = $1")
+                    .bind(group_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            // Design R4 (`add_member`'s doc): refused before any group or
+            // profile lock and before the write, so nothing is recompiled. The
+            // check sits on this read, not a separate one, so it judges the
+            // same row the write would use; a group's source never changes
+            // (`upsert_oidc_group` does not flip a local group, and rename and
+            // delete refuse an OIDC one).
+            if add && matches!(&row, Some((_, source)) if source == "oidc") {
+                return Err(egret_core::Error::Conflict(
+                    "Cannot add members to an OIDC-synced group; \
+                     its membership is owned by the identity provider"
+                        .to_string(),
+                ));
+            }
+            let name = row.map(|(n, _)| n);
             match &name {
                 Some(n) if held.cover(&mut tx, std::slice::from_ref(n)).await? => {
                     passes += 1;
