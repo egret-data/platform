@@ -22,6 +22,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { AssignmentBadge, GrantDialog } from "./GrantDialog";
 import { grantSentence } from "./permFormat";
+import { OpenInDataLink, scopeToDataLink, useCatalogNameById } from "./openInData";
 
 /**
  * Governance → Data permissions (SP4b-2 Task 3).
@@ -47,6 +48,7 @@ export default function DataPermissions() {
   const grantsQ = usePermListGrants({ query: { retry: false } });
   const rows: GrantView[] = grantsQ.data?.status === 200 ? grantsQ.data.data : [];
 
+  const catalogNameById = useCatalogNameById();
   const workspaces = useMyWorkspaces(true);
   const workspaceLabel = (id: string) => workspaces.data?.find((w) => w.id === id)?.name ?? id;
 
@@ -85,14 +87,20 @@ export default function DataPermissions() {
       label: "Grant",
       sortable: true,
       value: (g) => grantSentence(g),
-      cell: (g) => (
+      cell: (g) => {
+        const link = scopeToDataLink(g.scope, catalogNameById, "permissions");
+        return (
         <div className="space-y-1 py-0.5">
           <p className="text-sm">{grantSentence(g)}</p>
+          {link && (
+            <OpenInDataLink to={link.to} subject={grantSentence(g)} stoppedAtPattern={link.stoppedAtPattern} />
+          )}
           {g.origin.type === "workspace_assignment" && (
             <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
           )}
         </div>
-      ),
+        );
+      },
     },
     {
       key: "actions",
