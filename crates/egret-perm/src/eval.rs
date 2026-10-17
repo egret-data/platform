@@ -442,6 +442,18 @@ mod resource_level_matches_tests {
         assert!(resource_level_matches("NGƯỜI", "người"));
     }
 
+    /// Pins the fifth bound in the module doc, so a change to it is seen.
+    /// U+0130 (`İ`) is in `FOLD_DIVERGENT`: its full lowercase is TWO code
+    /// points (`i` + U+0307), so this fold says no, while the engine's
+    /// per-character `equalsIgnoreCase` lowers `İ` to `i` and says yes. Here
+    /// the oracle is narrower than the engine, and that is the recorded bound,
+    /// not a gate.
+    #[test]
+    fn a_fold_divergent_character_is_the_documented_bound() {
+        assert!(!resource_level_matches("İ", "i"));
+        assert!(resource_level_matches("İ", "i\u{0307}"));
+    }
+
     #[test]
     fn a_literal_still_needs_the_same_letters() {
         assert!(!resource_level_matches("orders", "order"));
