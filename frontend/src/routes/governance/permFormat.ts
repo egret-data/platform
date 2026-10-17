@@ -30,6 +30,9 @@ export function formatActions(actions: Action[]): string {
  * implies a schema, enforced by the database and by `ScopePicker`), so at
  * most one of these branches is ever a real narrowing choice for a given row.
  *
+ * A level whose value is a pattern (`*`, `ord*`) is quoted (`wh.sales.“*”`):
+ * the bare trailing `*` means only "this level is not set".
+ *
  * `catalogName` is the ALREADY-RESOLVED display name, not a lookup function
  * (SP4b-2 finding 1). The read surface puts it on the payload
  * (`GrantView.catalog_name`, `RuleView.catalog_name`) precisely so rendering
@@ -41,10 +44,30 @@ export function formatActions(actions: Action[]): string {
  */
 export function formatScope(scope: Scope, catalogName?: string | null): string {
   const catalog = catalogName || scope.catalog_id;
-  if (!scope.schema) return `${catalog}.*`;
-  if (!scope.table) return `${catalog}.${scope.schema}.*`;
-  if (!scope.column) return `${catalog}.${scope.schema}.${scope.table}`;
-  return `${catalog}.${scope.schema}.${scope.table}.${scope.column}`;
+  const schema = scope.schema ? level(scope.schema) : null;
+  const table = scope.table ? level(scope.table) : null;
+  if (!schema) return `${catalog}.*`;
+  if (!table) return `${catalog}.${schema}.*`;
+  if (!scope.column) return `${catalog}.${schema}.${table}`;
+  return `${catalog}.${schema}.${table}.${level(scope.column)}`;
+}
+
+/**
+ * Whether a stored scope value is a pattern: the engines glob-match a level
+ * (`*` any run of characters, `?` one; `crates/egret-perm/src/eval.rs`,
+ * `glob_match`), so `*` or `ord*` names every value it matches, not one.
+ */
+export function isPattern(value: string): boolean {
+  return /[*?]/.test(value);
+}
+
+/**
+ * A named level as the sentence prints it. A pattern is quoted, so a grant
+ * whose table is the value `*` (`wh.sales.“*”`) never reads the same as one
+ * that sets no table at all (`wh.sales.*`).
+ */
+function level(value: string): string {
+  return isPattern(value) ? `“${value}”` : value;
 }
 
 function principalWord(p: PermPrincipal): string {

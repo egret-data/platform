@@ -1,4 +1,5 @@
-import type { Grant } from "@/api/generated/model";
+import type { Grant, Scope } from "@/api/generated/model";
+import { isPattern } from "@/routes/governance/permFormat";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 /** How a grant reaches an object: set on it, set on an ancestor, or set on one of its columns. */
@@ -20,7 +21,8 @@ const ANCESTORS = ["catalog", "schema", "table"] as const;
  * characters, `?` one), not by equality (`crates/egret-perm/src/eval.rs`,
  * `covers` and `level_covers`), because the engines enforce a stored `ord*`
  * or `*` that way. A grant with `table = "*"` is therefore "here" on every
- * table of its schema.
+ * table of its schema; {@link patternLevels} tells such a grant apart from one
+ * set on this object by name.
  *
  * The scope's levels narrow without gaps (a column implies a table implies a
  * schema; `perm.grants` CHECKs it), so the set levels are a prefix.
@@ -38,6 +40,18 @@ export function grantCoverage(g: Grant, p: ObjectPath, catalogId: string): Grant
   if (granted.length < target.length) return { inheritedFrom: ANCESTORS[granted.length] };
   // Deeper than `p`: only a column of the table `p` is listed.
   return target.length === 2 && granted.length === 3 ? "child" : null;
+}
+
+export type PatternLevel = { level: "schema" | "table" | "column"; value: string };
+
+/** The levels of `scope` set to a pattern (`*`, `ord*`, `order?`): each names every value it matches. */
+export function patternLevels(scope: Scope): PatternLevel[] {
+  const levels: PatternLevel[] = [];
+  for (const level of ["schema", "table", "column"] as const) {
+    const value = scope[level];
+    if (value && isPattern(value)) levels.push({ level, value });
+  }
+  return levels;
 }
 
 /** The levels up to the first unset one. */

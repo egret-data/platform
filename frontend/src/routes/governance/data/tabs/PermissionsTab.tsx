@@ -15,7 +15,7 @@ import { AssignmentBadge } from "@/routes/governance/GrantDialog";
 import { grantSentence } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
-import { grantCoverage } from "@/routes/governance/data/coverage";
+import { grantCoverage, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
@@ -33,8 +33,14 @@ type Inherited = { grant: GrantView; from: keyof typeof LEVEL_LABEL };
 /**
  * An object's Permissions tab (spec §2.2): every grant that reaches the
  * object, grouped by how it reaches it: set here, inherited from an ancestor
- * (the level named), or set on one of a table's columns. A deny grant is
- * marked.
+ * (the level named), set on one of a table's columns, or matching a pattern.
+ * A deny grant is marked.
+ *
+ * A grant that names a level by pattern (`table = "*"`, `ord*`) reaches every
+ * value it matches, not this object alone, so it is never listed as "Here"
+ * or beside a grant that leaves the level unset: it has its own group, which
+ * names the pattern, its sentence quotes it (`ice.sales.“*”`, see
+ * `formatScope`), and deleting it says how far it reaches.
  *
  * The grants come from the existing list route (`GET /perm/grants`,
  * `policy:read`), filtered here by {@link grantCoverage} (spec §2.3, "Not
@@ -102,19 +108,22 @@ function Grants({
   const here: GrantView[] = [];
   const inherited: Inherited[] = [];
   const onColumns: GrantView[] = [];
+  const byPattern: GrantView[] = [];
   for (const g of grantsQ.data.data) {
     const reach = grantCoverage(g, target, catalog.id);
-    if (reach === "here") here.push(g);
+    if (reach !== null && patternLevels(g.scope).length > 0) byPattern.push(g);
+    else if (reach === "here") here.push(g);
     else if (reach === "child") onColumns.push(g);
     else if (reach) inherited.push({ grant: g, from: reach.inheritedFrom });
   }
   const bySentence = (a: GrantView, b: GrantView) => grantSentence(a).localeCompare(grantSentence(b));
   here.sort(bySentence);
+  byPattern.sort(bySentence);
   onColumns.sort((a, b) => (a.scope.column ?? "").localeCompare(b.scope.column ?? "") || bySentence(a, b));
   const order = Object.keys(LEVEL_LABEL);
   inherited.sort((a, b) => order.indexOf(a.from) - order.indexOf(b.from) || bySentence(a.grant, b.grant));
 
-  if (here.length + inherited.length + onColumns.length === 0) {
+  if (here.length + inherited.length + onColumns.length + byPattern.length === 0) {
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     return <EmptyState icon={KeyRound} title={`No grant reaches this ${noun}`} />;
   }
@@ -150,6 +159,14 @@ function Grants({
           {table("On columns", onColumns, { head: "Column", cell: (g) => g.scope.column ?? "", mono: true })}
         </Section>
       ) : null}
+      {byPattern.length > 0 ? (
+        <Section title="Matching a pattern">
+          {table("Matching a pattern", byPattern, {
+            head: "Pattern",
+            cell: (g) => patternLevels(g.scope).map(patternText).join(", "),
+          })}
+        </Section>
+      ) : null}
 
       <ConfirmDeleteDialog
         open={deleting !== null}
@@ -157,7 +174,7 @@ function Grants({
           if (!open) setDeleting(null);
         }}
         title={deleting ? `Delete "${grantSentence(deleting)}"?` : "Delete grant?"}
-        description="This grant is permanently removed and every profile it reaches recompiles."
+        description={deleteDescription(deleting)}
         onConfirm={() => {
           if (deleting) deleteGrant.mutate({ id: deleting.id });
           setDeleting(null);
@@ -165,6 +182,20 @@ function Grants({
       />
     </div>
   );
+}
+
+/** `table “*”`. */
+function patternText(p: PatternLevel): string {
+  return `${p.level} “${p.value}”`;
+}
+
+/** The delete confirmation's text; a pattern grant says how far it reaches. */
+function deleteDescription(g: GrantView | null): string {
+  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const patterns = g ? patternLevels(g.scope) : [];
+  if (patterns.length === 0) return "This grant is permanently removed and every profile it reaches recompiles.";
+  const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
+  return `This grant covers ${reach}, not one object. ${removed}`;
 }
 
 function GrantTable({

@@ -1183,10 +1183,10 @@ export default function ExplainAccess() {
   /**
    * Why `Explain` is disabled, in words (SP4b-2 finding 2). A disabled button
    * with no explanation is the failure this finding is about: with
-   * `policy:read` alone the target picker holds zero options — it says so
-   * itself now, and needing `catalog_registry:read` for an admin-tier page's
-   * picker is acceptable (D4) — but the button must not simply sit there inert
-   * either way.
+   * `policy:read` alone the target picker once held zero options (it read the
+   * registry list, `catalog_registry:read`); it reads the Governance list now
+   * and says so itself when even that is refused — but the button must not
+   * simply sit there inert either way.
    */
   const missing = [
     user.trim().length === 0 ? "a user" : null,

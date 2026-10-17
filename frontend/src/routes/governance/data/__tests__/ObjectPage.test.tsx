@@ -151,7 +151,11 @@ const panel = () => screen.getByRole("tabpanel");
 /** The value a `<dt>` in the open panel names. */
 const term = (name: string) => within(panel()).getByText(name, { selector: "dt" }).nextElementSibling?.textContent;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  toast.success.mockClear();
+  toast.error.mockClear();
+});
 
 describe("ObjectHeader", () => {
   it("shows a table's name, kind, path, attached engines and its own tags", async () => {
@@ -715,5 +719,92 @@ describe("PermissionsTab", () => {
     expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants", "DELETE /perm/grants/g-table", "GET /perm/grants"]);
     expect(toast.success).toHaveBeenCalledWith("Grant deleted.");
+  });
+  it("keeps a pattern grant apart from an inherited one, in its group and in its sentence", async () => {
+    const pattern = g("g-star", { schema: "sales", table: "*" });
+    serveData(fixture({ grants: ok([pattern, g("g-sales", { schema: "sales" })]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await within(panel()).findByRole("table", { name: "Matching a pattern" });
+
+    expect(within(panel()).queryByRole("table", { name: "Here" })).not.toBeInTheDocument();
+    expect(rowsOf("Inherited")).toEqual([["role analyst can read ice.sales.*", "Schema", "Allow", ""]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", ""]]);
+  });
+
+  it("says how far a pattern grant reaches before deleting it", async () => {
+    serveData(fixture({ grants: ok([g("g-star", { schema: "sales", table: "ord*" })]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete role analyst can read ice.sales.“ord*”" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/This grant covers every table matching “ord\*”, not one object\./)).toBeInTheDocument();
+  });
+
+  it("reads a grant's excluded principals into its sentence", async () => {
+    serveData(
+      fixture({
+        grants: ok([
+          g("g-ex", { schema: "sales", table: "orders" }, { principals: { include: [{ kind: "role", ref: "analyst" }], exclude: [{ kind: "user", ref: "bob" }] } }),
+        ]),
+      }),
+    );
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here")[0][0]).toBe("role analyst can read ice.sales.orders except user bob");
+  });
+
+  it.each([
+    [{ status: 403, body: { error: "forbidden" } }, "This account cannot do that: it needs the policy:update permission."],
+    [{ status: 409, body: { error: "A rule overlap would follow from this delete." } }, "A rule overlap would follow from this delete."],
+  ])("shows a refused delete's reason and keeps the grant (%j)", async (refusal, message) => {
+    const { permCalls } = serveData(fixture({ grants: ok([ON_TABLE]), grantWrite: refusal }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete user alice can read and write ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByRole("textbox"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(message));
+    expect(toast.success).not.toHaveBeenCalledWith("Grant deleted.");
+    expect(permCalls.map((c) => c.call)).toContain("DELETE /perm/grants/g-table");
+    expect(within(panel()).getByRole("table", { name: "Here" })).toBeInTheDocument();
+  });
+
+  it("creates a grant from Grant access, then refetches the tab and confirms", async () => {
+    const created = g("g-new", { schema: "sales", table: "orders" });
+    const { permCalls } = serveData(
+      fixture({
+        grants: [ok([]), ok([created])],
+        preview: ok({ affected: [], compile: { services: [], created: 0, updated: 0, deleted: 0, unchanged: 0, skipped: [] } }),
+        grantWrite: { status: 201, body: { id: "g-new" } },
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+
+    await user.click(await within(header()).findByRole("button", { name: "Grant access" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("combobox", { name: "Include kind" }));
+    await user.click(await screen.findByRole("option", { name: "role" }));
+    await user.type(within(dialog).getByRole("textbox", { name: "Include role name" }), "analyst");
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+    await user.click(within(dialog).getByRole("button", { name: "Preview" }));
+    const create = within(dialog).getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toBeEnabled());
+    await user.click(create);
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(permCalls.find((c) => c.call === "POST /perm/grants")?.body).toEqual({
+      effect: "allow",
+      actions: ["read"],
+      scope: { catalog_id: "c-ice", schema: "sales", table: "orders" },
+      principals: { include: [{ kind: "role", ref: "analyst" }], exclude: [] },
+    });
+    expect(toast.success).toHaveBeenCalledWith("Grant created.");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here")[0][0]).toBe("role analyst can read ice.sales.orders");
+    expect(permCalls.filter((c) => c.call === "GET /perm/grants")).toHaveLength(2);
   });
 });

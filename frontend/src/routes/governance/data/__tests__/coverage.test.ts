@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Grant, Scope } from "@/api/generated/model";
-import { globMatch, grantCoverage } from "@/routes/governance/data/coverage";
+import { globMatch, grantCoverage, patternLevels } from "@/routes/governance/data/coverage";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 const CAT = "c-ice";
@@ -106,5 +106,17 @@ describe("globMatch", () => {
     ["?", "😀", true],
   ])("%j against %j is %s", (pattern, value, expected) => {
     expect(globMatch(pattern, value)).toBe(expected);
+  });
+});
+
+describe("patternLevels", () => {
+  it("lists the levels set to a pattern, and nothing for named or unset levels", () => {
+    expect(patternLevels({ catalog_id: CAT })).toEqual([]);
+    expect(patternLevels({ catalog_id: CAT, schema: "sales", table: "orders", column: "email" })).toEqual([]);
+    expect(patternLevels({ catalog_id: CAT, schema: "sales", table: "*" })).toEqual([{ level: "table", value: "*" }]);
+    expect(patternLevels({ catalog_id: CAT, schema: "sal*", table: "order?" })).toEqual([
+      { level: "schema", value: "sal*" },
+      { level: "table", value: "order?" },
+    ]);
   });
 });
