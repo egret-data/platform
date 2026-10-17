@@ -15,7 +15,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 **W7a spec:** `docs/{en,vi}/specs/2026-10-10-workflow-w7a-flows-design.md`. Its rulings still hold. In particular, every execution runs the saved draft.
 
 **Decided with the user, 2026-10-11:**
-- **Real timestamps.** Executions and task runs get real `started_at` and `ended_at`, and attempts get an end, each written when the state changes (migration 0183). The executions list gains a root-only filter and a children-of filter, and `replayed_from_execution_id` is exposed. Kill, restart, labels, metrics and execution-level outputs stay out, because the backend has none of them.
+- **Real timestamps.** Executions and task runs get real `started_at` and `ended_at`, and attempts get an end, each written when the state changes (migration 0183). The executions list gains a root-only filter and a children-of filter, and `replayed_from_execution_id` is exposed. Kill, restart, labels, metrics and execution-level outputs stay out, because the backend has none of them. *(Note, 2026-10-18: the execution-level kill has since shipped, with a Kill button on this page; see `docs/{en,vi}/specs/2026-10-17-workflow-kill-and-exit-design.md`.)*
 - **Kestra's tabs.** The execution detail has the tabs Overview, Gantt, Logs and Outputs, with the tab in the URL. Clicking a run in the Gantt opens that run's logs and outputs. Metrics and Dependencies are left out because there is no data for them. W7c adds Topology.
 - **The list.** It shows root executions by default, with a "Show child executions" switch. There are no bulk actions, because the backend replays and resumes one execution at a time.
 

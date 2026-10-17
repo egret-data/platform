@@ -2128,6 +2128,507 @@ async fn namespace_files_are_staged_into_the_container_as_the_artifact_does() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workflow kill Task 7 (spec §8): a kill stops a real container
+// ---------------------------------------------------------------------------
+//
+// These three cases drive the WORKER, not a handler: an execution is started
+// in the test database, a real `tick_with` claims its one script task and runs
+// it in a real container, `kill_execution` writes the kill, and the daemon is
+// asked what is left. Every container they start is labelled with a workspace
+// of their own (`KillWorld::ws`), and `KillWorld`'s `Drop` removes exactly
+// those -- also when an assertion fails.
+//
+// # Why the `delete: false` case exists, and what it pins
+//
+// After `KILLED` commits, `release` removes a script task's container
+// (`DockerRunner::release`, `rm --force`, for the default `delete: true`). So
+// "no container remains" after a kill would hold with the CANCEL removed from
+// `finish_kill`: the handler future is dropped (its `docker start --attach`
+// CLI dies, the container keeps running), KILLED commits, and release removes
+// the still-running container anyway. That assertion pins the release, not
+// the cancel.
+//
+// With `taskRunner.delete: false` release keeps the container, so the only
+// call left that can stop it is the kill's `cancel` (`DockerRunner::cancel`
+// with the script handler's zero grace: `rm --force`). The case asserts the
+// container is not running and not there; without the cancel it is still
+// running `sleep 600` (measured: with `end_kill`'s cancel removed, this case
+// fails on "still running", and the other two pass their daemon assertions
+// and fail only on the worker's own record of the cancel).
+//
+// The other direction does not exist on Docker: the kill's release cannot
+// be seen from the daemon, because the cancel has already removed the
+// container and `rm --force` of an absent name succeeds (measured: with
+// `end_kill`'s release removed, all three cases pass). That the kill path
+// releases is pinned without a daemon (`tests/worker.rs`, `KillRecorder`).
+
+/// How often the live worker checks its run for a kill.
+const KILL_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The script handler's kill grace (`Script::cancel` passes zero), named so
+/// the bound below reads as the spec's `kill_poll + grace + margin`.
+const SCRIPT_KILL_GRACE: std::time::Duration = std::time::Duration::ZERO;
+
+/// The spec's margin (§8: `kill_poll_ms + grace + margin`).
+const KILL_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A [`Registry`](egret_workflow::worker::Registry) over the production
+/// [`Handlers`](egret_workflow::worker::Handlers) -- the four script types on
+/// a real `DockerRunner` -- that records every `run` and every `cancel` by
+/// `(run, attempt)`, so a case can say WHICH worker stopped the container.
+struct KillSpy {
+    inner: egret_workflow::worker::Handlers,
+    ran: Mutex<Vec<(Uuid, usize)>>,
+    cancels: Mutex<Vec<(Uuid, usize)>>,
+}
+
+impl KillSpy {
+    fn new() -> Arc<Self> {
+        let mut inner = egret_workflow::worker::Handlers::with_core_tasks(None);
+        let files = suite_files();
+        egret_workflow::worker::handlers::script::register(
+            &mut inner,
+            Arc::new(ScriptRuntime {
+                runner_kind: RunnerKind::Docker,
+                runner: Arc::new(DockerRunner::new().with_files(files.clone())),
+                plugin_configurations: egret_config::PluginConfigurations(vec![
+                    egret_config::PluginConfiguration {
+                        r#type: RunnerKind::Docker.fqcn().to_string(),
+                        values: egret_config::PluginConfigurationValues {
+                            allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                            allowed_types: None,
+                        },
+                    },
+                ]),
+                features: Arc::new(FixedFeatureState(true)),
+                files: Some(files),
+                pool: None,
+            }),
+        );
+        Arc::new(Self {
+            inner,
+            ran: Mutex::default(),
+            cancels: Mutex::default(),
+        })
+    }
+    fn ran(&self) -> Vec<(Uuid, usize)> {
+        self.ran.lock().unwrap().clone()
+    }
+    fn cancels(&self) -> Vec<(Uuid, usize)> {
+        self.cancels.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::Registry for KillSpy {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.ran.lock().unwrap().push((task.run_id, task.attempt));
+        egret_workflow::worker::Registry::run(&self.inner, task).await
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.cancels
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt));
+        egret_workflow::worker::Registry::cancel(&self.inner, task).await
+    }
+    async fn release(&self, task: &TaskInput) -> egret_core::Result<()> {
+        egret_workflow::worker::Registry::release(&self.inner, task).await
+    }
+}
+
+/// One kill case's database and workspace. Dropping it removes every
+/// container labelled with this workspace -- and nothing else on the daemon.
+struct KillWorld {
+    pool: sqlx::PgPool,
+    ws: Uuid,
+}
+
+impl KillWorld {
+    async fn new() -> Self {
+        let db = common::db()
+            .await
+            .expect("the kill cases need DATABASE_URL (the test database)");
+        let (ws, _user) = common::seed_workspace(&db).await;
+        Self { pool: db.pool, ws }
+    }
+
+    /// Start a flow of ONE `shell.Commands` task, `sleep 600` in
+    /// [`SHELL_IMAGE`] on the Docker runner, with `task_runner` as its
+    /// `taskRunner:` (`None`: the default, `delete: true`). Returns the
+    /// execution.
+    async fn start_sleeper(&self, id: &str, task_runner: Option<&str>) -> Uuid {
+        let runner = task_runner
+            .map(|r| format!("    taskRunner:\n{r}"))
+            .unwrap_or_default();
+        let source = format!(
+            "id: {id}\nnamespace: {NS}\ntasks:\n  - id: sleeper\n    type: {}\n    \
+             containerImage: {SHELL_IMAGE}\n    commands:\n      - sleep 600\n{runner}",
+            egret_workflow::scripts::SHELL_COMMANDS
+        );
+        egret_workflow::worker::start_execution(
+            &self.pool,
+            self.ws,
+            None,
+            &source,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("start {id}: {e}\n{source}"))
+    }
+
+    /// `(run id, attempt)` of the execution's `sleeper` run, once a worker
+    /// has claimed it and opened its attempt.
+    async fn sleeper(&self, ex: Uuid) -> (Uuid, usize) {
+        let (id, attempts): (Uuid, i32) = sqlx::query_as(
+            "SELECT id, jsonb_array_length(attempts)::int FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'sleeper'",
+        )
+        .bind(ex)
+        .fetch_one(&self.pool)
+        .await
+        .expect("read the sleeper run");
+        (id, usize::try_from(attempts).expect("a count"))
+    }
+
+    async fn run_state(&self, run: Uuid) -> (String, Option<chrono::DateTime<chrono::Utc>>) {
+        sqlx::query_as("SELECT state, claimed_at FROM workflow.task_runs WHERE id = $1")
+            .bind(run)
+            .fetch_one(&self.pool)
+            .await
+            .expect("read the run")
+    }
+
+    async fn execution_state(&self, ex: Uuid) -> String {
+        sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(&self.pool)
+            .await
+            .expect("read the execution")
+    }
+
+    /// Wait until the run's container -- addressed by [`container_name`], the
+    /// (run, attempt) name W5a gives it -- is RUNNING on the daemon. Returns
+    /// `(run, attempt, name)`.
+    async fn wait_for_running_container(&self, ex: Uuid) -> (Uuid, usize, String) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let (run, attempt) = self.sleeper(ex).await;
+            if attempt > 0 {
+                let name = container_name_of(self.ws, ex, run, attempt);
+                if container_running(&name) {
+                    // The label listing finds the same one container: the name
+                    // and the labels agree about whose container it is.
+                    assert_eq!(containers_of(run), vec![name.clone()]);
+                    // And the workspace label `Drop` cleans up by finds it.
+                    assert_eq!(containers_of_workspace(self.ws), vec![name.clone()]);
+                    return (run, attempt, name);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no running container for execution {ex} within 60s: run {:?}",
+                self.run_state(self.sleeper(ex).await.0).await
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// Every container, running or not, labelled with workspace `ws`: the label
+/// [`KillWorld`]'s `Drop` removes by.
+fn containers_of_workspace(ws: Uuid) -> Vec<String> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--all",
+            "--filter",
+            &format!("label=egret.io/workspace-id={ws}"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+impl Drop for KillWorld {
+    fn drop(&mut self) {
+        let out = std::process::Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=egret.io/workspace-id={}", self.ws),
+            ])
+            .stdin(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = out {
+            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                force_remove(id);
+            }
+        }
+    }
+}
+
+/// The name W5a gives `(run, attempt)`'s container, computed by the runner's
+/// own [`container_name`] rather than a format copied here.
+fn container_name_of(ws: Uuid, ex: Uuid, run: Uuid, attempt: usize) -> String {
+    let mut t = task(
+        egret_workflow::scripts::SHELL_COMMANDS,
+        serde_json::json!({}),
+    );
+    t.workspace_id = ws;
+    t.execution_id = ex;
+    t.run_id = run;
+    t.attempt = attempt;
+    container_name(&t)
+}
+
+/// The live worker's timing: a kill is looked for every [`KILL_POLL`]; the
+/// lease is renewed every 20 s, so no renewal falls inside a case; a task
+/// with no `timeout:` gets two minutes, so a broken kill fails the case
+/// rather than leaving `sleep 600` to run out.
+fn live_timing(kill_poll: std::time::Duration) -> egret_workflow::worker::WorkerTiming {
+    egret_workflow::worker::WorkerTiming {
+        working_timeout: std::time::Duration::from_secs(60),
+        container_default_timeout: std::time::Duration::from_secs(120),
+        kill_poll,
+    }
+}
+
+/// One worker: a single `tick_with` over `reg`, which claims the sleeper and
+/// stays inside its handler until the run ends.
+fn spawn_worker(
+    pool: &sqlx::PgPool,
+    reg: Arc<KillSpy>,
+    timing: egret_workflow::worker::WorkerTiming,
+) -> tokio::task::JoinHandle<egret_core::Result<usize>> {
+    let pool = pool.clone();
+    tokio::spawn(async move { egret_workflow::worker::tick_with(&pool, 1, &*reg, timing).await })
+}
+
+/// Kill a running sleeper with the live worker running it, and judge the
+/// end: run and execution `KILLED` within `kill_poll + grace + margin`.
+async fn kill_a_running_sleeper(
+    w: &KillWorld,
+    id: &str,
+    task_runner: Option<&str>,
+) -> KilledSleeper {
+    let ex = w.start_sleeper(id, task_runner).await;
+    let reg = KillSpy::new();
+    let worker = spawn_worker(&w.pool, reg.clone(), live_timing(KILL_POLL));
+    let (run, attempt, name) = w.wait_for_running_container(ex).await;
+
+    let killed_at = std::time::Instant::now();
+    let outcome = egret_workflow::worker::kill_execution(&w.pool, w.ws, ex, true)
+        .await
+        .expect("kill");
+    assert!(
+        matches!(outcome, egret_workflow::worker::KillOutcome::Killing),
+        "a worker holds the leaf, so the execution is KILLING: {outcome:?}"
+    );
+    let bound = KILL_POLL + SCRIPT_KILL_GRACE + KILL_MARGIN;
+    let done = tokio::time::timeout(bound, worker)
+        .await
+        .unwrap_or_else(|_| panic!("the worker did not finish the kill within {bound:?}"))
+        .expect("the worker task did not panic")
+        .expect("the tick succeeded");
+    let took = killed_at.elapsed();
+    eprintln!("    {id}: KILLED committed {took:?} after the kill was written");
+    assert_eq!(done, 1, "the kill is the tick's one committed result");
+    assert_eq!(w.run_state(run).await, ("KILLED".to_string(), None));
+    assert_eq!(w.execution_state(ex).await, "KILLED");
+    KilledSleeper {
+        name,
+        run,
+        attempt,
+        reg,
+    }
+}
+
+/// What [`kill_a_running_sleeper`] leaves for its case to judge: the daemon
+/// first, then what the worker said it did.
+struct KilledSleeper {
+    name: String,
+    run: Uuid,
+    attempt: usize,
+    reg: Arc<KillSpy>,
+}
+
+impl KilledSleeper {
+    /// The worker's own account, asserted AFTER the daemon's so a case that
+    /// fails says first what the daemon saw.
+    fn assert_the_worker_cancelled_once(&self) {
+        assert_eq!(
+            self.reg.ran(),
+            vec![(self.run, self.attempt)],
+            "the handler ran once"
+        );
+        assert_eq!(
+            self.reg.cancels(),
+            vec![(self.run, self.attempt)],
+            "the worker asked the handler to stop, once, for the running attempt"
+        );
+    }
+}
+
+/// **Spec §8 (live): a kill stops the container its run is running.** A
+/// `sleep 600` container is killed; the run and the execution are `KILLED`
+/// within `kill_poll + grace + 10 s`, and no container named for that run
+/// and attempt remains on the daemon.
+async fn kill_stops_a_running_container() {
+    let w = KillWorld::new().await;
+    let killed = kill_a_running_sleeper(&w, "kill-stops", None).await;
+    let name = &killed.name;
+    assert!(
+        !container_running(name),
+        "{name} is still running after its run was KILLED"
+    );
+    assert!(
+        !container_exists(name),
+        "{name} remains after its run was KILLED and released"
+    );
+    killed.assert_the_worker_cancelled_once();
+}
+
+/// **The cancel, not the release, is what stops a killed container.** With
+/// `taskRunner.delete: false` release keeps the container, so only the
+/// kill's `cancel` can stop it -- see this section's doc. After the kill it
+/// is not running, and is gone: the Docker runner's zero-grace cancel is
+/// `rm --force` (`DockerRunner::cancel`).
+async fn a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false() {
+    let w = KillWorld::new().await;
+    let runner = format!(
+        "      type: {}\n      delete: false\n",
+        egret_workflow::scripts::DOCKER_RUNNER
+    );
+    let killed = kill_a_running_sleeper(&w, "kill-kept", Some(&runner)).await;
+    let name = &killed.name;
+    assert!(
+        !container_running(name),
+        "{name} is still running after its run was KILLED: nothing stopped it"
+    );
+    assert!(
+        !container_exists(name),
+        "{name} remains after the kill's cancel"
+    );
+    killed.assert_the_worker_cancelled_once();
+}
+
+/// **Spec §8 and §4.3 (live): a kill survives the worker dying.** The first
+/// worker runs the container and is aborted right after the kill is written,
+/// before its kill poll (set to an hour) or its next renewal (20 s) can see
+/// it -- and aborting a tokio task does not stop a container, so it keeps
+/// running. The reaper (with a two-second `working_timeout`) frees the
+/// lease; a second worker claims the `KILLING` run, never runs its handler,
+/// cancels the attempt the first worker started, records `KILLED` and
+/// releases, and the container is gone.
+async fn a_kill_survives_the_worker_dying() {
+    let w = KillWorld::new().await;
+    let ex = w.start_sleeper("kill-dies", None).await;
+    let first = KillSpy::new();
+    let worker = spawn_worker(
+        &w.pool,
+        first.clone(),
+        live_timing(std::time::Duration::from_secs(3600)),
+    );
+    let (run, attempt, name) = w.wait_for_running_container(ex).await;
+
+    let outcome = egret_workflow::worker::kill_execution(&w.pool, w.ws, ex, true)
+        .await
+        .expect("kill");
+    worker.abort();
+    let aborted = worker.await;
+    assert!(
+        aborted.as_ref().is_err_and(|e| e.is_cancelled()),
+        "the first worker was aborted inside its handler, not finished: {aborted:?}"
+    );
+    let died_at = std::time::Instant::now();
+    assert!(
+        matches!(outcome, egret_workflow::worker::KillOutcome::Killing),
+        "{outcome:?}"
+    );
+    assert!(
+        first.cancels().is_empty(),
+        "the first worker never reached the cancel: {:?}",
+        first.cancels()
+    );
+    let (state, lease) = w.run_state(run).await;
+    assert_eq!(state, "KILLING", "the kill is written and not finished");
+    assert!(lease.is_some(), "still under the dead worker's lease");
+    // Aborting the task dropped the handler's `docker start --attach`; the
+    // container does not care.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(
+        container_running(&name),
+        "{name} must still be running with its worker dead"
+    );
+
+    // The lease expires: the reaper's `working_timeout` is two seconds here.
+    // Polled through `reap` itself, so the only clock is the database's:
+    // the lease's `claimed_at` and the reaper's `now()` are both its own.
+    let reap_after = std::time::Duration::from_secs(2);
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let reaped = loop {
+        let n = egret_workflow::worker::reap(&w.pool, reap_after)
+            .await
+            .expect("reap");
+        if n != 0 || std::time::Instant::now() >= reap_deadline {
+            break n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        reaped, 1,
+        "the reaper frees the dead worker's KILLING lease within 15s"
+    );
+    assert_eq!(w.run_state(run).await, ("KILLING".to_string(), None));
+    assert!(container_running(&name), "{name} still runs after the reap");
+
+    let second = KillSpy::new();
+    let started = std::time::Instant::now();
+    let done = egret_workflow::worker::tick_with(&w.pool, 8, &*second, live_timing(KILL_POLL))
+        .await
+        .expect("the second worker's tick");
+    eprintln!(
+        "    kill-dies: the second worker finished the kill in {:?} ({:?} after the first died)",
+        started.elapsed(),
+        died_at.elapsed()
+    );
+    assert_eq!(done, 1, "the kill is the second worker's one commit");
+    assert!(
+        second.ran().is_empty(),
+        "a KILLING claim never runs its handler: {:?}",
+        second.ran()
+    );
+    assert_eq!(
+        w.sleeper(ex).await,
+        (run, attempt),
+        "no attempt was opened by the kill"
+    );
+    assert_eq!(w.run_state(run).await, ("KILLED".to_string(), None));
+    assert_eq!(w.execution_state(ex).await, "KILLED");
+    assert!(
+        !container_running(&name),
+        "{name} is still running after the second worker's kill"
+    );
+    assert!(
+        !container_exists(&name),
+        "{name} remains after the second worker's kill"
+    );
+    assert_eq!(
+        second.cancels(),
+        vec![(run, attempt)],
+        "the second worker cancelled the attempt the first one started"
+    );
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -2162,6 +2663,9 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(output_files_are_uris_streamed_out_and_read_back_byte_identical),
         case!(a_reattached_container_is_collected_under_the_same_uris),
         case!(namespace_files_are_staged_into_the_container_as_the_artifact_does),
+        case!(kill_stops_a_running_container),
+        case!(a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false),
+        case!(a_kill_survives_the_worker_dying),
     ]
 }
 

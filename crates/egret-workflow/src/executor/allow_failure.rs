@@ -4,9 +4,13 @@
 //! **This module is the `allowFailure:` FLAG, not the `AllowFailure`
 //! flowable.** They are different constructs with the same word in them:
 //! `io.kestra.plugin.core.flow.AllowFailure` is a class that `extends
-//! Sequential` and is still planned opaque here
-//! ([`plan::TaskKind::Runnable`](super::plan::TaskKind)) -- and refused at
-//! validate as `unsupported_allow_failure` since no-silent-stall Task 1 --
+//! Sequential`, planned as its own flowable
+//! ([`plan::TaskKind::AllowFailure`](super::plan::TaskKind), driven by
+//! `flowable::allow_failure`) -- **corrected 2026-10-17 (kill Task 2 fix round
+//! 1):** this said it was still planned opaque and refused at validate as
+//! `unsupported_allow_failure`; that was true from no-silent-stall Task 1 until
+//! #680 (`a0e232b3`) made it a flowable, and validate now refuses only a block
+//! `retry:` (`unsupported_allow_failure_retry`) --
 //! while
 //! `allowFailure:` is a `Task.java` property every task in the language may
 //! write. Four of `oracle-exec/baseline.txt`'s twelve entries for this row hold
@@ -317,7 +321,7 @@ mod tests {
     /// unfalsifiable alone**, and a filter that excluded everything would make
     /// the loop above pass by running nothing.
     #[test]
-    fn the_untouched_population_is_eleven_of_the_thirteen() {
+    fn the_untouched_population_is_twelve_of_the_fourteen() {
         let untouched = RunState::ALL
             .iter()
             .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
@@ -326,6 +330,8 @@ mod tests {
         // alone: Kestra's two `if`s read `state == FAILED` and `state ==
         // WARNING`, so `allowFailure:` on a task whose subflow child was
         // CANCELLED by an `sla:` does NOT turn that into a success.
-        assert_eq!((untouched, RunState::ALL.len()), (11, 13));
+        // 12 of 14 since `Killing` (the kill package's Task 1), which is not
+        // terminal and which `soften` leaves alone for the same reason.
+        assert_eq!((untouched, RunState::ALL.len()), (12, 14));
     }
 }

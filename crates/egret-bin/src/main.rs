@@ -1908,6 +1908,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             container_default_timeout: std::time::Duration::from_secs(
                 config.workflow.container_default_timeout_s,
             ),
+            kill_poll: std::time::Duration::from_millis(config.workflow.kill_poll_ms),
             scheduler_enabled: config.workflow.scheduler_enabled,
             trigger_interval: std::time::Duration::from_secs(config.workflow.trigger_interval_secs),
             log_limits: egret_workflow::logs::LogLimits {

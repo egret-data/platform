@@ -1117,6 +1117,122 @@ async fn the_schema_refuses_an_end_on_a_live_row_and_an_end_before_the_start(poo
     );
 }
 
+/// **`KILLING` needs no migration**: no CHECK lists the state vocabulary, so
+/// both tables take it on a live row, and the one CHECK that reads the state
+/// (`*_ended_only_when_terminal`, through `workflow.state_is_terminal`) treats
+/// it as live -- an end on a `KILLING` row is refused like one on `RUNNING`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_schema_holds_killing_as_a_live_state(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let ex = start(&pool, ws, &one_log("killing")).await;
+    let tables: [(&str, &'static str, &'static str); 2] = [
+        (
+            "workflow.executions",
+            "UPDATE workflow.executions SET state = 'KILLING', ended_at = NULL WHERE id = $1",
+            "UPDATE workflow.executions SET ended_at = now() WHERE id = $1",
+        ),
+        (
+            "workflow.task_runs",
+            "UPDATE workflow.task_runs SET state = 'KILLING', ended_at = NULL WHERE execution_id = $1",
+            "UPDATE workflow.task_runs SET ended_at = now() WHERE execution_id = $1",
+        ),
+    ];
+    for (table, live, end) in tables {
+        let n = sqlx::query(live)
+            .bind(ex)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{table} refused a live KILLING row: {e}"))
+            .rows_affected();
+        assert!(n >= 1, "{table}: the fixture wrote no KILLING row");
+        let ended = sqlx::query(end)
+            .bind(ex)
+            .execute(&pool)
+            .await
+            .expect_err("a KILLING row cannot carry an end");
+        assert!(
+            ended.to_string().contains("_ended_only_when_terminal"),
+            "{table}: {ended}"
+        );
+    }
+}
+
+// ── 14b. An `Exit` (kill-and-exit Task 3, spec §6) ──────────────────────────
+
+/// The corpus shape (`valids/exit`): an `Exit` in an `If`'s `else`, and a task
+/// after the `If` that is never created. `state:` here is `{{ inputs.s }}`,
+/// rendered by the worker's render pass at `RUNNING`.
+fn exit_flow(state: &str) -> String {
+    format!(
+        "id: exit\nnamespace: t\ninputs:\n  - id: s\n    type: STRING\n    defaults: CANCELLED\n\
+         tasks:\n  - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{{{ false }}}}\"\n    \
+         then:\n      - id: hello\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    \
+         else:\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: {state}\n  \
+         - id: end\n    type: io.kestra.plugin.core.log.Log\n    message: end\n"
+    )
+}
+
+/// Run end to end through the worker: the `Exit` run, its `If` and the
+/// execution all end in the rendered state, each with a start and an end, and
+/// nothing after the `If` is created. No worker claims the `Exit` run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_exit_ends_its_run_its_parent_and_the_execution(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let ex = start(&pool, ws, &exit_flow("\"{{ inputs.s }}\"")).await;
+    drain(&pool, &Succeeds).await;
+
+    let e = execution(&pool, ex).await;
+    assert_eq!(e.state, "CANCELLED", "{e:?}");
+    assert_eq!(
+        e.history,
+        serde_json::json!(["CREATED", "RUNNING", "CANCELLED"])
+    );
+    let all = runs(&pool, ex).await;
+    assert_eq!(
+        all.iter().map(|r| r.task_id.as_str()).collect::<Vec<_>>(),
+        ["if", "exit"],
+        "`end` is never created"
+    );
+    for r in &all {
+        assert_eq!(r.state, "CANCELLED", "{r:?}");
+        assert!(r.started_at.is_some() && r.ended_at.is_some(), "{r:?}");
+    }
+    let type_id: Option<String> = sqlx::query_scalar(
+        "SELECT type_id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'exit'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        type_id, None,
+        "no `type_id`, so no worker claim can take it"
+    );
+    assert_invariants(&pool, true).await;
+}
+
+/// `state: NOPE` is not one of the five: the run fails with a message naming
+/// the value, and the failure propagates as any run failure does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_exit_state_outside_the_five_fails_the_run_naming_it(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let ex = start(&pool, ws, &exit_flow("NOPE")).await;
+    drain(&pool, &Succeeds).await;
+
+    assert_eq!(execution(&pool, ex).await.state, "FAILED");
+    let (state, message): (String, Option<String>) = sqlx::query_as(
+        "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'exit'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "FAILED");
+    let message = message.expect("the run carries why it failed");
+    assert!(message.contains("NOPE"), "{message}");
+    assert_invariants(&pool, true).await;
+}
+
 // ── 15. The parent= index ───────────────────────────────────────────────────
 
 /// `EXPLAIN` of the list's OWN statement (`repo::EXECUTION_LIST_SQL`) with

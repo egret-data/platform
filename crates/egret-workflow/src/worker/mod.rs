@@ -82,6 +82,7 @@ mod claim;
 pub mod commands;
 pub mod handlers;
 pub mod k8s;
+mod kill;
 mod reaper;
 mod registry;
 mod render;
@@ -129,6 +130,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
+pub use kill::{kill_execution, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
@@ -164,6 +166,12 @@ pub const DEFAULT_WORKING_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// be. `egret_config::WorkflowConfig::container_default_timeout_s` carries the
 /// configured value; `tests/runtime.rs` pins the two defaults together.
 pub const DEFAULT_CONTAINER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// **How often a running task's worker checks whether its run was killed**
+/// (workflow kill spec §4.2): five seconds.
+/// `egret_config::WorkflowConfig::kill_poll_ms` carries the configured value;
+/// `tests/runtime.rs` pins the two defaults together.
+pub const DEFAULT_KILL_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What a handler is handed.
 ///
@@ -802,6 +810,24 @@ pub enum WorkerError {
     /// rolls back and it has nothing left to say about it.
     #[error("run {0} committed under a lease that no longer exists; it was reaped and re-claimed while this worker was in its handler")]
     LeaseLost(uuid::Uuid),
+}
+
+impl WorkerError {
+    /// **The error comes from the row's own content, not from I/O**: a source
+    /// that does not plan, a task that is not a leaf of it, a row that does
+    /// not read back into an execution state. Retrying cannot change the
+    /// answer. The kill path (`claim::finish_claimed_kill`) records such a
+    /// run `KILLED` without a cancel; every other error is treated as
+    /// transient there.
+    pub fn is_row_content(&self) -> bool {
+        matches!(
+            self,
+            WorkerError::Unplannable(..)
+                | WorkerError::NotALeaf(..)
+                | WorkerError::Corrupt(..)
+                | WorkerError::UnknownState(..)
+        )
+    }
 }
 
 /// The most rounds of `advance()` one [`apply_outcome`] will drive.

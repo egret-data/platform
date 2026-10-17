@@ -607,6 +607,7 @@ export * from './workflowGetFlowGraphParams';
 export * from './workflowGetFlowSchema200';
 export * from './workflowGetKvValueParams';
 export * from './workflowGraphUnsavedFlowParams';
+export * from './workflowKillExecutionParams';
 export * from './workflowListExecutionsParams';
 export * from './workflowListFlowsParams';
 export * from './workflowListNamespaceDirectoryParams';

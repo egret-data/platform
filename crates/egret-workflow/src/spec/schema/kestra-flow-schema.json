@@ -3201,6 +3201,204 @@
     }
    ]
   },
+  "io.kestra.plugin.core.execution.Exit": {
+   "markdownDescription": "Updates the execution to `SUCCESS`, `WARNING`, `FAILED`, `CANCELED`, or `KILLED`. When set to `KILLED`, an out-of-band kill event is sent so running task runs are stopped; other states simply mark the execution and parent task runs as finished.\n\nUse with care inside parallel branches: only `KILLED` stops sibling tasks.##### Examples\n> \n```yaml\nid: exit\nnamespace: company.team\n\ninputs:\n  - id: state\n    type: SELECT\n    values:\n      - CONTINUE\n      - END\n    defaults: CONTINUE\n\ntasks:\n  - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{inputs.state == 'CONTINUE'}}\"\n    then:\n      - id: hello\n        type: io.kestra.plugin.core.log.Log\n        message: I'm continuing\n    else:\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: KILLED\n  - id: end\n    type: io.kestra.plugin.core.log.Log\n    message: I'm ending\n\n```",
+   "properties": {
+    "allowFailure": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "allowWarning": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "assets": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+      },
+      {
+       "$dynamic": false,
+       "$group": "advanced"
+      }
+     ]
+    },
+    "description": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "type": "string"
+    },
+    "disabled": {
+     "$dynamic": false,
+     "$group": "execution",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "id": {
+     "maxLength": 256,
+     "minLength": 1,
+     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+     "type": "string"
+    },
+    "logLevel": {
+     "$dynamic": false,
+     "$group": "logging",
+     "enum": [
+      "ERROR",
+      "WARN",
+      "INFO",
+      "DEBUG",
+      "TRACE"
+     ],
+     "type": "string"
+    },
+    "logToFile": {
+     "$dynamic": false,
+     "$group": "logging",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "policyRefs": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "items": {
+      "$dynamic": false,
+      "$group": "advanced",
+      "type": "string"
+     },
+     "markdownDescription": "Identifiers of `enforcement: REFERENCE` governance policies to attach to this task and everything nested under it (Enterprise Edition; ignored in the open-source edition).",
+     "type": "array"
+    },
+    "retry": {
+     "anyOf": [
+      {
+       "allOf": [
+        {
+         "$ref": "#/$defs/io.kestra.core.models.tasks.retrys.Constant-2"
+        },
+        {
+         "$dynamic": false,
+         "$group": "reliability",
+         "markdownDescription": "Retry policy applied when the task fails.",
+         "title": "Retry"
+        }
+       ]
+      },
+      {
+       "allOf": [
+        {
+         "$ref": "#/$defs/io.kestra.core.models.tasks.retrys.Exponential-2"
+        },
+        {
+         "$dynamic": false,
+         "$group": "reliability",
+         "markdownDescription": "Retry policy applied when the task fails.",
+         "title": "Retry"
+        }
+       ]
+      },
+      {
+       "allOf": [
+        {
+         "$ref": "#/$defs/io.kestra.core.models.tasks.retrys.Random-2"
+        },
+        {
+         "$dynamic": false,
+         "$group": "reliability",
+         "markdownDescription": "Retry policy applied when the task fails.",
+         "title": "Retry"
+        }
+       ]
+      }
+     ]
+    },
+    "runIf": {
+     "$dynamic": true,
+     "$group": "reliability",
+     "default": "true",
+     "markdownDescription": "Default value is : `\"true\"`",
+     "type": "string"
+    },
+    "state": {
+     "$dynamic": true,
+     "default": "SUCCESS",
+     "enum": [
+      "SUCCESS",
+      "WARNING",
+      "KILLED",
+      "FAILED",
+      "CANCELLED"
+     ],
+     "markdownDescription": "Using `KILLED` will end existing running tasks, and any other execution with a different state will continue to run.\n\nDefault value is : `SUCCESS`",
+     "title": "The execution exit state",
+     "type": "string"
+    },
+    "taskCache": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.tasks.Cache"
+      },
+      {
+       "$dynamic": false,
+       "$group": "advanced"
+      }
+     ]
+    },
+    "timeout": {
+     "$group": "execution",
+     "anyOf": [
+      {
+       "$dynamic": true,
+       "$group": "execution",
+       "format": "duration",
+       "type": "string"
+      },
+      {
+       "$dynamic": true,
+       "$group": "execution",
+       "type": "string"
+      }
+     ]
+    },
+    "type": {
+     "const": "io.kestra.plugin.core.execution.Exit"
+    },
+    "version": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "markdownDescription": "Defines the version of the plugin to use.\n\nThe version must follow the Semantic Versioning (SemVer) specification:\n  - A single-digit MAJOR version (e.g., `1`).\n  - A MAJOR.MINOR version (e.g., `1.1`).\n  - A MAJOR.MINOR.PATCH version, optionally with any qualifier\n    (e.g., `1.1.2`, `1.1.0-SNAPSHOT`).\n",
+     "title": "Plugin Version",
+     "type": "string"
+    },
+    "workerSelector": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+      },
+      {
+       "$dynamic": false,
+       "$group": "execution",
+       "markdownDescription": "Routing requirements (tags + fallback) for this task."
+      }
+     ]
+    }
+   },
+   "required": [
+    "id",
+    "type"
+   ],
+   "title": "Terminate the current execution with a chosen state.",
+   "type": "object",
+   "x-egret-outputs": []
+  },
   "io.kestra.plugin.core.execution.Fail": {
    "markdownDescription": "Throws an error to end the flow. If `condition` is provided, it is rendered and coerced to boolean (via TruthUtils); failure occurs only when it is truthy. Without `condition` the task always fails.\n\nUse `errorMessage` to control the logged/raised message; helpful for explicit branch failures or alert routing.##### Examples\n> Fail on a switch branch\n```yaml\nid: fail_on_switch\nnamespace: company.team\n\ninputs:\n  - id: param\n    type: STRING\n    required: true\n\ntasks:\n  - id: switch\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{inputs.param}}\"\n    cases:\n      case1:\n        - id: case1\n          type: io.kestra.plugin.core.log.Log\n          message: Case 1\n      case2:\n        - id: case2\n          type: io.kestra.plugin.core.log.Log\n          message: Case 2\n      notexist:\n        - id: fail\n          type: io.kestra.plugin.core.execution.Fail\n      default:\n        - id: default\n          type: io.kestra.plugin.core.log.Log\n          message: default\n\n```\n\n> Fail on a condition\n```yaml\nid: fail_on_condition\nnamespace: company.team\n\ninputs:\n  - name: param\n    type: STRING\n    required: true\n\ntasks:\n  - id: before\n    type: io.kestra.plugin.core.log.Log\n    message: I'm before the fail on condition\n\n  - id: fail\n    type: io.kestra.plugin.core.execution.Fail\n    condition: '{{ inputs.param == \"fail\" }}'\n\n  - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: I'm after the fail on condition\n\n```\n\n> Using errorLogs function to send error message to Slack\n```yaml\nid: error_logs\nnamespace: company.team\n\ntasks:\n- id: fail\n    type: io.kestra.plugin.core.execution.Fail\n    errorMessage: Something went wrong, make sure to fix it asap!\n\nerrors:\n- id: slack\n    type: io.kestra.plugin.slack.notifications.SlackIncomingWebhook\n    url: \"{{ secret('SLACK_WEBHOOK') }}\"\n    payload: |\n    {\n      \"text\": \"Failure alert for flow `{{ flow.namespace }}.{{ flow.id }}` with ID `{{ execution.id }}`. Here is a bit more context about why the execution failed: `{{ errorLogs()[0]['message'] }}`\"\n    }\n\n```",
    "properties": {
@@ -19284,7 +19482,7 @@
  },
  "x-egret-source": {
   "export": "GET /api/v1/plugins/schemas/flow",
-  "exported_at": "2026-10-10",
+  "exported_at": "2026-10-17",
   "image_id": "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
   "kestra_version": "2.0.0-rc13"
  },
@@ -19293,10 +19491,10 @@
    "egret.task": 38,
    "egret.trigger": 1
   },
-  "kept_definitions": 108,
+  "kept_definitions": 109,
   "raw_bytes": 16533865,
   "raw_definitions": 1850,
-  "raw_sha256": "f29b9ae6930bd2a09dcf5851a7221d21d35c9910d9dbb34ce98d128a013522f8"
+  "raw_sha256": "6e5392cdd3beeed6cfd7dd1cde054e29ac8583d287ed9640357024ff651f6fc3"
  },
  "x-kestra-types": {
   "tasks": [

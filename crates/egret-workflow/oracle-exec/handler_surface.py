@@ -515,6 +515,18 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.WaitFor",
 }
 
+# Kill-and-exit Task 3: types `advance()` runs itself that are NOT flowables in
+# Kestra. `Exit` is an `ExecutionUpdatableTask`; `build_plan` gives it a
+# `TaskKind::Exit` and `advance()` decides it (the run, its ancestors and the
+# execution), so no worker claims it. Kept apart from `W3A_FLOWABLES` so that
+# set keeps meaning what its name says; every reader takes the union
+# (`EXECUTOR_DRIVEN`).
+W3A_EXECUTOR_LEVEL = {
+    "io.kestra.plugin.core.execution.Exit",
+}
+
+EXECUTOR_DRIVEN = W3A_FLOWABLES | W3A_EXECUTOR_LEVEL
+
 # `executor::RunState::ALL`, which is 12 of the golden's 13 states.  A trace
 # carrying anything else cannot be represented, whatever the handler does.
 # PAUSED and RESTARTED joined it at W8 Task 2 and WARNING at W8 Task 5; the one
@@ -528,7 +540,7 @@ W3A_FLOWABLES = {
 # and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
              "RETRYING", "RETRIED", "KILLED", "SKIPPED",
-             "PAUSED", "RESTARTED", "WARNING", "CANCELLED"}
+             "PAUSED", "RESTARTED", "WARNING", "CANCELLED", "KILLING"}
 
 # `State.Type`'s seventeen, i.e. `models::State`.  Used ONLY by the self-test,
 # to pick a state that is real to Kestra and absent from RUN_STATE above --
@@ -616,7 +628,7 @@ def run_blockers(entry, flows, kinds):
             out.add(("construct", "a run of a task declared in ANOTHER flow"))
             continue
         ty, path = info
-        if ty not in W3B_HANDLERS and ty not in W3A_FLOWABLES:
+        if ty not in W3B_HANDLERS and ty not in EXECUTOR_DRIVEN:
             kind = kinds.get(ty, {}).get("kind", "unresolved")
             out.add(("handler" if kind == "RunnableTask" else "construct", ty))
         if "finally" in path and unported_finally(flows[fid]["doc"]):
@@ -643,7 +655,7 @@ def declared_blockers(entry, flows, kinds):
     flow = flows[fid]
     doc, keys, raw = flow["doc"], flow["keys"], flow["raw"]
     for _tid, ty, _path in flow["tasks"]:
-        if ty in W3B_HANDLERS or ty in W3A_FLOWABLES:
+        if ty in W3B_HANDLERS or ty in EXECUTOR_DRIVEN:
             continue
         kind = kinds.get(ty, {}).get("kind", "unresolved")
         out.add(("handler" if kind == "RunnableTask" else "construct", ty))
@@ -966,9 +978,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # `valids/working-directory-taskrun`, whose Kestra trace egret now reproduces;
     # 104 since the same WorkingDirectory pass baselined
     # `valids/retry-failed-task-duration` (Kestra's ~0.6 s per-retry scheduler
-    # latency lets it stop at three attempts where egret makes four).
-    if len(baseline) != 104:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 104; the split "
+    # latency lets it stop at three attempts where egret makes four); 100 since
+    # kill-and-exit Task 3 banked the four `valids/exit*` entries (the
+    # executor runs `io.kestra.plugin.core.execution.Exit`).
+    if len(baseline) != 100:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 100; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1618,8 +1632,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 104",
-         "not 104",
+    case("baseline.txt is no longer 100",
+         "not 100",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

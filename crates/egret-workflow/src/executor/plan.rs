@@ -116,7 +116,9 @@ impl Plan {
     /// alone.
     fn direct_task_children(&self, ix: TaskIx) -> Vec<TaskIx> {
         match &self.tasks[ix].kind {
-            TaskKind::Runnable { .. } | TaskKind::Executable { .. } => Vec::new(),
+            TaskKind::Runnable { .. } | TaskKind::Executable { .. } | TaskKind::Exit { .. } => {
+                Vec::new()
+            }
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
             | TaskKind::Loop { tasks, .. }
@@ -550,9 +552,13 @@ pub enum TaskKind {
     /// `type_id`, the worker claimed it and failed with `NotALeaf` before
     /// recording an outcome, and the execution stalled in `RUNNING` for ever.
     /// **The same was true of `AllowFailure` and `WorkingDirectory`**, which
-    /// published with no finding at all; no-silent-stall Task 1 refuses them
+    /// published with no finding at all; no-silent-stall Task 1 refused them
     /// the same way (`unsupported_allow_failure`,
-    /// `unsupported_working_directory`).
+    /// `unsupported_working_directory`). **Corrected 2026-10-17 (kill Task 2
+    /// fix round 1):** neither is refused any more -- #680 and #683 plan them
+    /// as the flowables [`TaskKind::AllowFailure`] and
+    /// [`TaskKind::WorkingDirectory`]; only an `AllowFailure` block `retry:`
+    /// is refused (`unsupported_allow_failure_retry`).
     Pause {
         duration: Option<String>,
     },
@@ -597,6 +603,21 @@ pub enum TaskKind {
         max_duration: Option<std::time::Duration>,
         /// `failOnMaxReached`, Kestra's `@Builder.Default` of `false`.
         fail_on_max_reached: bool,
+    },
+    /// `io.kestra.plugin.core.execution.Exit` -- kill-and-exit Task 3 (spec
+    /// §6). An `ExecutionUpdatableTask` in Kestra: the executor runs it, no
+    /// worker ever sees it (no `type_id` is persisted, so no claim takes it),
+    /// and it has no children. Started like a flowable (no `SUBMITTED`; the
+    /// golden reads `CREATED RUNNING <state>`) and decided the round after by
+    /// [`super::exit::drive`].
+    ///
+    /// `state` is the author's `state:`, **unrendered**: `None` is "none
+    /// written", Kestra's default `SUCCESS`. A literal one of the five is
+    /// read as it is; anything else is the caller's to render into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) at `RUNNING`
+    /// ([`super::exit::expression`]).
+    Exit {
+        state: Option<String>,
     },
 }
 
@@ -920,7 +941,8 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// no handler can run. Measured at Task 1: `validate` reports errors on **52**
 /// of the 266 `runs` entries (3 `unsupported_pause_property`, 4
 /// `unsupported_allow_failure`, 4 `unsupported_working_directory`, 41
-/// `unknown_task_type`), and on **57** of the 295 flows this Kestra published
+/// `unknown_task_type`; the first two codes are gone since #680 and #683 --
+/// noted 2026-10-17, kill Task 2 fix round 1, the counts are Task 1's), and on **57** of the 295 flows this Kestra published
 /// with 200 (those 52, three more with no golden entry, and the two named
 /// over-refusals). Each is a row of `executor::PUBLISHED_BUT_REFUSED`, with its
 /// cause, and `every_flow_kestra_published_plans_except_the_named_refusals`
@@ -977,8 +999,9 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// in tension.** An opaque `Runnable` that is not a `Leaf` is a task no
 /// handler can run, and every execution of it stalled in `RUNNING`; so
 /// `spec::validate` refuses each such construct BY NAME
-/// (`unsupported_allow_failure`, `unsupported_working_directory`,
-/// `unsupported_loop_until_property`, `unsupported_pause_property`, and for a
+/// (`unsupported_allow_failure` and `unsupported_working_directory` until #680
+/// and #683 made both real flowables -- noted 2026-10-17, kill Task 2 fix
+/// round 1 --, `unsupported_loop_until_property`, `unsupported_pause_property`, and for a
 /// `Leaf`, `unsupported_flow_task` and `unknown_task_type`). That is not M8's
 /// rule below: M8 refused by SPELLING, in the builder, and its refusals landed
 /// on flows Kestra refused for other reasons. Measured at Task 1, the named
@@ -1307,6 +1330,13 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         // W6. It takes no children: a `Subflow` runs a DIFFERENT flow, whose
         // tasks get runs in the child execution and never in this one -- which
         // is why `models::TaskKind::Subflow` has no `children()` either.
+        // Kill-and-exit Task 3. An `Exit` is a registered leaf type to
+        // `models` and `spec`, and an executor-level task here.
+        (ModelKind::Leaf { spec }, _) if task.r#type == super::exit::TYPE_ID => {
+            out[ix].kind = TaskKind::Exit {
+                state: super::exit::source_of(spec),
+            };
+        }
         (ModelKind::Subflow(_), Some(SUBFLOW_TYPE)) => {
             out[ix].kind = TaskKind::Executable {
                 type_id: task.r#type.clone(),

@@ -19,7 +19,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 **Đã quyết với người dùng, 2026-10-11:**
 - **Mốc thời gian thật.** Execution và task run có `started_at` và `ended_at` thật; attempt có thời điểm kết thúc. Tất cả được ghi ngay khi state đổi (migration 0183).
 - **API danh sách.** Danh sách execution có thêm bộ lọc "chỉ execution gốc" và bộ lọc "con của execution X". `replayed_from_execution_id` được đưa ra API.
-- **Ngoài phạm vi.** Kill, restart, labels, metrics và output cấp execution không làm, vì backend chưa có.
+- **Ngoài phạm vi.** Kill, restart, labels, metrics và output cấp execution không làm, vì backend chưa có. *(Ghi chú, 2026-10-18: kill ở mức execution sau đó đã được ship, kèm nút Kill trên trang này; xem `docs/{en,vi}/specs/2026-10-17-workflow-kill-and-exit-design.md`.)*
 - **Trang chi tiết dùng tab như Kestra:** Overview, Gantt, Logs, Outputs; tab nằm trên URL.
   - Bấm một run trong Gantt thì mở log và output của riêng run đó.
   - Bỏ Metrics và Dependencies vì không có dữ liệu.

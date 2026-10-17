@@ -445,6 +445,19 @@ pub enum RunState {
     /// in [`Command`] can ask for.
     Retried,
     Killed,
+    /// **Non-terminal: a kill has been asked for and has not yet landed.**
+    /// Kestra's `State.Type.KILLING`, which `isTerminated()` does not list and
+    /// `isRunning()` does — the execution, or the run, is still live.
+    ///
+    /// Written by the kill route (on the execution, and on its leased runs)
+    /// and by `advance()` (on flowable runs, when it closes a `KILLING`
+    /// execution). It is left by one transition only: to [`RunState::Killed`].
+    /// It is **not** `RUNNING`, so the normal claim (`state = 'RUNNING'`) does
+    /// not hand a `KILLING` run out; it is not paused and it is not a failure.
+    ///
+    /// Slot 13 — appended to [`RunState::ALL`] rather than inserted beside
+    /// `KILLED`, so no existing variant's slot moves.
+    Killing,
     /// The terminal a falsy `runIf:` leaves behind — W3c, which is what took
     /// this enum from 8 of the golden's 13 states to **9**.
     ///
@@ -620,7 +633,8 @@ pub enum RunState {
     /// `valids/sla-execution-condition` and
     /// `valids/flow-concurrency-sla-assert-cancel`. The third,
     /// `valids/exit-cancelled`, is an `Exit` — `oracle-exec/README.md`'s
-    /// `ExecutionUpdatableTask` row — and stays baselined.
+    /// `ExecutionUpdatableTask` row — and stayed baselined until kill-and-exit
+    /// Task 3 (2026-10-17) implemented `Exit` (`executor::exit`) and banked it.
     Cancelled,
 }
 
@@ -655,6 +669,7 @@ impl RunState {
         RunState::Restarted,
         RunState::Warning,
         RunState::Cancelled,
+        RunState::Killing,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -673,6 +688,7 @@ impl RunState {
             RunState::Restarted => 10,
             RunState::Warning => 11,
             RunState::Cancelled => 12,
+            RunState::Killing => 13,
         }
     }
 
@@ -692,6 +708,7 @@ impl RunState {
             RunState::Restarted => "RESTARTED",
             RunState::Warning => "WARNING",
             RunState::Cancelled => "CANCELLED",
+            RunState::Killing => "KILLING",
         }
     }
 
@@ -1056,6 +1073,17 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
 mod tests {
     use super::*;
 
+    /// `KILLING` is a live state: held by `ALL`, not terminal, and its wire
+    /// spelling round-trips through the one inverse the crate reads rows with.
+    #[test]
+    fn killing_is_a_live_state_that_round_trips() {
+        assert!(RunState::ALL.contains(&RunState::Killing));
+        assert!(!RunState::Killing.is_terminal());
+        assert!(!RunState::Killing.is_terminated_no_fail());
+        assert_eq!(RunState::Killing.wire(), "KILLING");
+        assert_eq!(crate::worker::from_wire("KILLING"), Some(RunState::Killing));
+    }
+
     /// [`RunState::ALL`] and [`RunState::slot`] agree, in both directions this
     /// pair can check.
     ///
@@ -1117,6 +1145,7 @@ mod tests {
                 RunState::Restarted => State::Restarted,
                 RunState::Warning => State::Warning,
                 RunState::Cancelled => State::Cancelled,
+                RunState::Killing => State::Killing,
             }
         }
         for r in RunState::ALL {
@@ -1213,13 +1242,15 @@ mod tests {
             RunState::Retried,
             RunState::Skipped,
         ];
-        const NOT_TERMINAL: [RunState; 6] = [
+        const NOT_TERMINAL: [RunState; 7] = [
             RunState::Created,
             RunState::Submitted,
             RunState::Running,
             RunState::Retrying,
             RunState::Paused,
             RunState::Restarted,
+            // `isTerminated()` does not list `KILLING`; `isRunning()` does.
+            RunState::Killing,
         ];
         for state in TERMINAL {
             assert!(
@@ -1265,10 +1296,11 @@ mod tests {
         assert_eq!(RunState::Restarted.wire(), "RESTARTED");
         assert_eq!(
             RunState::ALL.len(),
-            13,
-            "the golden's vocabulary is 13 and this enum now holds ALL of it \
+            14,
+            "the golden's vocabulary is 13 and this enum holds ALL of it \
              (11 until W8 Task 5 added `Warning`, 12 until W8 Task 6 added \
-             `Cancelled`), and \
+             `Cancelled`), plus `Killing`, which the kill route writes and the \
+             golden never holds; \
              `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
              is what derives that rather than this line"
         );

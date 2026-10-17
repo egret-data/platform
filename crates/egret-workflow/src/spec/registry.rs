@@ -81,7 +81,10 @@ pub struct TaskTypeSpec {
 /// the `egret.container`/`egret.script.python` rows with four script-task
 /// FQCNs that carry them as aliases, W9a Task 11 added the four core
 /// storage tasks, two of them in `with_core_tasks`, and Task 12 the five
-/// whole-file ones, all in it). The
+/// whole-file ones, all in it). *(2026-10-17, kill-and-exit Task 3 fix round 1:
+/// those counts were already stale; counted then, the table is 34 rows, the
+/// last added being `io.kestra.plugin.core.execution.Exit`, a row with no
+/// handler on purpose -- see [`EXECUTOR_LEVEL`].)* The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the per-deployment refusal above, not a
 /// startup panic.
@@ -194,6 +197,14 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.execution.Fail",
+        aliases: &[],
+        references: &[],
+    },
+    // Kill-and-exit Task 3 (spec §6). **A row with no worker handler on
+    // purpose**: the executor runs it (`executor::TaskKind::Exit`), so it is
+    // in [`EXECUTOR_LEVEL`] and every deployment serves it.
+    TaskTypeSpec {
+        r#type: crate::executor::exit::TYPE_ID,
         aliases: &[],
         references: &[],
     },
@@ -315,6 +326,16 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         references: &[],
     },
 ];
+
+/// The registered types `advance()` runs itself, with no worker handler:
+/// `build_plan` plans them as executor-level kinds, so no run of one is ever
+/// claimed, and every deployment serves them (`runtime::Served::serves`).
+pub const EXECUTOR_LEVEL: &[&str] = &[crate::executor::exit::TYPE_ID];
+
+/// Whether `t` is one of [`EXECUTOR_LEVEL`].
+pub fn executor_level(t: &str) -> bool {
+    EXECUTOR_LEVEL.contains(&t)
+}
 
 /// The row for `t`, matching the canonical spelling **or any alias**.
 ///

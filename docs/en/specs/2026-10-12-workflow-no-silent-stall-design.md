@@ -47,7 +47,7 @@ Measured on main `ee8194af`, these cases reach the loop:
 ## 2. What this package does not do
 
 - It does not run `AllowFailure`, `WorkingDirectory`, expression-bounded `LoopUntil`, or the six unwired types. Each stays a separate decision: `AllowFailure` needs a `WARNING` state that `RunState` cannot hold, and `WorkingDirectory` hands a subtree to one worker.
-- It adds no kill route. §5 ends the existing stalled executions; a kill route stays a follow-up.
+- It adds no kill route. §5 ends the existing stalled executions; a kill route stays a follow-up. *(Note, 2026-10-18: the kill route has since shipped; see `docs/{en,vi}/specs/2026-10-17-workflow-kill-and-exit-design.md`.)*
 - It adds no frontend code. The new codes reach the editor through the existing validation report and Problems tab, and the schema loses the unserved types through the existing filter.
 
 ## 3. Static refusals (deployment-free, in `validate_for_run`)

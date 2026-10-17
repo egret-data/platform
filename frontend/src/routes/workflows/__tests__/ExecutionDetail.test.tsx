@@ -89,6 +89,7 @@ class Server {
   childTotal: number | null = null;
   resume: Reply = { status: 200, body: execution("RUNNING") };
   replay: Reply = { status: 201, body: { ...execution("RUNNING"), id: NEW } };
+  kill: Reply = { status: 202, body: execution("KILLING", { ended_at: null }) };
   /** `GET …/executions/{EXEC}/graph` (W7c): a graph with no tasks. */
   graph: Reply = {
     status: 200,
@@ -116,6 +117,7 @@ class Server {
     if (method === "GET" && path === `${EXEC_PATH}/graph`) return this.graph;
     if (method === "POST" && path === `${EXEC_PATH}/resume`) return this.resume;
     if (method === "POST" && path === `${EXEC_PATH}/replay`) return this.replay;
+    if (method === "POST" && path === `${EXEC_PATH}/kill`) return this.kill;
     return { status: 404, body: { error: `no route ${method} ${path}` } };
   }
 
@@ -485,6 +487,143 @@ describe("ExecutionDetail: Replay", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Replay" }));
     expect(await within(dialog).findByText(message)).toBeInTheDocument();
     expect(screen.getByTestId("where")).toHaveTextContent(`/executions/${EXEC}/overview`);
+  });
+});
+
+describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
+  const killing = () => execution("KILLING", { ended_at: null });
+  const killCalls = (server: Server) => server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/kill`);
+
+  it.each(["RUNNING", "PAUSED", "CREATED"])("is shown and enabled while %s", async (state) => {
+    new Server(ok(execution(state, { ended_at: null })));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Kill" })).toBeEnabled();
+  });
+
+  it("is not shown once the execution has ended, nor without can_manage", async () => {
+    for (const state of ["SUCCESS", "KILLED"]) {
+      new Server(ok(execution(state)));
+      const { unmount } = renderPage();
+      // The control: Replay is there, so the actions rendered.
+      expect(await screen.findByRole("button", { name: "Replay" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: /^Kill/ })).toBeNull();
+      unmount();
+    }
+    new Server(ok(execution("RUNNING", { can_manage: false })));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(screen.queryByRole("button", { name: /^Kill/ })).toBeNull();
+  });
+
+  it("reads Killing… and is disabled, saying why, while KILLING", async () => {
+    const server = new Server(ok(killing()));
+    renderPage();
+    const button = await screen.findByRole("button", { name: "Killing…" });
+    expect(button).toBeDisabled();
+    const reason = "The kill was sent; a worker is stopping the running task";
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(button).toHaveAccessibleDescription(reason);
+    expect(within(screen.getByRole("banner")).getByText("Killing")).toBeInTheDocument();
+    await userEvent.click(button);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(killCalls(server)).toHaveLength(0);
+  });
+
+  it("asks first, with the cascade checkbox on, sends cascade=true, toasts, and follows KILLING to KILLED", async () => {
+    const server = new Server(ok(execution("RUNNING")), ok(killing()), ok(execution("KILLED")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    const cascade = within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" });
+    expect(cascade).toBeChecked();
+    // Nothing sent until confirmed.
+    expect(killCalls(server)).toHaveLength(0);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+    await waitFor(() => expect(killCalls(server)).toHaveLength(1));
+    expect(killCalls(server)[0].query.get("cascade")).toBe("true");
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Killing the execution: the running task is being stopped"));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    // The invalidation reads it again: KILLING, which is not terminal, so the page keeps polling...
+    expect(await within(screen.getByRole("banner")).findByText("Killing")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Killing…" })).toBeDisabled();
+    // ...until the worker has stopped the task.
+    expect(await within(screen.getByRole("banner")).findByText("Killed", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Kill/ })).toBeNull();
+  });
+
+  it("sends cascade=false when the checkbox is cleared", async () => {
+    const server = new Server(ok(execution("RUNNING")));
+    server.kill = { status: 202, body: execution("KILLED") };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+    await waitFor(() => expect(killCalls(server)).toHaveLength(1));
+    expect(killCalls(server)[0].query.get("cascade")).toBe("false");
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Killed the execution"));
+  });
+
+  it("starts the checkbox on again each time the dialog opens", async () => {
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    let dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Kill" }));
+    dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    expect(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" })).toBeChecked();
+  });
+
+  it("on a 409 execution_terminated, says so inline in the dialog, not in a toast, reads the execution again, and turns the confirm off", async () => {
+    const server = new Server(ok(execution("RUNNING")), ok(execution("SUCCESS")));
+    server.kill = {
+      status: 409,
+      body: { error: `conflict: execution ${EXEC} is SUCCESS and has already ended; there is nothing to kill`, code: "execution_terminated" },
+    };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    const readsBefore = server.executionReads();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+    expect(
+      await within(dialog).findByText("The execution has already ended, so there is nothing to kill. The page now shows its final state."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    await waitFor(() => expect(server.executionReads()).toBeGreaterThan(readsBefore));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+    // Nothing is left to kill: the confirm is off, a second click sends nothing, and Cancel still closes.
+    const confirm = within(dialog).getByRole("button", { name: "Kill" });
+    expect(confirm).toBeDisabled();
+    await userEvent.click(confirm);
+    expect(killCalls(server)).toHaveLength(1);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("shows the cascade help in plain words", async () => {
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    expect(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" })).toHaveAccessibleDescription(
+      "Its loop iterations and subflow executions, and theirs. Unchecked, they keep running.",
+    );
+  });
+
+  it("keeps the dialog open with the server's message on any other refusal", async () => {
+    const server = new Server(ok(execution("RUNNING")));
+    server.kill = { status: 403, body: { error: "missing permission workflow:manage" } };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+    expect(await within(dialog).findByText(/missing permission workflow:manage/)).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });
 

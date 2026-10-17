@@ -33,6 +33,7 @@
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/file/preview
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/resume
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/replay
+//! POST   /api/ws/{workspace}/workflows/executions/{id}/kill
 //! ```
 //!
 //! Mounted under `/ws/{workspace}/workflows/...` here, **not**
@@ -2126,9 +2127,10 @@ async fn get_execution_logs(
 // POST /api/ws/{workspace}/workflows/flows/{id}/executions   start
 // POST /api/ws/{workspace}/workflows/executions/{id}/resume  resume a pause
 // POST /api/ws/{workspace}/workflows/executions/{id}/replay  run it again
+// POST /api/ws/{workspace}/workflows/executions/{id}/kill    kill it
 // ```
 //
-// **All three are [`WF_MANAGE`], and the test that says so is a `:read`-only
+// **All four are [`WF_MANAGE`], and the test that says so is a `:read`-only
 // holder.** Task 4 proved the read gate with a `:manage`-only holder, because a
 // caller with no grants at all is refused by a handler that checks nothing
 // (Cedar refuses by default) and so cannot tell the two apart. The mirror image
@@ -2137,8 +2139,7 @@ async fn get_execution_logs(
 // `workflow_read_alone_cannot_start_resume_or_replay` fails when the claim is
 // false and passes only when it is true.
 //
-// **Kill is NOT here, and it is a finding rather than an omission** — see
-// [`the kill finding`](#the-kill-finding) below, and the task report.
+// Kill came later, with the kill package (see [`kill_execution`]).
 //
 // # Which source an execution runs
 //
@@ -2173,66 +2174,13 @@ async fn get_execution_logs(
 // existed (**0** occurrences across `migrations/`; control `flow_key` at
 // `0134:32`).
 //
-// # The kill finding
+// # Kill
 //
-// `POST .../executions/{id}/kill` is **not** shipped. It needs a capability
-// nothing in this crate has, and the gap is in the DATA rather than in a
-// missing handler:
-//
-// 1. **No command produces `KILLED`.** `RunState::Killed` appears in
-//    `crates/egret-workflow/src` only inside aggregation and terminality
-//    predicates; grep finds **no** `Command::SetRunState { state:
-//    RunState::Killed }` and no `SetExecutionState` with it. `advance()` is pure
-//    over `(plan, state, now)` and takes no operator input, so it cannot grow
-//    one — which is the contract this task is forbidden to widen.
-// 2. **A killer holds no lease, and `persist` clears `claimed_at` only under
-//    one.** `persist`'s run UPDATE clears the lease exactly where
-//    `release: Option<Lease>` names the run, and an HTTP caller has no `Lease`
-//    to pass. So an in-flight run keeps `claimed_at`, the worker's
-//    `apply_outcome` fence (`WHERE id = $2 AND claimed_at = $3`) still matches,
-//    and the handler's result is written onto a run of a killed execution
-//    afterwards. A kill that the worker can overwrite is worse than no kill.
-// 3. **The handler itself cannot be reached.** `worker::cancel::kill` exists and
-//    its module doc states, from the pinned artifact's bytecode, that *"the
-//    budget's expiry is the only site"* and that the execution-level kill is
-//    W8's — W8 shipped no such path. There is no channel from an HTTP handler to
-//    the worker task holding the `TaskHandler`.
-//
-// What kill needs is therefore a *mechanism*, not an endpoint. Fix round 1
-// widened this bill, because the first version of it — "a migration plus a
-// `Command` that spells `KILLED`" — reads like an afternoon's work and is not.
-// **Four more costs, each measured:**
-//
-// 4. **"Kill requested" is UNREPRESENTABLE in the executor's state.**
-//    `executor::RunState` has no `Killing` variant — `Killing` occurs **0**
-//    times in `executor/state.rs` (control: **9** times in `models/state.rs`,
-//    which is the wire model the harvester reads, not the state machine). So a
-//    kill cannot even be recorded as pending while the worker is asked to stop;
-//    it is one atomic transition or nothing, and `RunState::ALL` is round-tripped
-//    against `slot()` by a test, so adding a variant is not a local edit.
-// 5. **Clearing `claimed_at` RE-OPENS the run rather than closing it.**
-//    `claim`'s predicate is `state = 'RUNNING' AND claimed_at IS NULL`, so the
-//    obvious way to make `apply_outcome`'s fence miss — null the lease — hands
-//    the run straight back to the next `claim` batch. The lease must be cleared
-//    *and* the run moved out of `RUNNING` in the same statement, which is the
-//    same transition item 4 says is unrepresentable.
-// 6. **No in-process channel is sufficient, because the killer is a different
-//    PROCESS.** `worker::cancel`'s module doc establishes this from the pinned
-//    artifact: the API node and the worker node are not the same process, so a
-//    `tokio::sync` handle reaching the `TaskHandler` cannot exist. The signal
-//    has to go through the database and be *polled* by the tick.
-// 7. **At least one shipped handler cannot be cancelled at all.**
-//    `handlers::sql::cancel` returns `Err` by construction — *"`QueryExecPort`
-//    has no cancellation verb, so the statement continues on the engine after
-//    the run is abandoned … on StarRocks it ends when the connection is
-//    dropped at that budget"* — and
-//    `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` holds
-//    it to that. So a kill still cannot reach `egret.sql` before its budget,
-//    because the handler has no way to stop its statement early; an abandoned
-//    statement does not keep running on StarRocks 4.1.6 (measured 2026-10-17).
-//
-// Reported rather than improvised. An understated cost invites someone to try
-// it in an afternoon and ship half of it.
+// `POST .../executions/{id}/kill` shipped with the kill package. Why it was
+// held back at first, and what answered each of the seven obstacles recorded
+// here before, is `docs/en/specs/2026-10-17-workflow-kill-and-exit-design.md`
+// §1's table; the route is [`kill_execution`], the transaction
+// `worker::kill`.
 
 /// `POST .../flows/{id}/executions`'s body. Optional in whole: a flow with no
 /// `inputs:` is started with `{}` and a caller should not have to send a body
@@ -3025,6 +2973,122 @@ async fn replay_execution(
     Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
+/// `POST .../executions/{id}/kill`'s query.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct KillQuery {
+    /// Also kill the execution's child executions -- its `Loop` iterations
+    /// and its `Subflow` children, recursively (default `true`). A replay of
+    /// it, or an execution a Flow trigger fired on it, is not a child. With
+    /// `false`, the children run on, and what they report when they end
+    /// changes nothing in the killed parent.
+    pub cascade: Option<bool>,
+}
+
+/// `ErrorBody.code` of the kill route's 409 (spec D3).
+pub const EXECUTION_TERMINATED_CODE: &str = "execution_terminated";
+
+/// The kill route's error: every [`egret_core::Error`], plus the coded 409.
+#[derive(Debug)]
+pub enum KillError {
+    Core(Error),
+    /// The execution is terminal, in this state.
+    Terminated(Uuid, String),
+}
+
+impl From<Error> for KillError {
+    fn from(e: Error) -> Self {
+        KillError::Core(e)
+    }
+}
+
+impl axum::response::IntoResponse for KillError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            KillError::Core(e) => e.into_response(),
+            KillError::Terminated(id, state) => (
+                StatusCode::CONFLICT,
+                Json(egret_core::http::ErrorBody {
+                    error: Error::Conflict(format!(
+                        "execution {id} is {state} and has already ended; there is nothing to kill"
+                    ))
+                    .to_string(),
+                    code: Some(EXECUTION_TERMINATED_CODE.to_string()),
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/kill",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        KillQuery,
+    ),
+    responses(
+        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.", body = ExecutionDto),
+        (status = 400, description = "`cascade` is not `true` or `false`", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has already ended (code `execution_terminated`). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Kill an execution that has not ended.
+///
+/// Tasks retrying, paused or not yet started end `KILLED` at once; a running
+/// task is stopped by a worker -- the one running it, or the next one to claim
+/// it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
+/// and `Subflow` child executions are killed the same way.
+async fn kill_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<KillQuery>,
+) -> std::result::Result<(StatusCode, Json<ExecutionDto>), KillError> {
+    // Workflow kill spec §3. The terminal check is made twice, as resume's
+    // is: here off the scoped read (so a foreign id never reaches the worker,
+    // and the common refusal is cheap), and again by
+    // `worker::kill_execution` under the execution's lock, which decides the
+    // race with a worker ending it.
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    // An unknown spelling is not called terminal: the worker's `load` refuses
+    // it, which is a 500 rather than a guess.
+    if crate::worker::from_wire(&before.execution.state).is_some_and(RunState::is_terminal) {
+        return Err(KillError::Terminated(id, before.execution.state));
+    }
+    let cascade = q.cascade.unwrap_or(true);
+    let outcome =
+        crate::worker::kill_execution(&st.db.pool, ctx.workspace_id.0, id, cascade).await?;
+    let outcome = match outcome {
+        crate::worker::KillOutcome::Killing => RunState::Killing,
+        crate::worker::KillOutcome::Killed => RunState::Killed,
+        crate::worker::KillOutcome::Terminated(s) => {
+            return Err(KillError::Terminated(id, s.wire().to_string()));
+        }
+    };
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_execution:kill",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "from_state": before.execution.state,
+            "cascade": cascade,
+            "outcome": outcome.wire(),
+        }),
+    ));
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok((StatusCode::ACCEPTED, Json(ExecutionDto::new(detail, true))))
+}
+
 /// One namespace of the workspace (W7d spec §3.1). egret has no namespace
 /// table: a namespace exists while a flow that is not deleted, a live
 /// namespace file or directory (even an empty one) or a live KV key is in
@@ -3552,6 +3616,10 @@ pub fn management_router() -> Router<WorkflowState> {
             "/ws/{workspace}/workflows/executions/{id}/replay",
             post(replay_execution),
         )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/kill",
+            post(kill_execution),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -3580,6 +3648,7 @@ pub fn management_router() -> Router<WorkflowState> {
         start_flow_execution,
         resume_execution,
         replay_execution,
+        kill_execution,
         list_namespaces,
         get_namespace,
         namespace_dependencies,

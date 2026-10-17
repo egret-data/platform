@@ -159,8 +159,9 @@
 //!
 //! ## 4. [`reap`](crate::worker::reap) — safe by **re-evaluation under READ COMMITTED**
 //!
-//! One `UPDATE … SET claimed_at = NULL WHERE claimed_at IS NOT NULL AND state =
-//! 'RUNNING' AND claimed_at < now() - interval` (`worker/reaper.rs:39`). No
+//! One `UPDATE … SET claimed_at = NULL WHERE claimed_at IS NOT NULL AND state IN
+//! ('RUNNING', 'KILLING') AND claimed_at < now() - interval` (`worker/reaper.rs`;
+//! `KILLING` since the workflow kill, spec §4.3). No
 //! `SKIP LOCKED` and no explicit lock. Two reapers meeting on one row: the
 //! second blocks on the first's row-level write lock, and when the first commits
 //! Postgres **re-evaluates the `WHERE` clause against the committed version**
@@ -275,6 +276,10 @@ pub struct RuntimeConfig {
     /// `timeout:`. `egret_config::WorkflowConfig::container_default_timeout_s`;
     /// see [`DEFAULT_CONTAINER_TIMEOUT`](crate::worker::DEFAULT_CONTAINER_TIMEOUT).
     pub container_default_timeout: Duration,
+    /// Between a running task's checks for a kill (workflow kill spec §4.2).
+    /// `egret_config::WorkflowConfig::kill_poll_ms`; see
+    /// [`DEFAULT_KILL_POLL`](crate::worker::DEFAULT_KILL_POLL).
+    pub kill_poll: Duration,
     /// **The scheduler's own gate (W12), independent of [`enabled`](Self::enabled).**
     ///
     /// When true, [`spawn`] starts a third ticker that calls
@@ -590,6 +595,7 @@ fn spawn_worker(
     let timing = crate::worker::WorkerTiming {
         working_timeout: cfg.working_timeout,
         container_default_timeout: cfg.container_default_timeout,
+        kill_poll: cfg.kill_poll,
     };
     let claim_loop = {
         let pool = pool.clone();
@@ -861,8 +867,13 @@ pub struct Served(std::collections::BTreeSet<String>);
 impl Served {
     /// Whether this deployment has a handler for `type_id`: an exact match,
     /// as [`Handlers::get`] is.
+    ///
+    /// **An executor-level type is served by every deployment**
+    /// (`spec::registry::EXECUTOR_LEVEL`, kill-and-exit Task 3): `advance()`
+    /// runs it and no handler is ever asked for it, so it is not in the set
+    /// [`handlers_for`] builds and needs no entry to be served.
     pub fn serves(&self, type_id: &str) -> bool {
-        self.0.contains(type_id)
+        self.0.contains(type_id) || crate::spec::registry::executor_level(type_id)
     }
 
     /// Every key `h` is registered under. For the drift test, which holds
@@ -877,7 +888,10 @@ impl Served {
         Self(ids.into_iter().map(Into::into).collect())
     }
 
-    /// The type ids, sorted.
+    /// The type ids, sorted: the handler-backed set only. **An executor-level
+    /// type (`spec::registry::EXECUTOR_LEVEL`, i.e. `Exit`) is served by
+    /// [`Served::serves`] but is not listed here**, because no handler is
+    /// registered for it.
     pub fn type_ids(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
     }

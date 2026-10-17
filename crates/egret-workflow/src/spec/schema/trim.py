@@ -48,6 +48,8 @@ KESTRA_TYPES = [
     "io.kestra.plugin.core.log.Log",
     "io.kestra.plugin.core.debug.Return",
     "io.kestra.plugin.core.execution.Fail",
+    # registry.rs: executor-level, no handler (kill-and-exit Task 3)
+    "io.kestra.plugin.core.execution.Exit",
     "io.kestra.plugin.core.flow.Sleep",
     "io.kestra.plugin.core.storage.Write",
     "io.kestra.plugin.core.storage.Size",

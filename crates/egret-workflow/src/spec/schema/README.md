@@ -16,9 +16,18 @@ where each comes from and how to reproduce it.
 |---|---|
 | Kestra version | `2.0.0-rc13` (`GET /api/v1/configs` → `version`; OSS, commit `fde6740`, 2026-09-01) — the programme's pinned artifact |
 | Image | `kestra/kestra`, untagged, ID `sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd` (created 2026-09-01) |
-| Exported | 2026-10-10 |
-| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `f29b9ae6930bd2a09dcf5851a7221d21d35c9910d9dbb34ce98d128a013522f8` |
-| Committed after `trim.py` | about 715 KB, 108 definitions |
+| Exported | 2026-10-17 (first 2026-10-10; re-exported from the same image when kill-and-exit Task 3 added `io.kestra.plugin.core.execution.Exit` to `KESTRA_TYPES`) |
+| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `6e5392cdd3beeed6cfd7dd1cde054e29ac8583d287ed9640357024ff651f6fc3` |
+| Committed after `trim.py` | about 720 KB, 109 definitions |
+
+**The raw export is not byte-stable across runs of the same image.** The
+2026-10-10 export had the same size and definition count and the sha256
+`f29b9ae6930bd2a09dcf5851a7221d21d35c9910d9dbb34ce98d128a013522f8`; the
+2026-10-17 one hashes differently. Trimmed, the new export differs from the
+committed 2026-10-10 file only by the added `Exit` definition and
+`x-kestra-export`'s `kept_definitions` and `raw_sha256` (compared
+definition by definition, 2026-10-17), so the difference is in what
+`trim.py` drops, not in any definition it kept.
 
 The raw export is over 5 MB, so it is not committed; `trim.py` reproduces
 `kestra-flow-schema.json` from it byte for byte (the raw file's hash is
@@ -45,7 +54,7 @@ done
 docker rm -f w7a-kestra-t1
 
 python3 trim.py raw-flow-schema.json plugin-docs kestra-flow-schema.json \
-  2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-10
+  2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-17
 ```
 
 What `trim.py` does is in its docstring: task and trigger unions become
@@ -147,7 +156,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1495 properties over 90 rows: 1035 honoured, 4 warned, 334 ignored, 122 refused.
+1512 properties over 91 rows: 1051 honoured, 4 warned, 335 ignored, 122 refused (counted from `property-treatment.json`, 2026-10-17, after kill-and-exit Task 3 added the `Exit` row; the line said 1495 / 1035 / 334 before, while the committed file already held 1041 honoured and 328 ignored).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
@@ -155,6 +164,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 |---|---|---|---|---|
 | `Flow` | 14 | `checks`, `concurrency`, `quotas`, `sla` | `deleted`, `draft`, `policyRefs`, `revision`, `updated`, `workerSelector` | — |
 | `io.kestra.plugin.core.debug.Return` | 10 | — | *base 7* | — |
+| `io.kestra.plugin.core.execution.Exit` | 10 | — | *base 7* | — |
 | `io.kestra.plugin.core.execution.Fail` | 11 | — | *base 7* | — |
 | `io.kestra.plugin.core.flow.AllowFailure` | 10 | — | *base 7*, `errors`, `finally` | — |
 | `io.kestra.plugin.core.flow.Dag` | 12 | — | *base 7*, `finally`, `onChildFailure` | — |

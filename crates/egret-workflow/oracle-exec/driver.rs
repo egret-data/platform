@@ -892,7 +892,13 @@ const CREATE_REFUSED: usize = 4;
 /// publish gate is open to the Docker runner and the registry carries the
 /// script handler (see [`registry`] and `publish_corpus`). The four above are
 /// the only WorkingDirectory valids that did not need a script runner.
-const LIVE: usize = 250;
+///
+/// **250 -> 254 at kill-and-exit Task 3**: `valids/exit`, `-exit-cancelled`,
+/// `-exit-killed` and `-exit-nested` publish live, because
+/// `io.kestra.plugin.core.execution.Exit` has a `TASK_TYPES` row and every
+/// deployment serves it (`spec::registry::EXECUTOR_LEVEL`). They leave
+/// [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 254;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -953,7 +959,10 @@ const LIVE: usize = 250;
 /// behind a missing handler; that is the difference between "egret has not
 /// ported this plugin" and "egret refuses a plugin it runs", and only the first
 /// is a statement about the oracle rather than a defect.
-const UNKNOWN_TYPE_REFUSED: usize = 65;
+///
+/// **65 -> 61 at kill-and-exit Task 3**: the four `valids/exit*` flows, whose
+/// only unported type was `Exit` (see [`LIVE`]).
+const UNKNOWN_TYPE_REFUSED: usize = 61;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -1047,7 +1056,8 @@ fn census(filed: &BTreeMap<String, Filed>) {
 
     // 345 -> 351 with the six `working-directory-real-*` corpus flows added at
     // WorkingDirectory Task 8 (`corpus/valids/`; see `corpus.json`). The live
-    // count, 244 -> 250, is asserted through `LIVE` above.
+    // count, 244 -> 250 (254 since kill-and-exit Task 3), is asserted through
+    // `LIVE` above.
     assert_eq!(filed.len(), 351, "every corpus flow is accounted for");
     assert_eq!(live.len(), LIVE, "live versions: {live:?}");
     assert_eq!(

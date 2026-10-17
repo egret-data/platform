@@ -782,6 +782,11 @@ impl Surface {
                             "id": t.id,
                             "type": match &t.kind {
                                 TaskKind::Runnable { type_id } => Some(type_id.clone()),
+                                // Kill-and-exit Task 3: the one executor-level
+                                // kind with a single FQCN, which Kestra's is.
+                                TaskKind::Exit { .. } => {
+                                    Some(crate::executor::exit::TYPE_ID.to_string())
+                                }
                                 _ => None,
                             },
                         }),
@@ -1249,7 +1254,21 @@ pub(super) fn render_expressions(
                     }
                 }
             }
-            Ok(value) => state.runs[ix].rendered = Some(value),
+            // Kill-and-exit Task 3 (spec §6): an `Exit`'s `state:` that is not
+            // one of the five is a run failure NAMING the value, which only
+            // this pass can write (`advance()` carries no message).
+            Ok(value) => {
+                let refused = matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Exit { .. })
+                    .then(|| crate::executor::exit::parse_state(&value).err())
+                    .flatten();
+                match refused {
+                    Some(why) => {
+                        fail(state, ix);
+                        side.failures.push((ix, why));
+                    }
+                    None => state.runs[ix].rendered = Some(value),
+                }
+            }
             Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
@@ -1279,9 +1298,9 @@ fn fail(state: &mut ExecutionState, ix: RunIx) {
 
 /// The unrendered expression a planned task holds, by kind.
 ///
-/// Five kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
-/// `values`, a `Pause`'s `pauseDuration:` (W8 Task 3) and a `LoopUntil`'s
-/// `condition:` (W8 Task 4).
+/// Six kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
+/// `values`, a `Pause`'s `pauseDuration:` (W8 Task 3), a `LoopUntil`'s
+/// `condition:` (W8 Task 4) and an `Exit`'s `state:` (kill-and-exit Task 3).
 ///
 /// **The `Pause` arm is narrower than the other four**, and deliberately: it
 /// offers the expression only when the source does NOT already parse as an
@@ -1305,6 +1324,13 @@ fn expression_of(plan: &Plan, task: usize) -> Option<String> {
         TaskKind::Pause {
             duration: Some(source),
         } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
+        // Kill-and-exit Task 3, narrow the way the `Pause` arm is: a literal
+        // one of the five is read off the plan, and anything else -- an
+        // expression, or a literal outside the five -- is rendered, so a bad
+        // literal fails here with its message too.
+        TaskKind::Exit { state } => {
+            crate::executor::exit::expression(state.as_deref()).map(str::to_string)
+        }
         _ => None,
     }
 }
@@ -1323,6 +1349,7 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
     }
 }
 
+/// Keeps the `sqlx::Error` as the source (see `spawn`'s).
 fn db_err(e: sqlx::Error) -> egret_core::Error {
-    egret_core::Error::Internal(anyhow::anyhow!("{e}"))
+    egret_core::Error::Internal(anyhow::Error::new(e))
 }

@@ -392,8 +392,10 @@ fn due_run(state: &ExecutionState, now: Tick) -> Option<RunIx> {
         .map(|(_, ix)| ix)
 }
 
+/// Keeps the `sqlx::Error` as the source, as `claim`'s does, so a caller can
+/// read its SQLSTATE (`worker::kill` retries a deadlock).
 fn db_err(e: sqlx::Error) -> Error {
-    Error::Internal(anyhow::anyhow!("{e}"))
+    Error::Internal(anyhow::Error::new(e))
 }
 
 fn worker_err(e: WorkerError) -> Error {

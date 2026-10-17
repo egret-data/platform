@@ -795,7 +795,9 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 103 -> 104 baselined, 198 -> 197 matching at WorkingDirectory Task 9:
         // `valids/retry-failed-task-duration` is baselined with its cause, so its
         // mismatch is now attributed rather than reported; 104 + 197 = 301.
-        (301, 197, 104),
+        // 104 -> 100 baselined, 197 -> 201 matching at kill-and-exit Task 3:
+        // the four `valids/exit*` entries bank; 100 + 201 = 301.
+        (301, 201, 100),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2340,7 +2342,11 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
 /// `working-directory-real-*` flows and `retry-failed-task-duration` (their
 /// pairs are on the top level and inside them), and `working-directory-taskrun`
 /// and `-nested` are now run and compared (see `the_ordered_pairs_inside_spawned`).
-const EGRET_TOP_LEVEL_PAIRS: usize = 718;
+/// **727 since kill-and-exit Task 3**: the four `valids/exit*` entries are
+/// planned and run, and carry nine top-level pairs between them (one each in
+/// `exit`, `exit-cancelled` and `exit-killed`, six in `exit-nested`), every
+/// one of which matches the golden's.
+const EGRET_TOP_LEVEL_PAIRS: usize = 727;
 const EGRET_NESTED_PAIRS: usize = 125;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2427,7 +2433,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (m_top, m_nested, m_top + m_nested),
         // + the 81 top-level pairs of the three AllowFailure targets (45 + 15 + 21),
         // which now live on matching entries.
-        (394, 103, 497),
+        // + the 9 top-level pairs of the four `valids/exit*` entries (1 + 1 + 1
+        // + 6) at kill-and-exit Task 3.
+        (403, 103, 506),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2442,7 +2450,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // `valids/working-directory-taskrun` moved its pairs to the matching side,
         // and the re-harvest changed the pairs of four flows (see
         // `the_golden_has_no_relation_for_exactly_these_pairs`).
-        (495, 124, 619),
+        // 619 -> 610 at kill-and-exit Task 3: the nine top-level pairs of the
+        // four banked `valids/exit*` entries moved to the matching side.
+        (486, 124, 610),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2858,7 +2868,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// run terminals of the golden are 858 = 840 + the 18 the harvest added.
 /// **366 since `valids/retry-failed-task-duration` was baselined** (its one
 /// run terminal, `fail`, after three attempts).
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 366;
+/// **356 since kill-and-exit Task 3 banked the four `valids/exit*` entries**
+/// (two run terminals each in three, four in `valids/exit-nested`).
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 356;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2879,7 +2891,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // execution and one sub-execution) is banked.
 // 138 -> 139: `valids/retry-failed-task-duration` is one top-level execution with no
 // sub-executions, baselined at WorkingDirectory Task 9.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 139;
+// 139 -> 135 at kill-and-exit Task 3: the four `valids/exit*` entries, one
+// top-level execution each and no sub-execution, are banked.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 135;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2893,7 +2907,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 139;
 /// three runs (`CREATED RUNNING SUCCESS` each).
 /// **1419 since `valids/retry-failed-task-duration` was baselined**: 14 on its one
 /// run (`CREATED SUBMITTED RUNNING FAILED RETRYING`, three times, then `FAILED`).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1419;
+/// **1388 since kill-and-exit Task 3**: 31 on the four `valids/exit*` entries
+/// (6 + 6 + 6 + 13: `was_true` is the one run with a `SUBMITTED`).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1388;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2910,7 +2926,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1419;
 /// executions (`CREATED RUNNING SUCCESS` each).
 /// **500 since `valids/retry-failed-task-duration` was baselined**: nine on its
 /// one execution.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 500;
+/// **488 since kill-and-exit Task 3**: three on each of the four `valids/exit*`
+/// executions (`CREATED RUNNING <state>`).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 488;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3045,7 +3063,9 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 /// **910 since the AllowFailure flowable**: the 81 pairs of its three targets.
 // 910 -> 935 at WorkingDirectory Task 8: the 18 pairs the harvested flows add
 // are egret's own (measured: the restriction test prints `egret produced 935`).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 935;
+// 935 -> 944 at kill-and-exit Task 3: the nine pairs `EGRET_TOP_LEVEL_PAIRS`
+// gained, counted before the restriction (which removes none of them).
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 944;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3655,11 +3675,12 @@ fn the_two_state_vocabularies_agree() {
         missing,
         BTreeSet::from([
             "BREAKPOINT".to_string(),
-            "KILLING".to_string(),
             "QUEUED".to_string(),
             "RESUBMITTED".to_string(),
         ]),
-        "the FOUR of Kestra's seventeen that `RunState` does not hold. It was \
+        "the THREE of Kestra's seventeen (four until the kill package's Task 1 \
+         added `Killing`, which the golden does not hold but the kill route \
+         writes) that `RunState` does not hold. It was \
          six until W8 Task 5 added `Warning` and five until W8 Task 6 added \
          `Cancelled` -- which was the golden's last unrepresentable state, so \
          **none of the four left appears in the golden at all** and this set \
@@ -4278,18 +4299,17 @@ const MISMATCH_ON_ORDER: usize = 20;
 ///   `spec::registry` does not name (`unknown_task_type`: `OutputValues`,
 ///   `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`,
 ///   `PurgeLogs`). `executor`'s `PUBLISHED_BUT_REFUSED` holds each with its
-///   cause; it has three more rows, flows with no golden entry.
+///   cause; it has three more rows, flows with no golden entry. (`Exit` left
+///   at kill-and-exit Task 3, and its four entries with it.)
 // 49 -> 45 at WorkingDirectory Task 3 (not Task 8): its four `WorkingDirectory`
 // valids are planned now, so `unsupported_working_directory` refuses none of them.
-const RUNS_REFUSED: [&str; 45] = [
+// 45 -> 41 at kill-and-exit Task 3: `Exit` is registered, so the four
+// `valids/exit*` entries plan and are run (and match).
+const RUNS_REFUSED: [&str; 41] = [
     "valids/after-execution",
     "valids/after-execution-error",
     "valids/after-execution-finally",
     "valids/assert",
-    "valids/exit",
-    "valids/exit-cancelled",
-    "valids/exit-killed",
-    "valids/exit-nested",
     "valids/flow-concurrency-queue-after-execution",
     "valids/flow-concurrency-queue-killed-after-execution",
     "valids/flow-with-array-outputs",
@@ -4343,7 +4363,8 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 /// and whose flows are not refusals either.
 /// **103 since W9a Task 11** (`valids/loop-values-from-uri`).
 /// **100 since the AllowFailure flowable**: its three targets match.
-const MISMATCHING_RUNS_ENTRIES: usize = 100;
+/// **96 since kill-and-exit Task 3**: the four `valids/exit*` entries match.
+const MISMATCHING_RUNS_ENTRIES: usize = 96;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5244,6 +5265,12 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // (`unsupported_pause_property`), so its runs land in `unplanned`. Derived
     // here, for `in_an_errors_list`'s reason, and added back below.
     let mut refused_pause_runs = 0usize;
+    // **Kill-and-exit Task 3 moved four runs, W6's way.** An `Exit` was an
+    // unregistered type, read here from `plan_stored` as an opaque `Runnable`
+    // -- `fed`, and over-fed since no `Exit` run in the golden carries
+    // `SUBMITTED`. It is `TaskKind::Exit` now, so its runs are `flowable`.
+    // Derived and added back below, for `is_a_subflow`'s reason.
+    let mut is_an_exit = 0usize;
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -5342,6 +5369,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             entry.id, run.task
                         );
                     }
+                    Some(TaskKind::Exit { .. }) => {
+                        flowable += 1;
+                        is_an_exit += 1;
+                        assert!(
+                            !submitted,
+                            "{}: `Exit` run {} carries SUBMITTED in the GOLDEN, which would \
+                             refute planning it executor-level",
+                            entry.id, run.task
+                        );
+                    }
                     Some(_) => flowable += 1,
                 }
             }
@@ -5375,11 +5412,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          while it was planned opaque"
     );
     assert_eq!(
+        is_an_exit, 4,
+        "one `Exit` run in each of `valids/exit`, `valids/exit-cancelled`, \
+         `valids/exit-killed` and `valids/exit-nested` (`nested_was_false`)"
+    );
+    assert_eq!(
         (
-            fed - in_an_errors_list + is_a_subflow + refused_pause_runs,
-            flowable - is_a_subflow,
+            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit,
+            flowable - is_a_subflow - is_an_exit,
             unplanned + in_an_errors_list - refused_pause_runs,
-            over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs
+            over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs + is_an_exit
         ),
         (438, 109, 311, 104),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -5435,10 +5477,18 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `TaskKind::Executable`; it contributed {:?}",
         over_fed.get("io.kestra.plugin.core.flow.Subflow")
     );
+    // Kill-and-exit Task 3 took `Exit` out as a TYPE too (its four runs are
+    // not `core.flow.` runs, so `flow_then` does not move).
+    assert!(
+        !over_fed.contains_key(egret_workflow::executor::exit::TYPE_ID),
+        "`Exit` must contribute NO over-submitted run since it is planned \
+         `TaskKind::Exit`; it contributed {:?}",
+        over_fed.get(egret_workflow::executor::exit::TYPE_ID)
+    );
     assert_eq!(
         (
             flow_then + is_a_subflow + refused_pause_runs,
-            over_fed.len() + 1 + usize::from(refused_pause_runs > 0)
+            over_fed.len() + 1 + usize::from(refused_pause_runs > 0) + usize::from(is_an_exit > 0)
         ),
         // AllowFailure left the over-feed: its four block runs are flowables now
         // (the three targets, and `valids/retry-with-flowable-errors`), and its
@@ -5493,6 +5543,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
                     | "RESTARTED"
                     | "WARNING"
                     | "CANCELLED"
+                    | "KILLING"
             )
         })
         .collect();
@@ -5502,7 +5553,13 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         .filter(|s| {
             !matches!(
                 *s,
-                "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+                "RETRIED"
+                    | "SKIPPED"
+                    | "PAUSED"
+                    | "RESTARTED"
+                    | "WARNING"
+                    | "CANCELLED"
+                    | "KILLING"
             )
         })
         .collect();
@@ -5512,14 +5569,19 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         .filter(|s| {
             !matches!(
                 *s,
-                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED" | "KILLING"
             )
         })
         .collect();
     let through_w3c: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED" | "KILLING"
+            )
+        })
         .collect();
     // W8 Task 2's tier, which was `held` itself until W8 Task 5 added
     // `WARNING`. It is spelled out rather than left as "everything but the
@@ -5527,7 +5589,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let through_w8_task_2: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED"))
+        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED" | "KILLING"))
         .collect();
     // W8 Task 5's tier. `held` itself until W8 Task 6 added `CANCELLED`, which
     // is the LAST of the golden's thirteen -- so `fits_now` below is now the
@@ -5535,7 +5597,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let through_w8_task_5: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "CANCELLED"))
+        .filter(|s| !matches!(*s, "CANCELLED" | "KILLING"))
         .collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
@@ -5651,8 +5713,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          **W8 Task 6's `CANCELLED` buys the last 3 (263 -> 266), which is the \
          whole `CANCELLED` population, and TWO of the three bank in that \
          commit** -- the two `sla:` entries. The third, \
-         `valids/exit-cancelled`, is held by an `Exit`, an \
-         `ExecutionUpdatableTask` this crate does not implement"
+         `valids/exit-cancelled`, was held by an `Exit`, an \
+         `ExecutionUpdatableTask` this crate did not implement until \
+         kill-and-exit Task 3 (2026-10-17), which banked it"
     );
     assert_eq!(
         missing,
@@ -5669,13 +5732,25 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     // above falsifiable by something other than itself: the two vocabularies
     // are now the SAME SET, so a variant removed from `RunState` or a state
     // added to the golden fails here by name.
+    //
+    // **`KILLING` is the one state `RunState` holds and the golden does not**
+    // (the kill package's Task 1): the kill route writes it, and no corpus
+    // entry kills an execution. It is named rather than filtered out, so a
+    // second such state fails here instead of joining it silently.
     let held_owned: BTreeSet<String> = held.iter().map(|s| s.to_string()).collect();
+    let beyond_golden: BTreeSet<String> = held_owned.difference(&all).cloned().collect();
     assert_eq!(
-        held_owned, all,
-        "`RunState` now holds exactly the golden's vocabulary -- neither more \
-         nor less. `models::State` still holds four Kestra states neither of \
-         these sets has (KILLING, QUEUED, BREAKPOINT, RESUBMITTED); that \
-         direction is `the_two_state_vocabularies_agree`'s"
+        beyond_golden,
+        BTreeSet::from(["KILLING".to_string()]),
+        "`RunState` holds the golden's vocabulary plus `KILLING` and nothing else"
+    );
+    let within_golden: BTreeSet<String> = held_owned.intersection(&all).cloned().collect();
+    assert_eq!(
+        within_golden, all,
+        "`RunState` holds the golden's whole vocabulary -- `models::State` \
+         still holds three Kestra states neither of these sets has (QUEUED, \
+         BREAKPOINT, RESUBMITTED); that direction is \
+         `the_two_state_vocabularies_agree`'s"
     );
 }
 
@@ -6626,7 +6701,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ("finally:", 14, &["finally:"]),
         (
             "ExecutionUpdatableTask",
-            16,
+            // 16 until kill-and-exit Task 3 banked the four `valids/exit*`
+            // entries; `Labels`, `SetVariables` and `UnsetVariables` hold the 12.
+            12,
             &[
                 "io.kestra.plugin.core.execution.Labels",
                 "io.kestra.plugin.core.execution.SetVariables",
@@ -7123,9 +7200,11 @@ fn the_step_bound_dominates_the_widest_golden_entry() {
 /// The "kill"-named ids are still enumerated, because the spec's number came
 /// from them and a reader will look: none of them declares a `timeout:` on
 /// anything, so none is reachable by leg 1 either. **The list is a moving one
-/// and that is the point** -- five at W5, three at W8 Task 2, two now -- and
-/// every departure has been an entry banked for a reason that had nothing to do
-/// with killing anything. See the assertion below for each.
+/// and that is the point** -- five at W5, three at W8 Task 2, two at
+/// kill-and-exit Task 2, one now -- and every departure but the last has been
+/// an entry banked for a reason that had nothing to do with killing anything;
+/// the last, `valids/exit-killed`, is a kill `advance()` decides, which this
+/// worker path never reaches. See the assertion below for each.
 #[tokio::test]
 async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population() {
     let baseline = baseline();
@@ -7138,13 +7217,14 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
         .collect();
     assert_eq!(
         named,
-        vec![
-            "valids/exit-killed".to_string(),
-            "valids/flow-concurrency-queue-killed-after-execution".to_string(),
-        ],
+        vec!["valids/flow-concurrency-queue-killed-after-execution".to_string()],
         "the baselined ids whose name contains `kill`. It was FIVE through W5, \
-         THREE through W8 Task 2 and is TWO now, and not one departure was a \
-         kill. W6 Task 3 banked `valids/flow-concurrency-parallel-subflow-kill` \
+         THREE through W8 Task 2, TWO through kill-and-exit Task 2 and is ONE \
+         now. Kill-and-exit Task 3 banked `valids/exit-killed`, and that one IS \
+         a kill -- but not THIS path's: an `Exit` with `state: KILLED` is decided \
+         by `advance()` (`executor::exit`), with no `timeout:` and no \
+         `TaskHandler::cancel`, so leg 1 below excluded it before and after. \
+         None of the earlier departures was a kill. W6 Task 3 banked `valids/flow-concurrency-parallel-subflow-kill` \
          and its `-child`: the name is the Java test's, the flows declare \
          `concurrency:` with `behavior: QUEUE`, and what QUEUE changes is WHEN \
          a child starts, which a parent's trace does not record. W8 Task 3 \
@@ -7322,9 +7402,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     // (2, 101, 103) -> (2, 102, 104): `valids/retry-failed-task-duration` is baselined
     // and declares no `timeout:` anywhere, so only the denominator and `without` move.
+    // (2, 102, 104) -> (2, 98, 100) at kill-and-exit Task 3: the four banked
+    // `valids/exit*` entries declare no `timeout:` either.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 102, 104),
+        (2, 98, 100),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

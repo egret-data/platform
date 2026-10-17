@@ -513,6 +513,12 @@ pub(crate) fn descend(
         // never returns `Done` at all -- the terminal is
         // [`resume_paused`]'s, one clock move later.
         TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
+        // Kill-and-exit Task 3. Returned WITHOUT the `Done` mapping below, as
+        // a `Pause`'s is: an `Exit`'s commands are its own terminal, its
+        // ancestors' and the execution's, already decided -- an
+        // `allowFailure:` on an ancestor does not soften what Kestra's
+        // `Exit.update` writes onto it.
+        TaskKind::Exit { .. } => return crate::executor::exit::drive(plan, state, run, task),
         // W8 Task 4. It DOES go through the `Done` mapping below, unlike the
         // `Pause` above: a `LoopUntil` terminates in the round its last
         // iteration ends, and the `Step::Commands` it returns instead is a

@@ -687,6 +687,20 @@ pub struct WorkflowConfig {
     #[serde(default = "default_container_default_timeout_s")]
     pub container_default_timeout_s: u64,
 
+    /// **Milliseconds between a running task's checks for a kill** (workflow
+    /// kill spec §4.2).
+    ///
+    /// While a handler runs, the worker reads its run's row this often; a run
+    /// that the kill route has moved to `KILLING` under this worker's lease
+    /// has its handler dropped and cancelled and is recorded `KILLED`. So this
+    /// is the latency between a kill and the stop of the task it reaches. A
+    /// lease renewal (every third of `working_timeout_s`) notices a kill too,
+    /// so this only makes it faster. Default `5000`, minimum
+    /// [`MIN_KILL_POLL_MS`] (a boot error below): each check is one indexed
+    /// read per running task. `EGRET_WORKFLOW__KILL_POLL_MS=5000`.
+    #[serde(default = "default_kill_poll_ms")]
+    pub kill_poll_ms: u64,
+
     /// **The switch that makes `cron:` schedule triggers fire (W12), and it
     /// defaults to `false` for [`WorkflowConfig::worker_enabled`]'s argument.**
     ///
@@ -1402,6 +1416,16 @@ fn default_container_default_timeout_s() -> u64 {
     3600
 }
 
+/// `5000` -- see [`WorkflowConfig::kill_poll_ms`].
+fn default_kill_poll_ms() -> u64 {
+    5000
+}
+
+/// The smallest [`WorkflowConfig::kill_poll_ms`] egret boots with: below it
+/// the checks are a steady read load per running task for a latency nobody
+/// can see.
+pub const MIN_KILL_POLL_MS: u64 = 100;
+
 /// `false` -- see [`WorkflowConfig::scheduler_enabled`].
 fn default_scheduler_enabled() -> bool {
     false
@@ -1449,6 +1473,7 @@ fn default_workflow() -> WorkflowConfig {
         reaper_interval_secs: default_reaper_interval_secs(),
         working_timeout_s: default_working_timeout_s(),
         container_default_timeout_s: default_container_default_timeout_s(),
+        kill_poll_ms: default_kill_poll_ms(),
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),
@@ -1739,6 +1764,13 @@ impl Config {
             );
         }
         self.workflow.storage.validate()?;
+        if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
+            return Err(format!(
+                "workflow.kill_poll_ms: {} is below the minimum {MIN_KILL_POLL_MS} \
+                 (EGRET_WORKFLOW__KILL_POLL_MS)",
+                self.workflow.kill_poll_ms
+            ));
+        }
         if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
             return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
         }
@@ -2699,6 +2731,20 @@ values = { allowed-images = [] }
         assert!(err.contains("apps.session_idle_secs"), "{err}");
         cfg.apps.session_idle_secs = cfg.apps.session_absolute_secs;
         assert!(cfg.validate().is_ok(), "equal windows are allowed");
+    }
+
+    #[test]
+    fn validate_refuses_a_kill_poll_below_the_minimum() {
+        let mut cfg = Config::default();
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert_eq!(cfg.workflow.kill_poll_ms, 5000, "the default");
+        cfg.workflow.kill_poll_ms = MIN_KILL_POLL_MS - 1;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("workflow.kill_poll_ms"), "{err}");
+        cfg.workflow.kill_poll_ms = MIN_KILL_POLL_MS;
+        assert!(cfg.validate().is_ok(), "the minimum itself is allowed");
     }
 
     #[test]

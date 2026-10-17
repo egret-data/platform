@@ -29237,6 +29237,129 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/kill": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Kill an execution that has not ended.",
+        "description": "Tasks retrying, paused or not yet started end `KILLED` at once; a running\ntask is stopped by a worker -- the one running it, or the next one to claim\nit -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way.",
+        "operationId": "kill_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cascade",
+            "in": "query",
+            "description": "Also kill the execution's child executions -- its `Loop` iterations\nand its `Subflow` children, recursively (default `true`). A replay of\nit, or an execution a Flow trigger fired on it, is not a child. With\n`false`, the children run on, and what they report when they end\nchanges nothing in the killed parent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`cascade` is not `true` or `false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The execution has already ended (code `execution_terminated`). Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/logs": {
       "get": {
         "tags": [

@@ -6275,7 +6275,7 @@ found.
 |---|---|---|
 | 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
-| 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
+| 12 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`; `Exit` left at kill-and-exit Task 3, 16 → 12) | **unclaimed** (`Exit`: kill-and-exit Task 3, banked) |
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
@@ -13265,3 +13265,35 @@ four entries whose unstable pairs the re-harvest changed (`dag`, `finally-parall
 `if`, `parallel-nested`: 13 dropped pairs become 18), and the one banked baseline line.
 `handler_surface.py --self-test` is 13/13. `handler-surface.txt` is regenerated and
 `--check` is clean.
+
+## kill-and-exit Task 3: `Exit`, and the four `valids/exit*` entries bank
+
+**What changed.** `io.kestra.plugin.core.execution.Exit` has a `spec::registry`
+row with no worker handler. `build_plan` plans it `TaskKind::Exit` and
+`advance()` decides it (`executor::exit`). Every deployment serves it
+(`spec::registry::EXECUTOR_LEVEL`, read by `runtime::Served::serves`). The four
+`PUBLISHED_BUT_REFUSED` rows and the four `RUNS_REFUSED` entries are gone, and the
+census moved 250 → 254 live and `UNKNOWN_TYPE_REFUSED` 65 → 61. The ratchet went
+from 104 mismatching / 104 baselined to 100 / 100. `baseline.txt` lost exactly
+the four `valids/exit*` lines, and no other entry moved in either direction.
+
+**The golden decided the `KILLED` shape, and it is not the spec's first
+reading.** `valids/exit-killed` reads `CREATED RUNNING KILLED` for the
+execution, the `If` and the `Exit` run, with no `KILLING` anywhere. So a
+`KILLED` exit does not hand the execution to `kill::advance_killing`, which
+would write `KILLING` into two of those histories. It does what Kestra does
+(`ExecutorService.handleExecutionUpdatingTasks`, then
+`ExecutionService.killParentTaskruns`): the run and its ancestors become
+`KILLED` at once, and so does the execution when nothing else is live. When a
+sibling is live, the execution becomes `KILLING`. A running sibling `Runnable`
+becomes `KILLING` (its worker stops it), and any other live leaf becomes `KILLED`.
+These are the kill route's two leaf steps, done here because no route ran.
+
+**Pinned figures re-derived, not reset.** The pair totals: 9 top-level pairs
+on the four entries (`EGRET_TOP_LEVEL_PAIRS` 718 → 727,
+`EGRET_PAIRS_BEFORE_RESTRICTION` 935 → 944, asserted 394 → 403). The baselined
+populations: 10 run terminals, 4 executions, 31 run-history tokens and 12
+execution-history tokens. Task 5's reconstruction derives the four `Exit` runs
+(`is_an_exit`) and adds them back, as it does for `Subflow`. The handler-surface
+ceiling went 228 → 232: `Exit` is in `W3A_FLOWABLES`, which is the set the
+executor drives.

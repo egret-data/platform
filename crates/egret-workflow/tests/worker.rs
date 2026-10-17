@@ -7835,7 +7835,7 @@ async fn a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is
 /// | `RETRYING` | yes | `retry::reopen_due` puts it back to `CREATED` |
 /// | `PAUSED` | yes | `flowable::resume_paused` ends the wait — W8 Task 7 |
 /// | `RETRIED` | yes | `replay::spawn_due` starts the new execution |
-/// | the other ten | no | nothing moves a run in them, so a named one would be relocked and re-settled on every tick for ever |
+/// | the other eleven | no | nothing moves a run in them, so a named one would be relocked and re-settled on every tick for ever |
 ///
 /// **`RESTARTED` is the one to look at twice**, because it is the other
 /// non-terminal state W8 Task 2 added and "non-terminal" is not the rule here.
@@ -7847,7 +7847,7 @@ async fn a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is
 ///
 /// # The clock control
 ///
-/// A fourteenth execution is `'PAUSED'` with a deadline far in the future. It
+/// One more execution is `'PAUSED'` with a deadline far in the future. It
 /// is what fails if the clock term is dropped while the state terms are kept,
 /// which a state-only table could not see.
 #[sqlx::test(migrations = "../../migrations")]
@@ -7874,6 +7874,10 @@ async fn the_waker_names_exactly_the_states_something_will_move(pool: sqlx::PgPo
         ("RESTARTED", false),
         ("WARNING", false),
         ("CANCELLED", false),
+        // The kill package's Task 1. A `KILLING` run is closed by `advance()`
+        // (flowable) or by the worker that holds it (leased) -- never by the
+        // waker, which would resume a run that is being stopped.
+        ("KILLING", false),
     ]);
 
     let vocabulary: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
@@ -10391,4 +10395,657 @@ async fn a_subflow_to_a_foreach_creates_no_child_and_fails(pool: sqlx::PgPool) {
     .await
     .expect("count children");
     assert_eq!(children, 1, "a Loop target is started");
+}
+
+/// Kill Task 2 (spec §5): the waker names no run of a `KILLING` execution.
+///
+/// Its `RETRYING` and `PAUSED` arms exist for `retry::reopen_due` and
+/// `flowable::resume_paused`, and under a `KILLING` execution `advance()`
+/// calls neither (`executor::kill`): a leaf is left for the route or the
+/// worker, and a flowable is closed by whatever settle comes next. Naming such
+/// a run would relock and settle the execution every tick into nothing, which
+/// is the endless case the terminal-execution term already closes. The two
+/// `RUNNING` rows are the control: without them every `false` is satisfied by
+/// a waker that named nobody.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killing_execution_hides_its_waiting_runs_from_the_waker(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let cases: [(&str, &str, bool); 4] = [
+        ("RETRYING", "KILLING", false),
+        ("PAUSED", "KILLING", false),
+        ("RETRYING", "RUNNING", true),
+        ("PAUSED", "RUNNING", true),
+    ];
+    let mut planted: Vec<(&str, &str, bool, Uuid)> = Vec::new();
+    for (run_state, execution_state, want) in cases {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!(
+                "kill-wake-{}-{}",
+                run_state.to_lowercase(),
+                execution_state.to_lowercase()
+            )),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET state = $2, not_before_ms = 0, resume_with = 'TERMINAL:SUCCESS' \
+              WHERE execution_id = $1 AND task_id = 'a'",
+        )
+        .bind(ex)
+        .bind(run_state)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("plant a due {run_state} run: {e}"));
+        sqlx::query("UPDATE workflow.executions SET state = $2 WHERE id = $1")
+            .bind(ex)
+            .bind(execution_state)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("set the execution {execution_state}: {e}"));
+        planted.push((run_state, execution_state, want, ex));
+    }
+
+    let named: std::collections::BTreeSet<Uuid> = due_retries(&pool, 64)
+        .await
+        .expect("due_retries")
+        .into_iter()
+        .collect();
+    let wrong: Vec<String> = planted
+        .iter()
+        .filter(|(_, _, want, ex)| named.contains(ex) != *want)
+        .map(|(r, e, want, ex)| format!("run {r} in a {e} execution: expected named={want} ({ex})"))
+        .collect();
+    assert!(wrong.is_empty(), "{}\nNamed: {named:?}", wrong.join("\n"));
+}
+
+/// A flow whose `sla:` CANCELs once its input reads `CANCEL`, so the violation
+/// can be switched on after the execution is running.
+fn sla_cancel_flow(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ninputs:\n  - id: string\n    type: SELECT\n    values:\n      - PASS\n      - CANCEL\n    defaults: PASS\nsla:\n  - id: condition\n    type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{{{inputs.string != 'CANCEL'}}}}\"\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+    )
+}
+
+async fn kill_history(pool: &sqlx::PgPool, ex: Uuid) -> Vec<String> {
+    let h: serde_json::Value =
+        sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("read execution history");
+    serde_json::from_value(h).expect("history is a list of states")
+}
+
+/// Kill Task 2, item 1: an SLA violated while the execution is `KILLING` does
+/// not act. The kill wins and the execution ends `KILLED`.
+///
+/// Without the guard in `claim::sla_terminal`, the violation moves the
+/// execution `CANCELLED` mid-kill; `advance()` then returns nothing for a
+/// terminal execution, and any `KILLING` flowable run is stranded. The control
+/// is the same flow, the same flipped input, and no kill: it must CANCEL, or
+/// the fixture never violates and the kill assertion proves nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_sla_violated_during_a_kill_leaves_the_execution_to_end_killed(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let mut ids = Vec::new();
+    for label in ["control", "killed"] {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &sla_cancel_flow(&format!("sla-kill-{label}")),
+            serde_json::json!({"string": "PASS"}),
+        )
+        .await
+        .expect("start execution");
+        ids.push(ex);
+    }
+    let (control, killed) = (ids[0], ids[1]);
+    for ex in [control, killed] {
+        assert_eq!(
+            kill_history(&pool, ex).await.last().map(String::as_str),
+            Some("RUNNING"),
+            "the SLA must not fire before its input is flipped"
+        );
+    }
+
+    // The kill route's half (spec §3.2), written by hand: the run is leased and
+    // goes KILLING, and so does the execution.
+    let claimed = claim(&pool, 64).await.expect("claim");
+    assert!(
+        claimed.iter().any(|c| c.execution_id == killed),
+        "the run to kill must be leased"
+    );
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("run -> KILLING");
+    sqlx::query(
+        "UPDATE workflow.executions \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb \
+          WHERE id = $1",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("execution -> KILLING");
+
+    // The violation switches on for both.
+    sqlx::query(
+        "UPDATE workflow.executions SET inputs = '{\"string\": \"CANCEL\"}'::jsonb \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![control, killed])
+    .execute(&pool)
+    .await
+    .expect("flip the input");
+
+    egret_workflow::worker::resume(&pool, control)
+        .await
+        .expect("settle the control");
+    assert_eq!(
+        kill_history(&pool, control)
+            .await
+            .last()
+            .map(String::as_str),
+        Some("CANCELLED"),
+        "the control: the flipped input must violate the SLA"
+    );
+
+    egret_workflow::worker::resume(&pool, killed)
+        .await
+        .expect("settle the kill");
+    let h = kill_history(&pool, killed).await;
+    assert_eq!(
+        h.last().map(String::as_str),
+        Some("KILLING"),
+        "a kill in progress wins over the SLA, and the KILLING run is still the \
+         worker's: {h:?}"
+    );
+
+    // The worker's half (spec §4.2): the run ends KILLED.
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLED', claimed_at = NULL, ended_at = now(), \
+                history = history || '[\"KILLED\"]'::jsonb \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("run -> KILLED");
+    egret_workflow::worker::resume(&pool, killed)
+        .await
+        .expect("settle after the worker");
+    let h = kill_history(&pool, killed).await;
+    assert_eq!(
+        &h[h.len() - 2..],
+        &["KILLING".to_string(), "KILLED".to_string()],
+        "{h:?}"
+    );
+    assert!(!h.iter().any(|s| s == "CANCELLED"), "{h:?}");
+
+    // Fix round 1: a flowable closed by the kill gets its run-level `ended_at`
+    // (and its attempt's) from `persist`, as any terminal does; so does the
+    // execution.
+    let (state, history, ended, attempt_ended): (String, serde_json::Value, bool, bool) =
+        sqlx::query_as(
+            "SELECT state, history, ended_at IS NOT NULL, \
+                    (attempts -> -1 ->> 'ended_at') IS NOT NULL \
+               FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'seq'",
+        )
+        .bind(killed)
+        .fetch_one(&pool)
+        .await
+        .expect("read seq");
+    assert_eq!(state, "KILLED");
+    assert_eq!(
+        history,
+        serde_json::json!(["CREATED", "RUNNING", "KILLING", "KILLED"])
+    );
+    assert!(ended, "the KILLED flowable has a run-level ended_at");
+    assert!(attempt_ended, "its attempt is closed with an ended_at");
+    let exec_ended: bool =
+        sqlx::query_scalar("SELECT ended_at IS NOT NULL FROM workflow.executions WHERE id = $1")
+            .bind(killed)
+            .fetch_one(&pool)
+            .await
+            .expect("read the execution");
+    assert!(exec_ended, "the KILLED execution has an ended_at");
+}
+
+// --------------------------------------------------------------------------
+// Kill Task 5 (spec §4.3): a worker that dies while its run is KILLING
+// --------------------------------------------------------------------------
+
+/// A [`Registry`] that records which tasks it ran, and every `cancel` and
+/// `release` by `(run, attempt)`: the three facts a claim of a `KILLING` run
+/// is judged on (its handler is NOT run, it is cancelled once for the attempt
+/// that was running, and what it held is released).
+#[derive(Default)]
+struct KillRecorder {
+    ran: Mutex<Vec<String>>,
+    cancels: Mutex<Vec<(Uuid, usize)>>,
+    releases: Mutex<Vec<(Uuid, usize)>>,
+}
+
+impl KillRecorder {
+    fn ran(&self) -> Vec<String> {
+        self.ran.lock().unwrap().clone()
+    }
+    fn cancels(&self) -> Vec<(Uuid, usize)> {
+        self.cancels.lock().unwrap().clone()
+    }
+    fn releases(&self) -> Vec<(Uuid, usize)> {
+        self.releases.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for KillRecorder {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.ran.lock().unwrap().push(task.task_id.clone());
+        Ok(Outcome::success())
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.cancels
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt));
+        Ok(())
+    }
+    async fn release(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.releases
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt));
+        Ok(())
+    }
+}
+
+/// A `Parallel` of a leaf `a` and an `Exit(state: KILLED)`. The Exit is run by
+/// `advance()` when it is created, in the settle that starts the execution,
+/// so `a` is `KILLING` before any worker has claimed it (Task 3's unclaimed
+/// sibling: pure `advance()` cannot see `claimed_at`).
+fn exit_beside_an_unclaimed_leaf(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: KILLED\n"
+    )
+}
+
+/// A `Parallel` of a leaf `a` and a `Sequential` of a leaf `b` then an
+/// `Exit(state: KILLED)`. `a` is leased first by a worker that then dies; `b`
+/// is run by a live worker, and its success creates the Exit, which turns the
+/// leased `a` `KILLING` under the dead worker's lease.
+fn exit_after_a_sibling(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n      - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: b\n            type: io.kestra.plugin.core.log.Log\n            message: bye\n          - id: exit\n            type: io.kestra.plugin.core.execution.Exit\n            state: KILLED\n"
+    )
+}
+
+/// `(state, claimed_at)` of the run named `task_id`.
+async fn state_and_lease(
+    pool: &sqlx::PgPool,
+    execution: Uuid,
+    task_id: &str,
+) -> (String, Option<chrono::DateTime<chrono::Utc>>) {
+    sqlx::query_as(
+        "SELECT state, claimed_at FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read state and lease")
+}
+
+async fn attempts_json(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT attempts FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read attempts")
+}
+
+/// Start [`exit_after_a_sibling`] and leave `a` `KILLING` under the lease of
+/// a worker that claimed it and then died. Returns the execution and the dead
+/// worker's claim of `a`.
+async fn a_leaf_killed_under_a_dead_lease(
+    pool: &sqlx::PgPool,
+    ws: Uuid,
+    id: &str,
+) -> (Uuid, egret_workflow::worker::Claimed) {
+    let ex = start_execution(
+        pool,
+        ws,
+        None,
+        &exit_after_a_sibling(id),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    // The worker that dies: it leases `a` (the lowest `run_ix`) and never
+    // comes back -- no handler, no renewal, no commit.
+    let mut dead = claim(pool, 1).await.expect("the dead worker's claim");
+    assert_eq!(dead.len(), 1);
+    let dead = dead.remove(0);
+    assert_eq!(dead.task_id, "a", "the dead worker holds `a`");
+    // A live worker runs `b`; its success creates the Exit, which kills.
+    let live = KillRecorder::default();
+    egret_workflow::worker::tick(pool, 8, &live)
+        .await
+        .expect("the live worker's tick");
+    assert_eq!(live.ran(), vec!["b".to_string()], "only `b` was claimable");
+    assert_eq!(
+        state_and_lease(pool, ex, "a").await,
+        ("KILLING".to_string(), Some(dead.claimed_at)),
+        "the Exit turned the leased `a` KILLING, and its lease is the dead worker's"
+    );
+    assert_eq!(
+        execution_history(pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("KILLING"))
+    );
+    (ex, dead)
+}
+
+/// Spec §4.3: **the reaper clears an expired lease on a `KILLING` run exactly
+/// as on a `RUNNING` one**, and leaves the state alone -- and, the other
+/// direction, a `KILLING` lease inside the timeout is NOT cleared.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_reaper_frees_an_expired_killing_lease(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let (stale, _) = a_leaf_killed_under_a_dead_lease(&pool, ws, "reap-stale").await;
+    let (fresh, fresh_claim) = a_leaf_killed_under_a_dead_lease(&pool, ws, "reap-fresh").await;
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = now() - interval '2 hours' \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(stale)
+    .execute(&pool)
+    .await
+    .expect("backdate");
+
+    let n = reap(&pool, std::time::Duration::from_secs(3600))
+        .await
+        .expect("reap");
+    assert_eq!(n, 1, "exactly the expired KILLING lease is reclaimed");
+    assert_eq!(
+        state_and_lease(&pool, stale, "a").await,
+        ("KILLING".to_string(), None),
+        "the lease is cleared and the run is still KILLING"
+    );
+    assert_eq!(
+        state_and_lease(&pool, fresh, "a").await,
+        ("KILLING".to_string(), Some(fresh_claim.claimed_at)),
+        "a KILLING lease inside the timeout is left alone"
+    );
+}
+
+/// Spec §4.3 and Task 3's unclaimed sibling: **a `KILLING` run nobody holds
+/// is claimed only to finish the kill**. After the Exit's advance, `a` is
+/// `KILLING` with no lease; one tick takes it, never runs its handler,
+/// cancels it once for its attempt, records `KILLED`, releases it, and the
+/// execution ends `KILLED`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn claim_takes_a_killing_run_only_to_finish_the_kill(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &exit_beside_an_unclaimed_leaf("exit-sibling"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(
+        state_and_lease(&pool, ex, "a").await,
+        ("KILLING".to_string(), None),
+        "the Exit's advance turned the unclaimed `a` KILLING"
+    );
+    let before = attempts_json(&pool, ex, "a").await;
+    let a = run_id_of(&pool, ex, "a").await;
+
+    let reg = KillRecorder::default();
+    let done = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("tick");
+    assert_eq!(done, 1, "the kill is the one committed result");
+    assert!(
+        reg.ran().is_empty(),
+        "the handler is never run: {:?}",
+        reg.ran()
+    );
+    let attempt = before.as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(
+        reg.cancels(),
+        vec![(a, attempt)],
+        "cancelled once, for the attempt it had"
+    );
+    assert_eq!(reg.releases(), vec![(a, attempt)], "and released once");
+    assert_eq!(
+        state_and_lease(&pool, ex, "a").await,
+        ("KILLED".to_string(), None)
+    );
+    assert_closed_killed(&before, &attempts_json(&pool, ex, "a").await);
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("KILLED"))
+    );
+}
+
+/// **A `KILLING` claim opens no attempt** (carry 6): the attempts after the
+/// kill are the attempts before it, with only the last one closed `KILLED`.
+fn assert_closed_killed(before: &serde_json::Value, after: &serde_json::Value) {
+    let (b, a) = (
+        before.as_array().expect("attempts before"),
+        after.as_array().expect("attempts after"),
+    );
+    assert!(!b.is_empty(), "the run had an attempt: {before}");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "no attempt was opened: {before} -> {after}"
+    );
+    assert_eq!(
+        &a[..a.len() - 1],
+        &b[..b.len() - 1],
+        "earlier attempts unchanged"
+    );
+    let mut want = b.last().unwrap()["history"].as_array().unwrap().clone();
+    assert_eq!(want.last(), Some(&serde_json::json!("KILLING")), "{before}");
+    want.push(serde_json::json!("KILLED"));
+    assert_eq!(a.last().unwrap()["history"], serde_json::Value::Array(want));
+    assert!(
+        a.last().unwrap().get("ended_at").is_some(),
+        "the attempt's end is stamped: {after}"
+    );
+}
+
+/// Spec §4.3, end to end: **a worker that died holding a run the kill then
+/// reached** leaves it `KILLING` under a lease nobody renews (the class Task 4
+/// leaves to this path: a handler `Err`, the storage-outage return, a refused
+/// renewal whose kill read failed, a failed fallback read). It stays so until
+/// the lease expires; the reaper frees it, and the next tick claims it,
+/// cancels the attempt that was running (never a new one), records `KILLED`,
+/// releases, and the execution ends `KILLED`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dead_workers_kill_is_finished_by_the_next_worker(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let (ex, dead) = a_leaf_killed_under_a_dead_lease(&pool, ws, "dead-kill").await;
+    let before = attempts_json(&pool, ex, "a").await;
+
+    let reg = KillRecorder::default();
+    assert_eq!(
+        egret_workflow::worker::tick(&pool, 8, &reg)
+            .await
+            .expect("tick"),
+        0,
+        "under a live lease the KILLING run is the holder's: nothing is claimed"
+    );
+    assert!(reg.cancels().is_empty());
+
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = now() - interval '2 hours' WHERE id = $1",
+    )
+    .bind(dead.id)
+    .execute(&pool)
+    .await
+    .expect("the lease expires");
+    assert_eq!(
+        reap(&pool, std::time::Duration::from_secs(3600))
+            .await
+            .expect("reap"),
+        1
+    );
+
+    assert_eq!(
+        egret_workflow::worker::tick(&pool, 8, &reg)
+            .await
+            .expect("tick"),
+        1,
+        "the kill commits"
+    );
+    assert!(reg.ran().is_empty(), "the handler is never run again");
+    assert_eq!(
+        reg.cancels(),
+        vec![(dead.id, dead.attempt as usize)],
+        "cancelled once, for the attempt the dead worker was running"
+    );
+    assert_eq!(reg.releases(), vec![(dead.id, dead.attempt as usize)]);
+    assert_eq!(
+        state_and_lease(&pool, ex, "a").await,
+        ("KILLED".to_string(), None)
+    );
+    assert_closed_killed(&before, &attempts_json(&pool, ex, "a").await);
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("KILLED"))
+    );
+}
+
+/// The claim's order (W3b Task 7) is unchanged with a `KILLING` row among
+/// the runs: it is taken in its `(created_at, execution_id, run_ix)` slot,
+/// and it is the only claim marked kill-only.
+#[sqlx::test(migrations = "../../migrations")]
+async fn claim_order_is_unchanged_for_running_runs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let a = start_execution(&pool, ws, None, &one_task("order-a"), serde_json::json!({}))
+        .await
+        .expect("start a");
+    let b = start_execution(&pool, ws, None, &one_task("order-b"), serde_json::json!({}))
+        .await
+        .expect("start b");
+    let a_ids = siblings_sharing_one_instant(&pool, a, 6).await;
+    let b_ids = siblings_sharing_one_instant(&pool, b, 6).await;
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb \
+          WHERE id = $1",
+    )
+    .bind(b_ids[2])
+    .execute(&pool)
+    .await
+    .expect("one of b's runs is KILLING");
+    let mut descending = a_ids.clone();
+    descending.reverse();
+    touch_in_order(&pool, &descending).await;
+    let mut b_desc = b_ids.clone();
+    b_desc.reverse();
+    touch_in_order(&pool, &b_desc).await;
+
+    let taken = claim(&pool, 100).await.expect("claim");
+    let first = std::cmp::min(a, b);
+    let second = std::cmp::max(a, b);
+    let got: Vec<(Uuid, i32, bool)> = taken
+        .iter()
+        .map(|c| (c.execution_id, c.run_ix, c.kill_only))
+        .collect();
+    let want: Vec<(Uuid, i32, bool)> = [first, second]
+        .iter()
+        .flat_map(|&ex| (0..6).map(move |ix| (ex, ix, ex == b && ix == 2)))
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// Task 5 fix round 1: **a kill-only claim whose handler cannot be built is
+/// still killed.** `a` is `KILLING` with no lease, and its `task_id` names no
+/// leaf of the execution's source -- a row-content fault, which no retry can
+/// change. One tick records it `KILLED` with no cancel (there is no handler
+/// to ask) and no release (the orphan sweep owns what it held), and the
+/// execution ends `KILLED` instead of staying `KILLING` for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killing_run_whose_task_is_not_a_leaf_is_killed_without_a_cancel(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &exit_beside_an_unclaimed_leaf("exit-ghost"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(
+        state_and_lease(&pool, ex, "a").await,
+        ("KILLING".to_string(), None)
+    );
+    sqlx::query(
+        "UPDATE workflow.task_runs SET task_id = 'ghost' WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("the row names no leaf of its source");
+
+    let reg = KillRecorder::default();
+    let done = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("a row-content fault is not the tick's error");
+    assert_eq!(done, 1, "the kill commits");
+    assert!(reg.ran().is_empty());
+    assert!(reg.cancels().is_empty(), "no handler, so no cancel");
+    assert!(reg.releases().is_empty(), "and no release");
+    assert_eq!(
+        state_and_lease(&pool, ex, "ghost").await,
+        ("KILLED".to_string(), None)
+    );
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("KILLED"))
+    );
 }

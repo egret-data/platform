@@ -29,17 +29,26 @@
 //! Three facts fall out of that disassembly and all three are load-bearing
 //! here:
 //!
-//! 1. **The budget's expiry is the only site.** `kill(null)` appears in
-//!    `callWithTimeout`'s catch block; the other callers of `kill(State.Type)`
-//!    pass a state, which is the execution-level kill W8 owns. So egret's kill
-//!    path hangs off [`timeout::Guarded::Expired`](super::timeout::Guarded) and
-//!    off nothing else. See *Where the kill path does NOT go* below.
+//! 1. **The budget's expiry is the only `kill(null)` site.** `kill(null)`
+//!    appears in `callWithTimeout`'s catch block; the other callers of
+//!    `kill(State.Type)` pass a state, which is the execution-level kill. So
+//!    this module's [`guarded`] hangs off
+//!    [`timeout::Guarded::Expired`](super::timeout::Guarded). **The
+//!    execution-level kill is the second site** (workflow kill spec §4.2,
+//!    2026-10-17): `claim::finish_kill` calls [`kill`] for a run the kill route
+//!    moved to `KILLING` under the worker's lease, after `claim::under_lease`
+//!    found it and dropped the handler. Both sites go through [`kill`], so a
+//!    handler stops with the one grace it applies (the plugin host's
+//!    `kill_grace_s`, zero for a script task) whichever site asked. See *Where
+//!    the kill path does NOT go* below.
 //! 2. **A kill that fails does not change the run.** The state comes from
 //!    `exceptionHandler(TimeoutExceededException)` — `FAILED`, carrying
 //!    `Timeout after HH:mm:ss.SSS` — and it is computed *after* `kill` has
 //!    already swallowed its own failure. So [`guarded`] returns the budget's
 //!    outcome untouched whether the cancel succeeded or refused, and the
-//!    refusal goes to `tracing` exactly as Kestra's goes to slf4j.
+//!    refusal goes to `tracing` exactly as Kestra's goes to slf4j. The second
+//!    site keeps the rule: a killed run is recorded `KILLED` whatever
+//!    `cancel` answered.
 //! 3. **egret is louder about a kill it cannot deliver, and that is the only
 //!    sense in which it does more.** `WorkerJobLifecycle.kill()` has an empty
 //!    default body, so a Kestra task that cannot stop itself is
@@ -106,25 +115,60 @@ pub(super) enum Killed {
     Refused(String),
 }
 
+/// **How far the budget's own cancel got** (final review T4), for a kill found
+/// afterwards: not asked, asked and still in flight, or returned.
+///
+/// A flag set before the cancel was awaited could not tell the second from
+/// the third, and the second is not "stopped": when the kill poll finds the
+/// run `KILLING` while this cancel is running, `claim::under_lease` drops the
+/// handler future, and the cancel inside it with it. The kill path must then
+/// ask again; only a cancel that returned is not repeated (a second one is
+/// not reliably harmless, `claim::run_one`'s commit-time comment).
+#[derive(Debug, Default)]
+pub(super) struct Asked(std::sync::atomic::AtomicU8);
+
+impl Asked {
+    const IN_FLIGHT: u8 = 1;
+    const DONE: u8 = 2;
+
+    fn set(&self, to: u8) {
+        self.0.store(to, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the kill path has to ask the handler to stop: unless the
+    /// budget's cancel has already returned.
+    pub(super) fn kill_must_cancel(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) != Self::DONE
+    }
+}
+
 /// Run `task` under `budget`, and kill the handler if the budget expires.
 ///
 /// This is [`timeout::guard`] plus the artifact's `kill(null)`. The outcome is
 /// the budget's, unaltered — see the module doc's fact 2 for why a refused
 /// kill does not change it.
+///
+/// `asked` records the cancel as in flight before it is awaited and as done
+/// once it returns ([`Asked`]), so a caller whose run is then found killed
+/// (`claim::run_one`) asks again only if this cancel did not finish.
 pub(super) async fn guarded(
     reg: &dyn Registry,
     task: &TaskInput,
     budget: Option<std::time::Duration>,
+    asked: &Asked,
 ) -> Result<Outcome> {
     let guarded = timeout::guard(budget, reg.run(task)).await?;
     if matches!(guarded, Guarded::Expired(_)) {
+        asked.set(Asked::IN_FLIGHT);
         // **The value is read here, which is the whole reason it is a value.**
         // Fix round 1: `kill` used to log and this line used to discard what it
         // returned, so [`Killed`]'s own doc — "a value rather than a `Result`
         // swallowed at the call site" — described nothing. The log is the
         // caller's decision (the artifact makes it in `WorkerTaskCallable.kill`,
         // the caller of `task.kill()`), so it lives here and `kill` reports.
-        match kill(reg, task).await {
+        let killed = kill(reg, task).await;
+        asked.set(Asked::DONE);
+        match killed {
             Killed::Stopped => {}
             Killed::Refused(reason) => {
                 tracing::warn!(
@@ -261,6 +305,7 @@ mod tests {
             &reg,
             &input("test.endless", serde_json::json!({})),
             Some(Duration::from_millis(50)),
+            &Default::default(),
         )
         .await
         .expect("a timeout is a task failure, not a worker failure");
@@ -280,6 +325,7 @@ mod tests {
             &reg,
             &input("test.prompt", serde_json::json!({})),
             Some(Duration::from_secs(30)),
+            &Default::default(),
         )
         .await
         .expect("no worker failure");
@@ -292,9 +338,14 @@ mod tests {
         );
 
         // And no budget at all cannot expire, so it cannot kill.
-        let out = guarded(&reg, &input("test.prompt", serde_json::json!({})), None)
-            .await
-            .expect("no worker failure");
+        let out = guarded(
+            &reg,
+            &input("test.prompt", serde_json::json!({})),
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect("no worker failure");
         assert_eq!(out.message.as_deref(), Some("the handler's own reason"));
         assert_eq!(
             cancels.load(Ordering::SeqCst),
@@ -323,9 +374,14 @@ mod tests {
             "the refusal must reach the caller carrying the handler's own reason"
         );
 
-        let out = guarded(&reg, &task, Some(Duration::from_millis(50)))
-            .await
-            .expect("a refused kill must not become a worker failure that aborts the tick");
+        let out = guarded(
+            &reg,
+            &task,
+            Some(Duration::from_millis(50)),
+            &Default::default(),
+        )
+        .await
+        .expect("a refused kill must not become a worker failure that aborts the tick");
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(
             out.message.as_deref(),
