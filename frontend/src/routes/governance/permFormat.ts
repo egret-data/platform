@@ -1,10 +1,10 @@
 import type { Action, GrantView, PermPrincipal, Rule, RuleView, Scope } from "@/api/generated/model";
 
 /**
- * Shared formatting for the two steward-facing perm pages (`DataPermissions`
- * and `MaskFilterRules`) — D5's "the sentence is the primary column" applies
- * to both, and a scope/principal set is rendered identically wherever it
- * appears in either one.
+ * Shared formatting for the pages that show grants and rules (the Data and
+ * People areas, and one grant's and one rule's pages) — D5's "the sentence is
+ * the primary column" applies to each, and a scope/principal set is rendered
+ * identically wherever it appears.
  *
  * Nothing here duplicates the five pieces of hardcoded knowledge that live in
  * `PrincipalPicker`/`ScopePicker` (`grep -rn "Hardcoded fact" frontend/src/components/perm`):

@@ -2,39 +2,32 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi, type Mock } from "vitest";
 
 /**
- * `ExplainAccess` reads the generated perm client directly (`usePermExplain`),
- * matching `Catalogs.test.tsx`'s pattern for the newest list pages. `ScopePicker`
- * is mocked to a dumb controlled stand-in — its own behavior (progressive
- * narrowing, row-filter mode) is covered by `ScopePicker.test.tsx`.
+ * How an explain answer reads (`ExplainResultView`) and the subject's user
+ * field (`SubjectUserField`), rendered directly. These tests lived in
+ * `ExplainAccess.test.tsx` and reached the components through the Explain
+ * access page's form; the page is gone (DG redesign #2, P8). Its form-level
+ * tests (the disabled Explain button, a user-only subject, a refused question)
+ * are Check access tests now (`routes/governance/people/__tests__/CheckAccess.test.tsx`).
  *
- * **SP4d-2a Task 8.** `explain` no longer evaluates egret's own model: it
- * evaluates the policy set each engine actually downloads and answers once per
- * PROFILE, three-valued. So this file is about that shape — two profiles are two
- * results, "no profile serves this catalog" is its own state and not a denial, an
- * `Undecidable` names every cause it carries, and a policy egret's compiler does
- * not own is reported rather than dropped.
+ * **SP4d-2a Task 8.** `explain` evaluates the policy set each engine actually
+ * downloads and answers once per PROFILE, three-valued. So this file is about
+ * that shape — two profiles are two results, "no profile serves this catalog"
+ * is its own state and not a denial, an `Undecidable` names every cause it
+ * carries, and a policy egret's compiler does not own is reported rather than
+ * dropped.
+ *
+ * `answer` stands for the server: each test queues the response
+ * `POST /perm/explain` would send (`{ status, data }`), and `renderAnswer`
+ * renders its `data` as Check access does.
  */
-vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/policy-admin/policy-admin");
-vi.mock("@/components/perm/ScopePicker", () => ({
-  ScopePicker: ({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) => (
-    <div>
-      <div data-testid="scope-value">{JSON.stringify(value)}</div>
-      <button type="button" onClick={() => onChange({ catalog_id: "cat-1" })}>
-        set-scope
-      </button>
-    </div>
-  ),
-}));
 
-import * as permApi from "@/api/generated/perm/perm";
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
-import { ApiError } from "@/api/client";
 import type { ExplainResponse } from "@/api/generated/model";
-import ExplainAccess from "@/routes/governance/ExplainAccess";
+import { ExplainResultView, SubjectUserField } from "@/components/perm/ExplainResult";
 
 /**
  * Two profiles serving one catalog — the ordinary case on a cluster running
@@ -96,32 +89,26 @@ const TWO_PROFILES: ExplainResponse = {
   ],
 };
 
-let mutateAsync: ReturnType<typeof vi.fn>;
+let answer: Mock<() => Promise<{ status: number; data: ExplainResponse }>>;
 
-function renderPage() {
+function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MemoryRouter>
-      <QueryClientProvider client={qc}>
-        <ExplainAccess />
-      </QueryClientProvider>
+      <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
     </MemoryRouter>,
   );
 }
 
-async function submit(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText("User"), "alice-doe");
-  await user.click(screen.getByRole("button", { name: "set-scope" }));
-  await user.click(screen.getByRole("button", { name: /Explain/ }));
+/** Renders the next queued server answer, as Check access renders a 200. */
+async function renderAnswer() {
+  const res = await answer();
+  return wrap(<ExplainResultView result={res.data} />);
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mutateAsync = vi.fn().mockResolvedValue({ status: 200, data: TWO_PROFILES });
-  vi.mocked(permApi.usePermExplain).mockReturnValue({
-    mutateAsync,
-    isPending: false,
-  } as unknown as ReturnType<typeof permApi.usePermExplain>);
+  answer = vi.fn().mockResolvedValue({ status: 200, data: TWO_PROFILES });
   vi.mocked(policyAdminListPrincipals).mockResolvedValue({
     status: 200,
     data: [],
@@ -129,12 +116,10 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
 });
 
-describe("ExplainAccess — one answer per profile, over the artifact the engine downloads", () => {
+describe("ExplainResultView — one answer per profile, over the artifact the engine downloads", () => {
   /** Item 1. Two profiles are two results, each naming itself and its engine. */
   test("two profiles render as two results, each naming its profile and engine", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     await screen.findByTestId("explain-result");
     const profiles = screen.getAllByTestId("explain-profile");
@@ -161,9 +146,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * that refuses would be the most misleading pixel on the page.
    */
   test("no aggregate verdict is claimed above the per-profile answers", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     expect(result).not.toHaveTextContent(/only a summary/i);
@@ -174,18 +157,16 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
   /** Item 1's deep links, which now live on the per-profile rows. */
   test("a grant attribution links to that grant, and a rule attribution to that rule", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     await screen.findByTestId("explain-result");
 
     expect(screen.getByRole("link", { name: "View grant grant-1" })).toHaveAttribute(
       "href",
-      "/governance/data-permissions?grant=grant-1",
+      "/governance/grants/grant-1",
     );
     const ruleLink = screen.getByRole("link", { name: "View rule rule-1" });
-    expect(ruleLink).toHaveAttribute("href", "/governance/mask-filter-rules?rule=rule-1");
+    expect(ruleLink).toHaveAttribute("href", "/governance/rules/rule-1");
     // A per-column StarRocks rule expands ONE row into N policies; the locator
     // is the only thing that says which expansion decided.
     expect(screen.getByTestId("rule-locator")).toHaveTextContent("sales.public.orders.ssn");
@@ -193,13 +174,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
   /** Item 2. Nothing enforcing is a different fact from something refusing. */
   test("a catalog no profile serves is its own state, not a denial", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: { outcome: "no_profile_serves_the_catalog", profiles: [] },
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const state = within(result).getByTestId("no-profile-state");
@@ -219,7 +198,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * it renders as a sentence with a number in it, never a Debug string.
    */
   test("an undecidable verdict names every cause it carries, tag-policy count included", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -256,9 +235,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     expect(within(result).getByTestId("decision-badge")).toHaveTextContent("Undecidable");
@@ -289,7 +266,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   test("a plugin-version cause names where the version came from for either kind of engine", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -314,9 +291,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const cause = (await screen.findAllByTestId("undecidable-cause"))[0];
     expect(cause).toHaveTextContent("Ranger 2.9.0");
@@ -335,7 +310,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * for it, so there is no link.
    */
   test("a policy with no model attribution renders its Ranger name and id, unlinked", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -357,9 +332,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const raw = within(result).getByTestId("raw-policy");
@@ -377,7 +350,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * "no grant matched" while the engine allowed.
    */
   test("a seeded egret-admin policy reads as the expected explanation, not an alarm", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -403,9 +376,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const raw = within(result).getByTestId("raw-policy");
@@ -426,7 +397,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * OR across roles — holding any one clears the gate.
    */
   test("a clearance decision renders a real label, its tag, and the clearing roles", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -459,9 +430,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const clearance = within(result).getByTestId("clearance-attribution");
@@ -483,12 +452,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * `explain` sends neither.
    */
   test("the honest limits no longer claim explain cannot see hand-written policy", async () => {
-    const user = userEvent.setup();
-    renderPage();
-
-    expect(screen.queryByTestId("honest-limits")).not.toBeInTheDocument();
-
-    await submit(user);
+    await renderAnswer();
     const result = await screen.findByTestId("explain-result");
     const limits = within(result).getByTestId("honest-limits");
 
@@ -516,7 +480,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * falling into a branch written for a different variant.
    */
   test("no_policy_matched names no deciding policy, because there is none", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -544,9 +508,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const row = within(result).getByTestId("explain-access");
@@ -579,7 +541,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * "unknown" from a second field.
    */
   test("an unresolved clearance reports its roles as unknown, not as groups-only", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -613,9 +575,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const clearance = within(result).getByTestId("clearance-attribution");
@@ -635,7 +595,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    *  up" — that is `null` now. Both branches are pinned so the two cannot be
    *  confused again. */
   test("a resolved clearance with no roles states that, without claiming it is unknown", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -668,9 +628,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const clearance = within(result).getByTestId("clearance-attribution");
@@ -696,7 +654,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * what needs deleting — not the test.
    */
   test("a clearance whose roles are null is unknown even when the tag resolved (shape no live path emits)", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -729,9 +687,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const clearance = within(result).getByTestId("clearance-attribution");
@@ -759,7 +715,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * wrong place — so the last assertion here compares them.
    */
   test("a tag-download refusal says its scope, and other causes do not borrow it", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -795,9 +751,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -864,7 +818,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const rendered: string[] = [];
     for (const row of declines) {
-      mutateAsync.mockResolvedValueOnce({
+      answer.mockResolvedValueOnce({
         status: 200,
         data: {
           outcome: "per_profile",
@@ -887,9 +841,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
           tag_resolution_declined: row.declined,
         } satisfies ExplainResponse,
       });
-      const user = userEvent.setup();
-      const view = renderPage();
-      await submit(user);
+      const view = await renderAnswer();
 
       const result = await screen.findByTestId("explain-result");
       const cause = within(result).getAllByTestId("undecidable-cause")[0];
@@ -939,7 +891,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * is per-request, so with no reason the honest answer is no note at all.
    */
   test("an unresolved-tags cause with no reason renders the head and claims no reach", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -970,9 +922,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -1008,7 +958,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * policies" is the shape a hard-coded number wears.
    */
   test("one tag policy is named in the singular", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1038,9 +988,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -1061,7 +1009,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * overall.
    */
   test("the composite priority refusal names which policy is the tag one", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1096,9 +1044,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const sentence = within(result).getByTestId("undecidable-cause-sentence");
@@ -1141,7 +1087,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * value, the shape), and none may render empty.
    */
   test("the tag causes each render a sentence naming what a steward must act on", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1209,9 +1155,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -1282,7 +1226,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * access" for that would understate an incident as a gap.
    */
   test("the tag normalisation cause separates an editable name from a plugin that will not load", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1348,9 +1292,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -1418,7 +1360,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * wrong place), each must carry its own payload, and no two may read alike.
    */
   test("the tag attachment cause renders all three shapes, each naming the tag", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1474,9 +1416,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
@@ -1521,7 +1461,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * which row to change.
    */
   test("a tag that reaches this column from the table says so, beside the deny it caused", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1551,9 +1491,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     // ⚠ **Scoped to the badge, review M1.** These used to be asserted against the
@@ -1590,9 +1528,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * the heading is exactly the kind of sentence that gets widened again.
    */
   test("the tag list is labelled as the request's, and says what it does not reach", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
     const result = await screen.findByTestId("explain-result");
 
     // The label: the REQUEST, not "this resource" and not anything that reads as
@@ -1621,7 +1557,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * the verdict; this block must not contradict it.
    */
   test("a declined resolution is not reported as the target carrying no tags", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1649,9 +1585,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         },
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     expect(result).toHaveTextContent(/not resolved/i);
@@ -1677,9 +1611,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * defect, whatever number it is.
    */
   test("the access-only limit states itself and promises no release", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
     const result = await screen.findByTestId("explain-result");
     const limits = within(result).getByTestId("honest-limits");
 
@@ -1714,13 +1646,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * than the empty case that could never have caught it.
    */
   test("a catalog nothing serves renders no tag block at all", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: { outcome: "no_profile_serves_the_catalog", profiles: [] },
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     expect(within(result).getByTestId("no-profile-state")).toBeInTheDocument();
@@ -1754,7 +1684,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * the two profiles shared a claim: the first must say so, the second must not.
    */
   test("a profile whose download carries no tag policies says so instead of listing tags", async () => {
-    mutateAsync.mockResolvedValueOnce({
+    answer.mockResolvedValueOnce({
       status: 200,
       data: {
         outcome: "per_profile",
@@ -1790,9 +1720,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
         ],
       } satisfies ExplainResponse,
     });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     const result = await screen.findByTestId("explain-result");
     const blocks = within(result).getAllByTestId("explain-profile");
@@ -1809,133 +1737,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       /carries no tag policies, so no tag decided anything here/i,
     );
   });
-
-  test("a 403 renders as a forbidden message, not a bare error", async () => {
-    mutateAsync.mockRejectedValueOnce(new ApiError(403, "forbidden"));
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
-
-    expect(await screen.findByText(/policy:read/)).toBeInTheDocument();
-  });
-});
-
-describe("ExplainAccess — a disabled Explain button says what it is waiting for", () => {
-  /**
-   * SP4b-2 finding 2, the button half. `Explain` starts disabled and, with
-   * `policy:read` alone, can never enable — the target picker has no options
-   * (it names the missing `catalog_registry:read` itself; see
-   * `ScopePicker.test.tsx`). Either way the button must not sit there inert
-   * with nothing said.
-   */
-  test("names both missing inputs, then stops explaining once they are supplied", async () => {
-    const user = userEvent.setup();
-    renderPage();
-
-    expect(screen.getByRole("button", { name: /Explain/ })).toBeDisabled();
-    expect(screen.getByText("Explain needs a user and a target catalog.")).toBeInTheDocument();
-
-    await user.type(screen.getByLabelText("User"), "alice-doe");
-    expect(screen.getByText("Explain needs a target catalog.")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "set-scope" }));
-    expect(screen.getByRole("button", { name: /Explain/ })).toBeEnabled();
-    expect(screen.queryByText(/^Explain needs/)).not.toBeInTheDocument();
-  });
-});
-
-describe("ExplainAccess — the subject is a user and nothing else", () => {
-  /**
-   * **SP4d-2a Task 5 removed `groups` from `ExplainSubject`** — the third field
-   * removed from that struct for the third version of one reason: a
-   * caller-supplied value cannot stand in for a fact only egret can verify.
-   * `roles` and `groups` reach the evaluator EMPTY because egret serves no
-   * roles download and runs no usersync, so a policy item naming a role, or a
-   * group OTHER THAN `public`, matches nobody on any engine egret provisions.
-   * A field whose value can change no answer lies about what the endpoint
-   * does, so the input is gone and the request carries neither key.
-   *
-   * **`public` is the exception, and the reason removing the field loses
-   * nothing.** `egret-ranger-eval` matches `public` by NAME, independently of
-   * what the request carries, because Ranger does — so a policy granting to
-   * `public` decides here either way, and a caller could never have changed
-   * that by naming it. Every other group name is a value only egret could
-   * verify and egret cannot.
-   */
-  test("offers no Groups or Roles field and sends neither key", async () => {
-    const user = userEvent.setup();
-    renderPage();
-
-    expect(screen.queryByLabelText("Groups")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Roles")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/add a group/i)).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/add a role/i)).not.toBeInTheDocument();
-
-    await submit(user);
-
-    expect(mutateAsync).toHaveBeenCalledTimes(1);
-    const sent = mutateAsync.mock.calls[0][0].data.subject;
-    expect(sent).not.toHaveProperty("groups");
-    expect(sent).not.toHaveProperty("roles");
-    expect(sent.user).toBe("alice-doe");
-  });
-});
-
-describe("ExplainAccess — the subject's ref is the allocated username (fact 5/5)", () => {
-  /**
-   * **THE DISCRIMINATING CASE (review M-2).** The engine sees a bare
-   * `username`; `list_principals` returns an email as well, and a page that
-   * stored the email would get "no policy matched" — a wrong answer that looks
-   * exactly like a real one, on the page built to explain why. The suggestion
-   * shows `stored as …` so the operator can see which value is kept, and the
-   * explain request carries that value.
-   */
-  test("selecting a suggestion sends the username, not the email", async () => {
-    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
-      status: 200,
-      data: [
-        {
-          kind: "user",
-          name: "alice@egret.local",
-          label: "Alice Doe",
-          username: "alice-doe-2",
-        },
-      ],
-      headers: new Headers(),
-    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
-
-    const user = userEvent.setup();
-    renderPage();
-    await user.click(screen.getByLabelText("User"));
-
-    const option = await screen.findByRole("button", { name: /Alice Doe/ });
-    expect(option).toHaveTextContent("stored as alice-doe-2");
-    await user.click(option);
-
-    await user.click(screen.getByRole("button", { name: "set-scope" }));
-    await user.click(screen.getByRole("button", { name: /Explain/ }));
-
-    expect(mutateAsync).toHaveBeenCalled();
-    expect(mutateAsync.mock.calls[0][0].data.subject.user).toBe("alice-doe-2");
-  });
-
-  /** A principal with no allocated username has no ref the engine could ever
-   *  see, so it is shown and NOT selectable — never an invented slug (the
-   *  collision suffix `-2` above is unreproducible client-side). */
-  test("a principal with no allocated username is not offered", async () => {
-    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
-      status: 200,
-      data: [{ kind: "user", name: "bob@egret.local", label: "Bob Roe", username: null }],
-      headers: new Headers(),
-    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
-
-    const user = userEvent.setup();
-    renderPage();
-    await user.click(screen.getByLabelText("User"));
-
-    expect(await screen.findByText(/no allocated username yet/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
-  });
 });
 
 /**
@@ -1945,7 +1746,7 @@ describe("ExplainAccess — the subject's ref is the allocated username (fact 5/
  * verdict and `masked_read_skips_access` is set. The `create materialized view`
  * row is gone (M-4, N2): the page states the engine-wide rule instead.
  */
-describe("ExplainAccess — the StarRocks mask and the materialized-view rule", () => {
+describe("ExplainResultView — the StarRocks mask and the materialized-view rule", () => {
   const UNCLEARED_MASKED: ExplainResponse = {
     outcome: "per_profile",
     profiles: [
@@ -1976,10 +1777,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
   };
 
   test("an uncleared read of a masked StarRocks column says NULL via the mask, not denied", async () => {
-    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
+    await renderAnswer();
 
     const profile = await screen.findByTestId("explain-profile");
     const mask = within(profile).getByTestId("explain-mask");
@@ -2034,10 +1833,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
         },
       ],
     };
-    mutateAsync.mockResolvedValue({ status: 200, data: cleared });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: cleared });
+    await renderAnswer();
 
     const profile = await screen.findByTestId("explain-profile");
     const mask = within(profile).getByTestId("explain-mask");
@@ -2083,10 +1880,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
         },
       ],
     } as unknown as ExplainResponse;
-    mutateAsync.mockResolvedValue({ status: 200, data: undecidable });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: undecidable });
+    await renderAnswer();
 
     const profile = await screen.findByTestId("explain-profile");
     const note = within(profile).getByTestId("explain-mask-provisional");
@@ -2115,10 +1910,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
         },
       ],
     };
-    mutateAsync.mockResolvedValue({ status: 200, data: attributed });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: attributed });
+    await renderAnswer();
     const profile = await screen.findByTestId("explain-profile");
     const by = within(profile).getByTestId("explain-mask-decided-by");
     expect(within(by).getByTestId("clearance-attribution")).toHaveTextContent("pii");
@@ -2148,10 +1941,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
         },
       ],
     };
-    mutateAsync.mockResolvedValue({ status: 200, data: hand });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: hand });
+    await renderAnswer();
     const profile = await screen.findByTestId("explain-profile");
     const by = within(profile).getByTestId("explain-mask-decided-by");
     expect(by).toHaveTextContent(/did not mint this policy/i);
@@ -2169,30 +1960,79 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
         },
       ],
     } as unknown as ExplainResponse;
-    mutateAsync.mockResolvedValue({ status: 200, data: none });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: none });
+    await renderAnswer();
     const profile = await screen.findByTestId("explain-profile");
     expect(within(profile).getByTestId("explain-mask")).toHaveTextContent(/no mask applies/i);
     expect(within(profile).queryByTestId("explain-mask-decided-by")).not.toBeInTheDocument();
   });
 
   test("a decided mask carries no provisional note", async () => {
-    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    answer.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
+    await renderAnswer();
     const profile = await screen.findByTestId("explain-profile");
     expect(within(profile).queryByTestId("explain-mask-provisional")).not.toBeInTheDocument();
   });
 
   test("a profile with no mask verdict shows no mask line", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
+    await renderAnswer();
 
     await screen.findByTestId("explain-result");
     expect(screen.queryByTestId("explain-mask")).not.toBeInTheDocument();
+  });
+});
+
+describe("SubjectUserField — the subject's ref is the allocated username (fact 5/5)", () => {
+  /**
+   * **THE DISCRIMINATING CASE (review M-2).** The engine sees a bare
+   * `username`; `list_principals` returns an email as well, and a field that
+   * stored the email would get "no policy matched" — a wrong answer that looks
+   * exactly like a real one, on the surface built to explain why. The
+   * suggestion shows `stored as …` so the operator can see which value is
+   * kept, and the field hands that value on.
+   */
+  test("selecting a suggestion stores the username, not the email", async () => {
+    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
+      status: 200,
+      data: [
+        {
+          kind: "user",
+          name: "alice@egret.local",
+          label: "Alice Doe",
+          username: "alice-doe-2",
+        },
+      ],
+      headers: new Headers(),
+    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
+    const onChange = vi.fn();
+
+    const user = userEvent.setup();
+    wrap(<SubjectUserField value="" onChange={onChange} />);
+    await user.click(screen.getByLabelText("User"));
+
+    const option = await screen.findByRole("button", { name: /Alice Doe/ });
+    expect(option).toHaveTextContent("stored as alice-doe-2");
+    await user.click(option);
+
+    expect(onChange).toHaveBeenLastCalledWith("alice-doe-2");
+    expect(onChange).not.toHaveBeenCalledWith("alice@egret.local");
+  });
+
+  /** A principal with no allocated username has no ref the engine could ever
+   *  see, so it is shown and NOT selectable — never an invented slug (the
+   *  collision suffix `-2` above is unreproducible client-side). */
+  test("a principal with no allocated username is not offered", async () => {
+    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
+      status: 200,
+      data: [{ kind: "user", name: "bob@egret.local", label: "Bob Roe", username: null }],
+      headers: new Headers(),
+    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
+
+    const user = userEvent.setup();
+    wrap(<SubjectUserField value="" onChange={vi.fn()} />);
+    await user.click(screen.getByLabelText("User"));
+
+    expect(await screen.findByText(/no allocated username yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
   });
 });

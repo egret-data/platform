@@ -405,6 +405,61 @@ describe("the index's Check access dialog", () => {
     expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  // Moved from the Explain access page's tests (DG redesign #2, P8), as the dialog asks them now.
+  it("names what a disabled Explain waits for, until the question is complete", async () => {
+    serve({});
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    expect(within(dialog).getByRole("button", { name: "Explain" })).toBeDisabled();
+    expect(within(dialog).getByText("Explain needs a user and a target catalog.")).toBeInTheDocument();
+
+    await user.type(within(dialog).getByLabelText("User"), "ana");
+    expect(within(dialog).getByText("Explain needs a target catalog.")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
+    expect(within(dialog).getByRole("button", { name: "Explain" })).toBeEnabled();
+    expect(within(dialog).queryByText(/^Explain needs/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * SP4d-2a Task 5: `ExplainSubject` is a user and nothing else. Roles and
+   * groups reach the evaluator empty (no engine egret provisions can match
+   * either), so a user question offers no Groups or Roles field and the request
+   * carries neither key; a group or role is asked through
+   * `/perm/explain/principal`, membership read by the server.
+   */
+  it("asks about a user with the username alone: no Groups or Roles field, neither key sent", async () => {
+    const posts = serve({ explain: ok(explainOf(ALLOWED)) });
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    expect(within(dialog).queryByLabelText("Groups")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Roles")).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("User"), "alice-doe");
+    await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+    await within(dialog).findByTestId("explain-result");
+    expect(posts).toEqual([
+      { call: "explain", body: { subject: { user: "alice-doe" }, action: "read", target: { catalog_id: "c-ice", schema: "sales" } } },
+    ]);
+  });
+
+  it("says a 403 needs policy:read, not a bare error", async () => {
+    serve({ explain: { status: 403, body: { error: "forbidden" } } });
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    await user.type(within(dialog).getByLabelText("User"), "ana");
+    await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+    expect(await within(dialog).findByText("Explaining access needs the policy:read permission.")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^forbidden$/)).not.toBeInTheDocument();
+  });
+
   it("asks about a user through /perm/explain", async () => {
     const posts = serve({ explain: ok(explainOf(ALLOWED)) });
     const user = userEvent.setup();

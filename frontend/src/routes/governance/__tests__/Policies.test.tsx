@@ -2,11 +2,12 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import Policies from "../Policies";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import type { StoredOverlap } from "@/api/generated/model";
 
 const createProfile = vi.fn((_name: string, _type: string) =>
   Promise.resolve({ id: 3, name: "sr", type: "starrocks" }),
@@ -56,6 +57,16 @@ vi.mock("@/api/policies", () => ({
   compilerOwnedConflict: () => null,
 }));
 
+// The every-profile overlap report (moved here from Mask & filter rules, DG
+// redesign #2 P8); its own behaviour is `OverlapReport.test.tsx`'s.
+let overlapRows: StoredOverlap[] = [];
+vi.mock("@/api/generated/perm/perm", () => ({
+  usePermListOverlaps: () => ({ data: { status: 200, data: overlapRows }, isLoading: false, isError: false, error: null }),
+}));
+afterEach(() => {
+  overlapRows = [];
+});
+
 const ADMIN: Me = { user_id: "u2", email: "admin@egret.local", platform_roles: ["platform_admin"], permissions: [] };
 
 /** Default `me` is the admin, because every test below that drives a WRITE is
@@ -81,6 +92,28 @@ const ENGINE_CREATOR: Me = {
 };
 
 describe("Policies page (profiles landing)", () => {
+  it("shows the stored overlapping pairs of every profile, a tag service's included", async () => {
+    overlapRows = [
+      {
+        serviceId: 99,
+        serviceName: "orphan_tag",
+        kind: "mask",
+        coordinate: "catalog=[wh] column=[email] schema=[sales] table=[orders]",
+        rules: [
+          { id: "r-a", policyId: 11, name: "mask emails" },
+          { id: "r-b", policyId: 12, name: "null orders email" },
+        ],
+        servedToday: null,
+        sentence: "two mask policies ...",
+        howToFix: "Delete one of the two.",
+      },
+    ];
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "trino" });
+    expect(screen.getByText("1 pair of rules overlaps")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "rule mask emails" })).toHaveAttribute("href", "/governance/rules/r-a");
+  });
+
   it("renders each profile as a link to its detail page", async () => {
     wrap(<Policies />);
     const link = await screen.findByRole("link", { name: "trino" });

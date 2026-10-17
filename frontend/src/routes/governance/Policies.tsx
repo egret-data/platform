@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+import { OverlapReport } from "./OverlapReport";
 import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 export const profilesQueryKey = ["control-plane", "profiles"] as const;
@@ -278,6 +279,12 @@ export default function Policies() {
           )}
         </div>
       </div>
+
+      {/* Every profile's stored overlapping pairs (SP4d-4), here since Mask &
+          filter rules is gone (DG redesign #2, P8). A profile's own page shows
+          only the pairs reported under its name, so a pair reported under a
+          tag service no profile names is listed here alone. */}
+      <OverlapReport />
 
       <div className="space-y-4">
         {deleteError && (

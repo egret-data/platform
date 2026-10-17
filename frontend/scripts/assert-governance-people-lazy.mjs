@@ -2,9 +2,11 @@
 /**
  * IS THE GOVERNANCE PEOPLE AREA OUT OF THE ENTRY CHUNK?
  *
- * `App.tsx` reaches the People area (DG redesign #2: the People & groups index
- * and the principal pages) only through
- * `lazy(() => import("@/routes/governance/people/PeopleRoutes"))` (FE-ROUTE-2).
+ * `App.tsx` reaches the People area (DG redesign #2: the People & groups index,
+ * the principal pages, and one grant's and one rule's pages) only through
+ * `lazy(() => import("@/routes/governance/people/PeopleRoutes"))`,
+ * `lazy(() => import(".../people/GrantPage"))` and
+ * `lazy(() => import(".../people/RulePage"))` (FE-ROUTE-2).
  * Neither vitest nor `vite dev` code-splits, so only a production build can
  * show the area stayed lazy; this follows `assert-governance-data-lazy.mjs`.
  *
@@ -16,7 +18,8 @@
  * imports `PeopleIndex.tsx`, so a static import of it is caught through
  * PeopleIndex's marker; `principalData.ts` has none either, and PrincipalPage's
  * marker catches it, as it catches `tabs/CheckAccessTab.tsx`, whose one sentence
- * `components/perm/MembersExplainView.tsx` (shared, outside the area) also spells. `peopleUrl.ts` is NOT guarded: pages outside the area
+ * `components/perm/MembersExplainView.tsx` (shared, outside the area) also spells; `itemParts.tsx`
+ * has none, and GrantPage's marker catches it. `peopleUrl.ts` is NOT guarded: pages outside the area
  * link into the area through it.
  */
 import { readFileSync, readdirSync } from "node:fs";
@@ -48,6 +51,11 @@ const MARKERS = [
   ["src/routes/governance/people/CheckAccessDialog.tsx", "can reach a target, per policy profile"],
   // The prefix a uuid ref may carry.
   ["src/routes/governance/people/reach.ts", "urn:uuid:"],
+  // `ASSIGNMENT_READ_ONLY`. GrantPage and RulePage are lazy imports of their own
+  // in App.tsx (`/governance/grants/:id`, `/governance/rules/:id`).
+  ["src/routes/governance/people/GrantPage.tsx", "The workspace assignment sync writes this grant; "],
+  // `RULE_NEEDS_UPDATE`.
+  ["src/routes/governance/people/RulePage.tsx", "Editing or deleting a rule needs the policy:update permission."],
 ];
 
 const entry = entryChunkName(DIST);

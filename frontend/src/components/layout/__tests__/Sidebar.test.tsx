@@ -385,7 +385,8 @@ describe("Sidebar – Governance app", () => {
     expect(groupOf("Lineage")).toContainElement(lineage);
   });
 
-  test("Data comes first, then People & groups, then the existing items (spec Part 1, #2 P2)", () => {
+  // #2 P8: Data permissions, Mask & filter rules and Explain access are gone.
+  test("Data comes first, then People & groups, then the existing items (spec Part 1, #2 P2, P8)", () => {
     renderSidebar("/governance/data");
     const labels = within(screen.getByTestId("app-sidebar"))
       .getAllByRole("link")
@@ -393,9 +394,6 @@ describe("Sidebar – Governance app", () => {
     expect(labels).toEqual([
       "Data",
       "People & groups",
-      "Data permissions",
-      "Mask & filter rules",
-      "Explain access",
       "Policies",
       "Classifications",
       "Data Lineage",

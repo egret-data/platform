@@ -60,6 +60,15 @@ const DataRoutes = lazy(() => import("@/routes/governance/data/DataRoutes"));
  */
 const PeopleRoutes = lazy(() => import("@/routes/governance/people/PeopleRoutes"));
 
+/**
+ * One grant's and one rule's pages (spec §2 "Single items"): People area
+ * modules, mounted at `/governance/grants/:id` and `/governance/rules/:id`
+ * (outside `people/*`, so through their own lazy imports) and guarded by the
+ * same bundle test.
+ */
+const GrantPage = lazy(() => import("@/routes/governance/people/GrantPage"));
+const RulePage = lazy(() => import("@/routes/governance/people/RulePage"));
+
 /** What the People area shows while its chunk loads: a list skeleton in the page frame. */
 function PeopleFallback() {
   return (
@@ -138,9 +147,6 @@ import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import SecretDetail from "@/routes/control-plane/SecretDetail";
-import DataPermissions from "@/routes/governance/DataPermissions";
-import MaskFilterRules from "@/routes/governance/MaskFilterRules";
-import ExplainAccess from "@/routes/governance/ExplainAccess";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
 import PolicyMigrationPage from "@/routes/governance/PolicyMigrationPage";
@@ -162,7 +168,7 @@ import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
 import Classifications from "@/routes/governance/Classifications";
 import TagDetail from "@/routes/governance/TagDetail";
-import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
+import { LegacyGovernanceRedirect, RetiredPermPageRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
@@ -555,12 +561,37 @@ function GovernanceRoutes() {
               </RequirePermission>
             }
           />
-          {/* SP4b-2: data-plane permission UI, gated the same way the existing
-              governance routes are — see the design spec's D4/D6 for why these
-              are separate pages rather than a mode switch on Policies. */}
-          <Route path="data-permissions" element={<RequirePermission perm="policy:read"><DataPermissions /></RequirePermission>} />
-          <Route path="mask-filter-rules" element={<RequirePermission perm="policy:read"><MaskFilterRules /></RequirePermission>} />
-          <Route path="explain-access" element={<RequirePermission perm="policy:read"><ExplainAccess /></RequirePermission>} />
+          {/* DG redesign #2 (spec §2 "Single items"): one grant, one rule, where
+              explain, the overlap report and the People area link. Reading is
+              `policy:read`; Edit and Delete need `policy:update`, which each
+              page checks. */}
+          <Route
+            path="grants/:id"
+            element={
+              <RequirePermission perm="policy:read">
+                <LazyRouteArea area="People & groups" fallback={<PeopleFallback />}>
+                  <GrantPage />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="rules/:id"
+            element={
+              <RequirePermission perm="policy:read">
+                <LazyRouteArea area="People & groups" fallback={<PeopleFallback />}>
+                  <RulePage />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
+          {/* DG redesign #2 (spec P8, §5): Data permissions, Mask & filter rules
+              and Explain access were replaced by People & groups and the pages
+              above; their URLs, and their `?grant=`/`?rule=` deep links,
+              redirect. The targets carry the guards. */}
+          <Route path="data-permissions" element={<RetiredPermPageRedirect />} />
+          <Route path="mask-filter-rules" element={<RetiredPermPageRedirect />} />
+          <Route path="explain-access" element={<RetiredPermPageRedirect />} />
           <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
           <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
           {/* SP4d-3: reading is `policy:read`; Preview, Migrate and Undo need

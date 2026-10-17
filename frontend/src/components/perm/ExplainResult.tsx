@@ -39,10 +39,11 @@ import { Label } from "@/components/ui/label";
 import type { VariantProps } from "class-variance-authority";
 
 /**
- * How an explain answer reads (`POST /perm/explain`), shared by Governance →
- * Explain access and the Data area's "Who can read?" dialog: the subject's
- * user field and the per-profile result. Moved here from `ExplainAccess`
- * unchanged; its tests (`ExplainAccess.test.tsx`) cover it through that page.
+ * How an explain answer reads (`POST /perm/explain`), shared by the People
+ * area's Check access and the Data area's "Who can read?" dialog: the
+ * subject's user field and the per-profile result. Moved here from the former
+ * Explain access page; its tests (`__tests__/ExplainResult.test.tsx`) render
+ * it directly.
  */
 
 type BadgeVariant = NonNullable<VariantProps<typeof badgeVariants>["variant"]>;
@@ -639,7 +640,7 @@ function DecidedBy({
     return (
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <Link
-          to={`/governance/data-permissions?grant=${encodeURIComponent(attribution.grant_id)}`}
+          to={`/governance/grants/${encodeURIComponent(attribution.grant_id)}`}
           className="text-primary hover:underline"
         >
           View grant {attribution.grant_id}
@@ -653,7 +654,7 @@ function DecidedBy({
     return (
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <Link
-          to={`/governance/mask-filter-rules?rule=${encodeURIComponent(attribution.rule_id)}`}
+          to={`/governance/rules/${encodeURIComponent(attribution.rule_id)}`}
           className="text-primary hover:underline"
         >
           View rule {attribution.rule_id}
@@ -1145,9 +1146,9 @@ export function SubjectUserField({
 
 /**
  * One explain answer: a block per policy profile, or the "nothing is
- * enforcing" state, then the limits of what it says. Moved out of
- * `ExplainAccess` unchanged so the Data area's "Who can read?" dialog renders
- * the same answer the same way.
+ * enforcing" state, then the limits of what it says. Moved out of the former
+ * Explain access page unchanged so every surface that asks explain (Check
+ * access, "Who can read?") renders the same answer the same way.
  */
 export function ExplainResultView({ result }: { result: ExplainResponse }) {
   return (

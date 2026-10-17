@@ -8,7 +8,7 @@ import {
   useLocation,
 } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
+import { LegacyGovernanceRedirect, RetiredPermPageRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 
 function Where({ app }: { app: string }) {
   const { pathname, search, hash } = useLocation();
@@ -69,6 +69,42 @@ describe("LegacyGovernanceRedirect", () => {
     );
     render(<RouterProvider router={router} />);
     expect(await screen.findByTestId("where")).toHaveTextContent("governance /governance/policies/trino-prod?scope=tag");
+    expect(router.state.historyAction).toBe("REPLACE");
+  });
+});
+
+/**
+ * DG redesign #2, spec P8 and §5: Explain access, Data permissions and Mask &
+ * filter rules are gone. Their URLs open People & groups; a deep link to one
+ * grant or rule (`?grant=`, `?rule=`, which explain and the overlap report
+ * used to write) opens that grant's or rule's own page.
+ */
+describe("RetiredPermPageRedirect", () => {
+  function renderRetired(url: string) {
+    const router = createMemoryRouter(
+      [
+        { path: "/governance/data-permissions", element: <RetiredPermPageRedirect /> },
+        { path: "/governance/mask-filter-rules", element: <RetiredPermPageRedirect /> },
+        { path: "/governance/explain-access", element: <RetiredPermPageRedirect /> },
+        { path: "/governance/*", element: <Where app="governance" /> },
+      ],
+      { initialEntries: [url] },
+    );
+    render(<RouterProvider router={router} />);
+    return router;
+  }
+
+  it.each([
+    ["/governance/explain-access", "governance /governance/people"],
+    ["/governance/data-permissions", "governance /governance/people"],
+    ["/governance/mask-filter-rules", "governance /governance/people"],
+    ["/governance/data-permissions?grant=g-1", "governance /governance/grants/g-1"],
+    ["/governance/mask-filter-rules?rule=r-1", "governance /governance/rules/r-1"],
+    ["/governance/mask-filter-rules?rule=", "governance /governance/people"],
+    ["/governance/data-permissions?grant=a%2Fb", "governance /governance/grants/a%2Fb"],
+  ])("sends %s to %s, with replace", async (from, to) => {
+    const router = renderRetired(from);
+    expect((await screen.findByTestId("where")).textContent).toBe(to);
     expect(router.state.historyAction).toBe("REPLACE");
   });
 });
