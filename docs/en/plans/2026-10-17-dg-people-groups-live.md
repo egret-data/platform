@@ -227,3 +227,141 @@ Battery outputs are in the scratchpad `dgpg/`: `battery-main.txt`, `c5.txt`, `c6
   - the scratchpad `dgpg/`: battery outputs, scripts, Trino/StarRocks configs and the public cert.
 - **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7*-postgres`, ports 5173, 5000 and 8080.
   Free disk at the end: 102 GiB. No product code changed.
+
+## 2. The live browser check of People & groups (Task 14)
+
+Measurement only: defects are recorded here and fixed in a later fix round.
+
+### 2.0 Predictions (committed before anything was observed)
+
+Written from the code at `cfba7b88` and §1, before any container of this run was started (only the image build had
+begun). A wrong prediction is a finding. Nothing in this subsection is edited after observing.
+
+**Setup the predictions are about.** §1.2's stack, rebuilt from `cfba7b88`: image `egret-backend:vg-dgpg14`, DB
+`egret_dgpg_live2`, containers `vg-*` on `vg-net` (`vg-egret`, `vg-rustfs`, `vg-trino-coord` Trino 483 JWT/TLS
+profile `vgtr` + tag profile `vgtr-tag`, `vg-sr` StarRocks 4.1.6 Ranger profile `vgsr`, both polling every 5 s).
+The frontend is this branch's vite dev server on a free port, proxying `/api`, `/catalog`, `/oauth` to `vg-egret`;
+the browser is Playwright, logged in once as `admin@egret.local` and once per steward.
+- Catalog `ice` (egret Iceberg) attached to both engines: `s.t(id, v)`, `s.c6(id, secret)`, `s.c7(id, secret)`,
+  written as StarRocks `root` before Ranger is switched on.
+- Users (`POST /users`, `<name>@vg.local`): `ua`, `uc`, `ud`, `ue` get their username through the new
+  `POST /perm/people/users/{id}/username` (no SQL, unlike §1's DEV-3); `ub`, `uf`, `un`, `uz` have none.
+  Stewards: `vsr` (platform role `vg_reader`: `policy:read` only), `vs` (`vg_steward`: `policy:read`,
+  `policy:update`), `vt` (`vg_tagger`: `tag:read` only). A Data API service account `vgsa`
+  (`POST /ws/default/data-api/service-accounts`). StarRocks users of the same names exist.
+- Groups `g1` = {`ua`, `ub`}, `g2` = {`ue`}. Role `r1` (platform), held directly by `ud`, `uf` and by group `g2`.
+- Grants (`POST /perm/grants`, after the memberships):
+  - G1 allow read `ice.s.t` → group `g1`; G2 allow read `ice.s.t` → role `r1`;
+  - G3 allow read `ice.s.c6` → user `uc`;
+  - G4 allow read `ice.s.t` → user `ue`, **exclude role `r1`** (the exclude via a group-held role);
+  - G5 allow read `ice.s.c7` → group `g1`, role `r1`;
+  - G6 allow read `ice.s.t` → user `ua`, then by SQL (DEV) an include `user uz` (the stale ref for the 409 guard)
+    and an exclude `user ghost` (a pre-J-F3 row that fails open).
+- Gates: tag `vggroup` on `ice.s.c6.secret` with `required_groups = [g1]`; tag `vgrole` on `ice.s.c7.secret` with
+  `required_roles = [r1]`.
+- Rules: M1 `MASK` on `ice.s.t.v`, exempt group `g1`; M2 `MASK_NULL` on tag `vgtagrule` (assigned nowhere), exempt
+  group `g2`; M3 `MASK_NULL` on tag `vgorphan`, whose tag is then deleted.
+- Real queries as in §1.2 DEV-4: Trino directly with a JWT signed by egret's key; StarRocks as the same-named user
+  through `mysql` in `vg-sr`.
+
+**Q1. Index (`/governance/people`).**
+
+| id | check | prediction |
+|---|---|---|
+| Q1a | Users tab | `admin`, `ua`…`uf`, `un`, `uz`, `vs`, `vsr`, `vt` (no `vgsa`). Username column: `admin`, `ua`, `ub` (minted by G1's compile), `uc`, `ud`, `ue`; the rest "No username yet". |
+| Q1b | Show service accounts | `vgsa` appears with a "Service account" badge and an empty Email cell; `?serviceAccounts=1` in the URL |
+| Q1c | Groups tab | `g1` "2 members", `g2` "1 member", source Local; the note "A member with no username gets one when a grant naming the group is compiled." Not confident whether `public` is listed |
+| Q1d | Roles tab | `r1` "2 holders (1 not on engines: no username)" (`ud`, `uf`; `g2`'s `ue` not counted), scope platform; the note naming that a group holding a role is not counted |
+| Q1e | Unmatched names | `user ghost` first, "Widens access", Allow, exclude; then `user uz`, "Narrows access", Allow, include. Each links to `/governance/grants/<G6>` |
+| Q1f | search | `?q=u` filters users; a miss shows "No user matches “…”." with Clear search |
+
+**Q2. Principal pages: Overview** (marks exactly as §1.1 measured).
+
+| id | page | prediction |
+|---|---|---|
+| Q2a | `ua` | Groups: `g1`, Applied on engines "Yes". No roles, no workspaces |
+| Q2b | `ub` | Groups `g1` "Yes"; username `ub` in the header |
+| Q2c | `ud` | Roles: `r1`, Platform, Direct, Never, "Yes" |
+| Q2d | `ue` | Groups `g2` "Yes"; Roles: `r1`, Platform, Through "Group g2", "egret only — not applied on engines: held through a group" |
+| Q2e | `uf` | header: the no-username sentence; Grant access disabled with "A grant names a user by username, and this user has none yet."; Roles `r1` Direct "No: no username yet" |
+| Q2f | `g1` | Members `ua` (`ua`), `ub` (`ub`); no roles held, no workspaces held |
+| Q2g | `g2` | Members `ue`; Roles held `r1` Platform "egret only — not applied on engines: held through a group" |
+| Q2h | `r1` | Holders `ud` (`ud`), `uf` ("Not named on engines until they have a username"); Groups holding this role: `g2`, Local, "egret only — not applied on engines"; header "2 holders" |
+| Q2i | `public` | the "Everyone. Engines resolve public themselves…" sentence; tabs Permissions and Masks & filters only |
+
+**Q3. Permissions, Masks & filters, Clearances.**
+
+| id | page | prediction |
+|---|---|---|
+| Q3a | `ua` Permissions | Directly: G6; Through a group: G1 ("Through group g1 · applied on engines"); G5 under Through a group |
+| Q3b | `ue` Permissions | Directly: G4 with two lines, "Directly · applied on engines" and "Excluded in egret only — not on engines: through role r1, held by group g2"; egret only: G2 |
+| Q3c | `ue` real query | `ue` reads `ice.s.t` on both engines (G4's exclude compiles to an `allowExceptions` naming only `ud`); `v` masked by M1 |
+| Q3d | `ud` Permissions | Through a role: G2, G5; Excluded: G4 ("Excluded: through role r1 · applied on engines"). `ud` still reads `ice.s.t` on both engines (G2) |
+| Q3e | `uf` Permissions | the no-username note; G2, G5 under "Not applied on engines" |
+| Q3f | `g1` / `r1` Permissions | `g1`: Directly G1, G5. `r1`: Directly G2, G5; Excluded G4 |
+| Q3g | `ua` Masks & filters | Through a group: M1; "2 other rules apply to everyone they do not exempt…" |
+| Q3h | `ue` Masks & filters | Through a group: M2 |
+| Q3i | M1 real query | `ua`, `ub` read real `v`; `ud`, `ue` read masked `v`, on both engines |
+| Q3j | Clearances `uc` | `vggroup`: Engines "Engines do not enforce this gate (it names only groups)", egret objects "Not cleared". Real query: `uc` reads real `ice.s.c6.secret` on both engines |
+| Q3k | Clearances `ua` | `vggroup`: Engines the groups-only sentence, egret "Cleared through group g1". `vgrole`: Engines "Not cleared", egret "Not cleared". Real query: `ua` on `c7.secret` refused by Trino; NULL on StarRocks (the clearance mask, #1 live doc C2) |
+| Q3l | Clearances `ud`, `ue`, `uf` | `vgrole`: `ud` Engines "Cleared through role r1"; `ue` "Not cleared: the required role is held through a group…", egret "Cleared through role r1, held by group g2"; `uf` "Not cleared: no username yet", egret "Cleared through role r1". `ud` reads real `c7.secret` on both engines |
+| Q3m | Clearances `g1` | `vggroup`: Engines the groups-only sentence; egret "Cleared: the gate names this group" |
+
+**Q4. Check access** (target `ice.s.t`, action read).
+
+| id | subject | prediction |
+|---|---|---|
+| Q4a | `ua` (user page tab) | `ExplainResultView`, allowed on `vgtr` and `vgsr`; Trino rows, StarRocks rows |
+| Q4b | `uf` | "No username yet, so no engine knows this user."; nothing asked |
+| Q4c | `g1` | table of 2 members (`ua`, `ub`), each allowed on both profiles; counts 2 / 0 / 0; the "no single verdict" sentence; no "Not asked" |
+| Q4d | `r1` | 1 evaluated (`ud`, allowed on both); "Not asked": `uf` "No username yet…"; counts 1 / 0 / 0 |
+| Q4e | each member's verdict | equals a real query on each engine |
+| Q4f | index dialog | the same answers for a user and a group, chosen through the subject kind |
+
+**Q5. Writes from People.**
+- Q5a: Grant access on `uc`'s page opens GrantDialog with `user uc` in Include; read on `ice.s.t`, Create; toast;
+  the Permissions tab shows it under Directly. Within one poll (≤ 10 s) `uc` goes from refused to rows (`v` masked)
+  on both engines.
+- Q5b: in a GrantDialog (Data page `ice.s.t`), the include picker lists `un` under "Users with no username yet"
+  with "Allocate username and add"; confirm; the chip `user un` appears with "un was allocated a username and
+  added, stored as un."; Create; `un` reads `ice.s.t` on both engines within one poll.
+- Q5c: two picks in a row (`ua` then `ub`) without leaving the field: the list stays open after the first pick.
+- Q5d: Allocate for `uz` is refused: an alert "1 stored grant principal(s) or rule exemption(s) already name "uz"
+  as a user; …" with a link "grant <G6 id> · include names uz"; no chip; `uz` keeps no username.
+
+**Q6. Old URLs and single items.**
+- `/governance/data-permissions`, `/governance/mask-filter-rules`, `/governance/explain-access` →
+  `/governance/people` (replace). `?grant=<G1>` → `/governance/grants/<G1>`; `?rule=<M1>` →
+  `/governance/rules/<M1>`. `/governance/explain` (the brief's name) is not a route: the catch-all opens
+  `/governance/data`.
+- `/governance/grants/<G1>`: sentence, scope, principals linked to People, Open in Data, Edit/Delete for admin. An
+  unknown id: "No grant has this id; it may have been deleted."
+- `/governance/rules/<M1>` likewise; `/governance/rules/<M3>` says "No tag has the key vgorphan now."
+- An explain attribution link (Check access answer for `ua`) opens `/governance/grants/<id>`.
+- TagDetail of `vgtagrule`: section "Mask and filter rules" listing M2, "This tag", exempt `g2`.
+- Classifications: "1 rule selects a tag that no longer exists" listing M3 · tag key `vgorphan`.
+
+**Q7. Data area Who can read? with a group.** On `ice.s.t`: subject Group `g1` → 2 members allowed on both.
+On `ice.s.c7` column `secret`: `ua`, `ub` refused on `vgtr` (clearance deny), `MASK_NULL` on `vgsr`; real queries:
+Trino `Access Denied`, StarRocks `NULL`.
+
+**Q8. 390 px, dark, keyboard.**
+- At 390 px, light and dark: index, each principal page and tab, GrantPage, RulePage, the GrantDialog with the
+  picker open and the Check access dialog: the page never scrolls sideways (`scrollWidth == clientWidth`). Tables
+  may clip inside their own scroll containers (as #1's D10). Dark mode: no white surface.
+- Index tabs and principal tabs: Radix arrows move and select; `?kind=` / `?tab=` follow.
+- PrincipalPicker: ArrowDown/Up move the active option, Enter adds it and the list stays open, Escape closes the
+  list and **not** the GrantDialog.
+- SubjectNameField (group/role subject, Check access dialog): arrows and Enter pick. **Escape with the list open
+  closes the whole dialog** (Radix listens on the document in the capture phase, before the field's React
+  handler; the field has no window capture listener like the picker's). Predicted defect.
+- SubjectUserField (user subject): not a combobox; no arrow keys; Tab to a suggestion closes the list (the
+  150 ms blur timer) so a suggestion cannot be picked by keyboard; typing the username works. Escape closes the
+  dialog.
+
+**Q9. Stewards.**
+- `vsr` (`policy:read`): sidebar shows People & groups; index and pages load; no Grant access on principal pages;
+  no Manage in Control Plane; GrantPage says "Editing or deleting a grant needs the policy:update permission.";
+  Clearances tag names are not links (no `tag:read`). Allocate is unreachable (no GrantDialog opens).
+- `vs` (`policy:read` + `policy:update`): Grant access shown; the picker offers "Allocate username and add".
+- `vt` (`tag:read` only): no People & groups in the sidebar; `/governance/people` renders the Forbidden page.
