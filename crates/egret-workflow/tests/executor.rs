@@ -3655,11 +3655,12 @@ fn the_two_state_vocabularies_agree() {
         missing,
         BTreeSet::from([
             "BREAKPOINT".to_string(),
-            "KILLING".to_string(),
             "QUEUED".to_string(),
             "RESUBMITTED".to_string(),
         ]),
-        "the FOUR of Kestra's seventeen that `RunState` does not hold. It was \
+        "the THREE of Kestra's seventeen (four until the kill package's Task 1 \
+         added `Killing`, which the golden does not hold but the kill route \
+         writes) that `RunState` does not hold. It was \
          six until W8 Task 5 added `Warning` and five until W8 Task 6 added \
          `Cancelled` -- which was the golden's last unrepresentable state, so \
          **none of the four left appears in the golden at all** and this set \
@@ -5493,6 +5494,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
                     | "RESTARTED"
                     | "WARNING"
                     | "CANCELLED"
+                    | "KILLING"
             )
         })
         .collect();
@@ -5502,7 +5504,13 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         .filter(|s| {
             !matches!(
                 *s,
-                "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+                "RETRIED"
+                    | "SKIPPED"
+                    | "PAUSED"
+                    | "RESTARTED"
+                    | "WARNING"
+                    | "CANCELLED"
+                    | "KILLING"
             )
         })
         .collect();
@@ -5512,14 +5520,19 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         .filter(|s| {
             !matches!(
                 *s,
-                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED" | "KILLING"
             )
         })
         .collect();
     let through_w3c: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED" | "KILLING"
+            )
+        })
         .collect();
     // W8 Task 2's tier, which was `held` itself until W8 Task 5 added
     // `WARNING`. It is spelled out rather than left as "everything but the
@@ -5527,7 +5540,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let through_w8_task_2: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED"))
+        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED" | "KILLING"))
         .collect();
     // W8 Task 5's tier. `held` itself until W8 Task 6 added `CANCELLED`, which
     // is the LAST of the golden's thirteen -- so `fits_now` below is now the
@@ -5535,7 +5548,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let through_w8_task_5: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "CANCELLED"))
+        .filter(|s| !matches!(*s, "CANCELLED" | "KILLING"))
         .collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
@@ -5669,13 +5682,25 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     // above falsifiable by something other than itself: the two vocabularies
     // are now the SAME SET, so a variant removed from `RunState` or a state
     // added to the golden fails here by name.
+    //
+    // **`KILLING` is the one state `RunState` holds and the golden does not**
+    // (the kill package's Task 1): the kill route writes it, and no corpus
+    // entry kills an execution. It is named rather than filtered out, so a
+    // second such state fails here instead of joining it silently.
     let held_owned: BTreeSet<String> = held.iter().map(|s| s.to_string()).collect();
+    let beyond_golden: BTreeSet<String> = held_owned.difference(&all).cloned().collect();
     assert_eq!(
-        held_owned, all,
-        "`RunState` now holds exactly the golden's vocabulary -- neither more \
-         nor less. `models::State` still holds four Kestra states neither of \
-         these sets has (KILLING, QUEUED, BREAKPOINT, RESUBMITTED); that \
-         direction is `the_two_state_vocabularies_agree`'s"
+        beyond_golden,
+        BTreeSet::from(["KILLING".to_string()]),
+        "`RunState` holds the golden's vocabulary plus `KILLING` and nothing else"
+    );
+    let within_golden: BTreeSet<String> = held_owned.intersection(&all).cloned().collect();
+    assert_eq!(
+        within_golden, all,
+        "`RunState` holds the golden's whole vocabulary -- `models::State` \
+         still holds three Kestra states neither of these sets has (QUEUED, \
+         BREAKPOINT, RESUBMITTED); that direction is \
+         `the_two_state_vocabularies_agree`'s"
     );
 }
 

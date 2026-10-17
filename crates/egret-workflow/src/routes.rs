@@ -2210,6 +2210,9 @@ async fn get_execution_logs(
 //    kill cannot even be recorded as pending while the worker is asked to stop;
 //    it is one atomic transition or nothing, and `RunState::ALL` is round-tripped
 //    against `slot()` by a test, so adding a variant is not a local edit.
+//    **Since resolved:** the kill package's Task 1 added `RunState::Killing`
+//    (non-terminal, wire `KILLING`); the count above is what it was when this
+//    was written.
 // 5. **Clearing `claimed_at` RE-OPENS the run rather than closing it.**
 //    `claim`'s predicate is `state = 'RUNNING' AND claimed_at IS NULL`, so the
 //    obvious way to make `apply_outcome`'s fence miss — null the lease — hands

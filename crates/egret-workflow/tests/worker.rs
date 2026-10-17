@@ -7835,7 +7835,7 @@ async fn a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is
 /// | `RETRYING` | yes | `retry::reopen_due` puts it back to `CREATED` |
 /// | `PAUSED` | yes | `flowable::resume_paused` ends the wait — W8 Task 7 |
 /// | `RETRIED` | yes | `replay::spawn_due` starts the new execution |
-/// | the other ten | no | nothing moves a run in them, so a named one would be relocked and re-settled on every tick for ever |
+/// | the other eleven | no | nothing moves a run in them, so a named one would be relocked and re-settled on every tick for ever |
 ///
 /// **`RESTARTED` is the one to look at twice**, because it is the other
 /// non-terminal state W8 Task 2 added and "non-terminal" is not the rule here.
@@ -7847,7 +7847,7 @@ async fn a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is
 ///
 /// # The clock control
 ///
-/// A fourteenth execution is `'PAUSED'` with a deadline far in the future. It
+/// One more execution is `'PAUSED'` with a deadline far in the future. It
 /// is what fails if the clock term is dropped while the state terms are kept,
 /// which a state-only table could not see.
 #[sqlx::test(migrations = "../../migrations")]
@@ -7874,6 +7874,10 @@ async fn the_waker_names_exactly_the_states_something_will_move(pool: sqlx::PgPo
         ("RESTARTED", false),
         ("WARNING", false),
         ("CANCELLED", false),
+        // The kill package's Task 1. A `KILLING` run is closed by `advance()`
+        // (flowable) or by the worker that holds it (leased) -- never by the
+        // waker, which would resume a run that is being stopped.
+        ("KILLING", false),
     ]);
 
     let vocabulary: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();

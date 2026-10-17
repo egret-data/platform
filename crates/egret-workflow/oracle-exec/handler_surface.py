@@ -528,7 +528,7 @@ W3A_FLOWABLES = {
 # and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
              "RETRYING", "RETRIED", "KILLED", "SKIPPED",
-             "PAUSED", "RESTARTED", "WARNING", "CANCELLED"}
+             "PAUSED", "RESTARTED", "WARNING", "CANCELLED", "KILLING"}
 
 # `State.Type`'s seventeen, i.e. `models::State`.  Used ONLY by the self-test,
 # to pick a state that is real to Kestra and absent from RUN_STATE above --

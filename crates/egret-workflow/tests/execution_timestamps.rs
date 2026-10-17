@@ -1117,6 +1117,46 @@ async fn the_schema_refuses_an_end_on_a_live_row_and_an_end_before_the_start(poo
     );
 }
 
+/// **`KILLING` needs no migration**: no CHECK lists the state vocabulary, so
+/// both tables take it on a live row, and the one CHECK that reads the state
+/// (`*_ended_only_when_terminal`, through `workflow.state_is_terminal`) treats
+/// it as live -- an end on a `KILLING` row is refused like one on `RUNNING`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_schema_holds_killing_as_a_live_state(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let ex = start(&pool, ws, &one_log("killing")).await;
+    let tables: [(&str, &'static str, &'static str); 2] = [
+        (
+            "workflow.executions",
+            "UPDATE workflow.executions SET state = 'KILLING', ended_at = NULL WHERE id = $1",
+            "UPDATE workflow.executions SET ended_at = now() WHERE id = $1",
+        ),
+        (
+            "workflow.task_runs",
+            "UPDATE workflow.task_runs SET state = 'KILLING', ended_at = NULL WHERE execution_id = $1",
+            "UPDATE workflow.task_runs SET ended_at = now() WHERE execution_id = $1",
+        ),
+    ];
+    for (table, live, end) in tables {
+        let n = sqlx::query(live)
+            .bind(ex)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{table} refused a live KILLING row: {e}"))
+            .rows_affected();
+        assert!(n >= 1, "{table}: the fixture wrote no KILLING row");
+        let ended = sqlx::query(end)
+            .bind(ex)
+            .execute(&pool)
+            .await
+            .expect_err("a KILLING row cannot carry an end");
+        assert!(
+            ended.to_string().contains("_ended_only_when_terminal"),
+            "{table}: {ended}"
+        );
+    }
+}
+
 // ── 15. The parent= index ───────────────────────────────────────────────────
 
 /// `EXPLAIN` of the list's OWN statement (`repo::EXECUTION_LIST_SQL`) with

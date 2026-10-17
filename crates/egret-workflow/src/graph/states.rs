@@ -37,8 +37,8 @@
 //! [`fold_state`] picks the state that ranks first in [`FOLD_PRIORITY`].
 //! Kestra's list (`ui/packages/topology/src/nodes/TaskNode.vue`, `SORT_STATUS`)
 //! is FAILED, KILLED, WARNING, SKIPPED, KILLING, RUNNING, SUCCESS, RESTARTED,
-//! CREATED; egret has no KILLING, and five of its states are not on the list
-//! at all. They are placed by meaning (see [`FOLD_PRIORITY`]).
+//! CREATED; egret holds all nine of those, and five of its states are not on
+//! the list at all. They are placed by meaning (see [`FOLD_PRIORITY`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -141,20 +141,22 @@ pub struct GraphRun {
 /// | 4 | WARNING | Kestra |
 /// | 5 | SKIPPED | Kestra |
 /// | 6 | RETRIED | not listed; a terminal left by a `CREATE_NEW_EXECUTION` retry, ranked with the terminals above the live states, as Kestra ranks WARNING and SKIPPED |
-/// | 7 | PAUSED | not listed; live and waiting on a person, so it shows over a sibling that is merely running (Kestra's KILLING slot, live, sits here too) |
-/// | 8 | RETRYING | not listed; live, between attempts |
-/// | 9 | RUNNING | Kestra |
-/// | 10 | SUBMITTED | not listed; live, handed to a worker but not yet running |
-/// | 11 | SUCCESS | Kestra |
-/// | 12 | RESTARTED | Kestra |
-/// | 13 | CREATED | Kestra |
-pub const FOLD_PRIORITY: [RunState; 13] = [
+/// | 7 | KILLING | Kestra (after SKIPPED, before RUNNING); the first live state, so a kill in flight shows over a sibling that is paused or running |
+/// | 8 | PAUSED | not listed; live and waiting on a person, so it shows over a sibling that is merely running |
+/// | 9 | RETRYING | not listed; live, between attempts |
+/// | 10 | RUNNING | Kestra |
+/// | 11 | SUBMITTED | not listed; live, handed to a worker but not yet running |
+/// | 12 | SUCCESS | Kestra |
+/// | 13 | RESTARTED | Kestra |
+/// | 14 | CREATED | Kestra |
+pub const FOLD_PRIORITY: [RunState; 14] = [
     RunState::Failed,
     RunState::Killed,
     RunState::Cancelled,
     RunState::Warning,
     RunState::Skipped,
     RunState::Retried,
+    RunState::Killing,
     RunState::Paused,
     RunState::Retrying,
     RunState::Running,
@@ -174,13 +176,14 @@ fn rank(s: RunState) -> u8 {
         RunState::Warning => 3,
         RunState::Skipped => 4,
         RunState::Retried => 5,
-        RunState::Paused => 6,
-        RunState::Retrying => 7,
-        RunState::Running => 8,
-        RunState::Submitted => 9,
-        RunState::Success => 10,
-        RunState::Restarted => 11,
-        RunState::Created => 12,
+        RunState::Killing => 6,
+        RunState::Paused => 7,
+        RunState::Retrying => 8,
+        RunState::Running => 9,
+        RunState::Submitted => 10,
+        RunState::Success => 11,
+        RunState::Restarted => 12,
+        RunState::Created => 13,
     }
 }
 
@@ -503,6 +506,8 @@ mod tests {
             (&[Warning, Killed], Killed),
             (&[Skipped, Warning], Warning),
             (&[Running, Skipped], Skipped),
+            (&[Killing, Skipped], Skipped),
+            (&[Running, Killing], Killing),
             (&[Success, Running], Running),
             (&[Running, Success], Running),
             (&[Restarted, Success], Success),
@@ -514,6 +519,8 @@ mod tests {
             (&[Warning, Cancelled], Cancelled),
             (&[Retried, Skipped], Skipped),
             (&[Paused, Retried], Retried),
+            (&[Killing, Retried], Retried),
+            (&[Paused, Killing], Killing),
             (&[Running, Paused], Paused),
             (&[Retrying, Paused], Paused),
             (&[Running, Retrying], Retrying),

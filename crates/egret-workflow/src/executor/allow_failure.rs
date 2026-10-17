@@ -317,7 +317,7 @@ mod tests {
     /// unfalsifiable alone**, and a filter that excluded everything would make
     /// the loop above pass by running nothing.
     #[test]
-    fn the_untouched_population_is_eleven_of_the_thirteen() {
+    fn the_untouched_population_is_twelve_of_the_fourteen() {
         let untouched = RunState::ALL
             .iter()
             .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
@@ -326,6 +326,8 @@ mod tests {
         // alone: Kestra's two `if`s read `state == FAILED` and `state ==
         // WARNING`, so `allowFailure:` on a task whose subflow child was
         // CANCELLED by an `sla:` does NOT turn that into a success.
-        assert_eq!((untouched, RunState::ALL.len()), (11, 13));
+        // 12 of 14 since `Killing` (the kill package's Task 1), which is not
+        // terminal and which `soften` leaves alone for the same reason.
+        assert_eq!((untouched, RunState::ALL.len()), (12, 14));
     }
 }
