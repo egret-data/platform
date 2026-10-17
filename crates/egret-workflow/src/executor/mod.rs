@@ -7253,7 +7253,8 @@ tasks:
         println!("corpus flows declaring a runIf anywhere: {with_run_if}");
         assert_eq!(
             // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
-            with_run_if, 10,
+            with_run_if,
+            10,
             "the population this is a statement about; if it moves, re-derive \
              the `runIf:` numbers in oracle-exec/README.md in the same commit"
         );
@@ -7454,7 +7455,8 @@ tasks:
         }
         assert_eq!(
             // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
-            with_run_if, 10,
+            with_run_if,
+            10,
             "the control: this must find the flows that declare a `runIf:` at all"
         );
         assert_eq!(
