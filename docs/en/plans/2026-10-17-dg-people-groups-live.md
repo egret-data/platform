@@ -365,3 +365,190 @@ Trino `Access Denied`, StarRocks `NULL`.
   Clearances tag names are not links (no `tag:read`). Allocate is unreachable (no GrantDialog opens).
 - `vs` (`policy:read` + `policy:update`): Grant access shown; the picker offers "Allocate username and add".
 - `vt` (`tag:read` only): no People & groups in the sidebar; `/governance/people` renders the Forbidden page.
+
+### 2.1 Result (read this first)
+
+Measured 2026-10-17 between 18:14 and 18:40 UTC on an image built from `cfba7b88` (the predictions commit
+`61268b04` changes only this file).
+
+**People & groups says what the engines do.** Every membership mark, reach group and clearance answer on the pages
+matched the compiled policies and a real query on Trino 483 and StarRocks 4.1.6:
+- a group's members read, and a role's direct holders read;
+- a role held through a group is marked "egret only", and its holder is not named on engines;
+- an exclude through a group-held role is marked "Excluded in egret only — not on engines", and the engine still
+  grants: `ue` read `ice.s.t` on both engines;
+- the groups-only gate is "not enforced on engines": `uc` read the real `ice.s.c6.secret` on both;
+- Check access for a user, a group and a role agreed with the engines, member by member;
+- a grant made from a user's page reached both engines within one poll;
+- a username allocated from the picker, then granted, let `un` read on both engines;
+- the 409 guard refused `uz`, with a link to the stale grant.
+
+**6 defects**, none Critical (§2.4):
+- two keyboard defects in the subject fields of Check access and Who can read? (D1, D2);
+- the member table drops StarRocks' mask answer and prints "no access asked" (D3);
+- deleting a tag that a rule selects fails silently (D4);
+- the orphan-rule callout describes a state the schema forbids (D5);
+- the engine-mark columns are clipped at 390 px (D6).
+
+54 predicted cells (Q2a–Q2i counted as nine): 51 matched and 3 did not (Q6 orphan, Q7 `c7`, Q8 dialogs).
+
+### 2.2 Stack and deviations
+
+- **Image and frontend.**
+  - Image `egret-backend:vg-dgpg14` was built from `cfba7b88`: a warm release build, 13 min. Free disk stayed
+    ≥ 57 GiB. The Dockerfile builds `--release`, so `CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` had nothing
+    to change.
+  - Vite 8.2.1 ran from this worktree on port 5293, through a scratch config proxying `/api`, `/catalog` and
+    `/oauth` to `localhost:18096`.
+  - The browser was Playwright MCP Chromium, at 1280×900 and 390×844, light and dark.
+- **DB and containers.** DB `egret_dgpg_live2` (`migrate`, `init`, `serve`), with the log line `kubernetes
+  unavailable; engine provisioning disabled`. Containers on `vg-net`:
+  - `vg-egret`;
+  - `vg-rustfs`;
+  - `vg-trino-coord` (Trino 483 `db58cc93…`, host `vgtr-coordinator-6d5f7c9b8-ab1cd`, JWT/TLS);
+  - `vg-sr` (allin1 `5cbf09c4…`, `4.1.6-6862092`, `access_control = ranger`).
+- **DEV-1 and DEV-2 (SQL), as in §1.2.** Engine rows `vgtr` and `vgsr`, and the attachment `vgtr` → `ice` as
+  `applied`. The baseline came from a restart (`seeded=1 failed=0`), then `POST /perm/compile/2`. StarRocks
+  attached `ice` through `POST /engines/{id}/catalogs/{cid}` (`applied`).
+- **No username SQL this time.** `ua`, `uc`, `ud` and `ue` got their usernames through the new
+  `POST /perm/people/users/{id}/username`, each answering `allocated: true`. This replaces §1's DEV-3.
+- **DEV-3 (SQL): stale refs.** Two `perm.grant_principals` rows were inserted on G6: include `user uz` and exclude
+  `user ghost`. Grant writes refuse an unresolved user ref, so no API can write them.
+- **DEV-4 (SQL): the orphan rule.** `DELETE /tags/{vgorphan}` answered 409 (D4), because `perm.rules.tag_key`
+  references `tags(key)` (migration `0154`, `rules_tag_key_fkey`). The tag was then deleted with
+  `SET session_replication_role = replica` in the throwaway DB, which bypasses the foreign key. This is the only way
+  to get an orphan rule (D5).
+- **DEV-5 (identity): real queries.**
+  - Trino was queried directly with JWTs signed by egret's key, using `engine_claims`' claim set.
+  - StarRocks was queried as same-named users (created by `root`, no password) through `mysql` in `vg-sr`.
+- **DEV-6 (config).** The Ranger poll was 5000 ms on both engines.
+- **DEV-7 (harness).** The Playwright MCP may write only under `data-portal/`. Screenshots were saved to
+  `data-portal/.playwright-mcp/dgpg14/` and then moved to the scratchpad `dgpg14/shots/`.
+- **Logins.** Admin twice by curl, then once each in the browser for admin, `vs` and `vt`, and twice for `vsr`.
+  Each was at least 60 s after the one before; no 429.
+- No privilege of `egret-lineage` or of StarRocks `root` was changed.
+
+### 2.3 Every cell
+
+| id | observed | verdict |
+|---|---|---|
+| Q1a | Users: Administrator (`admin`), `ua`, `ub`, `uc`, `ud`, `ue` with usernames. `ub`'s came from G1's compile. `uf`, `un`, `uz`, `vs`, `vsr`, `vt` show "No username yet". `vgsa` is absent. "1–12 of 12" | match |
+| Q1b | `?serviceAccounts=1` adds `vgsa` with a "Service account" badge, an empty Email cell and "No username yet" (13 rows) | match |
+| Q1c | `g1` "2 members", `g2` "1 member", both Local, with the note. `public` is not listed | match |
+| Q1d | `r1` "2 holders (1 not on engines: no username)", platform, with the note. Also listed: `data_api_invoker`, `data_steward`, `platform_admin` (1 holder), `ws_admin` (1 holder), `ws_editor`, `ws_viewer`, and the three steward roles | match |
+| Q1e | `user ghost` comes first, "Widens access", "Allow, exclude". `user uz` is second, "Narrows access", "Allow, include". Both link to `/governance/grants/<G6>` | match |
+| Q1f | `?q=zzz` → "No user matches “zzz”." with Clear search | match |
+| Q2a–Q2i | exactly as predicted. `ue`: `r1`, Platform, Through "Group g2", "egret only — not applied on engines: held through a group". `uf`: header sentence; Grant access disabled with the reason; `r1` "No: no username yet". `r1`: holders `ud` and `uf` (with "Not named on engines until they have a username"); group `g2` "egret only". `public`: the sentence; tabs Permissions and Masks & filters | match |
+| Q3a | `ua`: G6 under Directly ("user ua, user uz can read ice.s.t except user ghost"). G1 and G5 under Through a group | match |
+| Q3b | `ue`: G4 under Directly, with "Directly · applied on engines" and "Excluded in egret only — not on engines: through role r1, held by group g2". G2 and G5 under egret only | match |
+| Q3c | `ue` reads `ice.s.t` on Trino and StarRocks, with `v` masked (`xxxx`). The compiled G4 has items `[ue]` and allowExceptions `[ud]` | match |
+| Q3d | `ud`: G2 and G5 under Through a role; G4 under Excluded ("Excluded: through role r1 · applied on engines"). `ud` reads `t` on both engines (G2) | match |
+| Q3e | `uf`: the no-username note; G2 and G5 under "Not applied on engines" ("Through role r1 · No: no username yet") | match |
+| Q3f | `g1`: G1 and G5 under Directly. `r1`: G2 and G5 under Directly; G4 under Excluded ("Excluded: directly · applied on engines") | match |
+| Q3g | `ua` Masks & filters: `vg-mask-v` under Through a group, with "2 other rules apply…" | match |
+| Q3h | `ue`: `vg-tagrule` under Through a group (g2) | match |
+| Q3i | `ua` and `ub` read real `v` (`xray`, `yankee`); `ud`, `ue`, `uc` and `un` read `xxxx` / `xxxxxx`, on both engines | match |
+| Q3j | `uc` `vggroup`: "Engines do not enforce this gate (it names only groups)" / "Not cleared". `uc` reads real `s1`, `s2` from `c6.secret` on both engines. Explain: allowed on both (vgtr lists tag `vggroup`) | match |
+| Q3k | `ua` `vggroup`: groups-only sentence / "Cleared through group g1". `vgrole`: "Not cleared" / "Not cleared". On `c7.secret`, Trino `Access Denied: Cannot select from columns [id, secret]`; StarRocks `NULL` ×2 | match |
+| Q3l | `ud` "Cleared through role r1" twice. `ue` "Not cleared: the required role is held through a group…" / "Cleared through role r1, held by group g2". `uf` "Not cleared: no username yet" / "Cleared through role r1". `ud` reads `r1s`, `r2s` on both engines | match |
+| Q3m | `g1` `vggroup`: groups-only / "Cleared: the gate names this group" | match |
+| Q4a | `ua` tab: allowed on vgtr and vgsr, attributed to G1, "View grant …". Rows on both engines | match |
+| Q4b | `uf` tab: "No username yet, so no engine knows this user." | match |
+| Q4c | `g1`: 2 / 0 / 0, `ua` and `ub` each "vgtr: select Allowed, vgsr: select Allowed", with the no-single-verdict sentence | match |
+| Q4d | `r1`: 1 / 0 / 0, `ud` allowed; Not asked: "uf: No username yet, so no engine knows this user." | match |
+| Q4e | each member's verdict equals the real query (`ua`, `ub`, `ud`, `ue` rows on both; `g2` → `ue` allowed) | match |
+| Q4f | the index dialog answered `r1` the same as the role's tab | match |
+| Q5a | Grant access on `uc` opens GrantDialog with `USER uc` in Include. Create stays disabled until Preview. Toast "Grant created."; the Permissions tab lists it under Directly. 15 s later, `uc` reads `t` (masked) on both engines (before: Trino `Access Denied`, StarRocks `5204`) | match |
+| Q5b | the picker lists `un`, `uf` and `uz` with "Allocate username and add". The confirmation names egret's rule. Chip `un`, and status "un was allocated a username and added, stored as un.". Focus returns to the field. After Create, `un` reads `t` on both engines 8 s later. `users.username = un` | match |
+| Q5c | ArrowDown ×4 then Enter adds `ub`; the list stays open (`aria-expanded=true`); ArrowDown, Enter adds `ua`; still open | match |
+| Q5d | the `uz` alert: `1 stored grant principal(s) or rule exemption(s) already name "uz" as a user; they match nobody today and would start applying to this person. Remove or change them, then allocate again`, with the link `grant ca9f79a8… (opens in a new tab) · include names uz` (`target=_blank`). No chip; `uz` stays NULL | match |
+| Q6 redirects | the three old URLs → `/governance/people`. `?grant=` → `/governance/grants/<id>` (also from `explain-access?grant=`); `?rule=` → `/governance/rules/<id>`. `/governance/explain` → `/governance/data` | match |
+| Q6 items | the grant page: sentence, Allow, read, `ice.s.t`, Open in Data (`?tab=permissions`), principals linked by name (`by-name/ua`, …), Except. An unknown id gives "No grant has this id; it may have been deleted." The rule page links `g1` and Open in Data (`?column=v&tab=masks`). The explain link "View grant 4483c432…" opens `/governance/grants/4483c432…` | match |
+| Q6 tag | TagDetail of `vgtagrule`: "Mask and filter rules", `vg-tagrule`, `mask · MASK_NULL`, "This tag", `group g2` | match |
+| Q6 orphan | **The tag could not be deleted**: `DELETE /tags/{id}` → 409 `this tag is still selected by a permission rule`, and the page showed nothing (D4). After DEV-4, Classifications showed "1 rule selects a tag that no longer exists … vg-orphan · tag key vgorphan", and the rule page said "No tag has the key vgorphan now." | **mismatch → D4, D5** |
+| Q7 `t` | Who can read? on `ice.s.t`, Group `g1` (picked from the list of `g1`, `g2`): 2 / 0 / 0, both allowed | match |
+| Q7 `c7` | on `ice.s.c7.secret`: `ua` and `ub` "vgtr: select Refused by a deny item" (Trino `Access Denied`, matches), but **"vgsr: no access asked"**. The member's full answer says the column is not access-checked and returns NULL (MASK_NULL); StarRocks returned `NULL` | **partly → D3** |
+| Q8 page | at 390 px, light and dark, on 14 pages (the index's 4 tabs, `ue`'s 5 tabs, `g2`, `r1`, `public`, a grant and a rule): `scrollWidth == clientWidth == 390` every time. Tables scroll inside their containers: users 452 px, roles 581, Unmatched names 990, `ue` Overview 719, Permissions 430 | match (D6) |
+| Q8 dialogs | GrantDialog with the picker open and the Check access dialog with `r1`'s expanded answer: the dialog is 390 px wide with its own `scrollWidth == clientWidth`; the page does not scroll. The picker's list is cut by the dialog's bottom edge, showing two rows until the dialog body is scrolled | partly (finding, not a defect) |
+| Q8 dark | screenshots readable; no white surface | match |
+| Q8 tabs | index: ArrowRight walks `?kind=group` → `unmatched` → wraps to Users (no `kind`). Principal tabs: Right, Right, End, Home, Left → `permissions`, `masks`, `check`, (none), `check`. Tab moves into the tabpanel | match |
+| Q8 picker | ArrowDown/Up and Enter as in Q5c; Escape closes the list (`aria-expanded=false`) and the GrantDialog stays open | match |
+| Q8 SubjectNameField | Group kind by keyboard, type `g`, ArrowDown, Enter → `g1`; with the list open again, **Escape closed the whole Check access dialog** | match (predicted defect → D2) |
+| Q8 SubjectUserField | ArrowDown does nothing (focus stays in the input). Tab closes the list and focus lands on the dialog's container, so no suggestion can be chosen by keyboard. Escape closes the dialog | match (predicted defect → D1) |
+| Q9 `vsr` | sidebar: Data, People & groups, Policies. Pages load; no Grant access, no Manage in Control Plane. Clearances tag names are not links. Grant and rule pages say "Editing or deleting a grant/rule needs the policy:update permission." Data Permissions links principals to People (`groups/g1`, `roles/r1`, `users/by-name/…`) | match |
+| Q9 `vs` | Grant access shown; the picker offers "Allocate username and add" for `uf` and `uz` | match |
+| Q9 `vt` | sidebar: Data, Classifications. `/governance/people` and `/governance/grants/<id>` → "403 — Forbidden". TagDetail has no "Mask and filter rules" section | match |
+
+**Also observed (not predicted, not defects of this branch):**
+- When a column mask applies, StarRocks' `SELECT *` on an Iceberg table also returns the hidden `_file` and `_pos`
+  columns. This was seen for `ud`, `ue`, `uc` and `un` on `ice.s.t`, and not for the exempt `ua` and `ub`. An
+  unprivileged `uc` was refused on `COLUMN _file`. Explain's StarRocks text already mentions `_file` / `_pos`.
+- The compiled G6 names `uz` in its items. A stale user ref is compiled as a Ranger user name, which is the reason
+  for the 409 guard.
+- A user page with no username (`uf`) has no allocate action. The only way to allocate is through a picker inside
+  GrantDialog or RuleDialog (P13 as specified).
+- The grant page for G6 shows `uz` and `ghost` like any principal, with no mark that they match nobody or that
+  `ghost` widens access. Only Unmatched names says so.
+- On a missing principal (`groups/nosuch`, an unknown user id) and on `public`, the page still shows "Manage in
+  Control Plane".
+
+### 2.4 Defects
+
+Severity is a guess. Screenshots are in the scratchpad `dgpg14/shots/` (390×844 or 1280×900, checked with `sips`).
+
+- **D1 (Important, keyboard): the User subject field cannot be used by keyboard.** In Check access (the index
+  dialog and each Check access tab) and in Who can read?, `SubjectUserField`
+  (`frontend/src/components/perm/ExplainResult.tsx:1071`) is a plain input over a list of buttons. Arrow keys do
+  nothing. Tab blurs the input, and its 150 ms timer removes the list, so focus falls to the dialog container.
+  Escape closes the whole dialog. Repro: `/governance/people`, Check access, focus User, type `u`, ArrowDown, then
+  Tab. Typing a username in full still works.
+- **D2 (Important, keyboard): Escape in the Group/Role subject field closes the dialog.** `SubjectNameField`
+  (`frontend/src/components/perm/SubjectExplain.tsx:142`) handles Escape in React's `onKeyDown`. Radix's dialog
+  listens on the document in the capture phase and closes first, which loses the question. PrincipalPicker avoids
+  this with a window capture listener. Repro: Check access, Subject kind Group, type `g`, press Escape.
+- **D3 (Important, honesty): the member table drops StarRocks' mask answer.** For a member whose StarRocks read of a
+  column is decided by a mask (no access check), the row reads "vgsr: no access asked", and the member counts as
+  neither allowed nor refused there. The expanded answer says "returns NULL (MASK_NULL)", and the engine returned
+  NULL. Repro: `/governance/data/ice/s/c7?column=secret`, Who can read?, Group `g1`. Screenshot
+  `d-who-c7-g1.png`. `MembersExplainView` builds the line from `accesses` only; the mask is elsewhere in the
+  profile.
+- **D4 (Minor): deleting a tag a rule selects fails silently.** `DELETE /tags/{id}` answers 409 ("still selected by a
+  permission rule … delete or retarget that rule first"). The confirm dialog closes, no toast appears and the tag
+  stays. `Classifications.tsx:279` calls `deleteTag.mutate` with no `onError`. Repro: create a rule on tag `k`, then
+  delete `k` from Classifications. Screenshot `d-tag-delete-409.png`. The page code predates this branch, but the
+  rule list that makes the refusal reachable is new here.
+- **D5 (Minor, spec premise): the orphan-rule callout describes a state the schema forbids.** Spec §1 says
+  `delete_tag` "deletes the tag only", and the callout says "Deleting a tag leaves its rules in place". But
+  `perm.rules.tag_key` has `REFERENCES tags(key) ON UPDATE CASCADE` (no `ON DELETE`) since migration `0154`, and
+  `egret-bi/src/tags.rs` turns that into a 409. An orphan rule exists only if the foreign key is bypassed (DEV-4).
+  P9's Classifications callout is reachable only after DEV-4, and its sentence is false. Screenshot
+  `q6-orphan-rule.png`.
+- **D6 (Minor, 390 px): the engine-mark columns are clipped.** The page never scrolls sideways, but the columns
+  that carry this sub-project's claims are off-screen inside each table's scroller:
+  - Overview's "Applied on engines" (`ue` Roles: 719 px);
+  - Permissions' Effect and Actions, with the grant sentence wrapped one word per line;
+  - Unmatched names' Effect, In and Reason (990 px).
+
+  The same class as #1's D10. Screenshots `390-light-ue-overview.png`, `390-dark-ue-perm.png` and
+  `390-dark-idx-unmatched.png`.
+
+### 2.5 Left behind
+
+- **Removed:**
+  - containers `vg-egret`, `vg-trino-coord`, `vg-sr`, `vg-rustfs`;
+  - network `vg-net`;
+  - DB `egret_dgpg_live2` (dropped);
+  - image `egret-backend:vg-dgpg14`;
+  - the vite process.
+
+  `docker ps -a`, `docker network ls` and `docker images` show no `vg-` entry.
+- **Secrets deleted from the scratchpad:** the env file, the signing key and `kid`, the catalog client, the Trino
+  internal secret, the TLS key and keystore, the cookie jars.
+- **Kept:**
+  - BuildKit cache, 15.5 GB reclaimable, shared with earlier builds' cache mounts, so it was not pruned;
+  - the scratchpad `dgpg14/`: batteries (`b-base.txt`, `b-clear.txt`, `q5a.txt`, `q5b.txt`), `compiled-1.txt`,
+    `users-final.txt`, `egret-alloc-log.txt`, configs, the public cert, and `shots/` (36 PNGs).
+- **Untouched:** DB `egret`, every `egret-dev-*` container (only `egret-dev-postgres-1` was used, for this DB), the
+  `egret-w7*` containers, ports 5173, 5000 and 8080.
+
+  Free disk at the end: 55 GiB. No product code changed.
