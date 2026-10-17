@@ -220,7 +220,11 @@ describe("Check access for a group or a role", () => {
         .getAllByRole("term")
         .map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
     );
-    expect(counts).toEqual({ "Allowed by every profile": "1", "Refused by at least one": "1", "Undecidable on at least one": "1" });
+    expect(counts).toEqual({
+      "Members allowed by every profile": "1",
+      "Members refused by at least one": "1",
+      "Members undecidable on at least one": "1",
+    });
 
     const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
@@ -277,13 +281,16 @@ describe("Check access for a group or a role", () => {
   it("says how many were evaluated when the server stopped at its limit", async () => {
     serve({
       principal: { "roles/reader": ok(READER_ROLE) },
-      explainPrincipal: ok({ ...MEMBERS, membersTotal: 201, truncated: true, notEvaluated: [] }),
+      explainPrincipal: ok({ ...MEMBERS, membersTotal: 205, limit: 3, truncated: true }),
     });
     open("/governance/people/roles/reader?tab=check");
     const panel = await screen.findByRole("tabpanel");
     await within(panel).findByRole("button", { name: "Explain" });
     await ask(panel);
-    expect(await within(panel).findByText("Evaluated 3 of 201 members; the others were not asked.")).toBeInTheDocument();
+    // 205 members: 3 evaluated, 1 with no username listed apart, 201 over the limit.
+    expect(
+      await within(panel).findByText("Evaluated 3 of 205 members; 201 more were not asked (over the limit of 3)."),
+    ).toBeInTheDocument();
   });
 
   it("shows the server's sentence when it refuses the question", async () => {
@@ -325,9 +332,9 @@ describe("the index's Check access dialog", () => {
 
     await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
     await user.click(await screen.findByRole("option", { name: "Group" }));
-    await user.click(within(dialog).getByLabelText("Group"));
-    await user.click(await within(dialog).findByRole("button", { name: /analysts/ }));
-    expect(within(dialog).getByLabelText("Group")).toHaveValue("analysts");
+    await user.click(within(dialog).getByRole("combobox", { name: "Group" }));
+    await user.click(await within(dialog).findByRole("option", { name: /analysts/ }));
+    expect(within(dialog).getByRole("combobox", { name: "Group" })).toHaveValue("analysts");
 
     await user.click(within(dialog).getByRole("combobox", { name: "Action" }));
     await user.click(await screen.findByRole("option", { name: "write" }));
@@ -341,6 +348,61 @@ describe("the index's Check access dialog", () => {
         body: { principal: { kind: "group", ref: "analysts" }, action: "write", target: { catalog_id: "c-ice", schema: "sales" } },
       },
     ]);
+  });
+
+  it("keeps a group's answer when an earlier user question answers late", async () => {
+    let answerUser: (a: Answer) => void = () => {};
+    serve({ explain: () => new Promise((r) => (answerUser = r)), explainPrincipal: ok(MEMBERS) });
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
+    await user.type(within(dialog).getByLabelText("User"), "ana");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
+    await user.click(await screen.findByRole("option", { name: "Group" }));
+    await user.type(within(dialog).getByRole("combobox", { name: "Group" }), "analysts");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+    expect(await within(dialog).findByTestId("members-explain")).toBeInTheDocument();
+
+    answerUser(ok(explainOf(ALLOWED)));
+    // Let the late answer land, then check it changed nothing.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(within(dialog).getByTestId("members-explain")).toBeInTheDocument();
+    expect(within(dialog).queryByTestId("explain-result")).not.toBeInTheDocument();
+  });
+
+  it("searches groups once typing pauses, and picks one from the keyboard", async () => {
+    serve({
+      people: ok({ items: [{ kind: "group", key: "analysts", label: "analysts", detail: "local", serviceAccount: false }], total: 1 }),
+    });
+    const fetchSpy = vi.mocked(fetch);
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
+    await user.click(await screen.findByRole("option", { name: "Group" }));
+    const field = within(dialog).getByRole("combobox", { name: "Group" });
+    await user.type(field, "anal");
+    const asked = () =>
+      fetchSpy.mock.calls
+        .map(([input]) => new URL(String(input), "http://localhost"))
+        .filter((u) => u.pathname === "/api/control-plane/perm/people" && u.searchParams.get("kind") === "group")
+        .map((u) => u.searchParams.get("q") ?? "");
+    await waitFor(() => expect(asked()).toContain("anal"));
+    expect(asked()).not.toContain("a");
+    expect(asked()).not.toContain("an");
+    expect(asked()).not.toContain("ana");
+
+    await user.keyboard("{Backspace}{Backspace}{Backspace}{Backspace}");
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect(field).toHaveAttribute("aria-activedescendant"));
+    await user.keyboard("{Enter}");
+    expect(field).toHaveValue("analysts");
+    expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("asks about a user through /perm/explain", async () => {

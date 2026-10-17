@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Loader2, Search } from "lucide-react";
 import type { ApiError } from "@/api/client";
 import type { Action, ExplainPrincipalResponse, ExplainResponse, Scope } from "@/api/generated/model";
@@ -73,6 +73,15 @@ export function SubjectField({
   return <SubjectNameField kind={kind} value={value} onChange={onChange} />;
 }
 
+/** How long typing pauses before a group or role search is sent. */
+const SEARCH_DEBOUNCE_MS = 200;
+
+/**
+ * A group or role name: a combobox (ARIA 1.2 pattern) over the People list.
+ * The search is sent once typing pauses (`SEARCH_DEBOUNCE_MS`). Arrow keys
+ * move through the suggestions (`aria-activedescendant`, focus stays in the
+ * field), Enter picks one, Escape closes the list; a click picks too.
+ */
 function SubjectNameField({
   kind,
   value,
@@ -83,43 +92,98 @@ function SubjectNameField({
   onChange: (name: string) => void;
 }) {
   const id = useId();
+  const listId = `${id}-list`;
   const [open, setOpen] = useState(false);
-  const people = usePermListPeople({ kind, q: value || undefined, limit: 20 }, { query: { enabled: open, retry: false } });
+  const [active, setActive] = useState(-1);
+  const [q, setQ] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setQ(value), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [value]);
+  const people = usePermListPeople({ kind, q: q || undefined, limit: 20 }, { query: { enabled: open, retry: false } });
   const rows = people.data?.status === 200 ? people.data.data.items.filter((p) => p.key !== "public") : [];
+  const activeRow = open && active >= 0 && active < rows.length ? active : -1;
+
+  const pick = (name: string) => {
+    onChange(name);
+    setOpen(false);
+    setActive(-1);
+  };
+
   return (
     <div className="relative space-y-1.5">
       <Label htmlFor={id}>{SUBJECT_KIND_LABEL[kind]}</Label>
       <Input
         id={id}
+        role="combobox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={activeRow >= 0 ? `${listId}-${activeRow}` : undefined}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+          setActive(-1);
+        }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            if (rows.length === 0) return;
+            const step = e.key === "ArrowDown" ? 1 : -1;
+            setActive((i) => (i < 0 ? (step > 0 ? 0 : rows.length - 1) : (i + step + rows.length) % rows.length));
+          } else if (e.key === "Enter" && activeRow >= 0) {
+            // Picks the suggestion instead of submitting the form.
+            e.preventDefault();
+            pick(rows[activeRow].key);
+          } else if (e.key === "Escape" && open) {
+            e.preventDefault();
+            setOpen(false);
+            setActive(-1);
+          }
+        }}
         placeholder={kind === "group" ? "Search groups…" : "Search roles…"}
         autoComplete="off"
       />
       {open ? (
         <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
-          {rows.map((p) => (
-            <button
-              key={p.key}
-              type="button"
-              className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                onChange(p.key);
-                setOpen(false);
-              }}
-            >
-              <span>{p.label}</span>
-              {p.detail ? <span className="shrink-0 text-xs text-muted-foreground">{p.detail}</span> : null}
-            </button>
-          ))}
-          {rows.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">
-              {people.isFetching ? "Searching…" : people.isError ? "The list could not be loaded; type a name." : "No matches."}
+          {rows.length > 0 ? (
+            <ul id={listId} role="listbox" aria-label={`${SUBJECT_KIND_LABEL[kind]} suggestions`}>
+              {rows.map((p, i) => (
+                <li
+                  key={p.key}
+                  id={`${listId}-${i}`}
+                  role="option"
+                  aria-selected={i === activeRow}
+                  className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
+                    i === activeRow ? "bg-accent" : ""
+                  }`}
+                  // Keeps focus in the field, so the list does not close before the click lands.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pick(p.key)}
+                  // Options never take focus (the field keeps it and handles the keys); this
+                  // only answers an assistive technology that sends Enter to the option itself.
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") pick(p.key);
+                  }}
+                >
+                  <span>{p.label}</span>
+                  {p.detail ? <span className="shrink-0 text-xs text-muted-foreground">{p.detail}</span> : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div id={listId} className="px-2 py-1.5 text-xs text-muted-foreground">
+              {people.isFetching || q !== value
+                ? "Searching…"
+                : people.isError
+                  ? "The list could not be loaded; type a name."
+                  : "No matches."}
             </div>
-          ) : null}
+          )}
         </div>
       ) : null}
     </div>
@@ -168,6 +232,11 @@ export type SubjectAnswer =
  * membership). Each answer and each refusal keeps the question it was asked
  * for, and `answerFor`/`failureFor` return it only for that question: an answer
  * still on its way when the form changes never appears under the new one.
+ *
+ * Only the latest question asked may settle (`latest`): the two kinds use two
+ * mutation hooks, and react-query drops a superseded call's callbacks only
+ * within one hook, so a slow user answer would otherwise land after a group's
+ * and replace it.
  */
 export function useSubjectExplain() {
   const [answer, setAnswer] = useState<SubjectAnswer | null>(null);
@@ -175,14 +244,18 @@ export function useSubjectExplain() {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const user = usePermExplain<ApiError>();
   const members = usePermExplainPrincipal<ApiError>();
+  const latest = useRef<number>(0);
 
   const ask = (q: Question) => {
     const key = questionKey(q);
+    const asked = ++latest.current;
+    const current = () => latest.current === asked;
     setAnswer(null);
     setFailure(null);
     setPendingKey(key);
     const settle = () => setPendingKey((k) => (k === key ? null : k));
     const fail = (error: ApiError) => {
+      if (!current()) return;
       setFailure({ key, error });
       settle();
     };
@@ -191,6 +264,7 @@ export function useSubjectExplain() {
         { data: { subject: { user: q.subject.ref }, action: q.action, target: q.target } },
         {
           onSuccess: (res) => {
+            if (!current()) return;
             if (res.status === 200) setAnswer({ key, kind: "user", response: res.data });
             settle();
           },
@@ -203,6 +277,7 @@ export function useSubjectExplain() {
         { data: { principal: { kind, ref: q.subject.ref }, action: q.action, target: q.target } },
         {
           onSuccess: (res) => {
+            if (!current()) return;
             if (res.status === 200) setAnswer({ key, kind, response: res.data });
             settle();
           },

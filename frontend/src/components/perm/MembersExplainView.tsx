@@ -22,15 +22,20 @@ function anyDecision(r: ExplainResponse, kind: "denied" | "undecidable"): boolea
   return r.profiles.some((p) => p.accesses.some((a) => a.decision.kind === kind));
 }
 
-/** `Evaluated 200 of 201 members; the others were not asked.` */
-export function truncatedText(evaluated: number, total: number): string {
-  return `Evaluated ${evaluated} of ${total} members; the others were not asked.`;
+/**
+ * When the server stopped at its limit: how many were evaluated, of how many,
+ * and how many more were not asked because of the limit (`membersTotal −
+ * evaluated − notEvaluated`; the members with no username are listed apart).
+ */
+export function truncatedText(r: ExplainPrincipalResponse): string {
+  const over = Math.max(0, r.membersTotal - r.evaluated.length - r.notEvaluated.length);
+  return `Evaluated ${r.evaluated.length} of ${r.membersTotal} members; ${over} more ${over === 1 ? "was" : "were"} not asked (over the limit of ${r.limit}).`;
 }
 
 /**
  * Explain for a group or a role (spec §4.3): each member's own answer, from
- * `POST /perm/explain/principal`. Three counts — allowed by every profile,
- * refused by at least one, undecidable on at least one — a row per evaluated
+ * `POST /perm/explain/principal`. Three counts of members — allowed by every
+ * profile, refused by at least one, undecidable on at least one — a row per evaluated
  * member with each profile's verdict per access, a "Refused only" filter, and
  * the member's full `ExplainResultView` on expand. There is no overall verdict
  * and nothing here makes one up: one member allowed and another refused is
@@ -75,9 +80,10 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
       <p className="text-sm text-muted-foreground">{NO_SINGLE_VERDICT}</p>
       <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
         {[
-          ["Allowed by every profile", allowed],
-          ["Refused by at least one", refused],
-          ["Undecidable on at least one", undecidable],
+          // Each count is of members, so none reads as the group's own access.
+          ["Members allowed by every profile", allowed],
+          ["Members refused by at least one", refused],
+          ["Members undecidable on at least one", undecidable],
         ].map(([label, n]) => (
           <div key={label} className="flex items-baseline gap-2">
             <dt className="text-muted-foreground">{label}</dt>
@@ -85,7 +91,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
           </div>
         ))}
       </dl>
-      {truncated ? <p className="text-sm">{truncatedText(evaluated.length, membersTotal)}</p> : null}
+      {truncated ? <p className="text-sm">{truncatedText(response)}</p> : null}
 
       {evaluated.length > 0 ? (
         <div className="space-y-2">
