@@ -542,6 +542,11 @@ function decisionMeta(d: WireDecision): {
   };
 }
 
+/** A decision's short label, as an answer's badge reads it (`Allowed`, `Undecidable`, `Refused by a deny item`, …). */
+export function decisionLabel(d: WireDecision): string {
+  return decisionMeta(d).label;
+}
+
 /**
  * A deciding policy egret's compiler does not own — and it is reported, never
  * dropped. Four live categories reach here: the `egret-admin`/`all`

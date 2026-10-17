@@ -42,7 +42,7 @@ const MARKERS = [
   // `PANEL_NEEDS_POLICY_READ`.
   ["src/routes/governance/data/ColumnPanel.tsx", "Reading grants and rules needs the policy:read permission."],
   // `WHO_CAN_READ_INTRO`.
-  ["src/routes/governance/data/WhoCanReadDialog.tsx", "Whether one user can read this, per policy profile"],
+  ["src/routes/governance/data/WhoCanReadDialog.tsx", "Whether a user, or each member of a group or role, can read this"],
   // `TAGS_EGRET_ONLY`.
   ["src/routes/governance/data/AddTagDialog.tsx", "Tags can be added to egret-managed catalogs only"],
 ];

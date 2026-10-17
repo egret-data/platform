@@ -1,0 +1,340 @@
+import { useId, useState, type ReactNode } from "react";
+import { Loader2, Search } from "lucide-react";
+import type { ApiError } from "@/api/client";
+import type { Action, ExplainPrincipalResponse, ExplainResponse, Scope } from "@/api/generated/model";
+import { usePermExplain, usePermExplainPrincipal, usePermListPeople } from "@/api/generated/perm/perm";
+import { ExplainResultView, SubjectUserField } from "@/components/perm/ExplainResult";
+import { MembersExplainView } from "@/components/perm/MembersExplainView";
+import { ScopePicker } from "@/components/perm/ScopePicker";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+/*
+ * Asking explain about a user, a group or a role (DG redesign #2, spec §2,
+ * §4.3, P7): the parts the People area's Check access (tab and dialog) and the
+ * Data area's Who can read? share. Kept in `components/perm`, outside both
+ * lazy areas, so neither imports the other's modules.
+ */
+
+export type SubjectKind = "user" | "group" | "role";
+
+/** Who is asked about: a user by engine username, a group or a role by name. */
+export type Subject = { kind: SubjectKind; ref: string };
+
+export const SUBJECT_KIND_LABEL: Record<SubjectKind, string> = { user: "User", group: "Group", role: "Role" };
+
+/** `Explain needs a user.`, and so on; a page builds a longer one from {@link subjectNoun}. */
+export function subjectNoun(kind: SubjectKind): string {
+  return kind === "user" ? "a user" : kind === "group" ? "a group" : "a role";
+}
+
+/** A subject kind picker (FE-FORM-3): user, group or role. */
+export function SubjectKindField({ value, onChange }: { value: SubjectKind; onChange: (kind: SubjectKind) => void }) {
+  const id = useId();
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>Subject</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as SubjectKind)}>
+        <SelectTrigger id={id} className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {(["user", "group", "role"] as const).map((k) => (
+            <SelectItem key={k} value={k}>
+              {SUBJECT_KIND_LABEL[k]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+/**
+ * The subject field for a kind: a user is Explain access's user search
+ * (`SubjectUserField`, which stores the engine username); a group or a role is
+ * a search over the People list (`GET /perm/people`, `policy:read`), storing
+ * the name. Typing a name directly is accepted too. `public` is not offered:
+ * it has no members to ask about, and the server refuses it with a sentence.
+ */
+export function SubjectField({
+  kind,
+  value,
+  onChange,
+}: {
+  kind: SubjectKind;
+  value: string;
+  onChange: (ref: string) => void;
+}) {
+  if (kind === "user") return <SubjectUserField value={value} onChange={onChange} />;
+  return <SubjectNameField kind={kind} value={value} onChange={onChange} />;
+}
+
+function SubjectNameField({
+  kind,
+  value,
+  onChange,
+}: {
+  kind: "group" | "role";
+  value: string;
+  onChange: (name: string) => void;
+}) {
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  const people = usePermListPeople({ kind, q: value || undefined, limit: 20 }, { query: { enabled: open, retry: false } });
+  const rows = people.data?.status === 200 ? people.data.data.items.filter((p) => p.key !== "public") : [];
+  return (
+    <div className="relative space-y-1.5">
+      <Label htmlFor={id}>{SUBJECT_KIND_LABEL[kind]}</Label>
+      <Input
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={kind === "group" ? "Search groups…" : "Search roles…"}
+        autoComplete="off"
+      />
+      {open ? (
+        <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
+          {rows.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(p.key);
+                setOpen(false);
+              }}
+            >
+              <span>{p.label}</span>
+              {p.detail ? <span className="shrink-0 text-xs text-muted-foreground">{p.detail}</span> : null}
+            </button>
+          ))}
+          {rows.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              {people.isFetching ? "Searching…" : people.isError ? "The list could not be loaded; type a name." : "No matches."}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Read or write, with what `write` means on each engine. */
+export function ActionField({ value, onChange }: { value: Action; onChange: (action: Action) => void }) {
+  const id = useId();
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>Action</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as Action)}>
+        <SelectTrigger id={id} className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="read">read</SelectItem>
+          <SelectItem value="write">write</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">
+        Ranger has no <span className="font-mono">write</span>: it is evaluated as insert and delete on Trino, and insert,
+        update and delete on StarRocks, each answered separately.
+      </p>
+    </div>
+  );
+}
+
+/** One question: who, what, where. */
+export type Question = { subject: Subject; action: Action; target: Scope };
+
+/** The identity of a question; an answer or a refusal shows only under the question it was asked for. */
+export function questionKey(q: Question): string {
+  const t = q.target;
+  return JSON.stringify([q.subject.kind, q.subject.ref, q.action, t.catalog_id, t.schema ?? null, t.table ?? null, t.column ?? null]);
+}
+
+export type SubjectAnswer =
+  | { key: string; kind: "user"; response: ExplainResponse }
+  | { key: string; kind: "group" | "role"; response: ExplainPrincipalResponse };
+
+/**
+ * Asks explain: a user through `POST /perm/explain`, a group or a role through
+ * `POST /perm/explain/principal` (each member's own answer, server-read
+ * membership). Each answer and each refusal keeps the question it was asked
+ * for, and `answerFor`/`failureFor` return it only for that question: an answer
+ * still on its way when the form changes never appears under the new one.
+ */
+export function useSubjectExplain() {
+  const [answer, setAnswer] = useState<SubjectAnswer | null>(null);
+  const [failure, setFailure] = useState<{ key: string; error: ApiError } | null>(null);
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const user = usePermExplain<ApiError>();
+  const members = usePermExplainPrincipal<ApiError>();
+
+  const ask = (q: Question) => {
+    const key = questionKey(q);
+    setAnswer(null);
+    setFailure(null);
+    setPendingKey(key);
+    const settle = () => setPendingKey((k) => (k === key ? null : k));
+    const fail = (error: ApiError) => {
+      setFailure({ key, error });
+      settle();
+    };
+    if (q.subject.kind === "user") {
+      user.mutate(
+        { data: { subject: { user: q.subject.ref }, action: q.action, target: q.target } },
+        {
+          onSuccess: (res) => {
+            if (res.status === 200) setAnswer({ key, kind: "user", response: res.data });
+            settle();
+          },
+          onError: fail,
+        },
+      );
+    } else {
+      const kind = q.subject.kind;
+      members.mutate(
+        { data: { principal: { kind, ref: q.subject.ref }, action: q.action, target: q.target } },
+        {
+          onSuccess: (res) => {
+            if (res.status === 200) setAnswer({ key, kind, response: res.data });
+            settle();
+          },
+          onError: fail,
+        },
+      );
+    }
+  };
+
+  return {
+    ask,
+    /** Whether the question `key` names is on its way. */
+    pendingFor: (key: string) => pendingKey === key,
+    answerFor: (key: string) => (answer?.key === key ? answer : null),
+    failureFor: (key: string) => (failure?.key === key ? failure.error : null),
+  };
+}
+
+/** A refused explain, in words: the server's sentence (a 400 says why), or the permission it needs. */
+export function ExplainFailure({ error }: { error: ApiError }) {
+  return (
+    <Alert variant="destructive">
+      <AlertDescription>
+        {error.status === 403
+          ? "Explaining access needs the policy:read permission."
+          : error.message || "Access could not be explained. Try again."}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/** A user's answer per profile (`ExplainResultView`), or a group's or role's members (`MembersExplainView`). */
+export function SubjectExplainAnswer({ answer }: { answer: SubjectAnswer }) {
+  if (answer.kind === "user") return <ExplainResultView result={answer.response} />;
+  return <MembersExplainView response={answer.response} kind={answer.kind} />;
+}
+
+const EMPTY_SCOPE: Scope = { catalog_id: "" };
+
+/**
+ * The whole question-and-answer: whatever of subject, action and target the
+ * caller does not fix is a field (subject kind and subject, `ActionField`,
+ * `ScopePicker`), then Explain, then the refusal or the answer for exactly the
+ * question on screen (`useSubjectExplain`). Explain is disabled until the
+ * question is complete, and says what is missing (FE-ACTION-4).
+ */
+export function SubjectExplainForm({
+  subject: fixedSubject,
+  action: fixedAction,
+  target: fixedTarget,
+  initialKind = "user",
+  layout,
+}: {
+  /** A principal page's own subject; absent, the form asks for one. */
+  subject?: Subject;
+  action?: Action;
+  target?: Scope;
+  initialKind?: SubjectKind;
+  /** Lays the fields out; gets the subject, action-and-target and submit groups. Default: stacked. */
+  layout?: (parts: { subject: ReactNode; action: ReactNode; target: ReactNode; submit: ReactNode }) => ReactNode;
+}) {
+  const needsId = useId();
+  const [kind, setKind] = useState<SubjectKind>(fixedSubject?.kind ?? initialKind);
+  const [ref, setRef] = useState("");
+  const [action, setAction] = useState<Action>(fixedAction ?? "read");
+  const [target, setTarget] = useState<Scope>(fixedTarget ?? EMPTY_SCOPE);
+  const explain = useSubjectExplain();
+
+  const subject: Subject = fixedSubject ?? { kind, ref: ref.trim() };
+  const question: Question = { subject, action: fixedAction ?? action, target: fixedTarget ?? target };
+  const key = questionKey(question);
+  const missing = [
+    subject.ref ? null : subjectNoun(subject.kind),
+    question.target.catalog_id.trim() ? null : "a target catalog",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  const pending = explain.pendingFor(key);
+  const failure = explain.failureFor(key);
+  const answer = explain.answerFor(key);
+
+  const parts = {
+    subject: fixedSubject ? null : (
+      <>
+        <SubjectKindField
+          value={kind}
+          onChange={(k) => {
+            setKind(k);
+            setRef("");
+          }}
+        />
+        <SubjectField kind={kind} value={ref} onChange={setRef} />
+      </>
+    ),
+    action: fixedAction ? null : <ActionField value={action} onChange={setAction} />,
+    target: fixedTarget ? null : <ScopePicker value={target} onChange={setTarget} />,
+    submit: (
+      <>
+        <Button type="submit" disabled={missing !== "" || pending} aria-describedby={missing ? needsId : undefined}>
+          {pending ? <Loader2 aria-hidden className="animate-spin" /> : <Search aria-hidden />}
+          Explain
+        </Button>
+        {missing ? (
+          <p id={needsId} className="w-full text-xs text-muted-foreground">
+            {`Explain needs ${missing}.`}
+          </p>
+        ) : null}
+      </>
+    ),
+  };
+
+  return (
+    <div className="space-y-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (missing === "" && !pending) explain.ask(question);
+        }}
+      >
+        {layout ? (
+          layout(parts)
+        ) : (
+          <div className="space-y-4">
+            {parts.subject}
+            {parts.action}
+            {parts.target}
+            <div className="flex flex-wrap items-center gap-2">{parts.submit}</div>
+          </div>
+        )}
+      </form>
+      {failure ? <ExplainFailure error={failure} /> : null}
+      {answer ? <SubjectExplainAnswer answer={answer} /> : null}
+    </div>
+  );
+}

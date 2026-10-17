@@ -15,7 +15,8 @@
  * this pass on any bundle). `PeopleRoutes.tsx` has no literal of its own; it
  * imports `PeopleIndex.tsx`, so a static import of it is caught through
  * PeopleIndex's marker; `principalData.ts` has none either, and PrincipalPage's
- * marker catches it. `peopleUrl.ts` is NOT guarded: pages outside the area
+ * marker catches it, as it catches `tabs/CheckAccessTab.tsx`, whose one sentence
+ * `components/perm/MembersExplainView.tsx` (shared, outside the area) also spells. `peopleUrl.ts` is NOT guarded: pages outside the area
  * link into the area through it.
  */
 import { readFileSync, readdirSync } from "node:fs";
@@ -43,6 +44,8 @@ const MARKERS = [
   ["src/routes/governance/people/tabs/MasksFiltersTab.tsx", " other rules apply to everyone they do not exempt; "],
   // `GROUPS_ONLY_GATE`.
   ["src/routes/governance/people/tabs/ClearancesTab.tsx", "Engines do not enforce this gate (it names only groups)"],
+  // `CHECK_ACCESS_INTRO`.
+  ["src/routes/governance/people/CheckAccessDialog.tsx", "can reach a target, per policy profile"],
   // The prefix a uuid ref may carry.
   ["src/routes/governance/people/reach.ts", "urn:uuid:"],
 ];

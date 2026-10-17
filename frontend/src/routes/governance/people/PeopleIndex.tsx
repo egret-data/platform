@@ -1,10 +1,11 @@
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Users } from "lucide-react";
+import { ChevronLeft, ChevronRight, ShieldQuestion, Users } from "lucide-react";
 import type { PersonRow } from "@/api/generated/model";
 import { usePermListPeople } from "@/api/generated/perm/perm";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { principalUrl } from "@/routes/governance/people/peopleUrl";
 import { UnmatchedNames } from "@/routes/governance/people/UnmatchedNames";
+import { CheckAccessDialog } from "@/routes/governance/people/CheckAccessDialog";
 
 type PersonKind = "user" | "group" | "role";
 type TabId = PersonKind | "unmatched";
@@ -60,6 +62,8 @@ export default function PeopleIndex() {
   const showServiceAccounts = search.get("serviceAccounts") === "1";
   const searchId = useId();
   const saId = useId();
+  // Check access (spec §2): a dialog; its question and answer are a POST's, not a link's.
+  const [checking, setChecking] = useState(false);
 
   const change = (changes: Record<string, string | null>, replace = false) =>
     setSearch(
@@ -80,7 +84,9 @@ export default function PeopleIndex() {
     <ListPageShell
       title="People & groups"
       description="Users, groups and roles, and the egret grants and rules that reach each one."
+      toolbar={<ListToolbarButton icon={ShieldQuestion} label="Check access" onClick={() => setChecking(true)} />}
     >
+      <CheckAccessDialog open={checking} onOpenChange={setChecking} />
       <Tabs value={kind} onValueChange={(t) => change({ kind: t === "user" ? null : t, page: null })}>
         {/* Wraps, so every tab is in view at 390 px. */}
         <TabsList className="h-auto max-w-full flex-wrap justify-start">

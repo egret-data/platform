@@ -64,6 +64,10 @@ export interface FakeData {
   ruleWrite?: Answer;
   /** `POST …/perm/explain`; none is a 404. A function answers each call when the promise it returns settles. */
   explain?: Answer | (() => Promise<Answer>);
+  /** `POST …/perm/explain/principal`; none is a 404. */
+  explainPrincipal?: Answer;
+  /** `GET …/perm/people` (a group or role subject's search); default 200 with no items. */
+  people?: Answer;
   /** `GET …/principals`; default 200 `[]`. */
   principals?: Answer;
   /** `GET …/tags`, the tag catalogue; none is a 404. */
@@ -135,6 +139,8 @@ export function serveData(data: FakeData): DataCalls {
         const method = (init?.method ?? "GET").toUpperCase();
         const call = `${method} ${perm[1]}`;
         permCalls.push({ call, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+        if (call === "GET /perm/people") return reply(data.people ?? { status: 200, body: { items: [], total: 0 } });
+        if (call === "POST /perm/explain/principal") return reply(data.explainPrincipal);
         if (call === "GET /perm/grants") {
           const asked = permCalls.filter((c) => c.call === call).length - 1;
           const a = data.grants;
