@@ -32,7 +32,7 @@
 **Interfaces:**
 - Produces for Task 2: (a) whether `insert_timeout` exists; (b) `LONG_SQL`, a single `SELECT` that runs for more than 60 s on an empty all-in-one and that `query_timeout = 2` ends within 10 s; (c) the exact error text StarRocks returns when it ends it.
 
-- [ ] **Step 1: start the private engine.**
+- [x] **Step 1: start the private engine.**
 
 ```bash
 # No mysql client on the host: use the one in the image.
@@ -45,7 +45,7 @@ $SR -e "SHOW BACKENDS\G" | grep -E 'Alive'
 
 Expected: `Alive: true`. Allow 30-90 s.
 
-- [ ] **Step 2: check the two variables exist.**
+- [x] **Step 2: check the two variables exist.**
 
 ```bash
 $SR -e "SHOW VARIABLES LIKE '%_timeout'"
@@ -54,7 +54,7 @@ $SR -e "SET query_timeout = 2, insert_timeout = 2; SELECT @@query_timeout, @@ins
 
 Record whether `insert_timeout` is listed and whether the combined `SET` succeeds.
 
-- [ ] **Step 3: find `LONG_SQL`.** Try in this order and keep the first that runs over 60 s with the default timeout and stops at about 2 s with `SET query_timeout = 2`:
+- [x] **Step 3: find `LONG_SQL`.** Try in this order and keep the first that runs over 60 s with the default timeout and stops at about 2 s with `SET query_timeout = 2`:
 
 ```sql
 SELECT count(*) AS n, 'egret-deadline-probe' AS marker FROM TABLE(generate_series(1, 100000000000));
@@ -67,13 +67,13 @@ time $SR -e "SET query_timeout = 2; <candidate>"   # with SR set as in Step 1
 
 Record the elapsed time and the exact error line (for example `ERROR 1064 (HY000): ... timeout ...`).
 
-- [ ] **Step 4: confirm the engine, not the client, ended it.** Start the candidate with `query_timeout = 2` in one shell, and in another run `$SR -e "SHOW FULL PROCESSLIST"` at 1 s and at 5 s. Expected: the marker is in `Info` at 1 s and absent at 5 s. Then confirm the control: run it with no `SET`, kill the client with Ctrl-C at 3 s, and check `SHOW FULL PROCESSLIST` at 5 s. Expected: the marker is still there (this is the bug).
+- [x] **Step 4: confirm the engine, not the client, ended it.** Start the candidate with `query_timeout = 2` in one shell, and in another run `$SR -e "SHOW FULL PROCESSLIST"` at 1 s and at 5 s. Expected: the marker is in `Info` at 1 s and absent at 5 s. Then confirm the control: run it with no `SET`, kill the client with Ctrl-C at 3 s, and check `SHOW FULL PROCESSLIST` at 5 s. Expected: the marker is still there (this is the bug).
 
-- [ ] **Step 5: `insert_timeout`, only if Step 2 found it.** `CREATE DATABASE probe; CREATE TABLE probe.t (n BIGINT) DISTRIBUTED BY HASH(n) BUCKETS 1 PROPERTIES('replication_num'='1');` then `SET query_timeout = 600, insert_timeout = 2; INSERT INTO probe.t SELECT count(*) FROM TABLE(generate_series(1, 100000000000));`. Record whether it stops at about 2 s. Then run it again with `SET query_timeout = 2, insert_timeout = 600` and record which variable governs.
+- [x] **Step 5: `insert_timeout`, only if Step 2 found it.** `CREATE DATABASE probe; CREATE TABLE probe.t (n BIGINT) DISTRIBUTED BY HASH(n) BUCKETS 1 PROPERTIES('replication_num'='1');` then `SET query_timeout = 600, insert_timeout = 2; INSERT INTO probe.t SELECT count(*) FROM TABLE(generate_series(1, 100000000000));`. Record whether it stops at about 2 s. Then run it again with `SET query_timeout = 2, insert_timeout = 600` and record which variable governs.
 
-- [ ] **Step 6: write the results into both specs** under §1.3 as `**Measured 2026-10-17 on 4.1.6:**` bullets: the variables' existence, `LONG_SQL`, its elapsed time with and without the deadline, the error text, which variable governs `INSERT`. If `insert_timeout` does not exist, change the §1.3 bullet to say only `query_timeout` is set.
+- [x] **Step 6: write the results into both specs** under §1.3 as `**Measured 2026-10-17 on 4.1.6:**` bullets: the variables' existence, `LONG_SQL`, its elapsed time with and without the deadline, the error text, which variable governs `INSERT`. If `insert_timeout` does not exist, change the §1.3 bullet to say only `query_timeout` is set.
 
-- [ ] **Step 7: commit.**
+- [x] **Step 7: commit.**
 
 ```bash
 git add docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md docs/vi/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md
@@ -99,7 +99,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes from Task 1 (spec §1.2): `LONG_SQL` = `SELECT count(*) AS n, 'egret-deadline-probe' AS marker FROM TABLE(generate_series(1, 100000000000))`; StarRocks strips `/* */` comments from `Info`, so match on SQL text; a raw `mysql_async` probe connection needs `prefer_socket(false)`; the private engine runs at `mysql://127.0.0.1:9131`.
 - Produces: nothing later tasks call.
 
-- [ ] **Step 1: write the two live tests** in `connector_starrocks.rs`, beside the existing ones, using the file's `parse()` / `spec()` helpers. Shared helpers in the same file:
+- [x] **Step 1: write the two live tests** in `connector_starrocks.rs`, beside the existing ones, using the file's `parse()` / `spec()` helpers. Shared helpers in the same file:
 
 ```rust
 /// A fresh raw connection to read the engine's own view of what is running.
@@ -220,7 +220,7 @@ async fn starrocks_cancels_an_insert_when_egret_drops_it() {
 
 If `OptsBuilder`, `get_opt` or `query` do not compile against the pinned `mysql_async`, adapt the call shape in the helpers only; the assertions stay the same.
 
-- [ ] **Step 2: run them, expect PASS** (the behaviour holds today), with `ran:` lines in the output for both.
+- [x] **Step 2: run them, expect PASS** (the behaviour holds today), with `ran:` lines in the output for both.
 
 ```bash
 EGRET_TEST_STARROCKS_URL=mysql://127.0.0.1:9131 \
@@ -229,9 +229,9 @@ EGRET_TEST_STARROCKS_URL=mysql://127.0.0.1:9131 \
 
 The whole file runs, so the existing tests still pass too.
 
-- [ ] **Step 3: show the test can fail (probe mutation, spec §1.4).** In the SELECT test only, change the `needle` argument to `"egret-never-in-info"`; rerun; expect FAIL with `the probe never saw`. Restore it; check `git diff` on the test shows the original needle; rerun; expect PASS. Record both outputs for the report.
+- [x] **Step 3: show the test can fail (probe mutation, spec §1.4).** In the SELECT test only, change the `needle` argument to `"egret-never-in-info"`; rerun; expect FAIL with `the probe never saw`. Restore it; check `git diff` on the test shows the original needle; rerun; expect PASS. Record both outputs for the report.
 
-- [ ] **Step 4: correct the texts** (spec §1.1 lists them; §1.3 says what they become). Each states what was measured, with the date and engine version, and points at the two tests by name:
+- [x] **Step 4: correct the texts** (spec §1.1 lists them; §1.3 says what they become). Each states what was measured, with the date and engine version, and points at the two tests by name:
   - `starrocks.rs:300-305`: replace the "**Not yet timeout-bound.**" paragraph: `limits.timeout` is still unread here; the caller's outer `tokio::time::timeout` drops this future, which closes the connection, and StarRocks 4.1.6 cancels the statement on its own (measured 2026-10-17, pinned by `starrocks_cancels_a_select_when_egret_drops_it`). Keep the obligation that a caller MUST supply the outer wrapper.
   - `handlers/sql.rs` `cancel()` doc, the StarRocks bullet (`:557-565`): StarRocks, like Trino, does not leave an abandoned statement running: the worker's drop closes the connection and the engine cancels it (measured 2026-10-17). What this handler still cannot do is stop a statement **before** its budget, which needs a port verb and `KILL QUERY` (group B). Delete the sentence that the session variable would fail Data API queries, and the claim that a timed-out statement runs to completion.
   - `handlers/sql.rs:579-582` error text: replace `on StarRocks that connector does not read \`Limits::timeout\` at all, so it is not bounded by anything` with `on StarRocks it ends when the connection is dropped at that budget`. Keep `QueryExecPort` and `StarRocks` in the text: `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` (`:1428`) asserts both.
@@ -246,7 +246,7 @@ rg -n "not bounded by anything|runs to completion on the engine|run the full hou
 
 Expected: no output. If a hit remains elsewhere (for example `handlers/sql.rs:503-504`, *"runs the full hour here on StarRocks"*), correct it the same way and list it in the report.
 
-- [ ] **Step 5: format, lint, run the crates whose text changed.**
+- [x] **Step 5: format, lint, run the crates whose text changed.**
 
 ```bash
 cargo fmt --all
@@ -254,7 +254,7 @@ cargo clippy -p egret-query -p egret-workflow -p egret-dataapi --all-targets -- 
 cargo test -p egret-workflow --lib handlers::sql
 ```
 
-- [ ] **Step 6: commit.**
+- [x] **Step 6: commit.**
 
 ```bash
 git add crates/egret-query crates/egret-workflow/src/worker/handlers/sql.rs crates/egret-workflow/src/routes.rs crates/egret-dataapi/src/serving/router.rs
@@ -280,7 +280,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `Refusal::Unsupported(&'static str)` and `pub(crate) const HTTP_REFUSAL: &str`.
 
-- [ ] **Step 1: change the test first.** In `the_refused_list_is_six_and_kv_is_not_in_it`, remove the `("http", "an outbound HTTP client", "W9")` line from `expected`, change the count check to `expected.len() + 2` with the comment `// \`secret\` (Confined) and \`http\` (Unsupported) are checked by their sentences below.`, and change the chain to:
+- [x] **Step 1: change the test first.** In `the_refused_list_is_six_and_kv_is_not_in_it`, remove the `("http", "an outbound HTTP client", "W9")` line from `expected`, change the count check to `expected.len() + 2` with the comment `// \`secret\` (Confined) and \`http\` (Unsupported) are checked by their sentences below.`, and change the chain to:
 
 ```rust
         for (name, want) in not_yet.chain([
@@ -299,13 +299,13 @@ After the loop, add:
         );
 ```
 
-- [ ] **Step 2: run it, expect a compile failure** (`cannot find value HTTP_REFUSAL`).
+- [x] **Step 2: run it, expect a compile failure** (`cannot find value HTTP_REFUSAL`).
 
 ```bash
 cargo test -p egret-workflow --lib the_refused_list_is_six
 ```
 
-- [ ] **Step 3: implement.** Beside `SECRET_REFUSAL`:
+- [x] **Step 3: implement.** Beside `SECRET_REFUSAL`:
 
 ```rust
 /// `http()`'s refusal (2026-10-17, spec `2026-10-17-workflow-starrocks-timeout-and-http`
@@ -329,14 +329,14 @@ Add the variant to `enum Refusal`:
 
 Extend the match: `Refusal::Confined(reason) | Refusal::Unsupported(reason) => pebble_error(*reason),`. Change the row to `("http", Refusal::Unsupported(HTTP_REFUSAL)),`. In the doc above `REFUSED`, add `**Updated 2026-10-17: \`http\` is \`Unsupported\`, not waiting for a package.**` and remove the sentence that `http` is left naming W9.
 
-- [ ] **Step 4: run the test, expect PASS.** Then the whole functions module:
+- [x] **Step 4: run the test, expect PASS.** Then the whole functions module:
 
 ```bash
 cargo test -p egret-workflow --lib the_refused_list_is_six
 cargo test -p egret-workflow --lib runners::functions
 ```
 
-- [ ] **Step 5: check the oracle still agrees.** The Pebble corpus compares refusals by error class (`oracle/error-class.txt:37`, paired with this test in `oracle/error-class-pairs.txt:71`), so a changed sentence must not move the ratchet:
+- [x] **Step 5: check the oracle still agrees.** The Pebble corpus compares refusals by error class (`oracle/error-class.txt:37`, paired with this test in `oracle/error-class-pairs.txt:71`), so a changed sentence must not move the ratchet:
 
 ```bash
 rg -n "function-http" crates/egret-workflow/oracle/   # error-class.txt, error-class-pairs.txt
@@ -345,7 +345,7 @@ cargo test -p egret-workflow --test oracle
 
 Expected: same pass/baseline counts as before the change (record them).
 
-- [ ] **Step 6: format, lint, commit.**
+- [x] **Step 6: format, lint, commit.**
 
 ```bash
 cargo fmt --all
@@ -367,9 +367,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `docs/vi/specs/2026-09-01-workflow-programme-design.md` (the same two sentences)
 - Modify: this plan (tick the boxes)
 
-- [ ] **Step 1: programme spec, EN.** At `:515` replace `and \`http\`, still owned by no row` with `and \`http\`, refused on purpose since 2026-10-17 because it would run in the control plane`. At the end of the parenthetical on `:541` append: `*(Decided 2026-10-17: \`http\` is refused permanently, \`Refusal::Unsupported\`; an expression renders in the egret server, so a request from it is a server-side request forgery. See \`docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md\` §2.)*`
-- [ ] **Step 2: the same two edits in the VI file**, in Vietnamese, found with `rg -n "http" docs/vi/specs/2026-09-01-workflow-programme-design.md`.
-- [ ] **Step 3: full local gate** (CI is out of quota; this is the merge gate). One command at a time:
+- [x] **Step 1: programme spec, EN.** At `:515` replace `and \`http\`, still owned by no row` with `and \`http\`, refused on purpose since 2026-10-17 because it would run in the control plane`. At the end of the parenthetical on `:541` append: `*(Decided 2026-10-17: \`http\` is refused permanently, \`Refusal::Unsupported\`; an expression renders in the egret server, so a request from it is a server-side request forgery. See \`docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md\` §2.)*`
+- [x] **Step 2: the same two edits in the VI file**, in Vietnamese, found with `rg -n "http" docs/vi/specs/2026-09-01-workflow-programme-design.md`.
+- [x] **Step 3: full local gate** (CI is out of quota; this is the merge gate). One command at a time:
 
 ```bash
 cargo fmt --all -- --check
@@ -382,7 +382,7 @@ EGRET_TEST_STARROCKS_URL=mysql://127.0.0.1:9131 cargo test -p egret-query --test
 
 Record pass/fail counts. Any red test is investigated before claiming it pre-existed: run it on `origin/main` in the same environment.
 
-- [ ] **Step 4: tick this plan's boxes, commit the docs.**
+- [x] **Step 4: tick this plan's boxes, commit the docs.**
 
 ```bash
 git add docs/en/specs/2026-09-01-workflow-programme-design.md docs/vi/specs/2026-09-01-workflow-programme-design.md docs/en/plans/2026-10-17-workflow-starrocks-timeout-and-http.md
