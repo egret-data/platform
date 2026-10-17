@@ -2321,6 +2321,8 @@ impl KillWorld {
                     // The label listing finds the same one container: the name
                     // and the labels agree about whose container it is.
                     assert_eq!(containers_of(run), vec![name.clone()]);
+                    // And the workspace label `Drop` cleans up by finds it.
+                    assert_eq!(containers_of_workspace(self.ws), vec![name.clone()]);
                     return (run, attempt, name);
                 }
             }
@@ -2332,6 +2334,27 @@ impl KillWorld {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+/// Every container, running or not, labelled with workspace `ws`: the label
+/// [`KillWorld`]'s `Drop` removes by.
+fn containers_of_workspace(ws: Uuid) -> Vec<String> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--all",
+            "--filter",
+            &format!("label=egret.io/workspace-id={ws}"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl Drop for KillWorld {
@@ -2538,7 +2561,7 @@ async fn a_kill_survives_the_worker_dying() {
     );
     let (state, lease) = w.run_state(run).await;
     assert_eq!(state, "KILLING", "the kill is written and not finished");
-    let lease = lease.expect("still under the dead worker's lease");
+    assert!(lease.is_some(), "still under the dead worker's lease");
     // Aborting the task dropped the handler's `docker start --attach`; the
     // container does not care.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -2548,20 +2571,22 @@ async fn a_kill_survives_the_worker_dying() {
     );
 
     // The lease expires: the reaper's `working_timeout` is two seconds here.
+    // Polled through `reap` itself, so the only clock is the database's:
+    // the lease's `claimed_at` and the reaper's `now()` are both its own.
     let reap_after = std::time::Duration::from_secs(2);
-    loop {
-        let age = chrono::Utc::now() - lease;
-        if age.to_std().is_ok_and(|a| a > reap_after) {
-            break;
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let reaped = loop {
+        let n = egret_workflow::worker::reap(&w.pool, reap_after)
+            .await
+            .expect("reap");
+        if n != 0 || std::time::Instant::now() >= reap_deadline {
+            break n;
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    };
     assert_eq!(
-        egret_workflow::worker::reap(&w.pool, reap_after)
-            .await
-            .expect("reap"),
-        1,
-        "the reaper frees the dead worker's KILLING lease"
+        reaped, 1,
+        "the reaper frees the dead worker's KILLING lease within 15s"
     );
     assert_eq!(w.run_state(run).await, ("KILLING".to_string(), None));
     assert!(container_running(&name), "{name} still runs after the reap");
