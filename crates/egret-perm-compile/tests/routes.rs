@@ -6557,6 +6557,13 @@ async fn bind_tag_service_with_one_policy(f: &Fixture, trino_id: i64, tag_value:
 /// for a stranger. A disagreement here is the model and the engine parting
 /// company, which is the class of defect the whole package exists to make
 /// impossible to ship silently.
+///
+/// **The second target differs from the grant only in case** (design R6):
+/// the grant names `sales.orders`, the target `sales.Orders`. The engine folds
+/// every resource level (`ignoreCase: true`) and the artifact evaluator folds
+/// with it, so a model oracle comparing exactly would deny the granted subject
+/// here while the artifact allows them. `egret_perm::eval::resource_level_matches`
+/// is what makes the two agree.
 #[tokio::test]
 async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
     let Some(f) = setup().await else { return };
@@ -6583,14 +6590,18 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
         .into_iter()
         .filter(|g| g.scope.catalog_id == f.catalog_id)
         .collect();
-    let target = egret_perm::Scope {
-        catalog_id: f.catalog_id,
-        schema: Some("sales".into()),
-        table: Some("orders".into()),
-        column: None,
-    };
-
-    for (user, expected) in [(&granted, true), (&stranger, false)] {
+    for (table, user, expected) in [
+        ("orders", &granted, true),
+        ("orders", &stranger, false),
+        ("Orders", &granted, true),
+        ("Orders", &stranger, false),
+    ] {
+        let target = egret_perm::Scope {
+            catalog_id: f.catalog_id,
+            schema: Some("sales".into()),
+            table: Some(table.into()),
+            column: None,
+        };
         let oracle = egret_perm::eval::evaluate(
             &egret_perm::Subject {
                 user: user.clone(),
@@ -6607,7 +6618,7 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
         );
         assert_eq!(
             oracle.allowed, expected,
-            "the model oracle must {expected} {user}: {oracle:?}"
+            "the model oracle must {expected} {user} on sales.{table}: {oracle:?}"
         );
 
         let (status, body) = into_json(
@@ -6616,7 +6627,16 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
                     "POST",
                     "/perm/explain",
                     &token,
-                    Some(explain_body(f.catalog_id, user)),
+                    Some(json!({
+                        "subject": { "user": user },
+                        "action": "read",
+                        "target": {
+                            "catalog_id": f.catalog_id,
+                            "schema": "sales",
+                            "table": table,
+                            "column": null,
+                        }
+                    })),
                 ))
                 .await
                 .unwrap(),
@@ -6630,8 +6650,8 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
         assert_eq!(
             kind == "allowed",
             oracle.allowed,
-            "the artifact and the model oracle disagree about {user}: oracle {oracle:?}, \
-             artifact {kind}; body: {body}"
+            "the artifact and the model oracle disagree about {user} on sales.{table}: \
+             oracle {oracle:?}, artifact {kind}; body: {body}"
         );
     }
 }
