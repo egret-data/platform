@@ -19,7 +19,7 @@ import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { ACTIONS_CELL, CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, CatalogGate, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -131,9 +131,16 @@ function Grants({
   const order = Object.keys(LEVEL_LABEL);
   inherited.sort((a, b) => order.indexOf(a.from) - order.indexOf(b.from) || bySentence(a.grant, b.grant));
 
+  // The tab renders the grants only with policy:read, which is also what Who can read? needs.
+  const note = <EgretGrantsOnlyNote explainLabel={canRead ? "Who can read?" : null} />;
   if (here.length + inherited.length + inside.length + byPattern.length === 0) {
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
-    return <EmptyState icon={KeyRound} title={`No grant reaches this ${noun}`} />;
+    return (
+      <div className="space-y-2">
+        {note}
+        <EmptyState icon={KeyRound} title={`No egret grant reaches this ${noun}`} />
+      </div>
+    );
   }
 
   const table = (label: string, rows: GrantView[], extra?: { head: string; cell: (g: GrantView) => string; mono?: boolean }) => (
@@ -153,6 +160,7 @@ function Grants({
 
   return (
     <div className="space-y-6">
+      {note}
       {here.length > 0 ? <Section title="Here">{table("Here", here)}</Section> : null}
       {inherited.length > 0 ? (
         <Section title="Inherited">

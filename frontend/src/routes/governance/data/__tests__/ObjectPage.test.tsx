@@ -806,17 +806,38 @@ describe("PermissionsTab", () => {
     expect(rowsOf("Matching a pattern").map((r) => r[0])).toEqual(["role analyst can read ice.sales.“*”"]);
   });
 
-  it("says no grant reaches the object", async () => {
+  const EGRET_ONLY =
+    "Lists egret grants. Hand-written and egret-seeded engine policies are not listed here; Who can read? gives the engines' answer.";
+
+  it("says no egret grant reaches the object, and that engine policies are not listed", async () => {
     serveData(fixture({ grants: ok(UNRELATED) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
-    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+    expect(await within(panel()).findByText("No egret grant reaches this table")).toBeInTheDocument();
+    expect(within(panel()).getByText(EGRET_ONLY)).toBeInTheDocument();
+  });
+
+  it("says, above the grants it lists, that they are egret's only", async () => {
+    serveData(fixture({ grants: ok([ON_TABLE]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(panel()).getByText(EGRET_ONLY)).toBeInTheDocument();
+  });
+
+  // I1: the engines' service-defs ignore case on every resource level.
+  it("lists on the orders page a deny grant typed on sales.Orders", async () => {
+    const upper = g("g-upper", { schema: "sales", table: "Orders" }, { effect: "deny" });
+    serveData(fixture({ grants: ok([upper]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here")).toEqual([["role analyst cannot read ice.sales.Orders", "Deny"]]);
+    expect(within(panel()).queryByText(/No egret grant reaches/)).not.toBeInTheDocument();
   });
 
   it("says the grants could not be loaded, never that there are none", async () => {
     serveData(fixture({ grants: boom }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     expect(await within(panel()).findByText("The grants could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(panel()).queryByText(/No grant reaches/)).not.toBeInTheDocument();
+    expect(within(panel()).queryByText(/No egret grant reaches/)).not.toBeInTheDocument();
   });
 
   it("tells a viewer without policy:read why, and never asks for the grants", async () => {
@@ -902,7 +923,7 @@ describe("PermissionsTab", () => {
     await user.type(within(dialog).getByRole("textbox"), "delete");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
-    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+    expect(await within(panel()).findByText("No egret grant reaches this table")).toBeInTheDocument();
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants", "DELETE /perm/grants/g-table", "GET /perm/grants"]);
     expect(toast.success).toHaveBeenCalledWith("Grant deleted.");
   });
@@ -968,7 +989,7 @@ describe("PermissionsTab", () => {
     );
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
-    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+    expect(await within(panel()).findByText("No egret grant reaches this table")).toBeInTheDocument();
 
     await user.click(await within(header()).findByRole("button", { name: "Grant access" }));
     const dialog = await screen.findByRole("dialog");

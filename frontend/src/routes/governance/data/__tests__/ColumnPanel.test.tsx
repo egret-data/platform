@@ -223,13 +223,20 @@ describe("ColumnPanel", () => {
       ]),
     );
     expect(within(panel).getByText("Grants on the table and above reach this column too. See Permissions.")).toBeInTheDocument();
+    // I2: the list is egret's grants only; explain gives the engines' answer.
+    expect(
+      within(panel).getByText(
+        "Lists egret grants. Hand-written and egret-seeded engine policies are not listed here; Who can read this column? gives the engines' answer.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("says when nothing selects the column and no grant is set on it", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=id");
     const panel = await screen.findByRole("dialog", { name: "id" });
-    expect(await within(panel).findByText("No grant is set on this column")).toBeInTheDocument();
+    expect(await within(panel).findByText("No egret grant is set on this column")).toBeInTheDocument();
+    expect(within(panel).getByText(/^Lists egret grants\. Hand-written and egret-seeded engine policies are not listed here/)).toBeInTheDocument();
     // The table's tag still reaches it, and so does the rule on that tag.
     await waitFor(() => expect(items(panel, "Masking rules of id")).toEqual(["redact_confidential mask · MASK · by tag CONFIDENTIAL"]));
     expect(items(panel, "Tags of id")).toEqual(["CONFIDENTIAL from table"]);
@@ -241,7 +248,7 @@ describe("ColumnPanel", () => {
     const panel = await screen.findByRole("dialog", { name: "email" });
     expect(await within(panel).findByText("The grants could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
     expect(within(panel).getByText("The masking rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(panel).queryByText("No grant is set on this column")).not.toBeInTheDocument();
+    expect(within(panel).queryByText("No egret grant is set on this column")).not.toBeInTheDocument();
   });
 
   it("tells a viewer without policy:read why, and never asks for grants or rules", async () => {

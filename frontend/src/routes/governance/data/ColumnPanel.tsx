@@ -14,7 +14,7 @@ import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governan
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { CatalogGate, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
 /**
@@ -233,7 +233,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
             <Masks path={path} catalog={catalog} tags={tags} />
           </Section>
           <Section title="Grants">
-            <Grants path={path} catalogId={catalog.id} />
+            <Grants path={path} catalogId={catalog.id} canExplain={canRead} />
           </Section>
         </>
       ) : (
@@ -319,7 +319,7 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
 }
 
 /** The grants set on the column: by its name, or by a pattern that matches it (marked). */
-function Grants({ path, catalogId }: { path: ColumnPath; catalogId: string }) {
+function Grants({ path, catalogId, canExplain }: { path: ColumnPath; catalogId: string; canExplain: boolean }) {
   const grantsQ = usePermListGrants({ query: { retry: false } });
   const workspaceName = useWorkspaceNames();
   const sentenceOf = (g: GrantView) => grantSentence(g, workspaceName);
@@ -329,12 +329,15 @@ function Grants({ path, catalogId }: { path: ColumnPath; catalogId: string }) {
     .filter((g) => grantCoverage(g, path, catalogId) === "here")
     .sort((a, b) => sentenceOf(a).localeCompare(sentenceOf(b)));
   const note = (
-    <p className="text-xs text-muted-foreground">Grants on the table and above reach this column too. See Permissions.</p>
+    <>
+      <p className="text-xs text-muted-foreground">Grants on the table and above reach this column too. See Permissions.</p>
+      <EgretGrantsOnlyNote explainLabel={canExplain ? "Who can read this column?" : null} />
+    </>
   );
   if (onColumn.length === 0) {
     return (
       <>
-        <p className="text-sm text-muted-foreground">No grant is set on this column</p>
+        <p className="text-sm text-muted-foreground">No egret grant is set on this column</p>
         {note}
       </>
     );
