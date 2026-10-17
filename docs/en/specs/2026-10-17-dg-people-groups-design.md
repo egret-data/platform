@@ -13,6 +13,8 @@ specifies it. Every claim about existing code carries a `file:line` from `0741a4
 The plan is written to the recommended answer of each question. Tasks that depend on an answer say so; they are not
 dispatched until the question is answered.
 
+**Answered by the user 2026-10-17: Q1 → allocate with the 409 guard (recommended); Q2 → People routes gated `policy:read` (recommended).**
+
 **Q1 (security: a new write that allocates an engine identity).** D9 from #1's live check: a user who never queried
 has no `users.username`, so the principal picker cannot offer them (`frontend/src/components/perm/PrincipalPicker.tsx:239-255`),
 and grant writes refuse a user ref that is not a stored username (`crates/egret-perm-compile/src/principal_refs.rs:35-44`).
@@ -49,7 +51,7 @@ memberships. Today those are read through Control Plane routes gated `user:read`
 | id | decision | by |
 |---|---|---|
 | P1 | Routes: `/governance/people` (index), `/governance/people/users/:userId`, `/governance/people/groups/:name`, `/governance/people/roles/:name`, plus `/governance/people/users/by-name/:username` (resolves to the id and replaces itself). `?tab=` selects a tab; the index keeps `?kind=` and `?q=` in the URL (FE-PAGE-2). A lazy route area with its own bundle guard (FE-ROUTE-2) | default decision (2026-10-17) |
-| P2 | The area, its sidebar item ("People & groups", after Data) and every new route are gated `policy:read`. A steward holding only `tag:read` does not see it. Existing routes keep their permissions | default decision (2026-10-17), pending Q2 |
+| P2 | The area, its sidebar item ("People & groups", after Data) and every new route are gated `policy:read`. A steward holding only `tag:read` does not see it. Existing routes keep their permissions | user, 2026-10-17 (Q2) |
 | P3 | Memberships are shown exactly as the compiler expands them (§3). Memberships egret's own authoriser counts but the compiler does not (a group's roles and workspaces) are shown and marked "egret only — not applied on engines". Expired memberships are shown and marked | default decision (2026-10-17) |
 | P4 | The server returns, per principal, the list of `(kind, ref)` principals that stand for it and how (`standsFor`, §4.2). The client lists a grant or rule when one of its principals equals an entry (kind and ref, byte for byte, as the compiler joins). No membership logic in the client | default decision (2026-10-17) |
 | P5 | "Can <group or role> read <object>?" evaluates each member as a user, over the same served artifacts `/perm/explain` uses. No group or role is ever sent to the evaluator. At most 200 members are evaluated; the answer says how many were not. Members with no username are listed as not evaluated. There is no aggregate verdict word | default decision (2026-10-17) |
@@ -60,7 +62,7 @@ memberships. Today those are read through Control Plane routes gated `user:read`
 | P10 | Principal pages list egret grants and rules only and say so: hand-written and egret-seeded engine policies are not listed (as #1's tabs say), and Check access gives the engines' answer. Hand-written policies per principal come with #4 (F12) | default decision (2026-10-17) |
 | P11 | The index has an "Unmatched names" tab rendering `GET /perm/unresolved-principals`, fail-open rows first | default decision (2026-10-17) |
 | P12 | D9a: the principal picker's list stays open after a pick while the input has focus, and reopens on typing or click | default decision (2026-10-17) |
-| P13 | D9b: the picker offers "Allocate username and add" for a user with no username, through Q1's route | default decision (2026-10-17), pending Q1 |
+| P13 | D9b: the picker offers "Allocate username and add" for a user with no username, through Q1's route | user, 2026-10-17 (Q1) |
 | P14 | A principal page has **Grant access** (GrantDialog with the principal filled in, new additive `initialPrincipals`), and principal names in Data's Permissions and Masks & filters tabs link to their People page | default decision (2026-10-17) |
 | P15 | A live measurement (plan Task 1) checks that group and role grants reach the engines through member expansion and that group-held roles do not, before any UI states it | default decision (2026-10-17) |
 | P16 | Out of #2: expanding a group's roles and workspace memberships in the compiler; workspace pages; engine-scoped grants (F11, #4); server-side grant or rule filters; caching | default decision (2026-10-17) |
@@ -168,7 +170,7 @@ A missing id says "No grant has this id; it may have been deleted."
 ## 4. Backend
 
 All new routes live in `egret-perm-compile` beside `/perm/explain` and the expansion they mirror, are read-only
-except §4.4, and are gated `policy:read` (pending Q2) with `egret_core::authz::require`, as `list_grants` is
+except §4.4, and are gated `policy:read` (Q2, user 2026-10-17) with `egret_core::authz::require`, as `list_grants` is
 (`routes.rs:1400-1404`).
 
 ### 4.1 One definition of membership
@@ -202,7 +204,7 @@ label, reason: "no_username" }], truncated }`.
 - `public`, `workspace_members`, `user`, an unknown name → 400 with a sentence. Members sorted by username;
   the first 200 evaluated.
 
-### 4.4 Allocate a username (pending Q1)
+### 4.4 Allocate a username (Q1, user 2026-10-17)
 
 `POST /api/control-plane/perm/people/users/{user_id}/username`, gated `policy:update` → `{ username, allocated }`.
 Idempotent. In one transaction: `ensure_username_via`; if the user had none and any `perm.grant_principals` or
