@@ -120,13 +120,19 @@ pub(super) enum Killed {
 /// This is [`timeout::guard`] plus the artifact's `kill(null)`. The outcome is
 /// the budget's, unaltered — see the module doc's fact 2 for why a refused
 /// kill does not change it.
+///
+/// `asked` is set before the handler is asked to stop, so a caller whose run
+/// is then found killed (`claim::run_one`'s commit-time kill) does not ask the
+/// same handler to stop a second time.
 pub(super) async fn guarded(
     reg: &dyn Registry,
     task: &TaskInput,
     budget: Option<std::time::Duration>,
+    asked: &std::sync::atomic::AtomicBool,
 ) -> Result<Outcome> {
     let guarded = timeout::guard(budget, reg.run(task)).await?;
     if matches!(guarded, Guarded::Expired(_)) {
+        asked.store(true, std::sync::atomic::Ordering::SeqCst);
         // **The value is read here, which is the whole reason it is a value.**
         // Fix round 1: `kill` used to log and this line used to discard what it
         // returned, so [`Killed`]'s own doc — "a value rather than a `Result`
@@ -270,6 +276,7 @@ mod tests {
             &reg,
             &input("test.endless", serde_json::json!({})),
             Some(Duration::from_millis(50)),
+            &Default::default(),
         )
         .await
         .expect("a timeout is a task failure, not a worker failure");
@@ -289,6 +296,7 @@ mod tests {
             &reg,
             &input("test.prompt", serde_json::json!({})),
             Some(Duration::from_secs(30)),
+            &Default::default(),
         )
         .await
         .expect("no worker failure");
@@ -301,9 +309,14 @@ mod tests {
         );
 
         // And no budget at all cannot expire, so it cannot kill.
-        let out = guarded(&reg, &input("test.prompt", serde_json::json!({})), None)
-            .await
-            .expect("no worker failure");
+        let out = guarded(
+            &reg,
+            &input("test.prompt", serde_json::json!({})),
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect("no worker failure");
         assert_eq!(out.message.as_deref(), Some("the handler's own reason"));
         assert_eq!(
             cancels.load(Ordering::SeqCst),
@@ -332,9 +345,14 @@ mod tests {
             "the refusal must reach the caller carrying the handler's own reason"
         );
 
-        let out = guarded(&reg, &task, Some(Duration::from_millis(50)))
-            .await
-            .expect("a refused kill must not become a worker failure that aborts the tick");
+        let out = guarded(
+            &reg,
+            &task,
+            Some(Duration::from_millis(50)),
+            &Default::default(),
+        )
+        .await
+        .expect("a refused kill must not become a worker failure that aborts the tick");
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(
             out.message.as_deref(),

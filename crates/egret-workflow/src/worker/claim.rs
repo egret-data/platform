@@ -1358,6 +1358,9 @@ async fn run_one(
             let _ = store.store.delete(&wd.carry_to).await;
         }
     }
+    // Set once the budget's expiry has asked the handler to stop, so a kill
+    // found afterwards does not ask it again (`end_kill`).
+    let asked = std::sync::atomic::AtomicBool::new(false);
     let handler = async {
         match budget {
             Budget::Refused(message) => Ok(Outcome::failed_with(message)),
@@ -1366,7 +1369,7 @@ async fn run_one(
             // kill path hangs off it. A refusal there does not reach this
             // expression — it is logged and the budget's outcome stands. See
             // `super::cancel`.
-            other => cancel::guarded(reg, &input, other.duration()).await,
+            other => cancel::guarded(reg, &input, other.duration(), &asked).await,
         }
     };
     let (outcome, held, renewed_at) =
@@ -1382,7 +1385,15 @@ async fn run_one(
             // run is still this worker's, so stopping it is this worker's job.
             Leased::Killed { held } => {
                 input.log.finish().await;
-                return finish_kill(pool, c, held, reg, &input).await;
+                return end_kill(
+                    pool,
+                    c,
+                    held,
+                    reg,
+                    &input,
+                    !asked.load(std::sync::atomic::Ordering::SeqCst),
+                )
+                .await;
             }
             // **The fence moved: another worker holds this run now, and this one
             // records NOTHING** — no outcome, and no failed-attempt line, because
@@ -1538,17 +1549,56 @@ async fn run_one(
     // as a lost lease although the lease is still this worker's. The row is
     // read once, as after a refused renewal, and a run killed under the lease
     // takes the kill path rather than waiting for the reaper.
+    //
+    // **A budget that expired before the kill landed has already asked the
+    // handler to stop** (`cancel::guarded`), so this path does not ask again.
+    // A second cancel is not reliably harmless: the script handler's
+    // `docker kill`/pod delete on a container its first cancel already removed
+    // answers `Err`, which would log "could not stop this task" about a task
+    // that was stopped. A first cancel that was REFUSED is not retried either:
+    // a handler that cannot stop its work (`handlers::sql`) cannot on a second
+    // asking.
     let ended = match ended {
         Err(e) if is_lease_lost(&e) => {
-            if killing_under(pool, c.id, lease.0).await.unwrap_or(false) {
-                return finish_kill(pool, c, lease.0, reg, &input).await;
+            let killed_here = match killing_under(pool, c.id, lease.0).await {
+                Ok(k) => k,
+                Err(read) => {
+                    tracing::warn!(
+                        execution = %c.execution_id,
+                        run = %c.id,
+                        task_id = %c.task_id,
+                        error = %read,
+                        "the run's outcome was refused and its row could not be read to tell a \
+                         kill from a lost lease; it is treated as a lost lease"
+                    );
+                    false
+                }
+            };
+            if killed_here {
+                return end_kill(
+                    pool,
+                    c,
+                    lease.0,
+                    reg,
+                    &input,
+                    !asked.load(std::sync::atomic::Ordering::SeqCst),
+                )
+                .await;
             }
             return Err(e);
         }
         other => other?,
     };
     if let Some(held) = killed {
-        return finish_kill(pool, c, held, reg, &input).await;
+        return end_kill(
+            pool,
+            c,
+            held,
+            reg,
+            &input,
+            !asked.load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .await;
     }
     if let Ended::GaveUp = ended {
         tracing::warn!(
@@ -2052,15 +2102,30 @@ where
                 // this lease from a lost lease; a read that fails or does not
                 // answer is a lost lease, as before the kill existed.
                 Ok(Ok(None)) => {
-                    if kill_poll.is_some()
-                        && matches!(
-                            tokio::time::timeout_at(limit, killed(held)).await,
-                            Ok(Ok(true))
-                        )
-                    {
-                        return Leased::Killed { held };
-                    }
-                    return Leased::Lost;
+                    let Some(p) = kill_poll else {
+                        return Leased::Lost;
+                    };
+                    return match tokio::time::timeout(p, killed(held)).await {
+                        Ok(Ok(true)) => Leased::Killed { held },
+                        Ok(Ok(false)) => Leased::Lost,
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                run = %run,
+                                error = %e,
+                                "the lease renewal was refused and the run could not be read \
+                                 to tell a kill from a lost lease; it is treated as lost"
+                            );
+                            Leased::Lost
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                run = %run,
+                                "the lease renewal was refused and the read that tells a kill \
+                                 from a lost lease went unanswered; it is treated as lost"
+                            );
+                            Leased::Lost
+                        }
+                    };
                 }
                 Ok(Err(e)) => tracing::warn!(
                     run = %run,
@@ -2069,16 +2134,25 @@ where
                 ),
                 Err(_) => tracing::warn!(run = %run, "a lease renewal went unanswered"),
             },
-            Wake::Poll => match tokio::time::timeout_at(limit, killed(held)).await {
-                Ok(Ok(true)) => return Leased::Killed { held },
-                Ok(Ok(false)) => {}
-                Ok(Err(e)) => tracing::warn!(
-                    run = %run,
-                    error = %e,
-                    "could not check the run for a kill; checking again at the next poll"
-                ),
-                Err(_) => tracing::warn!(run = %run, "a kill check went unanswered"),
-            },
+            // Bounded by one poll period, not the renewal's limit: a check
+            // that does not answer in time is "not killed this tick", and the
+            // next tick asks again.
+            Wake::Poll => {
+                match tokio::time::timeout(kill_poll.unwrap_or(every), killed(held)).await {
+                    Ok(Ok(true)) => return Leased::Killed { held },
+                    Ok(Ok(false)) => {}
+                    Ok(Err(e)) => tracing::warn!(
+                        run = %run,
+                        error = %e,
+                        "could not check the run for a kill; checking again at the next poll"
+                    ),
+                    Err(_) => tracing::warn!(
+                        run = %run,
+                        "a kill check went unanswered within one poll period; checking again at \
+                         the next poll"
+                    ),
+                }
+            }
         }
         if tokio::time::Instant::now() >= last_ok + fence_after {
             return self_fence("the last renewal did not succeed");
@@ -2146,6 +2220,15 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 ///
 /// It needs nothing of [`under_lease_with`]: a claim of a `KILLING` run whose
 /// previous worker died (Task 5) calls it with the lease it has just taken.
+///
+/// **What the run held is released once `KILLED` has committed**, as after any
+/// committed outcome (`run_one`'s "released AFTER the commit"): `cancel` only
+/// stops a script task's container or pod, and [`Registry::release`] is what
+/// deletes it -- or keeps it, for `taskRunner.delete: false`. A kill whose
+/// commit is `LeaseLost` releases nothing: the run is someone else's.
+// Called in production by Task 5's claim of a `KILLING` run whose worker
+// died; until then only the tests below call it directly.
+#[cfg_attr(not(test), allow(dead_code))]
 async fn finish_kill(
     pool: &PgPool,
     claimed: &Claimed,
@@ -2153,17 +2236,45 @@ async fn finish_kill(
     reg: &dyn Registry,
     task: &TaskInput,
 ) -> Result<Committed> {
-    if let cancel::Killed::Refused(reason) = cancel::kill(reg, task).await {
-        tracing::warn!(
-            execution = %claimed.execution_id,
-            run = %claimed.id,
-            task_id = %claimed.task_id,
-            type_id = %claimed.type_id,
-            "the worker could not stop this task after it was killed, so its work may \
-             still be running: {reason}"
-        );
+    end_kill(pool, claimed, held, reg, task, true).await
+}
+
+/// [`finish_kill`], with the cancel skipped when the handler was already
+/// asked to stop (`cancel`: false) -- a budget that expired before the kill
+/// was found.
+async fn end_kill(
+    pool: &PgPool,
+    claimed: &Claimed,
+    held: DateTime<Utc>,
+    reg: &dyn Registry,
+    task: &TaskInput,
+    cancel: bool,
+) -> Result<Committed> {
+    if cancel {
+        if let cancel::Killed::Refused(reason) = cancel::kill(reg, task).await {
+            tracing::warn!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                task_id = %claimed.task_id,
+                type_id = %claimed.type_id,
+                "the worker could not stop this task after it was killed, so its work may \
+                 still be running: {reason}"
+            );
+        }
     }
-    commit_kill(pool, claimed, held).await
+    let committed = commit_kill(pool, claimed, held).await?;
+    if committed == Committed::Yes {
+        if let Err(e) = reg.release(task).await {
+            tracing::warn!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                task_id = %claimed.task_id,
+                "the run is recorded KILLED, but what it held could not be released \
+                 (the orphan sweep will remove it): {e}"
+            );
+        }
+    }
+    Ok(committed)
 }
 
 /// Record a `KILLING` run `KILLED` under the lease `held`, and settle its
@@ -5554,6 +5665,10 @@ mod tests {
         /// Plant the kill of `run_ix`, then answer `SUCCESS` at once: a kill
         /// that lands after the handler returned.
         KillThenReturn { pool: PgPool, ex: Uuid, run_ix: i32 },
+        /// Plant the kill of `run_ix`, then sleep for a minute: the task's
+        /// own budget expires before any kill check, and its cancel comes
+        /// first.
+        KillThenSleep { pool: PgPool, ex: Uuid, run_ix: i32 },
     }
 
     /// A registry that records every `cancel` and whether its handler future
@@ -5563,6 +5678,7 @@ mod tests {
         refuse: bool,
         started: tokio::sync::Notify,
         cancels: std::sync::Mutex<Vec<(Uuid, usize)>>,
+        releases: std::sync::Mutex<Vec<(Uuid, usize)>>,
         dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -5573,11 +5689,15 @@ mod tests {
                 refuse,
                 started: tokio::sync::Notify::new(),
                 cancels: std::sync::Mutex::new(Vec::new()),
+                releases: std::sync::Mutex::new(Vec::new()),
                 dropped: Default::default(),
             }
         }
         fn cancels(&self) -> Vec<(Uuid, usize)> {
             self.cancels.lock().unwrap().clone()
+        }
+        fn releases(&self) -> Vec<(Uuid, usize)> {
+            self.releases.lock().unwrap().clone()
         }
     }
 
@@ -5592,6 +5712,10 @@ mod tests {
                 }
                 Mode::KillThenReturn { pool, ex, run_ix } => {
                     plant_kill_of(pool, *ex, *run_ix).await;
+                }
+                Mode::KillThenSleep { pool, ex, run_ix } => {
+                    plant_kill_of(pool, *ex, *run_ix).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             }
             Ok(Outcome::success())
@@ -5608,6 +5732,13 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        async fn release(&self, task: &TaskInput) -> Result<()> {
+            self.releases
+                .lock()
+                .unwrap()
+                .push((task.run_id, task.attempt));
+            Ok(())
         }
     }
 
@@ -5795,6 +5926,11 @@ mod tests {
             "the handler future was dropped"
         );
         assert_eq!(reg.cancels.lock().unwrap().len(), 1, "no second cancel");
+        assert_eq!(
+            reg.releases(),
+            vec![(c.id, c.attempt as usize)],
+            "what the run held is released once, after KILLED committed"
+        );
         assert_killed(&pool, ex, &c).await;
     }
 
@@ -5823,6 +5959,24 @@ mod tests {
             "no KILLING run under the lease: nothing to commit"
         );
         assert_eq!(run_row(&pool, c.id).await, before);
+
+        // The release follows the commit, not the kill: a released kill is
+        // released once, and a kill whose commit is LeaseLost releases nothing.
+        assert_eq!(reg.releases(), vec![(c.id, c.attempt as usize)]);
+        let (input, _) = input_for(&pool, &c, &reg, super::super::DEFAULT_CONTAINER_TIMEOUT)
+            .await
+            .expect("the task's input");
+        assert_eq!(
+            finish_kill(&pool, &c, c.claimed_at, &reg, &input)
+                .await
+                .expect("finish_kill"),
+            Committed::LeaseLost
+        );
+        assert_eq!(
+            reg.releases(),
+            vec![(c.id, c.attempt as usize)],
+            "a LeaseLost kill releases nothing"
+        );
     }
 
     /// The W5a re-attach rule, kept (`under_lease`'s doc): **a fence moved by
@@ -5862,6 +6016,7 @@ mod tests {
             reg.cancels().is_empty(),
             "a lost run's handler is NOT cancelled"
         );
+        assert!(reg.releases().is_empty(), "nor is anything released");
         assert!(
             reg.dropped.load(std::sync::atomic::Ordering::SeqCst),
             "it is dropped"
@@ -5903,6 +6058,7 @@ mod tests {
         .expect("run_one returns");
         assert_eq!(out.expect("run_one"), Committed::Yes);
         assert_eq!(reg.cancels(), vec![(c.id, c.attempt as usize)]);
+        assert_eq!(reg.releases(), vec![(c.id, c.attempt as usize)]);
         assert_killed(&pool, ex, &c).await;
         let outputs: Option<Value> =
             sqlx::query_scalar("SELECT outputs FROM workflow.task_runs WHERE id = $1")
@@ -5911,6 +6067,43 @@ mod tests {
                 .await
                 .expect("outputs");
         assert_eq!(outputs, None, "the refused outcome wrote nothing");
+    }
+
+    /// Fix round 1 (b): **a budget that expires after the kill landed has
+    /// already asked the handler to stop**, so the commit-time kill does not
+    /// ask again: one cancel, one release, `KILLED`. No kill poll or renewal
+    /// is due, so the budget's expiry is what ends the handler.
+    #[tokio::test]
+    async fn a_budget_that_expired_on_a_killed_run_cancels_once() {
+        let (pool, ws) = kill_fixture().await;
+        let src = "id: kill-budget\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    timeout: PT0.3S\n";
+        let (ex, c) = start_with_leaf_leased(&pool, ws, src).await;
+        let reg = KillSpy::new(
+            Mode::KillThenSleep {
+                pool: pool.clone(),
+                ex,
+                run_ix: c.run_ix,
+            },
+            false,
+        );
+        let timing = WorkerTiming {
+            kill_poll: std::time::Duration::from_secs(3600),
+            ..WorkerTiming::default()
+        };
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
+        )
+        .await
+        .expect("the budget ends the handler");
+        assert_eq!(out.expect("run_one"), Committed::Yes);
+        assert_eq!(
+            reg.cancels(),
+            vec![(c.id, c.attempt as usize)],
+            "the budget's cancel, and no second one from the kill path"
+        );
+        assert_eq!(reg.releases(), vec![(c.id, c.attempt as usize)]);
+        assert_killed(&pool, ex, &c).await;
     }
 
     /// Carry from Kill Task 2: **a discard-only block claim, whose row is

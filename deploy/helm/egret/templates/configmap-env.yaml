@@ -42,8 +42,10 @@ data:
   # statement for each of the four statements those loops issue.
   #
   # The tuning knobs beside it — EGRET_WORKFLOW__TICK_INTERVAL_SECS (1),
-  # EGRET_WORKFLOW__BATCH (8), EGRET_WORKFLOW__REAPER_INTERVAL_SECS (60) and
-  # EGRET_WORKFLOW__WORKING_TIMEOUT_S (3600) — are deliberately NOT chart values:
+  # EGRET_WORKFLOW__BATCH (8), EGRET_WORKFLOW__REAPER_INTERVAL_SECS (60),
+  # EGRET_WORKFLOW__WORKING_TIMEOUT_S (3600),
+  # EGRET_WORKFLOW__CONTAINER_DEFAULT_TIMEOUT_S (3600) and
+  # EGRET_WORKFLOW__KILL_POLL_MS (5000) — are deliberately NOT chart values:
   # they reach the same config through the same EGRET_<SECTION>__<KEY> convention
   # when a deployment actually needs them, and a chart key nobody has a reason to
   # set is surface with no reader.
