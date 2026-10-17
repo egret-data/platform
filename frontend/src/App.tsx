@@ -42,6 +42,24 @@ import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
  */
 const WorkflowsRoutes = lazy(() => import("@/routes/workflows/WorkflowsRoutes"));
 
+/**
+ * The Governance Data area (DG redesign #1), code-split like Workflows
+ * (FE-ROUTE-2): the catalog tree and the object pages. Nothing under
+ * `routes/governance/data/` may be imported statically from the entry graph,
+ * except `objectPath.ts`, which old list pages link through;
+ * `npm run test:bundle:governance-data` checks it.
+ */
+const DataRoutes = lazy(() => import("@/routes/governance/data/DataRoutes"));
+
+/** What the Data area shows while its chunk loads: a skeleton in the page frame. */
+function DataFallback() {
+  return (
+    <div className="p-4" data-testid="governance-data-loading">
+      <ListSkeleton cols={1} />
+    </div>
+  );
+}
+
 /** What the Workflows area shows while its chunk loads: a list skeleton in the page frame. */
 function WorkflowsFallback() {
   return (
@@ -476,23 +494,16 @@ function ControlPlaneRoutes() {
 
 // Governance (SP2): the data-plane rules a data steward manages, split out of
 // the system-admin Control Plane. Same shape as `ControlPlaneRoutes` — one area
-// gate, then a per-route permission. First section (in preference order) each
-// Governance read permission unlocks, for the landing below.
-const GOVERNANCE_FIRST_SECTION: { path: string; perm: string }[] = [
-  { path: "/governance/policies", perm: "policy:read" },
-  { path: "/governance/classifications", perm: "tag:read" },
-];
-
+// gate, then a per-route permission.
+//
+// The landing is Data (DG redesign spec Part 1, "until #3 lands, the Governance
+// index opens Data"). Data takes either Governance read permission, which is
+// exactly what `RequireGovernanceAccess` admits, so every user who reaches this
+// index can open it. The target is absolute: this also renders for the `*`
+// catch-all, where react-router 7 resolves a relative target against the
+// unmatched URL and loops (see `exploreRedirectTo`).
 function GovernanceIndex() {
-  const { me } = useAuth();
-  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="/governance/policies" replace />;
-  const perms = me?.permissions ?? [];
-  const first = GOVERNANCE_FIRST_SECTION.find((s) => perms.includes(s.perm));
-  // Absolute targets: this also renders for the `*` catch-all, where react-router 7
-  // resolves a relative target against the unmatched URL and loops (see
-  // `exploreRedirectTo`). `RequireGovernanceAccess` already admitted this user,
-  // so `first` exists; the fallback only satisfies the type.
-  return <Navigate to={first ? first.path : "/governance/policies"} replace />;
+  return <Navigate to="/governance/data" replace />;
 }
 
 function GovernanceRoutes() {
@@ -501,6 +512,19 @@ function GovernanceRoutes() {
       <AppShell>
         <Routes>
           <Route index element={<GovernanceIndex />} />
+          {/* DG redesign #1: the catalog tree and the object pages. Either read
+              permission opens it: the tree reveals catalog structure, which the
+              browse API serves to `policy:read` or `tag:read`. */}
+          <Route
+            path="data/*"
+            element={
+              <RequirePermission perm={["policy:read", "tag:read"]}>
+                <LazyRouteArea area="Data" fallback={<DataFallback />}>
+                  <DataRoutes />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
           {/* SP4b-2: data-plane permission UI, gated the same way the existing
               governance routes are — see the design spec's D4/D6 for why these
               are separate pages rather than a mode switch on Policies. */}

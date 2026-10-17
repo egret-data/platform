@@ -11,9 +11,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * full-body PATCH, preview-before-save, and verbatim refusals.
  */
 vi.mock("@/api/generated/perm/perm");
-// The dialog reads the catalog registry itself now (review M-6) instead of
+// The dialog reads the Governance catalog list itself (review M-6) instead of
 // taking a resolved-name function from the list page.
-vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
+vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("@/components/perm/PrincipalPicker", () => ({
   PrincipalPicker: ({
     value,
@@ -50,23 +50,21 @@ vi.mock("@/components/perm/ScopePicker", () => ({
 }));
 
 import * as permApi from "@/api/generated/perm/perm";
-import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import * as governance from "@/api/generated/control-plane-governance/control-plane-governance";
 import { ApiError } from "@/api/client";
-import type { Grant, RegistryCatalogDto } from "@/api/generated/model";
+import type { Grant, GovernanceCatalog } from "@/api/generated/model";
 import { GrantDialog } from "@/routes/governance/GrantDialog";
 
-const CATALOG = {
+const CATALOG: GovernanceCatalog = {
   id: "cat-1",
   name: "wh",
-  kind: "iceberg",
-  config: {},
-  advanced: {},
-  warehouseId: "wh-1",
+  source: "egret",
+  connectorType: "iceberg",
   engines: [],
-  workspaceIds: [],
-  createdAt: "2026-09-01T00:00:00Z",
-  updatedAt: "2026-09-01T00:00:00Z",
-} as unknown as RegistryCatalogDto;
+  warehouseId: "wh-1",
+  warehouseName: "wh",
+  workspaces: [],
+};
 
 const EXISTING: Grant = {
   id: "g1",
@@ -105,11 +103,11 @@ function renderDialog(props: Partial<React.ComponentProps<typeof GrantDialog>> =
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+  vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
     isLoading: false,
     isError: false,
-  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+  } as unknown as ReturnType<typeof governance.useControlPlaneGovernanceListCatalogs>);
   previewMutateAsync = vi.fn().mockResolvedValue(OK_PREVIEW);
   createMutateAsync = vi.fn().mockResolvedValue({ status: 201, data: undefined });
   patchMutateAsync = vi.fn().mockResolvedValue({ status: 200, data: {} });
@@ -157,6 +155,40 @@ describe("GrantDialog — PATCH is a full-body replace (D1)", () => {
         principals: EXISTING.principals,
       },
     });
+  });
+});
+
+describe("GrantDialog — initialScope (the object page's Grant access)", () => {
+  const OBJECT_SCOPE = { catalog_id: "cat-1", schema: "sales", table: "orders" };
+
+  test("a new grant starts on the scope it was opened for, and creates on it", async () => {
+    const user = userEvent.setup();
+    renderDialog({ initialScope: OBJECT_SCOPE });
+
+    expect(screen.getByRole("heading", { name: "New grant" })).toBeInTheDocument();
+    expect(screen.getByTestId("scope-value")).toHaveTextContent(JSON.stringify(OBJECT_SCOPE));
+    expect(screen.getByText(/Preview: read on wh\.sales\.orders/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "set-principals" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const create = await screen.findByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toBeEnabled());
+    await user.click(create);
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
+    expect(createMutateAsync).toHaveBeenCalledWith({
+      data: {
+        effect: "allow",
+        actions: ["read"],
+        scope: OBJECT_SCOPE,
+        principals: { include: [{ kind: "user", ref: "alice" }], exclude: [] },
+      },
+    });
+  });
+
+  test("an existing grant keeps its own scope", () => {
+    renderDialog({ existing: EXISTING, initialScope: { catalog_id: "cat-2" } });
+    expect(screen.getByTestId("scope-value")).toHaveTextContent(JSON.stringify(EXISTING.scope));
   });
 });
 
@@ -287,11 +319,10 @@ describe("GrantDialog — two identical skip lines (SP4b-2 finding 4)", () => {
 
 describe("GrantDialog — it resolves the catalog's name itself (review M-6)", () => {
   /**
-   * The dialog reads the catalog registry directly now, instead of taking a
+   * The dialog reads the Governance catalog list directly, instead of taking a
    * lookup function from the list page. Nothing asserted the resolved NAME, so
    * a mutation that returned the id survived — this is that missing assertion.
-   * The dialog is the one place on this surface that still needs the registry:
-   * a writer must pick a catalog, and the preview line must say which.
+   * A writer must pick a catalog, and the preview line must say which.
    */
   test("the preview line names the catalog, not its uuid", async () => {
     renderDialog({ existing: EXISTING });
@@ -299,18 +330,18 @@ describe("GrantDialog — it resolves the catalog's name itself (review M-6)", (
     expect(screen.getByText(/Preview: read and write on wh\.sales\.orders/)).toBeInTheDocument();
     // (The mocked `ScopePicker` stand-in prints the raw scope JSON, so `cat-1`
     // legitimately appears in the DOM — the negative direction is asserted by
-    // the forbidden-registry test below instead.)
+    // the forbidden-list test below instead.)
   });
 
-  /** With the registry forbidden the dialog falls back to the id rather than
+  /** With the catalog list forbidden the dialog falls back to the id rather than
    *  inventing a name — the same honesty the list page's sentence keeps. */
-  test("falls back to the id when the registry is forbidden", async () => {
-    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+  test("falls back to the id when the catalog list is forbidden", async () => {
+    vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
       data: undefined,
       isLoading: false,
       isError: true,
       error: new ApiError(403, "forbidden"),
-    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    } as unknown as ReturnType<typeof governance.useControlPlaneGovernanceListCatalogs>);
     renderDialog({ existing: EXISTING });
 
     expect(screen.getByText(/Preview: read and write on cat-1\.sales\.orders/)).toBeInTheDocument();

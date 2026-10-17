@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity, ChevronDown, ChevronRight, Compass, EyeOff,
+  Activity, ChevronDown, ChevronRight, Compass, Database, EyeOff,
   FolderKanban, FolderTree, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Search, Server, Settings, Share2, ShieldCheck,
   Tags, UserCheck, UserCog, Users, UsersRound, Workflow, Zap,
@@ -17,11 +17,11 @@ import { useWorkspaceFeatures } from "@/hooks/useWorkspaceFeatures";
 import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
 /** `perm` is the fine-grained read permission that unlocks this item in the
- * Control Plane or Governance; items with no `perm` (e.g. Workspaces, Audit log)
- * are platform_admin-only. `feature` is the workspace entitlement key (e.g.
+ * Control Plane or Governance (a list: any one of them unlocks it); items with
+ * no `perm` (e.g. Workspaces, Audit log) are platform_admin-only. `feature` is the workspace entitlement key (e.g.
  * `apps`) that unlocks an Explore item; items with no `feature` are
  * unaffected by entitlements. */
-type NavItem = { label: string; icon: LucideIcon; perm?: string; feature?: string; to?: string };
+type NavItem = { label: string; icon: LucideIcon; perm?: string | readonly string[]; feature?: string; to?: string };
 type NavGroup = { heading: string; items: NavItem[] };
 
 const EXPLORE_GROUPS: NavGroup[] = [
@@ -69,10 +69,23 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
 ];
 
+/** Whether `permissions` holds `perm`, or any one of a list. No `perm` is never held. */
+function holdsAny(permissions: readonly string[], perm: NavItem["perm"]): boolean {
+  if (perm === undefined) return false;
+  return typeof perm === "string" ? permissions.includes(perm) : perm.some((p) => permissions.includes(p));
+}
+
 // Governance = the data-plane rules a data steward manages (SP2: split out of the
 // Control Plane). Headings must stay distinct from every other app's headings —
 // collapsed-group state is one localStorage key across all three apps.
 const GOVERNANCE_GROUPS: NavGroup[] = [
+  // The DG redesign (spec 2026-10-16 Part 1): Data, the catalog tree and its
+  // object pages, comes first. Either Governance read permission opens it, as
+  // its route does (`App.tsx`). Overview will go above it (sub-project #3).
+  {
+    heading: "Data",
+    items: [{ label: "Data", icon: Database, perm: ["policy:read", "tag:read"], to: "data" }],
+  },
   // SP4b-2: data-plane permission UI, steward-facing first, then admin-facing —
   // "Data permissions" alone (not "Permissions") is deliberate: Control Plane →
   // Access → Permissions already names the RBAC permission *catalog*, and these
@@ -186,7 +199,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
     ? permissionGroups.map((group) => ({
         ...group,
         items: group.items.filter(
-          (item) => isPlatformAdmin || (item.perm !== undefined && permissions.includes(item.perm)),
+          (item) => isPlatformAdmin || holdsAny(permissions, item.perm),
         ),
       })).filter((group) => group.items.length > 0)
     : EXPLORE_GROUPS.map((group) => ({

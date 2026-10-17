@@ -14,6 +14,9 @@
 mod access;
 pub mod audit;
 mod error;
+mod governance_browse;
+mod governance_lineage;
+mod governance_tags;
 mod lineage_sweep;
 mod secrets;
 mod storage;
@@ -21,6 +24,15 @@ mod tags;
 mod view_exposure;
 
 pub use error::CpError;
+pub use governance_browse::{
+    BrowseColumn, BrowseEngine, BrowseItem, BrowseKind, BrowseResponse, BrowseSource,
+    CatalogLister, GovernanceCatalog, GovernanceCatalogSource, GovernanceWorkspace, Listing,
+    ListingEngine, ListingEngineType, NotListed, NotListedReason, UnwiredCatalogLister,
+};
+pub use governance_lineage::{
+    LineageReader, LineageTableRef, ObjectLineage, ReadersIncomplete, ViewLineageInfo,
+};
+pub use governance_tags::ObjectTags;
 pub use view_exposure::{
     EngineNotChecked, ExposureEngine, LineageState, MatchedBy, MaterializedViewLister, MvRow,
     SecurityMode, TrinoViewItem, TrinoViewReason, ViewExposureDto, ViewExposureItem,
@@ -99,6 +111,13 @@ pub struct CpState {
     /// Deadline for the whole Trino half of one view-exposure report (the
     /// listing, every lineage read and every metadata load); tests shorten it.
     pub view_audit_timeout: std::time::Duration,
+    /// Lists one level of a non-egret catalog on an engine, for the Governance
+    /// Data tree (`GET /governance/browse/{catalog_id}`). The real Trino and
+    /// StarRocks listers are wired in `egret-bin`; tests pass a fake.
+    pub catalog_lister: Arc<dyn CatalogLister>,
+    /// Deadline for one browse listing, on an engine or on egret's
+    /// warehouse; tests shorten it.
+    pub browse_timeout: std::time::Duration,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -119,6 +138,9 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(tags::router())
         .merge(view_exposure::router())
         .merge(lineage_sweep::router())
+        .merge(governance_browse::router())
+        .merge(governance_lineage::router())
+        .merge(governance_tags::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -134,5 +156,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(tags::ControlPlaneTagsApi::openapi());
     doc.merge(view_exposure::ControlPlaneViewExposureApi::openapi());
     doc.merge(lineage_sweep::ControlPlaneLineageSweepApi::openapi());
+    doc.merge(governance_browse::ControlPlaneGovernanceBrowseApi::openapi());
+    doc.merge(governance_lineage::ControlPlaneGovernanceLineageApi::openapi());
+    doc.merge(governance_tags::ControlPlaneGovernanceTagsApi::openapi());
     doc
 }

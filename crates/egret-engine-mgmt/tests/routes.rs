@@ -13525,3 +13525,95 @@ async fn list_materialized_views_reads_a_provisioned_engine_and_scrubs_its_root_
     assert!(err.contains("Access denied"), "{err}");
     assert!(!err.contains(password), "the root password leaked: {err}");
 }
+
+// ---- list_catalog_level (DG frontend redesign #1, Governance browse) ----
+
+#[tokio::test]
+async fn list_catalog_level_refuses_an_external_or_unknown_engine_before_any_connection() {
+    let Some(f) = setup_full(None, None).await else {
+        return;
+    };
+    let st = mv_state(&f);
+    let external: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
+         external_host, external_port, ranger_plugin_version) \
+         VALUES ($1,'starrocks','','{}'::jsonb,'running','external','sr.example.com',9030,'2.8.0') \
+         RETURNING id",
+    )
+    .bind(format!("cl-ext-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("external engine row");
+    let trino = mv_engine(&f, "trino", None).await;
+
+    let err = egret_engine_mgmt::list_catalog_level(&st, external, "ext", None, None)
+        .await
+        .expect_err("an external engine is never dialled");
+    assert!(err.contains("external"), "{err}");
+    let err = egret_engine_mgmt::list_catalog_level(&st, trino, "ext", None, None)
+        .await
+        .expect_err("not a StarRocks engine");
+    assert!(err.contains("StarRocks"), "{err}");
+    let err = egret_engine_mgmt::list_catalog_level(&st, Uuid::new_v4(), "ext", None, None)
+        .await
+        .expect_err("unknown engine");
+    assert!(err.contains("no longer exists"), "{err}");
+    assert!(
+        f.starrocks_ddl.queried().is_empty(),
+        "nothing may be sent: {:?}",
+        f.starrocks_ddl.queried()
+    );
+}
+
+#[tokio::test]
+async fn list_catalog_level_reads_a_provisioned_engine_as_root_and_scrubs_its_password() {
+    let Some(f) = setup_full(None, None).await else {
+        return;
+    };
+    let st = mv_state(&f);
+    let password = "hunter2xyz";
+    let secret = st
+        .secrets
+        .create(
+            None,
+            &format!("cl-root-{}", Uuid::new_v4().simple()),
+            None,
+            password,
+        )
+        .await
+        .expect("root secret");
+    let id = mv_engine(&f, "starrocks", Some(secret)).await;
+    let sql = egret_engine_mgmt::starrocks_ddl::catalog_relations_sql("ext", "sales");
+    f.starrocks_ddl.answer_query(
+        &sql,
+        vec![vec![Some("orders".into()), Some("BASE TABLE".into())]],
+    );
+
+    let got = egret_engine_mgmt::list_catalog_level(&st, id, "ext", Some("sales"), None)
+        .await
+        .expect("a provisioned, running engine is listed");
+    assert_eq!(
+        got,
+        egret_query_api::catalog_listing::CatalogLevel::Relations(vec![
+            egret_query_api::catalog_listing::ListedRelation {
+                name: "orders".into(),
+                kind: egret_query_api::catalog_listing::ListedKind::Table,
+            }
+        ])
+    );
+    assert_eq!(f.starrocks_ddl.queried(), [sql]);
+    assert_eq!(
+        f.starrocks_ddl.last_target().root_password.as_deref(),
+        Some(password),
+        "the listing logs in as root with the engine's root password"
+    );
+
+    f.starrocks_ddl.set_fail(Some(
+        "ERROR 5501: Unknown database nosuch for root using password hunter2xyz",
+    ));
+    let err = egret_engine_mgmt::list_catalog_level(&st, id, "ext", Some("nosuch"), None)
+        .await
+        .expect_err("a missing schema is an error, not an empty listing");
+    assert!(err.contains("5501"), "{err}");
+    assert!(!err.contains(password), "the root password leaked: {err}");
+}

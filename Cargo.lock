@@ -3154,6 +3154,7 @@ dependencies = [
  "egret-policy",
  "egret-provisioner",
  "egret-query",
+ "egret-query-api",
  "egret-secrets",
  "egret-server",
  "egret-storage",

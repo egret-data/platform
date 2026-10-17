@@ -30,6 +30,9 @@ export function formatActions(actions: Action[]): string {
  * implies a schema, enforced by the database and by `ScopePicker`), so at
  * most one of these branches is ever a real narrowing choice for a given row.
  *
+ * A level whose value is a pattern (`*`, `ord*`) is quoted (`wh.sales.“*”`):
+ * the bare trailing `*` means only "this level is not set".
+ *
  * `catalogName` is the ALREADY-RESOLVED display name, not a lookup function
  * (SP4b-2 finding 1). The read surface puts it on the payload
  * (`GrantView.catalog_name`, `RuleView.catalog_name`) precisely so rendering
@@ -41,21 +44,54 @@ export function formatActions(actions: Action[]): string {
  */
 export function formatScope(scope: Scope, catalogName?: string | null): string {
   const catalog = catalogName || scope.catalog_id;
-  if (!scope.schema) return `${catalog}.*`;
-  if (!scope.table) return `${catalog}.${scope.schema}.*`;
-  if (!scope.column) return `${catalog}.${scope.schema}.${scope.table}`;
-  return `${catalog}.${scope.schema}.${scope.table}.${scope.column}`;
+  const schema = scope.schema ? level(scope.schema) : null;
+  const table = scope.table ? level(scope.table) : null;
+  if (!schema) return `${catalog}.*`;
+  if (!table) return `${catalog}.${schema}.*`;
+  if (!scope.column) return `${catalog}.${schema}.${table}`;
+  return `${catalog}.${schema}.${table}.${level(scope.column)}`;
 }
 
-function principalWord(p: PermPrincipal): string {
+/**
+ * Whether a stored scope value is a pattern: the engines glob-match a level
+ * (`*` any run of characters, `?` one; `crates/egret-perm/src/eval.rs`,
+ * `glob_match`), so `*` or `ord*` names every value it matches, not one.
+ */
+export function isPattern(value: string): boolean {
+  return /[*?]/.test(value);
+}
+
+/**
+ * A named level as the sentence prints it. A pattern is quoted, so a grant
+ * whose table is the value `*` (`wh.sales.“*”`) never reads the same as one
+ * that sets no table at all (`wh.sales.*`).
+ */
+function level(value: string): string {
+  return isPattern(value) ? `“${value}”` : value;
+}
+
+/**
+ * A workspace's name by its id, or `undefined` when it is not known. The
+ * Governance catalog list carries the workspaces each catalog is assigned to
+ * (`useWorkspaceNames` in `openInData.tsx`).
+ */
+export type WorkspaceNames = (id: string) => string | undefined;
+
+/**
+ * One principal. A `workspace_members` principal's ref is the workspace's id
+ * (the assignment sync writes it), so it reads by the workspace's name when
+ * `workspaceName` knows it, and by the id only when it does not.
+ */
+function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
+  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
   return `${p.kind} ${p.ref}`;
 }
 
 /** A `PermPrincipal[]` — a `PrincipalSet`'s `include` or `exclude` — joined
  * for reading inline. Empty reads as "nobody" rather than a blank. */
-export function formatPrincipals(list: PermPrincipal[]): string {
+export function formatPrincipals(list: PermPrincipal[], workspaceName?: WorkspaceNames): string {
   if (list.length === 0) return "nobody";
-  return list.map(principalWord).join(", ");
+  return list.map((p) => principalWord(p, workspaceName)).join(", ");
 }
 
 /**
@@ -66,13 +102,13 @@ export function formatPrincipals(list: PermPrincipal[]): string {
  * entirely when there is nothing excluded, rather than printed as "except
  * nobody".
  */
-export function grantSentence(g: GrantView): string {
-  const who = formatPrincipals(g.principals.include);
+export function grantSentence(g: GrantView, workspaceName?: WorkspaceNames): string {
+  const who = formatPrincipals(g.principals.include, workspaceName);
   const verb = g.effect === "allow" ? "can" : "cannot";
   const actions = formatActions(g.actions);
   const scope = formatScope(g.scope, g.catalog_name);
   const exclude =
-    g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude)}` : "";
+    g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude, workspaceName)}` : "";
   return `${who} ${verb} ${actions} ${scope}${exclude}`;
 }
 

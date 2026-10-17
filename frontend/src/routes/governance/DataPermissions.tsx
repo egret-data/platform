@@ -22,6 +22,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { AssignmentBadge, GrantDialog } from "./GrantDialog";
 import { grantSentence } from "./permFormat";
+import { OpenInDataLink, scopeToDataLink, useCatalogNameById, useWorkspaceNames } from "./openInData";
 
 /**
  * Governance → Data permissions (SP4b-2 Task 3).
@@ -47,8 +48,12 @@ export default function DataPermissions() {
   const grantsQ = usePermListGrants({ query: { retry: false } });
   const rows: GrantView[] = grantsQ.data?.status === 200 ? grantsQ.data.data : [];
 
+  const catalogNameById = useCatalogNameById();
   const workspaces = useMyWorkspaces(true);
-  const workspaceLabel = (id: string) => workspaces.data?.find((w) => w.id === id)?.name ?? id;
+  const governanceWorkspaceName = useWorkspaceNames();
+  const workspaceName = (id: string) => governanceWorkspaceName(id) ?? workspaces.data?.find((w) => w.id === id)?.name;
+  const workspaceLabel = (id: string) => workspaceName(id) ?? id;
+  const sentence = (g: GrantView) => grantSentence(g, workspaceName);
 
   const [effectFilter, setEffectFilter] = useState(FACET_ALL);
   const [actionFilter, setActionFilter] = useState(FACET_ALL);
@@ -84,15 +89,21 @@ export default function DataPermissions() {
       key: "sentence",
       label: "Grant",
       sortable: true,
-      value: (g) => grantSentence(g),
-      cell: (g) => (
-        <div className="space-y-1 py-0.5">
-          <p className="text-sm">{grantSentence(g)}</p>
-          {g.origin.type === "workspace_assignment" && (
-            <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
-          )}
-        </div>
-      ),
+      value: (g) => sentence(g),
+      cell: (g) => {
+        const link = scopeToDataLink(g.scope, catalogNameById, "permissions");
+        return (
+          <div className="space-y-1 py-0.5">
+            <p className="text-sm">{sentence(g)}</p>
+            {link && (
+              <OpenInDataLink to={link.to} subject={sentence(g)} stoppedAtPattern={link.stoppedAtPattern} />
+            )}
+            {g.origin.type === "workspace_assignment" && (
+              <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "actions",
@@ -104,7 +115,7 @@ export default function DataPermissions() {
             <Button
               variant="ghost"
               size="icon"
-              aria-label={`Edit ${grantSentence(g)}`}
+              aria-label={`Edit ${sentence(g)}`}
               onClick={() => openEdit(g)}
             >
               <Pencil className="h-4 w-4" />
@@ -113,7 +124,7 @@ export default function DataPermissions() {
               variant="ghost"
               size="icon"
               className="text-muted-foreground hover:text-destructive"
-              aria-label={`Delete ${grantSentence(g)}`}
+              aria-label={`Delete ${sentence(g)}`}
               onClick={() => setDeleteTarget(g)}
             >
               <Trash2 className="h-4 w-4" />
@@ -233,7 +244,7 @@ export default function DataPermissions() {
         }}
         title={
           deleteTarget
-            ? `Delete "${grantSentence(deleteTarget)}"?`
+            ? `Delete "${sentence(deleteTarget)}"?`
             : "Delete grant?"
         }
         description="This grant is permanently removed and every profile it reaches recompiles."

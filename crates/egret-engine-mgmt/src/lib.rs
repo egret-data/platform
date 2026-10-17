@@ -32,10 +32,10 @@ pub use http_error::EngineHttpError;
 pub use probe::{tcp_probe, ProbeOutcome, PROBE_TIMEOUT};
 pub use profile_compiler::{OverlapSnapshot, ProfileCompilerPort};
 pub use starrocks_ddl::{
-    compare_to_fe, list_materialized_views, parse_base_tables, parse_show_create_properties,
-    select_materialized_views, show_catalogs, show_create_catalog, Drift, FakeStarRocksDdl,
-    FeError, FeTarget, MaterializedViewRow, MysqlDdlRunner, StarRocksDdl, FE_ERROR_EXCERPT_MAX,
-    FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS, MATERIALIZED_VIEWS_SQL,
+    compare_to_fe, list_catalog_level, list_materialized_views, parse_base_tables,
+    parse_show_create_properties, select_materialized_views, show_catalogs, show_create_catalog,
+    Drift, FakeStarRocksDdl, FeError, FeTarget, MaterializedViewRow, MysqlDdlRunner, StarRocksDdl,
+    FE_ERROR_EXCERPT_MAX, FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS, MATERIALIZED_VIEWS_SQL,
 };
 pub use state::EngineMgmtState;
 pub use store::{engine_status, Engine, EngineMgmtStore};

@@ -195,6 +195,37 @@ pub async fn run_lineage_explain(
     }
 }
 
+/// Run one catalog-listing statement (`SHOW SCHEMAS`, an
+/// `information_schema` read, `SHOW TABLES`, `DESCRIBE`) on a Trino
+/// coordinator, for `super::catalog_listing` — DG frontend redesign #1.
+///
+/// Crate-private: the statements are built there from quoted names, and this
+/// is not a general way to run SQL as whatever principal `spec` names. Refuses
+/// a non-Trino `spec`. Reads at most `max_rows` rows; one more sets
+/// `truncated`, which the caller refuses.
+pub(crate) async fn run_catalog_listing(
+    spec: &ConnSpec,
+    sql: &str,
+    max_rows: usize,
+    timeout: Duration,
+) -> Result<TabularResult, EngineError> {
+    if spec.engine != Engine::Trino {
+        return Err(EngineError::Engine(
+            "the catalog listing runs on Trino only".into(),
+        ));
+    }
+    let connector = trino::TrinoConnector::new(spec);
+    let limits = Limits { max_rows, timeout };
+    let cancel = CancellationToken::new();
+    match tokio::time::timeout(timeout, connector.execute(sql, &limits, cancel.clone())).await {
+        Ok(r) => r,
+        Err(_) => {
+            cancel.cancel();
+            Err(EngineError::Timeout)
+        }
+    }
+}
+
 /// The off-by-default TLS insecure opt-out, shared with the notebook kernel
 /// (`EGRET_ENGINE_TLS_INSECURE`). `1`/`true`/`yes` (case-insensitive) enable it.
 /// When set, engine connections skip the transport-security guard below — an

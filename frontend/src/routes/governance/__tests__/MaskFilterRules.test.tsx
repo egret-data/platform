@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@/api/generated/perm/perm");
+vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
+vi.mock("@/api/tags");
 // The profiles that resolve an overlap's service name to an editor route.
 let profiles: Array<{ id: number; name: string; type: string; tag_service?: string | null }> = [];
 vi.mock("@/api/policies", async (orig) => ({
@@ -22,6 +24,8 @@ vi.mock("../RuleDialog", async () => {
 });
 
 import * as permApi from "@/api/generated/perm/perm";
+import * as govApi from "@/api/generated/control-plane-governance/control-plane-governance";
+import * as tagsApi from "@/api/tags";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { Me } from "@/api/hooks";
 import type { RegistryCatalogDto, RuleView, StoredOverlap } from "@/api/generated/model";
@@ -107,6 +111,12 @@ function renderPage(me: Me | null = ADMIN, url = "/governance/mask-filter-rules"
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(govApi.useControlPlaneGovernanceListCatalogs).mockReturnValue({
+    data: { status: 200, data: [{ id: "cat-1", name: "wh" }] },
+  } as unknown as ReturnType<typeof govApi.useControlPlaneGovernanceListCatalogs>);
+  vi.mocked(tagsApi.useTags).mockReturnValue({
+    data: [{ id: "tag-9", key: "pii_v2", name: "PII Data" }],
+  } as unknown as ReturnType<typeof tagsApi.useTags>);
   profiles = [
     { id: 7, name: "trino-eu", type: "trino" },
     { id: 8, name: "trino-us", type: "trino" },
@@ -443,5 +453,39 @@ describe("MaskFilterRules — the overlap report reads as an operator action (SP
     vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
     renderPage(reader);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("MaskFilterRules: Open in Data", () => {
+  test("a tag rule links to its classification page", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    renderPage();
+    expect(screen.getByRole("link", { name: /Open classification/ })).toHaveAttribute(
+      "href",
+      "/governance/classifications/tag-9",
+    );
+  });
+
+  test("a tag rule whose tag is not listed gets no link", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([maskRule({ selector: { type: "tag", key: "gone" } })]),
+    );
+    renderPage();
+    expect(screen.queryByRole("link", { name: /Open classification/ })).not.toBeInTheDocument();
+  });
+
+  test("a column path rule links to the table's Masks & filters tab", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([
+        maskRule({
+          selector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders", column: "email" },
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByRole("link", { name: /Open in Data/ })).toHaveAttribute(
+      "href",
+      "/governance/data/wh/sales/orders?column=email&tab=masks",
+    );
   });
 });

@@ -5929,6 +5929,380 @@
         }
       }
     },
+    "/api/control-plane/governance/browse/{catalog_id}": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "operationId": "browse",
+        "parameters": [
+          {
+            "name": "catalog_id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "The schema to list (dotted for a nested egret namespace).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "The table or view whose columns to list; needs `schema`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One level of the catalog, or why it was not listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`table` without `schema`, or an empty `schema` or `table`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog, or (egret catalog) no such schema or table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/catalogs": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "`GET /governance/catalogs`: every registry catalog, by name, for the\nGovernance Data tree. Gated like browse, on `policy:read` OR `tag:read`,\nso a steward who cannot read the catalog registry\n(`catalog_registry:read`) can still pick a catalog to browse.",
+        "operationId": "list_catalogs",
+        "responses": {
+          "200": {
+            "description": "Every registry catalog, by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GovernanceCatalog"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/lineage/{catalog_id}": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "operationId": "object_lineage",
+        "parameters": [
+          {
+            "name": "catalog_id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "The object's schema (dotted for a nested egret namespace).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "The table or view.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object's readers, and for a view its own lineage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectLineage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing or empty `schema` or `table`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog, or (egret catalog) no such table or view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "(egret catalog) egret's warehouse could not be read to tell a table from a view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "(egret catalog) egret's warehouse did not answer within the deadline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/tags/{catalog_id}": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "operationId": "object_tags",
+        "parameters": [
+          {
+            "name": "catalog_id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "The table's schema (dotted for a nested egret namespace).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "The table or view.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's and its columns' tags, or that the catalog cannot carry tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectTags"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing or empty `schema` or `table`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/grants/{grant_id}": {
       "delete": {
         "tags": [
@@ -36172,6 +36546,170 @@
           "after_execution"
         ]
       },
+      "BrowseColumn": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "The type as the source spells it: an Iceberg type for an egret\ncatalog, the engine's type name otherwise."
+          }
+        }
+      },
+      "BrowseEngine": {
+        "type": "object",
+        "description": "One engine the catalog is attached to.",
+        "required": [
+          "name",
+          "type",
+          "origin",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "`trino`, `starrocks` or `risingwave`."
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` or `external`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`provisioning`, `running`, `failed` or `deleting`. An external engine's\n`running` is a placeholder (migration 0184)."
+          }
+        }
+      },
+      "BrowseItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BrowseKind"
+          }
+        }
+      },
+      "BrowseKind": {
+        "type": "string",
+        "description": "What one level of a catalog holds.",
+        "enum": [
+          "schema",
+          "table",
+          "view",
+          "materialized_view"
+        ]
+      },
+      "BrowseResponse": {
+        "type": "object",
+        "required": [
+          "engines"
+        ],
+        "properties": {
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BrowseSource",
+                "description": "Where the listing was read; `null` when nothing could be asked."
+              }
+            ]
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrowseEngine"
+            },
+            "description": "Every engine the catalog is attached to, by name."
+          },
+          "items": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BrowseItem"
+            },
+            "description": "Schemas, or a schema's tables and views. `null` when `table` is given\nor the level was not listed."
+          },
+          "columns": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BrowseColumn"
+            },
+            "description": "The table's columns, when `table` is given and it was listed."
+          },
+          "notListed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotListed",
+                "description": "Set exactly when the level could not be listed."
+              }
+            ]
+          }
+        }
+      },
+      "BrowseSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "egret's embedded warehouse.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "egret"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The named engine.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "engine"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where the listing was read."
+      },
       "BulkResultDto": {
         "type": "object",
         "description": "One entry's outcome.",
@@ -41408,6 +41946,93 @@
           }
         }
       },
+      "GovernanceCatalog": {
+        "type": "object",
+        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties.\n\nTwo fields reach further than browse does, by decision (Task 6 of the DG\nfrontend redesign): the workspaces the catalog is assigned to, and its\nwarehouse's name. A `policy:read` viewer already sees the assignments as\nworkspace-assignment grants; a viewer holding only `tag:read` sees both\nhere and nowhere else, because the object page's Overview and Details\nshow them to everyone who may open that page.",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "connectorType",
+          "engines",
+          "workspaces"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The registry name, which is also the catalog's SQL name on every engine."
+          },
+          "source": {
+            "$ref": "#/components/schemas/GovernanceCatalogSource"
+          },
+          "connectorType": {
+            "type": "string",
+            "description": "The catalog's kind as the registry stores it (`iceberg`, `hive`,\n`jdbc`, ...)."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the engines the catalog is attached to, by name."
+          },
+          "warehouseId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The warehouse an egret catalog is; `null` for any other catalog."
+          },
+          "warehouseName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That warehouse's name; `null` exactly when `warehouse_id` is."
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GovernanceWorkspace"
+            },
+            "description": "The workspaces the catalog is assigned to, by name: the rows `GET\n/control-plane/catalogs/{id}/workspaces` reads\n(`registry.catalog_workspaces`)."
+          }
+        }
+      },
+      "GovernanceCatalogSource": {
+        "type": "string",
+        "description": "How a catalog is read: from egret's own warehouse, or through an engine.",
+        "enum": [
+          "egret",
+          "engine"
+        ]
+      },
+      "GovernanceWorkspace": {
+        "type": "object",
+        "description": "A workspace a catalog is assigned to.",
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
       "Grant": {
         "type": "object",
         "description": "One row of `perm.grants` plus its principal subtract (`perm.grant_principals`).",
@@ -41978,6 +42603,44 @@
         },
         "additionalProperties": false
       },
+      "LineageReader": {
+        "type": "object",
+        "description": "One view or materialized view that reads the object.",
+        "required": [
+          "catalog",
+          "schema",
+          "name",
+          "kind",
+          "matchedBy"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The registry catalog name for a view; `default_catalog` for a\nStarRocks materialized view, where StarRocks keeps every one."
+          },
+          "schema": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BrowseKind",
+            "description": "`view` or `materialized_view`."
+          },
+          "engine": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The StarRocks engine holding a materialized view; `null` for a view."
+          },
+          "matchedBy": {
+            "$ref": "#/components/schemas/MatchedBy",
+            "description": "`lineage` for a view (its recorded lineage); `baseTable` or `text` for\na materialized view, as the classification page matches them. `text`\nmeans the view has no base-table map and its definition names the\ncatalog and schema: it may over-report."
+          }
+        }
+      },
       "LineageState": {
         "type": "string",
         "description": "What egret has recorded of a Trino view's lineage (spec B1).",
@@ -41986,6 +42649,26 @@
           "missing",
           "failed"
         ]
+      },
+      "LineageTableRef": {
+        "type": "object",
+        "description": "A recorded base table of a view.",
+        "required": [
+          "catalog",
+          "schema",
+          "table"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        }
       },
       "ListingDto": {
         "type": "object",
@@ -43047,6 +43730,33 @@
           }
         }
       },
+      "NotListed": {
+        "type": "object",
+        "required": [
+          "reason",
+          "detail"
+        ],
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/NotListedReason"
+          },
+          "detail": {
+            "type": "string",
+            "description": "A sentence for the page. Never the engine's own error text."
+          }
+        }
+      },
+      "NotListedReason": {
+        "type": "string",
+        "description": "Why a level was not listed.",
+        "enum": [
+          "no_engine_attached",
+          "only_external_engines",
+          "engine_not_running",
+          "timeout",
+          "engine_error"
+        ]
+      },
       "NsFileRevisionDto": {
         "type": "object",
         "required": [
@@ -43321,6 +44031,43 @@
           }
         }
       },
+      "ObjectLineage": {
+        "type": "object",
+        "required": [
+          "readers"
+        ],
+        "properties": {
+          "readers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageReader"
+            },
+            "description": "The views and materialized views that read this table. See\n`readers_incomplete`."
+          },
+          "readersIncomplete": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReadersIncomplete",
+                "description": "Set when `readers` may be missing some: a view in any of egret's\ncatalogs has unknown lineage (failed or not yet computed), egret's views or an\nengine's materialized views could not be listed or were not asked, the\ncatalog is not egret's (its own views are not tracked), or the object\nis a view."
+              }
+            ]
+          },
+          "view": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ViewLineageInfo",
+                "description": "Set exactly when the object is a view."
+              }
+            ]
+          }
+        }
+      },
       "ObjectRef": {
         "type": "object",
         "required": [
@@ -43345,6 +44092,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ObjectTags": {
+        "type": "object",
+        "description": "The tags on one table and on its columns.",
+        "required": [
+          "supported"
+        ],
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "description": "`false` for a catalog that is not egret's: its objects cannot be\ntagged (tags are keyed by an egret warehouse), and `assignments` is\n`null`."
+          },
+          "assignments": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ResourceTagDto"
+            },
+            "description": "Each tag directly on the table (`column` empty) or on one of its\ncolumns, sorted by column then tag key. `null` exactly when not\n`supported`."
           }
         }
       },
@@ -44637,6 +45407,19 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReadersIncomplete": {
+        "type": "object",
+        "description": "Why the reader list may be missing some.",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A sentence for the page. Never an engine's own error text."
+          }
+        }
       },
       "RecipientDto": {
         "type": "object",
@@ -49279,6 +50062,58 @@
           }
         }
       },
+      "ViewLineageInfo": {
+        "type": "object",
+        "description": "A view's own lineage.",
+        "required": [
+          "securityMode",
+          "lineageState",
+          "bases"
+        ],
+        "properties": {
+          "securityMode": {
+            "$ref": "#/components/schemas/SecurityMode"
+          },
+          "securityModeError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the mode is `unknown`; `null` otherwise."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The DEFINER's `trino.run-as-owner`; `null` for any other mode."
+          },
+          "ownerCleared": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the owner is cleared for every classification the bases carry.\n`null` when it cannot be said: not DEFINER, lineage not computed, or a\nreached clearance names only groups. Read from current role membership."
+          },
+          "lineageState": {
+            "$ref": "#/components/schemas/LineageState"
+          },
+          "lineageDetail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the lineage failed; `null` otherwise."
+          },
+          "bases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageTableRef"
+            },
+            "description": "The recorded base tables, sorted; empty unless `computed`."
+          }
+        }
+      },
       "WarehouseConfigDto": {
         "type": "object",
         "required": [
@@ -51522,6 +52357,10 @@
     {
       "name": "control-plane-tags",
       "description": "Platform classification-tag catalog (Access P3.1) + access policies (P3.3)"
+    },
+    {
+      "name": "control-plane-governance",
+      "description": "Governance Data: browse a catalog and read an object's lineage (DG frontend redesign #1)"
     },
     {
       "name": "control-plane-catalog",

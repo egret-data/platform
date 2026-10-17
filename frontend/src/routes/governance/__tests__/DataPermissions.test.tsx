@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -11,6 +12,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("@/api/hooks");
+vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("../GrantDialog", async () => {
   const actual = await vi.importActual<typeof import("../GrantDialog")>("../GrantDialog");
   return {
@@ -22,6 +24,7 @@ vi.mock("../GrantDialog", async () => {
 import * as permApi from "@/api/generated/perm/perm";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import * as hooks from "@/api/hooks";
+import * as govApi from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { Me } from "@/api/hooks";
 import type { GrantView, RegistryCatalogDto } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
@@ -74,7 +77,9 @@ function renderPage(me: Me | null = ADMIN) {
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <DataPermissions />
+        <MemoryRouter>
+          <DataPermissions />
+        </MemoryRouter>
       </QueryClientProvider>
     </AuthContext.Provider>,
   );
@@ -82,6 +87,9 @@ function renderPage(me: Me | null = ADMIN) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(govApi.useControlPlaneGovernanceListCatalogs).mockReturnValue({
+    data: { status: 200, data: [{ id: "cat-1", name: "wh", workspaces: [{ id: "ws9", name: "Analytics", slug: "analytics" }] }] },
+  } as unknown as ReturnType<typeof govApi.useControlPlaneGovernanceListCatalogs>);
   vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
     isLoading: false,
@@ -141,6 +149,31 @@ describe("DataPermissions — the sentence is the primary column (D5)", () => {
     expect(screen.getByText(/Engineering/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Edit /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Delete /i })).not.toBeInTheDocument();
+  });
+
+  // Live check D5: the sentence read `workspace_members 220f80e1-… can read ice.*`.
+  test("a workspace's members read by the workspace's name, and by its id only when it is unknown", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([
+        grant({
+          id: "g5",
+          scope: { catalog_id: "cat-1" },
+          principals: { include: [{ kind: "workspace_members", ref: "ws9" }], exclude: [] },
+          origin: { type: "workspace_assignment", workspace_id: "ws9" },
+        }),
+        grant({
+          id: "g6",
+          scope: { catalog_id: "cat-1" },
+          principals: { include: [{ kind: "workspace_members", ref: "ws-gone" }], exclude: [] },
+          origin: { type: "workspace_assignment", workspace_id: "ws-gone" },
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("members of workspace Analytics can read wh.*")).toBeInTheDocument();
+    expect(screen.getByText("Set by workspace assignment · Analytics")).toBeInTheDocument();
+    expect(screen.getByText("members of workspace ws-gone can read wh.*")).toBeInTheDocument();
+    expect(screen.queryByText(/ws9/)).not.toBeInTheDocument();
   });
 
   test("an explicit grant DOES offer Edit and Delete to a platform_admin", () => {
@@ -214,5 +247,44 @@ describe("DataPermissions — the sentence must not need a second permission", (
     );
     renderPage();
     expect(screen.getByText("role analyst can read cat-1.sales.*")).toBeInTheDocument();
+  });
+});
+
+describe("DataPermissions: Open in Data", () => {
+  test("a schema grant links to that schema's Permissions tab", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(listResult([grant()]));
+    renderPage();
+    expect(screen.getByRole("link", { name: /Open in Data/ })).toHaveAttribute(
+      "href",
+      "/governance/data/wh/sales?tab=permissions",
+    );
+  });
+
+  test("a column grant links to the table with ?column=", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([grant({ scope: { catalog_id: "cat-1", schema: "sales", table: "orders", column: "email" } })]),
+    );
+    renderPage();
+    expect(screen.getByRole("link", { name: /Open in Data/ })).toHaveAttribute(
+      "href",
+      "/governance/data/wh/sales/orders?column=email&tab=permissions",
+    );
+  });
+
+  test("a pattern table links to the schema and says so", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([grant({ scope: { catalog_id: "cat-1", schema: "sales", table: "*" } })]),
+    );
+    renderPage();
+    const link = screen.getByRole("link", { name: /nearest level above its pattern/ });
+    expect(link).toHaveAttribute("href", "/governance/data/wh/sales?tab=permissions");
+  });
+
+  test("a catalog the Data area does not list gets no link", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([grant({ scope: { catalog_id: "other", schema: "sales" } })]),
+    );
+    renderPage();
+    expect(screen.queryByRole("link", { name: /Open in Data/ })).not.toBeInTheDocument();
   });
 });

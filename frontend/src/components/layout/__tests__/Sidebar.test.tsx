@@ -385,6 +385,28 @@ describe("Sidebar – Governance app", () => {
     expect(groupOf("Lineage")).toContainElement(lineage);
   });
 
+  test("Data comes first, then the existing items (spec Part 1)", () => {
+    renderSidebar("/governance/data");
+    const labels = within(screen.getByTestId("app-sidebar"))
+      .getAllByRole("link")
+      .map((a) => a.textContent);
+    expect(labels).toEqual([
+      "Data",
+      "Data permissions",
+      "Mask & filter rules",
+      "Explain access",
+      "Policies",
+      "Classifications",
+      "Data Lineage",
+    ]);
+    expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
+  });
+
+  test.each([["policy:read"], ["tag:read"]])("Data shows for a user holding only %s", (perm) => {
+    renderSidebar("/governance/data", { user_id: "6", email: "one@example.com", platform_roles: [], permissions: [perm] });
+    expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
+  });
+
   test("renders neither Control Plane nor Explore items", () => {
     renderSidebar("/governance/classifications");
     expect(screen.getByRole("link", { name: "Classifications" })).toBeInTheDocument();
@@ -393,7 +415,7 @@ describe("Sidebar – Governance app", () => {
     }
   });
 
-  test("a tag-only user sees Classifications and nothing else", () => {
+  test("a tag-only user sees Data and Classifications and nothing else", () => {
     renderSidebar("/governance/classifications", {
       user_id: "4",
       email: "tags@example.com",
@@ -404,6 +426,7 @@ describe("Sidebar – Governance app", () => {
       "href",
       "/governance/classifications",
     );
+    expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
     expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
     // Groups left with no visible items are dropped, heading included.

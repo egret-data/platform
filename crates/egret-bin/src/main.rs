@@ -2316,6 +2316,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         view_catalog: view_catalog.clone(),
         // The same budget as the StarRocks half's listings.
         view_audit_timeout: std::time::Duration::from_secs(15),
+        // Governance Data browse (DG frontend redesign #1): a non-egret
+        // catalog is listed on Trino as `egret-lineage` (the lineage EXPLAIN's
+        // principal and token) or on StarRocks as `root` (the MV report's
+        // connection). The route bounds each call by `browse_timeout`; the
+        // Trino statement carries the same budget.
+        catalog_lister: std::sync::Arc::new(EngineCatalogLister {
+            trino: egret_query::execution::catalog_listing::TrinoCatalogLister::new(
+                db.pool.clone(),
+                std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
+                    egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+                    egret_auth::users::UserRepo::new(db.clone()),
+                    egret_auth::groups::GroupRepo::new(db.clone()),
+                    identity.issuer().to_string(),
+                    900,
+                )),
+                std::time::Duration::from_secs(15),
+            ),
+            engine_mgmt: engine_mgmt
+                .clone()
+                .expect("engine-mgmt state is built just above"),
+        }),
+        // Spec §2.3: 15 s per call, the view audit's budget.
+        browse_timeout: std::time::Duration::from_secs(15),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
@@ -2945,6 +2968,87 @@ mod catalog_guard_audience_tests {
             );
             assert_eq!(err.1, "token is not scoped to this warehouse", "{alias}");
         }
+    }
+}
+
+/// The Governance browse route's `CatalogLister` (DG frontend redesign #1):
+/// Trino through `egret-query`, StarRocks through `egret-engine-mgmt`, neither
+/// of which the control plane depends on. Both answer an
+/// `egret_query_api::catalog_listing::CatalogLevel`, mapped here.
+struct EngineCatalogLister {
+    trino: egret_query::execution::catalog_listing::TrinoCatalogLister,
+    engine_mgmt: egret_engine_mgmt::EngineMgmtState,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::CatalogLister for EngineCatalogLister {
+    async fn list(
+        &self,
+        engine: &egret_controlplane::ListingEngine,
+        catalog: &str,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<egret_controlplane::Listing, String> {
+        let level = match engine.engine_type {
+            egret_controlplane::ListingEngineType::Trino => {
+                self.trino
+                    .list(&engine.name, catalog, schema, table)
+                    .await?
+            }
+            egret_controlplane::ListingEngineType::StarRocks => {
+                egret_engine_mgmt::list_catalog_level(
+                    &self.engine_mgmt,
+                    engine.id,
+                    catalog,
+                    schema,
+                    table,
+                )
+                .await?
+            }
+        };
+        Ok(listing_of(level))
+    }
+}
+
+/// An engine's [`CatalogLevel`](egret_query_api::catalog_listing::CatalogLevel)
+/// as the browse route's `Listing`.
+fn listing_of(
+    level: egret_query_api::catalog_listing::CatalogLevel,
+) -> egret_controlplane::Listing {
+    use egret_controlplane::{BrowseColumn, BrowseItem, BrowseKind, Listing};
+    use egret_query_api::catalog_listing::{CatalogLevel, ListedKind};
+    match level {
+        CatalogLevel::Schemas(names) => Listing::Items(
+            names
+                .into_iter()
+                .map(|name| BrowseItem {
+                    name,
+                    kind: BrowseKind::Schema,
+                })
+                .collect(),
+        ),
+        CatalogLevel::Relations(relations) => Listing::Items(
+            relations
+                .into_iter()
+                .map(|r| BrowseItem {
+                    name: r.name,
+                    kind: match r.kind {
+                        ListedKind::Table => BrowseKind::Table,
+                        ListedKind::View => BrowseKind::View,
+                        ListedKind::MaterializedView => BrowseKind::MaterializedView,
+                    },
+                })
+                .collect(),
+        ),
+        CatalogLevel::Columns(columns) => Listing::Columns(
+            columns
+                .into_iter()
+                .map(|c| BrowseColumn {
+                    name: c.name,
+                    r#type: c.r#type,
+                })
+                .collect(),
+        ),
     }
 }
 

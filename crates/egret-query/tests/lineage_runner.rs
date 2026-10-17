@@ -229,3 +229,60 @@ async fn an_unreachable_engine_is_named_in_the_refusal() {
     assert!(err.contains(&name) && err.contains("reachable"), "{err}");
     assert_eq!(minter.0.load(Ordering::SeqCst), 1);
 }
+
+/// DG frontend redesign #1: the catalog lister dials only the engine it was
+/// asked for, and only when that engine is one the lineage EXPLAIN could use;
+/// anything else is refused before a token is minted.
+#[tokio::test]
+async fn the_catalog_lister_refuses_an_ineligible_engine_before_minting() {
+    let Some(db) = test_db().await else { return };
+    let (cat, cat_id, ws) = catalog(&db).await;
+    let imp = unique("cl-imp");
+    let ext = unique("cl-ext");
+    engine(
+        &db,
+        cat_id,
+        ws,
+        Engine {
+            name: &imp,
+            mode: "impersonate",
+            ..GOOD
+        },
+    )
+    .await;
+    engine(
+        &db,
+        cat_id,
+        ws,
+        Engine {
+            name: &ext,
+            origin: "external",
+            ..GOOD
+        },
+    )
+    .await;
+    let minter = Arc::new(CountingMinter(AtomicUsize::new(0)));
+    let lister = egret_query::execution::catalog_listing::TrinoCatalogLister::new(
+        db.pool.clone(),
+        minter.clone(),
+        Duration::from_secs(5),
+    );
+
+    for name in [imp.as_str(), ext.as_str(), "no-such-engine"] {
+        let err = lister
+            .list(name, &cat, None, None)
+            .await
+            .expect_err("not an engine the lister may dial");
+        assert!(err.contains(name), "{err}");
+    }
+    let err = lister
+        .list(&imp, &cat, None, Some("t"))
+        .await
+        .expect_err("a table needs a schema");
+    assert!(err.contains("schema"), "{err}");
+    assert_eq!(
+        minter.0.load(Ordering::SeqCst),
+        0,
+        "no token minted for a refusal"
+    );
+}

@@ -257,6 +257,15 @@ async fn get_view_exposure(
         list_all(&*st.mv_lister, &dialled, st.mv_list_timeout),
         trino_half(&st, id),
     );
+    let failures: Vec<String> = failures
+        .into_iter()
+        .map(|f| {
+            format!(
+                "could not list materialized views on engine {}: {}",
+                f.engine, f.error
+            )
+        })
+        .collect();
     Ok(Json(ViewExposureDto {
         starrocks_materialized_views: failures.is_empty().then_some(views),
         starrocks_list_error: (!failures.is_empty()).then(|| failures.join("; ")),
@@ -276,7 +285,7 @@ const ORIGIN_EXTERNAL: &str = "external";
 
 /// Why `engine` must not be dialled, or `None` when it may be. Origin is checked
 /// BEFORE status: an external engine's `running` is a placeholder.
-fn not_dialled_reason(engine: &ClassifiedEngine) -> Option<String> {
+pub(crate) fn not_dialled_reason(engine: &ClassifiedEngine) -> Option<String> {
     if engine.origin == ORIGIN_EXTERNAL {
         return Some("external".to_string());
     }
@@ -372,19 +381,27 @@ fn reads_a_matched_view(row: &MvRow, matched: &[(String, String)]) -> Option<Mat
     }
 }
 
+/// One engine whose materialized views could not be listed.
+pub(crate) struct ListFailure {
+    pub engine: String,
+    /// The lister's own text, or the missed deadline.
+    pub error: String,
+}
+
 /// Ask every engine concurrently, all under one shared deadline; collect what
-/// matched and what failed. The caller decides that ANY failure withholds the
-/// whole list.
+/// matched and what failed. The caller decides what a failure does to the
+/// list (here: ANY failure withholds the whole list). Shared with the
+/// Governance lineage route, which asks with one table.
 ///
 /// Each real listing opens its own FE connection (10 s connect, 30 s statement),
 /// so asking in turn would cost an unreachable engine that long each. Concurrent
 /// asking bounds the request at `timeout`; a listing still pending when it
 /// passes is a failure that names its engine.
-async fn list_all(
+pub(crate) async fn list_all(
     lister: &dyn MaterializedViewLister,
     engines: &[ClassifiedEngine],
     timeout: std::time::Duration,
-) -> (Vec<ViewExposureItem>, Vec<String>) {
+) -> (Vec<ViewExposureItem>, Vec<ListFailure>) {
     let deadline = tokio::time::Instant::now() + timeout;
     let results = futures_util::future::join_all(engines.iter().map(|e| async move {
         let target = ExposureEngine {
@@ -411,10 +428,10 @@ async fn list_all(
                     matched_by,
                 }
             })),
-            Err(err) => failures.push(format!(
-                "could not list materialized views on engine {}: {err}",
-                e.engine_name
-            )),
+            Err(error) => failures.push(ListFailure {
+                engine: e.engine_name.clone(),
+                error,
+            }),
         }
     }
     (views, failures)

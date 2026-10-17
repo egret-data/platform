@@ -1,4 +1,4 @@
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { Scope } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -46,7 +46,10 @@ export interface ScopePickerProps {
  * `catalog_id` is a bare uuid — `perm.grants`/`perm.rules` store it that way
  * and neither `egret-perm` nor `egret-perm-compile` resolve it to a name —
  * so this picker is the one place that turns it back into something a human
- * can read, via the catalog-registry list.
+ * can read, via the Governance catalog list (`GET /governance/catalogs`,
+ * `policy:read` or `tag:read`). Not the catalog-registry list: that one needs
+ * `catalog_registry:read`, which a steward holding `policy:read` does not
+ * have, and its picker came up empty for them.
  */
 export function ScopePicker({
   value,
@@ -55,21 +58,19 @@ export function ScopePicker({
   onApply,
   disabled = false,
 }: ScopePickerProps) {
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
+  const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
 
   /**
    * **A picker that cannot be operated has to say so (SP4b-2 finding 2).**
-   * `Explain access` is an admin-tier page by design (D4), so needing
-   * `catalog_registry:read` for its target picker is acceptable — failing
-   * SILENTLY is not. With `policy:read` alone the browser run found this
-   * dropdown holding zero options, `Schema`/`Table`/`Column` disabled behind
-   * it and `Explain` permanently disabled, with nothing on the page saying
-   * why. The two cases read differently on purpose: a missing permission is
-   * something an administrator can fix for this account, an empty registry is
-   * not about this account at all.
+   * With the registry list, `policy:read` alone found this dropdown holding
+   * zero options, `Schema`/`Table`/`Column` disabled behind it and `Explain`
+   * permanently disabled, with nothing on the page saying why. The Governance
+   * list closes that for a steward, but an account with neither `policy:read`
+   * nor `tag:read` still gets a 403 here, and it still must not fail
+   * silently. The two cases read differently on purpose: a missing permission
+   * is something an administrator can fix for this account, an empty registry
+   * is not about this account at all.
    */
   const forbidden = catalogsQ.error instanceof ApiError && catalogsQ.error.status === 403;
   const nothingToPick = !catalogsQ.isLoading && catalogs.length === 0;
@@ -118,10 +119,9 @@ export function ScopePicker({
           >
             {forbidden ? (
               <>
-                No catalogs to choose from: listing them needs the{" "}
-                <code>catalog_registry:read</code> permission, which this account does not
-                have. Nothing on this form can name a target until a platform admin grants
-                it.
+                No catalogs to choose from: listing them needs the <code>policy:read</code>{" "}
+                or <code>tag:read</code> permission, which this account does not have.
+                Nothing on this form can name a target until a platform admin grants one.
               </>
             ) : (
               <>

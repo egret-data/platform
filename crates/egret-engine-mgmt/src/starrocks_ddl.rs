@@ -70,6 +70,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egret_catalog_registry::{escape_dq, escape_ident, StarRocksCatalogDdl};
+use egret_query_api::catalog_listing::{
+    is_hidden_schema, relation_kind, CatalogLevel, ListedColumn, ListedRelation,
+};
 
 use crate::Engine;
 use crate::EngineHttpError as CpError;
@@ -807,6 +810,17 @@ pub async fn list_materialized_views(
     st: &CpState,
     engine_id: uuid::Uuid,
 ) -> Result<Vec<MaterializedViewRow>, String> {
+    let fe = admin_fe(st, engine_id).await?;
+    select_materialized_views(&*st.starrocks_ddl, &fe)
+        .await
+        .map_err(|e| e.scrubbed(&fe, &BTreeMap::new()))
+}
+
+/// The `root` connection to a stored, provisioned StarRocks engine — the one
+/// [`list_materialized_views`] and [`list_catalog_level`] read through. Every
+/// failure (an unknown, non-StarRocks or external engine, an unresolvable FE
+/// target) is a message, before any connection.
+async fn admin_fe(st: &CpState, engine_id: uuid::Uuid) -> Result<FeTarget, String> {
     let engine = st
         .engine_mgmt
         .get_engine(engine_id)
@@ -826,10 +840,152 @@ pub async fn list_materialized_views(
             "engine is external: egret does not connect to engines it does not run".to_string(),
         );
     }
-    let fe = fe_target(st, &engine).await.map_err(|e| e.to_string())?;
-    select_materialized_views(&*st.starrocks_ddl, &fe)
+    fe_target(st, &engine).await.map_err(|e| e.to_string())
+}
+
+/// DG frontend redesign #1 (Governance Data): ``SHOW DATABASES FROM `c` ``.
+///
+/// The catalog, schema and table names given to these builders are untrusted
+/// caller input. Each is a backtick-delimited identifier
+/// ([`egret_query_api::quote_ident`], the same doubling as [`escape_ident`]);
+/// no string literal is built, so the StarRocks backslash escape that #504
+/// guards against in a literal does not apply — inside backticks a backslash is
+/// an ordinary character. Statements measured on 4.1.6 as `root`
+/// (`docs/en/plans/2026-10-16-dg-frontend-data-live.md` §1.4).
+pub fn catalog_schemas_sql(catalog: &str) -> String {
+    format!("SHOW DATABASES FROM {}", sr_ident(catalog))
+}
+
+/// ``SHOW FULL TABLES FROM `c`.`s` ``: columns `Tables_in_<s>, Table_type`.
+pub fn catalog_relations_sql(catalog: &str, schema: &str) -> String {
+    format!(
+        "SHOW FULL TABLES FROM {}.{}",
+        sr_ident(catalog),
+        sr_ident(schema)
+    )
+}
+
+/// ``SHOW FULL COLUMNS FROM `c`.`s`.`t` ``: `Field, Type, …`, the types
+/// lowercase (`DESCRIBE` spells them uppercase).
+pub fn catalog_columns_sql(catalog: &str, schema: &str, table: &str) -> String {
+    format!(
+        "SHOW FULL COLUMNS FROM {}.{}.{}",
+        sr_ident(catalog),
+        sr_ident(schema),
+        sr_ident(table)
+    )
+}
+
+fn sr_ident(name: &str) -> String {
+    egret_query_api::quote_ident(egret_query_api::Engine::StarRocks, name)
+}
+
+/// The text in cell `i` of `row`.
+fn listed_cell(row: &mut [Option<String>], i: usize, what: &str) -> Result<String, String> {
+    match row.get_mut(i) {
+        Some(cell) => cell
+            .take()
+            .ok_or_else(|| format!("the FE answered a NULL {what}")),
+        None => Err(format!("the FE answered a row with no {what}")),
+    }
+}
+
+/// The schemas out of `SHOW DATABASES`, sorted, hidden ones dropped.
+pub fn parse_catalog_schemas(rows: Vec<Vec<Option<String>>>) -> Result<Vec<String>, String> {
+    let mut schemas = Vec::new();
+    for mut row in rows {
+        let name = listed_cell(&mut row, 0, "database name")?;
+        if !is_hidden_schema(egret_query_api::Engine::StarRocks, &name) {
+            schemas.push(name);
+        }
+    }
+    schemas.sort();
+    Ok(schemas)
+}
+
+/// The relations out of `SHOW FULL TABLES`, sorted by name.
+pub fn parse_catalog_relations(
+    rows: Vec<Vec<Option<String>>>,
+) -> Result<Vec<ListedRelation>, String> {
+    let mut relations = rows
+        .into_iter()
+        .map(|mut row| {
+            Ok(ListedRelation {
+                name: listed_cell(&mut row, 0, "table name")?,
+                kind: relation_kind(&listed_cell(&mut row, 1, "table type")?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    relations.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(relations)
+}
+
+/// The columns out of `SHOW FULL COLUMNS`, in order. No column is an error:
+/// a table always has one, so an empty answer is not a listing.
+pub fn parse_catalog_columns(rows: Vec<Vec<Option<String>>>) -> Result<Vec<ListedColumn>, String> {
+    let columns = rows
+        .into_iter()
+        .map(|mut row| {
+            Ok(ListedColumn {
+                name: listed_cell(&mut row, 0, "column name")?,
+                r#type: listed_cell(&mut row, 1, "column type")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if columns.is_empty() {
+        return Err("the FE listed no column".to_string());
+    }
+    Ok(columns)
+}
+
+/// One level of `catalog` on one FE: its schemas when `schema` is `None`, the
+/// schema's relations when `table` is `None`, the table's columns otherwise.
+/// A missing schema or table is the FE's error (5501 / 1064, measured), never
+/// an empty listing. The FE's text is scrubbed of the root password.
+///
+/// Only `root` may read this: a StarRocks account without privilege on the
+/// catalog gets an EMPTY set from `SHOW DATABASES` / `SHOW TABLES`, not an error
+/// (measured S8), so an empty listing is trustworthy only as `root`.
+pub async fn select_catalog_level(
+    ddl: &dyn StarRocksDdl,
+    fe: &FeTarget,
+    catalog: &str,
+    schema: Option<&str>,
+    table: Option<&str>,
+) -> Result<CatalogLevel, String> {
+    let sql = match (schema, table) {
+        (None, None) => catalog_schemas_sql(catalog),
+        (None, Some(_)) => return Err("a table needs a schema".to_string()),
+        (Some(schema), None) => catalog_relations_sql(catalog, schema),
+        (Some(schema), Some(table)) => catalog_columns_sql(catalog, schema, table),
+    };
+    let rows = ddl
+        .query(fe, &sql)
         .await
-        .map_err(|e| e.scrubbed(&fe, &BTreeMap::new()))
+        .map_err(|e| e.scrubbed(fe, &BTreeMap::new()))?;
+    match (schema, table) {
+        (None, _) => parse_catalog_schemas(rows).map(CatalogLevel::Schemas),
+        (Some(_), None) => parse_catalog_relations(rows).map(CatalogLevel::Relations),
+        (Some(_), Some(_)) => parse_catalog_columns(rows).map(CatalogLevel::Columns),
+    }
+}
+
+/// [`select_catalog_level`] on a stored engine, through the same `root`
+/// connection as [`list_materialized_views`] — the StarRocks half of the
+/// Governance browse route's `CatalogLister`. `catalog`, `schema` and `table`
+/// are untrusted.
+pub async fn list_catalog_level(
+    st: &CpState,
+    engine_id: uuid::Uuid,
+    catalog: &str,
+    schema: Option<&str>,
+    table: Option<&str>,
+) -> Result<CatalogLevel, String> {
+    if schema.is_none() && table.is_some() {
+        return Err("a table needs a schema".to_string());
+    }
+    let fe = admin_fe(st, engine_id).await?;
+    select_catalog_level(&*st.starrocks_ddl, &fe, catalog, schema, table).await
 }
 
 /// The `"k" = "v"` pairs inside a parenthesized property body — the core
@@ -977,6 +1133,7 @@ pub fn compare_to_fe(rendered: &StarRocksCatalogDdl, fe: &BTreeMap<String, Strin
 
 /// The rows the fake FE answers [`MATERIALIZED_VIEWS_SQL`] with, as the real
 /// runner returns them: one `Option<String>` per selected column.
+/// Rows as [`StarRocksDdl::query`] answers them.
 type MaterializedViewRows = Vec<Vec<Option<String>>>;
 
 /// A StarRocks FE that lives in memory. Public because the route tests are an
@@ -1005,6 +1162,8 @@ pub struct FakeStarRocksDdl {
     /// The rows of `information_schema.materialized_views`, for
     /// [`MATERIALIZED_VIEWS_SQL`].
     materialized_views: Arc<Mutex<MaterializedViewRows>>,
+    /// Canned answers to `query`, by exact statement text.
+    answers: Arc<Mutex<BTreeMap<String, MaterializedViewRows>>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
     /// `(needle, message)`: fail only the statements containing `needle` —
@@ -1140,6 +1299,11 @@ impl FakeStarRocksDdl {
     }
 
     /// Seed a row exactly as given, for the shape-check tests.
+    /// Answer `sql` (exact text) with `rows` from now on.
+    pub fn answer_query(&self, sql: &str, rows: Vec<Vec<Option<String>>>) {
+        self.answers.lock().unwrap().insert(sql.to_string(), rows);
+    }
+
     pub fn seed_raw_materialized_view_row(&self, row: Vec<Option<String>>) {
         self.materialized_views.lock().unwrap().push(row);
     }
@@ -1236,6 +1400,9 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if sql == MATERIALIZED_VIEWS_SQL {
             return Ok(self.materialized_views.lock().unwrap().clone());
         }
+        if let Some(rows) = self.answers.lock().unwrap().get(sql) {
+            return Ok(rows.clone());
+        }
         if let Some(name) = statement_target("SHOW CREATE CATALOG", sql) {
             let Some(props) = self.catalogs.lock().unwrap().get(&name).cloned() else {
                 return Err(fe_error(format!("Unknown catalog '{name}'")));
@@ -1313,6 +1480,201 @@ fn show_create_text(name: &str, props: &BTreeMap<String, String>) -> String {
         escape_ident(name),
         body.join(",\n")
     )
+}
+
+#[cfg(test)]
+mod catalog_listing_tests {
+    use super::*;
+    use egret_query_api::catalog_listing::ListedKind;
+
+    /// A name with every character that could break out of a quoted form.
+    const NASTY: &str = r#"Mi"x`e.d\"#;
+
+    fn row(cells: &[Option<&str>]) -> Vec<Option<String>> {
+        cells.iter().map(|c| c.map(String::from)).collect()
+    }
+
+    fn fe() -> FeTarget {
+        FeTarget {
+            host: "fe".into(),
+            port: 9030,
+            root_password: Some("hunter2xyz".into()),
+            tls_cert_pem: None,
+        }
+    }
+
+    #[test]
+    fn every_name_is_a_backtick_identifier() {
+        assert_eq!(catalog_schemas_sql("ext"), "SHOW DATABASES FROM `ext`");
+        assert_eq!(
+            catalog_relations_sql("ext", "sales"),
+            "SHOW FULL TABLES FROM `ext`.`sales`"
+        );
+        assert_eq!(
+            catalog_columns_sql("ext", "sales", "orders"),
+            "SHOW FULL COLUMNS FROM `ext`.`sales`.`orders`"
+        );
+    }
+
+    /// Only the backtick is doubled. A backslash stays single: inside a
+    /// delimited identifier it is not an escape (unlike a string literal,
+    /// #504), so doubling it would name a different object.
+    #[test]
+    fn a_nasty_name_cannot_leave_its_identifier() {
+        assert_eq!(
+            catalog_schemas_sql(NASTY),
+            r#"SHOW DATABASES FROM `Mi"x``e.d\`"#
+        );
+        assert_eq!(
+            catalog_relations_sql(NASTY, "a.b"),
+            r#"SHOW FULL TABLES FROM `Mi"x``e.d\`.`a.b`"#
+        );
+        assert_eq!(
+            catalog_columns_sql("ext", NASTY, "`"),
+            r#"SHOW FULL COLUMNS FROM `ext`.`Mi"x``e.d\`.````"#
+        );
+    }
+
+    #[test]
+    fn schemas_are_sorted_without_information_schema() {
+        // S1's rows; `system` is a source schema on StarRocks and is kept.
+        let got = parse_catalog_schemas(vec![
+            row(&[Some("sales")]),
+            row(&[Some("information_schema")]),
+            row(&[Some("pg_catalog")]),
+            row(&[Some("empty_s")]),
+            row(&[Some("system")]),
+        ])
+        .unwrap();
+        assert_eq!(got, ["empty_s", "pg_catalog", "sales", "system"]);
+    }
+
+    #[test]
+    fn relations_carry_the_table_type_as_their_kind() {
+        let got = parse_catalog_relations(vec![
+            row(&[Some("v_orders"), Some("VIEW")]),
+            row(&[Some("orders"), Some("BASE TABLE")]),
+        ])
+        .unwrap();
+        assert_eq!(
+            got,
+            [
+                ListedRelation {
+                    name: "orders".into(),
+                    kind: ListedKind::Table
+                },
+                ListedRelation {
+                    name: "v_orders".into(),
+                    kind: ListedKind::View
+                },
+            ]
+        );
+        let err = parse_catalog_relations(vec![row(&[Some("t"), Some("SYNONYM")])]).unwrap_err();
+        assert!(err.contains("SYNONYM"), "{err}");
+    }
+
+    #[test]
+    fn columns_are_field_and_type_in_order() {
+        // S4's `SHOW FULL COLUMNS` answer: Field, Type, Collation, Null, …
+        let got = parse_catalog_columns(vec![
+            row(&[Some("id"), Some("int"), None, Some("YES")]),
+            row(&[Some("amount"), Some("decimal(10,2)"), None, Some("YES")]),
+            row(&[Some("note"), Some("varchar(1048576)"), None, Some("YES")]),
+        ])
+        .unwrap();
+        let pairs: Vec<(&str, &str)> = got
+            .iter()
+            .map(|c| (c.name.as_str(), c.r#type.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("id", "int"),
+                ("amount", "decimal(10,2)"),
+                ("note", "varchar(1048576)")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_answer_is_an_error() {
+        assert!(parse_catalog_columns(vec![]).is_err());
+        assert!(parse_catalog_schemas(vec![row(&[None])]).is_err());
+        assert!(parse_catalog_schemas(vec![row(&[])]).is_err());
+        assert!(parse_catalog_relations(vec![row(&[Some("t")])]).is_err());
+        assert!(parse_catalog_relations(vec![row(&[Some("t"), None])]).is_err());
+        assert!(parse_catalog_columns(vec![row(&[Some("id"), None])]).is_err());
+    }
+
+    #[tokio::test]
+    async fn each_level_is_one_statement_on_the_fe() {
+        let ddl = FakeStarRocksDdl::default();
+        ddl.answer_query(
+            &catalog_schemas_sql("ext"),
+            vec![row(&[Some("sales")]), row(&[Some("information_schema")])],
+        );
+        ddl.answer_query(
+            &catalog_relations_sql("ext", "sales"),
+            vec![row(&[Some("orders"), Some("BASE TABLE")])],
+        );
+        ddl.answer_query(
+            &catalog_columns_sql("ext", "sales", "orders"),
+            vec![row(&[Some("id"), Some("int")])],
+        );
+        let fe = fe();
+        assert_eq!(
+            select_catalog_level(&ddl, &fe, "ext", None, None).await,
+            Ok(CatalogLevel::Schemas(vec!["sales".into()]))
+        );
+        assert_eq!(
+            select_catalog_level(&ddl, &fe, "ext", Some("sales"), None).await,
+            Ok(CatalogLevel::Relations(vec![ListedRelation {
+                name: "orders".into(),
+                kind: ListedKind::Table
+            }]))
+        );
+        assert_eq!(
+            select_catalog_level(&ddl, &fe, "ext", Some("sales"), Some("orders")).await,
+            Ok(CatalogLevel::Columns(vec![ListedColumn {
+                name: "id".into(),
+                r#type: "int".into()
+            }]))
+        );
+        assert_eq!(
+            ddl.queried(),
+            [
+                catalog_schemas_sql("ext"),
+                catalog_relations_sql("ext", "sales"),
+                catalog_columns_sql("ext", "sales", "orders"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_schema_is_an_error_without_the_root_password() {
+        let ddl = FakeStarRocksDdl::default();
+        ddl.fail_matching(
+            "nosuch",
+            "ERROR 5501: Unknown database nosuch for root using password hunter2xyz",
+        );
+        let err = select_catalog_level(&ddl, &fe(), "ext", Some("nosuch"), None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("5501"), "{err}");
+        assert!(
+            !err.contains("hunter2xyz"),
+            "the root password leaked: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_table_without_a_schema_sends_nothing() {
+        let ddl = FakeStarRocksDdl::default();
+        assert!(select_catalog_level(&ddl, &fe(), "ext", None, Some("t"))
+            .await
+            .is_err());
+        assert!(ddl.queried().is_empty());
+    }
 }
 
 #[cfg(test)]

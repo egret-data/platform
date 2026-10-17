@@ -1,6 +1,8 @@
 //! Async query engine: connectors (Trino/StarRocks), job manager, result store.
 //! Folded in from the former `egret-engine` crate (E4b).
 
+/// DG frontend redesign #1: a catalog level listed on Trino as `egret-lineage`.
+pub mod catalog_listing;
 pub mod connector;
 mod error;
 mod job;

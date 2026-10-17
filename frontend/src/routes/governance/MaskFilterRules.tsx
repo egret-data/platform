@@ -11,6 +11,7 @@ import {
 } from "@/api/generated/perm/perm";
 import type { RuleView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
+import { useTags } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FACET_ALL, FacetSelect } from "@/components/explore/FacetSelect";
@@ -22,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { formatPrincipals, formatRuleKind, formatSelector } from "./permFormat";
+import { OpenInDataLink, scopeToDataLink, useCatalogNameById } from "./openInData";
 import { OverlapReport } from "./OverlapReport";
 import { RuleDialog } from "./RuleDialog";
 
@@ -41,6 +43,10 @@ export default function MaskFilterRules() {
 
   const rulesQ = usePermListRules({ query: { retry: false } });
   const rows: RuleView[] = rulesQ.data?.status === 200 ? rulesQ.data.data : [];
+
+  const catalogNameById = useCatalogNameById();
+  const tagsQ = useTags();
+  const tagIdByKey = new Map((tagsQ.data ?? []).map((t) => [t.key, t.id] as const));
 
   const [kindFilter, setKindFilter] = useState(FACET_ALL);
   const filtered = rows.filter((r) => kindFilter === FACET_ALL || r.kind.type === kindFilter);
@@ -86,6 +92,16 @@ export default function MaskFilterRules() {
     setDialogOpen(true);
   }
 
+  /** A tag rule opens its classification; a path rule opens the object its path names. */
+  function openLink(r: RuleView) {
+    if (r.selector.type === "tag") {
+      const id = tagIdByKey.get(r.selector.key);
+      return id ? <OpenInDataLink to={`/governance/classifications/${id}`} subject={r.name} label="Open classification" /> : null;
+    }
+    const link = scopeToDataLink(r.selector, catalogNameById, "masks");
+    return link ? <OpenInDataLink to={link.to} subject={r.name} stoppedAtPattern={link.stoppedAtPattern} /> : null;
+  }
+
   const columns: Column<RuleView>[] = [
     {
       key: "name",
@@ -110,7 +126,15 @@ export default function MaskFilterRules() {
       key: "selects",
       label: "Selects",
       value: (r) => formatSelector(r),
-      cell: (r) => formatSelector(r),
+      cell: (r) => {
+        const link = openLink(r);
+        return (
+          <div className="space-y-1">
+            <p>{formatSelector(r)}</p>
+            {link}
+          </div>
+        );
+      },
     },
     {
       key: "exempt",

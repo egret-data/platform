@@ -9,7 +9,7 @@ import {
   usePermPreview,
 } from "@/api/generated/perm/perm";
 import type { NewRule, PreviewResponse, PrincipalSet, Rule, RuleKind, Scope, Selector } from "@/api/generated/model";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { ApiError } from "@/api/client";
 import { type Tag, useTags } from "@/api/tags";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
@@ -159,20 +159,28 @@ function selectorOf(selectorType: SelectorType, tagKey: string, scope: Scope): S
  * `exempt` mode (no `exclude`, no `role`), and a path selector under
  * `row_filter` uses `ScopePicker`'s `rowFilterMode` (no column field at all,
  * catalog+schema+table jointly required).
+ *
+ * `initialSelector` and `initialKind` seed a NEW rule's selector and kind (the
+ * Data object page's Add rule passes a `path` selector naming its object, and
+ * on a table a row filter, which that selector completes); `existing` wins.
  */
 export function RuleDialog({
   open,
   onOpenChange,
   existing,
+  initialSelector,
+  initialKind,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing?: Rule | null;
+  initialSelector?: Selector;
+  initialKind?: KindType;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && <RuleForm existing={existing} onOpenChange={onOpenChange} />}
+        {open && <RuleForm existing={existing} initialSelector={initialSelector} initialKind={initialKind} onOpenChange={onOpenChange} />}
       </DialogContent>
     </Dialog>
   );
@@ -186,21 +194,24 @@ export function RuleDialog({
  */
 function RuleForm({
   existing,
+  initialSelector,
+  initialKind,
   onOpenChange,
 }: {
   existing?: Rule | null;
+  initialSelector?: Selector;
+  initialKind?: KindType;
   onOpenChange: (open: boolean) => void;
 }) {
+  const seed = existing ? existing.selector : initialSelector;
   // Read here rather than passed down — see the same note in `GrantDialog`
   // (review M-6).
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
+  const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const [name, setName] = useState(existing?.name ?? "");
-  const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? "mask");
+  const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? initialKind ?? "mask");
   const [maskType, setMaskType] = useState(
     existing?.kind.type === "mask" ? existing.kind.mask_type : "MASK",
   );
@@ -210,15 +221,11 @@ function RuleForm({
   const [filterExpr, setFilterExpr] = useState(
     existing?.kind.type === "row_filter" ? existing.kind.filter_expr : "",
   );
-  const [selectorType, setSelectorType] = useState<SelectorType>(
-    existing?.selector.type ?? "tag",
-  );
-  const [tagKey, setTagKey] = useState(
-    existing?.selector.type === "tag" ? existing.selector.key : "",
-  );
+  const [selectorType, setSelectorType] = useState<SelectorType>(seed?.type ?? "tag");
+  const [tagKey, setTagKey] = useState(seed?.type === "tag" ? seed.key : "");
   const [scope, setScope] = useState<Scope>(() => {
-    if (existing?.selector.type === "path") {
-      const { catalog_id, schema, table, column } = existing.selector;
+    if (seed?.type === "path") {
+      const { catalog_id, schema, table, column } = seed;
       return { catalog_id, schema, table, column };
     }
     return EMPTY_SCOPE;
