@@ -1402,7 +1402,9 @@ export default function ExplainAccess() {
                 A policy that grants through a role, or through any group except{" "}
                 <span className="font-mono">public</span>, matches nobody on these engines:
                 egret serves no roles download and runs no usersync, so explain sends
-                neither.{" "}
+                neither. That is why egret’s own compiler names a role’s holders and a
+                group’s members instead, by username — so only a hand-written policy can
+                still name one.{" "}
                 <span className="font-mono">public</span> is the exception and it does
                 decide — Ranger matches it by name whatever the request carries, and egret’s
                 own compiler grants and denies through it, so a verdict here can come from a{" "}
