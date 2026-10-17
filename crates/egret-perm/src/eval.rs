@@ -13,7 +13,7 @@
 //! granted.* A rule's `exempt` set is how an individual escapes a mask —
 //! never a competing grant.
 //!
-//! Two bounds on what this function can prove, recorded rather than fixed:
+//! Five bounds on what this function can prove, recorded rather than fixed:
 //!
 //! - **Leaf granularity.** `covers` is strictly grant-scope ⊇ target-scope
 //!   (see its doc). A deny scoped to `sales.orders.email` does not deny a
@@ -65,6 +65,24 @@
 //!   from everybody, not from the intended few), and reporting a denial for
 //!   it here would make `explain` disagree with the engine in the opposite
 //!   direction from the bug this task fixes.
+//! - **The resource-level fold is a full-string lowercase, and the engine's is
+//!   not (design R8).** The schema, table and column levels fold case like the
+//!   Ranger service-defs egret serves (see [`resource_level_matches`]), but
+//!   with Rust's `str::to_lowercase`, the same full Unicode mapping as
+//!   Postgres `lower()` and JS `toLowerCase`. The engine folds per character
+//!   (`String.equalsIgnoreCase`), and the two can disagree on 25 code points:
+//!   U+00B5, U+0130, U+0131, U+017F, U+0345, U+03A3, U+03C2, U+03D0, U+03D1,
+//!   U+03D5, U+03D6, U+03F0, U+03F1, U+03F5, U+1C80–U+1C88 and U+1E9B,
+//!   U+1FBE. That set, its derivation and its measurement are on
+//!   `egret_perm_compile::routes::FOLD_DIVERGENT`, where tag resolution
+//!   DECLINES on it. `evaluate` has no decline channel, and no production
+//!   caller (it is the test oracle), so here it is a bound and not a gate: a
+//!   name carrying one of those characters may get an answer the engine does
+//!   not give. The constant is not copied into this crate — egret-perm does
+//!   not depend on egret-perm-compile, and a second copy would drift. Tag keys
+//!   ([`Selector::Tag`], [`ClearanceGate::tag`]) and principal refs are NOT
+//!   folded at all (design R7): the `tag` service-def sets
+//!   `ignoreCase: false`, so `PII` and `pii` are two tags on the engine too.
 
 use uuid::Uuid;
 
@@ -298,14 +316,39 @@ fn covers(g: &Scope, t: &Scope) -> bool {
 /// scoped to a level (even to `"*"`, matching every value there) says
 /// nothing about a target that IS the object one level up and does not
 /// descend to a specific value at this level. A named grant value that does
-/// resolve against a named target value is matched by `glob_match`, not
-/// plain equality — see its doc for why.
+/// resolve against a named target value is matched by
+/// [`resource_level_matches`] — a glob, not plain equality, and folded for
+/// case; see its doc and `glob_match`'s for why.
 fn level_covers(grant: &Option<String>, target: &Option<String>) -> bool {
     match (grant, target) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(g), Some(t)) => glob_match(g, t),
+        (Some(g), Some(t)) => resource_level_matches(g, t),
     }
+}
+
+/// Whether a stored schema, table or column value matches a target's value
+/// at the same level, the way the engine decides it: case-folded, then
+/// glob-matched.
+///
+/// Every resource level egret's Ranger service-defs declare sets
+/// `"ignoreCase": true` — Trino's `catalog`/`schema`/`table`/`column` in
+/// `egret-policy/src/service-defs/trino.json` and StarRocks'
+/// `catalog`/`database`/`table`/`column` in `starrocks.json` — so the engine
+/// treats a grant on `sales.Orders` as a grant on `sales.orders`. Comparing
+/// exactly would make this oracle miss a deny the engine enforces, which is
+/// the fail-open direction: an oracle that misses a deny blesses a compiler
+/// that drops one.
+///
+/// The fold is a whole-string `str::to_lowercase` on both sides — the same
+/// function as `egret_ranger_eval::resource::fold`, the server's own fold,
+/// and as the Data UI's `toLowerCase` in
+/// `frontend/src/routes/governance/data/coverage.ts`, so the three agree.
+/// Where that full-string fold and the engine's per-character one disagree is
+/// the fifth bound in the module doc. The catalog level is not here: `covers`
+/// compares it by UUID. Tag keys are not here either; they stay exact.
+pub fn resource_level_matches(pattern: &str, value: &str) -> bool {
+    glob_match(&pattern.to_lowercase(), &value.to_lowercase())
 }
 
 /// Ranger's resource matcher globs (`*` = any run of characters including
@@ -320,6 +363,10 @@ fn level_covers(grant: &Option<String>, target: &Option<String>) -> bool {
 /// oracle: an oracle that under-matches would bless a compiler that
 /// over-permits. So this implements real glob matching rather than treating
 /// `"*"` as a single special case.
+///
+/// It compares characters exactly, which is the `tag` service-def's
+/// `ignoreCase: false` and what the Data UI's port of it expects. A resource
+/// level must go through [`resource_level_matches`], which folds case first.
 pub fn glob_match(pattern: &str, value: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let v: Vec<char> = value.chars().collect();
@@ -369,6 +416,36 @@ fn selector_hits(selector: &Selector, target: &Scope, tags_on: &[String]) -> boo
     match selector {
         Selector::Tag { key } => target.table.is_some() && tags_on.iter().any(|t| t == key),
         Selector::Path(scope) => covers(scope, target),
+    }
+}
+
+#[cfg(test)]
+mod resource_level_matches_tests {
+    use super::resource_level_matches;
+
+    #[test]
+    fn a_literal_matches_across_case() {
+        assert!(resource_level_matches("Orders", "orders"));
+        assert!(resource_level_matches("orders", "Orders"));
+    }
+
+    #[test]
+    fn a_glob_matches_across_case() {
+        assert!(resource_level_matches("ORD*", "orders"));
+        assert!(resource_level_matches("s?LES", "Sales"));
+    }
+
+    #[test]
+    fn a_non_ascii_name_folds_too() {
+        // An ASCII-only fold (`to_ascii_lowercase`) leaves `Ư`/`Ờ` alone and
+        // misses this pair; the engine does not.
+        assert!(resource_level_matches("NGƯỜI", "người"));
+    }
+
+    #[test]
+    fn a_literal_still_needs_the_same_letters() {
+        assert!(!resource_level_matches("orders", "order"));
+        assert!(!resource_level_matches("ORDERS", "order"));
     }
 }
 
