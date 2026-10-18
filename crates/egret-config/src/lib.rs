@@ -190,7 +190,9 @@ pub struct StorageSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditConfig {
-    /// When false, the PDP is not wrapped and no events are emitted.
+    /// When false, the PDP is not wrapped and the best-effort sink drops its
+    /// events. Governance changes (`egret_audit::governance`) are still recorded
+    /// in their write's transaction.
     pub enabled: bool,
     /// Rows older than this are pruned. Default 90.
     ///

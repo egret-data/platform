@@ -1199,6 +1199,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // mutation-emitting states (incl. AuthState's impersonation endpoints) and the
     // query API's CpState clone them.
     let audit_store = egret_audit::AuditStore::new(db.clone());
+    // Decision O3: whether governance events follow `audit.enabled` is decided in
+    // `egret_audit::governance::records_governance_changes` (today: they never do).
+    egret_audit::governance::configure(config.audit.enabled);
     let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
     if config.audit.enabled {
         let store = audit_store.clone();

@@ -1,4 +1,6 @@
 //! Append-only audit trail: an async best-effort sink + a batch writer + a store.
+pub mod governance;
+
 use egret_metastore::Db;
 use tokio::sync::mpsc;
 use uuid::Uuid;
