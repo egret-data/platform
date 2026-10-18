@@ -116,3 +116,47 @@ their `at`; nothing deletes them).
 Nothing. Removed: containers `vg-egret`, `vg-trino-coord`, `vg-sr`, `vg-rustfs`; network `vg-net` (`dgov-pg`
 disconnected first); DB `egret_dgov_live`; image `egret-backend:vg-dgov1`; scratch env file, TLS key and keystore,
 cookie jar and engine config copies. `dgov-pg` and `dgov-valkey` stay for Tasks 2–5.
+
+## 2. The live browser check of the Overview (Task 12)
+
+### 2.0 Predictions (committed before anything was observed)
+
+Written from the code at `faee0e1d`, before any container of this run was started. A wrong prediction is a finding.
+Nothing in this subsection is edited after observing.
+
+**Setup.** §1.2's stack rebuilt from `faee0e1d` (image `egret-backend:vg-dgov2`, DB `egret_dgov_live2` in `dgov-pg`,
+`vg-*` on `vg-net`, Trino 483 `vgtr` + `vgtr-tag`, StarRocks 4.1.6 `vgsr`, poll 5 s), catalog `ice` attached to both
+engines (SQL, as §1.2 DEV-2). Vite dev server from this worktree on a free port, proxying `/api`, `/catalog`,
+`/oauth` to `vg-egret`. Users through the API: admin; `vs` (role `vg_steward`: `policy:read`, `policy:update`);
+`vt` (role `vg_tagger`: `tag:read`); `ua`. Logins at least 60 s apart.
+
+**Seeds and the finding each raises** (SQL seeds are DEV-n):
+
+| id | seed | predicted finding on `/governance` |
+|---|---|---|
+| S1 | deny grant on `ice.s.t` naming user `ua`, plus SQL `perm.grant_principals` include `group ghost` | Critical `unresolved_principals_fail_open`, sample "group ghost" linking `/governance/grants/<id>`, Open → `/governance/people?kind=unmatched` |
+| S2 | mask rule via API on `ice.s.t.email`, plus a hand-written disagreeing mask on the same column (SQL: the profile is compiler-owned) | Warning `rule_overlaps`, sample "<rule> and <policy>" linking the rule page |
+| S3 | `view_lineage_state` row `failed` for `ice.s.v_bad` (SQL) | Warning `lineage_failed`, link `/governance/data/ice/s/v_bad?tab=lineage` |
+| S4 | `docker stop vg-sr`, wait 5 min | Warning `plugin_quiet` "No plugin has polled profile vgsr for N minutes." |
+| S5 | a forged poller for `vgsr` reporting the old version (anonymous download endpoint), then a grant compiled into `vgsr` | after 90 s, Critical `plugin_behind` "No plugin of profile vgsr has reported holding policy version V, set at T."; `plugin_quiet` gone |
+| S6 | poller stopped; `vgsr` rows' `at` set 25 h back (SQL) | Critical `plugin_silent` (not quiet) |
+| S7 | an attachment `apply_status = 'failed'` (SQL) | Warning `catalog_apply_failed`, link `/control-plane/catalogs/<id>` |
+| S8 | two mask rules whose model rows overlap (SQL move, the trick of `tests/compile_runs.rs`), then `POST /perm/compile/{vgtr}` | 409 to the caller; Critical `compile_failed` with the overlap sentence's first line |
+| S9 | a tag with no clearance; a catalog `lonely` with no engine | Info `tags_without_clearance`, Info `catalogs_without_engine` |
+
+**Browser cells.**
+
+| id | check | prediction |
+|---|---|---|
+| B1 | admin opens `/governance` | lands on the Overview (URL stays `/governance`), h1 "Overview", counts strip with four counts, findings grouped Critical, Warning, Info; every sample and Open link reaches a page that shows the thing named |
+| B2 | `/governance/nope` | replaced by `/governance` |
+| B3 | sidebar | first group "Governance overview", item Overview current on `/governance`, not current on `/governance/data` |
+| B4 | `vs` (no `engine:read`, no `tag:read`) | no engine, plugin, catalog-apply or tag finding; the "Not checked for you" lines name `engine:read`, `catalog_registry:read` and `tag:read`; counts strip without classifications |
+| B5 | `vt` | tag, lineage and catalog findings only; Recent changes shows clearance events and no grant event |
+| B6 | as admin through the UI: a grant, a rule, a clearance, a hand-written policy change, a migration, a manual compile | each appears in Recent changes with actor "Admin" (the admin's name) and a link; a preview and a refused write do not |
+| B7 | admin impersonates `ua` and changes a grant | an entry "Admin as ua" (labels as the users table holds them) |
+| B8 | 390 px and 1280 px, light and dark | no horizontal page scroll at 390 px, Recent changes as cards; rows readable |
+| B9 | keyboard only | every link and button reachable by Tab, focus ring visible |
+
+**Not confident:** whether the impersonation UI lets admin reach a Governance write as `ua` (it may need `ua` to hold
+`policy:update`); the exact actor label (name or email).
