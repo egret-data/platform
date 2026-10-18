@@ -1730,6 +1730,21 @@ pub async fn affected_services_for_role_membership(
     }
     // F11: the profile of every engine whose engine grants name the role.
     ids.extend(engine_grant_profiles_naming_via(conn, "role", &[role_name]).await?);
+    // F11: a platform admin is near-root as an impersonation target (egret
+    // seeds them engine admin), so a change of who holds the role re-checks
+    // every impersonation grant's target.
+    if role_name == crate::engine_grants::PLATFORM_ADMIN_ROLE {
+        ids.extend(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
+                   JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+                  WHERE g.target_user_id IS NOT NULL AND e.authz_service_id IS NOT NULL",
+            )
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?,
+        );
+    }
 
     normalize_service_order(&mut ids);
     Ok(ids)

@@ -508,3 +508,38 @@ async fn a_user_delete_waits_on_an_uncommitted_rebind_of_a_targeting_grants_engi
     rebind.commit().await.expect("commit");
     h.await.expect("join").expect("hard delete");
 }
+
+/// Infra-seeding gap: egret seeds every platform admin as an engine admin
+/// (`egret-admin - …`) at the next engine apply. So becoming platform admin is
+/// becoming near-root: the target's impersonation grant must lose its policy in
+/// the same commit as the role assignment, not at some later apply.
+#[tokio::test]
+async fn a_target_who_becomes_platform_admin_loses_the_grant_in_the_same_commit() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let (_ua, a) = person(pool).await;
+    let (uc, _c) = person(pool).await;
+    let id = create(
+        &e,
+        "starrocks.impersonate_user",
+        &[],
+        Some(uc),
+        vec![p(PrincipalKind::User, &a)],
+    )
+    .await;
+    assert_eq!(compiled_users(&e, id).await, Some(vec![a]));
+    let admin_role: Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("platform_admin role");
+    assign_platform_role_and_recompile(pool, "user", uc, admin_role)
+        .await
+        .expect("assign platform_admin");
+    assert_eq!(
+        compiled_users(&e, id).await,
+        None,
+        "no explicit recompile: the role assignment reaps it"
+    );
+}

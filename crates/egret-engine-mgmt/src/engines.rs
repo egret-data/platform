@@ -754,6 +754,7 @@ pub(crate) async fn build_provision_req_with(
                     .seed_admin_all_access(svc.id, service_name, "trino", &admins)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+                recompile_after_infra_seed(st, svc.id).await;
             }
             // The per-user baseline, for impersonate AND jwt: every delegated
             // session is checked for it (DG Task 7).
@@ -2368,7 +2369,9 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
             &dp::delegator_impersonate_policy(service_name),
         )
         .await
-        .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))
+        .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
+    recompile_after_infra_seed(st, svc.id).await;
+    Ok(())
 }
 
 /// Seed the per-user baseline ([`crate::delegator_policy::user_baseline_policies`])
@@ -2397,7 +2400,42 @@ pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Resu
             .await
             .map_err(|e| CpError::BadRequest(format!("seed policy {name}: {e}")))?;
     }
+    recompile_after_infra_seed(st, svc.id).await;
     Ok(())
+}
+
+/// Recompile a profile egret has just seeded infra policies on, when its
+/// engines carry impersonation grants: a grant's target is re-checked against
+/// every policy of the profile (engine grants spec E11, security re-review
+/// M-a). The seeded users (platform admins, `egret_delegator`, `{USER}`) are
+/// refused as targets already, so this only re-applies a decision the check
+/// has made; it runs after the seed (the seed's upserts are not one
+/// transaction), fire-and-forget and logged with the repair URL.
+async fn recompile_after_infra_seed(st: &CpState, service_id: i64) {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return;
+    };
+    let carries: Result<bool, sqlx::Error> = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE e.authz_service_id = $1 AND g.target_user_id IS NOT NULL)",
+    )
+    .bind(service_id)
+    .fetch_one(st.engine_mgmt.pool())
+    .await;
+    match carries {
+        Ok(false) => {}
+        Ok(true) => {
+            if let Err(e) = compiler.recompile_profile(service_id).await {
+                tracing::error!(service_id, error = %e,
+                    "could not recompile a profile after seeding its infra policies; its \
+                     impersonation grants are re-checked at the next recompile, POST \
+                     /api/control-plane/perm/compile/{service_id}");
+            }
+        }
+        Err(e) => tracing::error!(service_id, error = %e,
+            "could not tell whether a seeded profile carries impersonation grants"),
+    }
 }
 
 /// Seed the per-user baseline on ONE existing engine, without an apply.
@@ -3566,6 +3604,7 @@ async fn build_starrocks_provision_req(
                     .seed_admin_all_access(svc.id, service_name, "starrocks", &admins)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+                recompile_after_infra_seed(st, svc.id).await;
             }
         }
     }

@@ -187,6 +187,10 @@ fn is_pattern(value: &str) -> bool {
     value.contains('*') || value.contains('?')
 }
 
+/// The platform role whose holders egret seeds as engine admins
+/// (`egret_engine_mgmt`'s `admin_usernames` → `seed_admin_all_access`).
+pub(crate) const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
+
 /// How far [`impersonation_closure_problem`] walks before it refuses. A chain
 /// longer than this is refused rather than followed: refusing is the safe side.
 const MAX_IMPERSONATION_WALK: usize = 256;
@@ -488,6 +492,14 @@ pub(crate) async fn impersonation_closure_problem(
             )));
         }
         let (groups, roles) = identity_of(conn, &user).await?;
+        // egret seeds every platform admin as an engine admin (`egret-admin -
+        // …`, `seed_admin_all_access`) at each engine apply, so a platform admin
+        // is near-root whether or not that seed has run on this profile yet.
+        if roles.iter().any(|r| r == PLATFORM_ADMIN_ROLE) {
+            return Ok(Some(format!(
+                "{via}is a platform admin, whom egret seeds as an engine admin"
+            )));
+        }
         if let Some(held) = near_root_in(&profile, &user, &groups) {
             return Ok(Some(format!("{via}holds {held}")));
         }

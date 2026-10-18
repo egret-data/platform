@@ -512,6 +512,16 @@ async fn every_refusal_answers_its_status() {
         )
         .await
         .expect("admin all-access");
+    let (pa_id, platform_admin_target) = person(pool).await;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+          WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(pa_id)
+    .execute(pool)
+    .await
+    .expect("platform_admin");
     let group = unique("egrt-g-");
     sqlx::query("INSERT INTO groups (name, source) VALUES ($1, 'local')")
         .bind(&group)
@@ -612,6 +622,11 @@ async fn every_refusal_answers_its_status() {
             json!({"capability": "starrocks.impersonate_user", "values": ["Root"], "principals": user}),
         ),
         ("admin target", trino.engine, imp(&admin_target)),
+        (
+            "platform admin target",
+            trino.engine,
+            imp(&platform_admin_target),
+        ),
     ];
     for (why, eng, body) in conflicts {
         let (status, resp) = post(eng, body).await;
