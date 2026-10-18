@@ -42,6 +42,15 @@
 //! 6. No Flow-trigger outbox event is written, and no `errors:` or `finally:`
 //!    runs: there is no plan to run them from. The message says so.
 //!
+//! **Rule 2 holds a LEAF only** (fix round 1). A `WorkingDirectory` block's
+//! claim (`type_id IS NULL`) is never killed (`claim::Watch::Block`), so
+//! nobody would cancel it, and a `KILLING` block is claimable only in
+//! `FINISHING` (`claim::claim`): one left `KILLING` in `PREPARING` would
+//! keep the execution `KILLING` for ever. A leased block is closed `KILLED`
+//! with the rest; its worker's commit then fails once (the load) and the
+//! row, terminal, is never claimed again; what its claim wrote under `_wd/`
+//! is the crash sweep's.
+//!
 //! # How the timestamps are written
 //!
 //! Every state write goes through `stamps::stamp_set!`, as every other
@@ -122,6 +131,8 @@ struct Run {
     attempts: serde_json::Value,
     claimed_at: Option<DateTime<Utc>>,
     live: bool,
+    /// A leaf (`type_id IS NOT NULL`), not a `WorkingDirectory` block.
+    leaf: bool,
 }
 
 /// A run's write: `$1` the state, `$2` the history, `$3` the attempts, `$4`
@@ -174,7 +185,8 @@ pub(super) async fn close(
 
     let runs: Vec<Run> = sqlx::query(
         "SELECT id, state, history, attempts, claimed_at, \
-                NOT workflow.state_is_terminal(state) AS live \
+                NOT workflow.state_is_terminal(state) AS live, \
+                type_id IS NOT NULL AS leaf \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
     )
     .bind(execution)
@@ -189,6 +201,7 @@ pub(super) async fn close(
         attempts: r.get("attempts"),
         claimed_at: r.get("claimed_at"),
         live: r.get("live"),
+        leaf: r.get("leaf"),
     })
     .collect();
 
@@ -198,6 +211,7 @@ pub(super) async fn close(
     for run in runs.iter().filter(|r| r.live) {
         let is_own = own.is_some_and(|(id, at)| id == run.id && run.claimed_at == Some(at));
         let held = !is_own
+            && run.leaf
             && run.claimed_at.is_some()
             && matches!(run.state.as_str(), "RUNNING" | "SUBMITTED" | "KILLING");
         if held {

@@ -282,3 +282,95 @@ async fn a_reaped_discard_only_block_claim_is_claimed_again_and_discards(pool: P
         .expect("execution");
     assert_eq!(exec, "KILLED");
 }
+
+/// **Debt D4, fix round 1: a discard-only finish of a block whose execution
+/// can no longer be loaded closes it, instead of failing its commit, being
+/// reaped and claimed again for ever.** The kill is planted as in
+/// [`a_reaped_discard_only_block_claim_is_claimed_again_and_discards`]; the
+/// source is then corrupted (a planner change is the likely cause), and one
+/// tick takes the discard-only claim, discards, and closes the block and the
+/// execution `KILLED` by force.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_discard_only_block_claim_of_an_unloadable_execution_closes_it(pool: PgPool) {
+    // Arrange: the block is `KILLING` in `FINISHING`, as the kill leaves it.
+    egret_test_db::assert_database_url_is_exported();
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        KILLED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    tick_with(&pool, 8, &reg, WorkerTiming::default())
+        .await
+        .expect("the prepare claim");
+    let block: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("block id");
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb, \
+                attempts = jsonb_set(attempts, ARRAY[(jsonb_array_length(attempts) - 1)::text, 'history'], \
+                                     (attempts -> -1 -> 'history') || '[\"KILLING\"]'::jsonb) \
+          WHERE execution_id = $1 AND task_id = 'a' AND claimed_at IS NULL AND state = 'RUNNING'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("the child -> KILLING");
+    sqlx::query(
+        "UPDATE workflow.executions \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("the execution -> KILLING");
+    tick_with(&pool, 8, &reg, WorkerTiming::default())
+        .await
+        .expect("the child's kill");
+    let (state, phase, _) = block_row(&pool, ex).await;
+    assert_eq!(
+        (state.as_str(), phase.as_deref()),
+        ("KILLING", Some("FINISHING"))
+    );
+    sqlx::query("UPDATE workflow.executions SET source = 'tasks: [' WHERE id = $1")
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect("corrupt the source");
+    // Act
+    let ticked = tick_with(&pool, 8, &reg, WorkerTiming::default()).await;
+    // Assert
+    assert!(ticked.is_ok(), "{ticked:?}");
+    assert_eq!(block_row(&pool, ex).await.0, "KILLED");
+    let exec: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(&pool)
+        .await
+        .expect("state");
+    assert_eq!(exec, "KILLED");
+    let prefix = fs.working_dir_prefix(ws, ex, block);
+    let key = prefix
+        .strip_prefix("s3://")
+        .and_then(|r| r.split_once('/'))
+        .map(|(_, k)| k.to_string())
+        .expect("an s3:// URI");
+    assert_eq!(
+        fs.store.list(&key, None).await.expect("list").objects.len(),
+        0,
+        "the discard ran before the commit"
+    );
+    let again = egret_workflow::worker::claim(&pool, 8).await.unwrap();
+    assert!(again.is_empty(), "nothing is left to claim: {again:?}");
+}

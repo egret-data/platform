@@ -1226,9 +1226,9 @@ async fn make_unloadable(pool: &sqlx::PgPool, ex: Uuid) {
 }
 
 /// **Debt D4: the route force-closes an execution it cannot load.** A reaped
-/// run (no lease, no handler can be built) and a `CREATED` sibling both end
-/// `KILLED` with the force-close message, the execution is `KILLED`, and the
-/// audit says `forced`.
+/// run (no lease, no handler can be built) ends `KILLED` with the force-close
+/// message, the execution is `KILLED`, the audit says `forced`, and nothing
+/// is left for a worker to claim.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_route_force_closes_an_execution_it_cannot_load(pool: sqlx::PgPool) {
     // Arrange
@@ -1267,8 +1267,9 @@ async fn the_route_force_closes_an_execution_it_cannot_load(pool: sqlx::PgPool) 
     assert_eq!(exec_state(&pool, ex).await, "KILLED");
     let audit = common::audit_mutations(&app);
     assert_eq!(audit[0].2["forced"], true, "{audit:?}");
-    // And nothing loops: a tick finds nothing to claim.
-    finish_kills(&pool).await;
+    // And nothing loops: nothing is left to claim.
+    let again = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert!(again.is_empty(), "nothing is left to claim: {again:?}");
 }
 
 /// **Debt D4, the worker's side: a kill-only claim of a run whose execution
@@ -1372,4 +1373,227 @@ async fn a_force_closed_child_reports_to_its_parent(pool: sqlx::PgPool) {
     assert_eq!(res.status(), 202);
     assert_eq!(exec_state(&pool, child).await, "KILLED");
     assert_eq!(run_row(&pool, parent, "sub").await.0, "KILLED");
+}
+
+/// A sequential two-value `Loop` of one `Log` (`body`): one live iteration as
+/// soon as the first settle has run. An iteration's source is cut from its
+/// parent's (`spawn::sub_flow_source`), so a planner change that breaks one
+/// breaks both.
+fn one_loop(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n\
+         \x20   values: '[\"1\", \"2\"]'\n    concurrencyLimit: 1\n    tasks:\n      - id: body\n\
+         \x20       type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+    )
+}
+
+/// **Fix round 1, I1: a `Loop` whose parent and iteration both fail to load
+/// is killed, not refused.** The root is closed by force first, so the
+/// iteration's report finds its parent terminal and is skipped instead of
+/// loading it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cascade_force_closes_a_loop_whose_parent_and_iteration_cannot_load(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, user, app) = setup(&pool).await;
+    let parent = start(&pool, ws, &one_loop("loop-unloadable")).await;
+    let iteration = loop_children(&pool, parent).await;
+    assert_eq!(iteration.len(), 1);
+    make_unloadable(&pool, parent).await;
+    make_unloadable(&pool, iteration[0]).await;
+    // Act
+    let res = kill(&app, ws, parent, "", user).await;
+    // Assert
+    assert_eq!(res.status(), 202, "no longer a 500");
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+    assert_eq!(exec_state(&pool, iteration[0]).await, "KILLED");
+    assert_eq!(run_row(&pool, iteration[0], "body").await.0, "KILLED");
+    let again = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert!(again.is_empty(), "nothing is left to claim: {again:?}");
+}
+
+/// **Fix round 1, I1, the worker's side.** The iteration's leaf is held, so
+/// the route leaves it `KILLING`; once reaped, the kill-only claim closes it
+/// by force, and its report to the (already `KILLED`, unloadable) parent is
+/// skipped rather than failing the commit for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_held_iteration_of_an_unloadable_loop_is_closed_by_its_kill_only_claim(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_db, ws, user, app) = setup(&pool).await;
+    let parent = start(&pool, ws, &one_loop("loop-held")).await;
+    let iteration = loop_children(&pool, parent).await[0];
+    assert_eq!(
+        egret_workflow::worker::claim(&pool, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    make_unloadable(&pool, parent).await;
+    make_unloadable(&pool, iteration).await;
+    assert_eq!(kill(&app, ws, parent, "", user).await.status(), 202);
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+    assert_eq!(run_row(&pool, iteration, "body").await.0, "KILLING");
+    egret_workflow::worker::reap(&pool, std::time::Duration::ZERO)
+        .await
+        .expect("reap");
+    // Act
+    let reg = CancelRecorder::default();
+    let ticked = egret_workflow::worker::tick(&pool, 10, &reg).await;
+    // Assert
+    assert!(ticked.is_ok(), "{ticked:?}");
+    assert_eq!(run_row(&pool, iteration, "body").await.0, "KILLED");
+    assert_eq!(exec_state(&pool, iteration).await, "KILLED");
+    let again = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert!(again.is_empty(), "nothing is left to claim: {again:?}");
+}
+
+/// **Fix round 1, I1 (b): a live parent that cannot be loaded hears no
+/// report.** Killing the iteration alone closes it; the report to its
+/// unloadable parent is dropped with a warning, and the parent is closed by
+/// its own kill.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unloadable_iterations_report_to_an_unloadable_live_parent_is_dropped(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_db, ws, user, app) = setup(&pool).await;
+    let parent = start(&pool, ws, &one_loop("loop-live-parent")).await;
+    let iteration = loop_children(&pool, parent).await[0];
+    make_unloadable(&pool, parent).await;
+    make_unloadable(&pool, iteration).await;
+    // Act
+    let res = kill(&app, ws, iteration, "", user).await;
+    // Assert
+    assert_eq!(res.status(), 202, "no longer a 500");
+    assert_eq!(exec_state(&pool, iteration).await, "KILLED");
+    assert_eq!(
+        exec_state(&pool, parent).await,
+        "RUNNING",
+        "the parent was not loaded, so it did not move"
+    );
+    assert_eq!(kill(&app, ws, parent, "", user).await.status(), 202);
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+}
+
+/// **Fix round 1 (review M5): only a row-content fault is swallowed.** The
+/// parent of an unloadable `Subflow` child is locked by another transaction,
+/// and the route's connections give up on a lock after 300 ms: the report's
+/// load of the parent fails with `55P03`, an I/O-class error, and the kill
+/// answers 500 with nothing written, as before D4.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_report_that_cannot_lock_the_parent_still_fails_the_kill(pool: sqlx::PgPool) {
+    // Arrange: every connection of this pool gives up a lock after 300 ms.
+    let opts = (*pool.connect_options())
+        .clone()
+        .options([("lock_timeout", "300ms")]);
+    let impatient = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(opts)
+        .await
+        .expect("a pool with lock_timeout");
+    let (db, ws, user, app) = setup(&impatient).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    let parent = start(&impatient, ws, &parent_with_children("report-locked")).await;
+    let child = subflow_child(&impatient, parent).await;
+    make_unloadable(&impatient, child).await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(parent)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    // Act
+    let res = kill(&app, ws, child, "", user).await;
+    // Assert
+    assert_eq!(
+        res.status(),
+        500,
+        "a lock timeout is not a row-content fault"
+    );
+    holder.rollback().await.unwrap();
+    assert_eq!(
+        exec_state(&pool, child).await,
+        "RUNNING",
+        "nothing was written"
+    );
+    drop(app);
+    impatient.close().await;
+}
+
+/// A `WorkingDirectory` block of one `Log` child.
+const ONE_BLOCK: &str = "id: wd-held\nnamespace: t\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+
+/// **Fix round 1, the held block: a force-close closes a leased block claim
+/// at once.** Rule 2 leaves a held run to the worker that can cancel it, but
+/// a block's claim is never killed (`Watch::Block`) and a `KILLING` block
+/// outside `FINISHING` is never claimable again, so leaving it `KILLING`
+/// would keep the execution `KILLING` for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_force_close_closes_a_leased_block_claim_at_once(pool: sqlx::PgPool) {
+    // Arrange: the block's prepare claim is leased.
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = start(&pool, ws, ONE_BLOCK).await;
+    let claimed = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].block_phase.as_deref(), Some("PREPARING"));
+    make_unloadable(&pool, ex).await;
+    // Act
+    let res = kill(&app, ws, ex, "", user).await;
+    // Assert
+    assert_eq!(res.status(), 202);
+    assert_eq!(common::json(res).await["state"], "KILLED");
+    assert_eq!(run_row(&pool, ex, "block").await.0, "KILLED");
+    egret_workflow::worker::reap(&pool, std::time::Duration::ZERO)
+        .await
+        .expect("reap");
+    let again = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert!(again.is_empty(), "nothing is left to claim: {again:?}");
+}
+
+/// **Fix round 1, I1 (a): a report to a parent that is already terminal is
+/// skipped in plain SQL, without taking the parent's lock.** The parent was
+/// killed without cascade, so its `Subflow` child runs on; the child is then
+/// made unloadable and killed while another transaction holds the parent's
+/// row. Loading the parent would wait out the 300 ms `lock_timeout` and
+/// answer 500.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_report_to_a_terminal_parent_does_not_lock_it(pool: sqlx::PgPool) {
+    // Arrange
+    let opts = (*pool.connect_options())
+        .clone()
+        .options([("lock_timeout", "300ms")]);
+    let impatient = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(opts)
+        .await
+        .expect("a pool with lock_timeout");
+    let (db, ws, user, app) = setup(&impatient).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    let parent = start(&impatient, ws, &parent_with_children("report-terminal")).await;
+    let child = subflow_child(&impatient, parent).await;
+    assert_eq!(
+        kill(&app, ws, parent, "?cascade=false", user)
+            .await
+            .status(),
+        202
+    );
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+    assert_eq!(exec_state(&pool, child).await, "RUNNING");
+    make_unloadable(&impatient, child).await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(parent)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    // Act
+    let res = kill(&app, ws, child, "", user).await;
+    // Assert
+    assert_eq!(res.status(), 202, "the terminal parent was not locked");
+    holder.rollback().await.unwrap();
+    assert_eq!(exec_state(&pool, child).await, "KILLED");
+    drop(app);
+    impatient.close().await;
 }
