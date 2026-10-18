@@ -68,7 +68,7 @@ describe("Needs attention", () => {
     expect(within(critical).getAllByText("Critical")).toHaveLength(3);
   });
 
-  it("shows the sentence, up to five linked samples, a text sample without a ref, and Open", async () => {
+  it("shows the sentence, linked samples, a text sample without a ref, and Open", async () => {
     serve(
       ok(
         response({
@@ -101,6 +101,14 @@ describe("Needs attention", () => {
       expect(a.className).toContain("focus-visible:ring-2");
       expect(a.className).toContain("focus-visible:ring-ring");
     }
+  });
+
+  it("shows at most five samples even if the server sends more (review M7)", async () => {
+    const sample = Array.from({ length: 7 }, (_, i) => ({ label: `s${i}`, detail: null, ref: null }));
+    serve(ok(response({ findings: [finding({ kind: "engine_failed", severity: "critical", count: 7, sample })] })));
+    openOverview();
+    const row = (await screen.findByText("engine_failed sentence")).closest("li")!;
+    expect(within(row).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["s0", "s1", "s2", "s3", "s4"]);
   });
 
   it("renders a source it could not check as a warning with no link", async () => {

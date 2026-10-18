@@ -56,7 +56,8 @@ export function AttentionRow({ finding }: { finding: Finding }) {
       </div>
       {finding.sample.length > 0 ? (
         <ul className="flex flex-col gap-0.5 text-sm sm:ml-6">
-          {finding.sample.map((s, i) => (
+          {/* The server sends at most five; the page holds to that whatever it is sent. */}
+          {finding.sample.slice(0, 5).map((s, i) => (
             <li key={`${s.label}-${i}`} className="min-w-0 break-words">
               <RefLink r={s.ref}>{s.label}</RefLink>
               {s.detail ? <span className="text-muted-foreground"> — {s.detail}</span> : null}
