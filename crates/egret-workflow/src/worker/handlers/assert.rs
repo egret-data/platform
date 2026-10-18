@@ -16,13 +16,35 @@ pub const TYPE_ID: &str = "io.kestra.plugin.core.execution.Assert";
 ///
 /// `conditions` is `@NotNull @PluginProperty(dynamic = true) List<String>`: a
 /// raw list of templates, each rendered with [`render_str`], not a
-/// [`Property`]. `errorMessage` is a real `Property<String>`.
+/// [`Property`]. It is read as values and each entry turned to text by
+/// [`condition_texts`], as Jackson coerces a scalar to `String`.
+/// `errorMessage` is a real `Property<String>`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct Spec {
-    conditions: Option<Vec<String>>,
+    conditions: Option<Vec<serde_json::Value>>,
     #[serde(rename = "errorMessage")]
     error_message: Option<Property<String>>,
+}
+
+/// Each entry of `conditions` as the `String` Jackson's `StringDeserializer`
+/// makes of it: a string as it is, a boolean or a number as its text
+/// (`true`, `1`, `1.5`). A null, list or map entry is an error naming
+/// `conditions[i]` (Jackson refuses a list or map; a null entry would reach
+/// Kestra's renderer as `null` and fail there).
+fn condition_texts(raw: &[serde_json::Value]) -> Result<Vec<String>, String> {
+    use serde_json::Value;
+    raw.iter()
+        .enumerate()
+        .map(|(i, v)| match v {
+            Value::String(s) => Ok(s.clone()),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Number(n) => Ok(n.to_string()),
+            Value::Null => Err(format!("`conditions[{i}]`: must not be null")),
+            Value::Array(_) => Err(format!("`conditions[{i}]`: expected a string, got a list")),
+            Value::Object(_) => Err(format!("`conditions[{i}]`: expected a string, got a map")),
+        })
+        .collect()
 }
 
 /// Evaluate every condition; any falsy one fails the run.
@@ -45,6 +67,10 @@ impl TaskHandler for Assert {
         // `Log`'s absent `message` does.
         let Some(conditions) = spec.conditions else {
             return Ok(Outcome::failed_with("conditions: must not be null"));
+        };
+        let conditions = match condition_texts(&conditions) {
+            Ok(c) => c,
+            Err(e) => return Ok(Outcome::failed_with(e)),
         };
 
         // `Assert.java:82-101`: every condition is evaluated, each failure
@@ -210,6 +236,51 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(out.message, Some(render_error));
+    }
+
+    /// Jackson coerces a scalar to the `String` of `List<String>`, so
+    /// `conditions: [true, 1, 1.5]` reads as `["true", "1", "1.5"]`: all
+    /// truthy.
+    #[tokio::test]
+    async fn scalar_conditions_are_read_as_their_text() {
+        let (out, lines) = run(serde_json::json!({"conditions": [true, 1, 1.5]})).await;
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(
+            lines,
+            vec![(LogLevel::Info, "3 succeeded, 0 failed".to_string())]
+        );
+        let (out, lines) = run(serde_json::json!({"conditions": [false, 0]})).await;
+        assert_eq!(out.message.as_deref(), Some("2 assertions failed!"));
+        assert_eq!(
+            lines[..2],
+            [
+                (LogLevel::Error, "Assertion `false` failed!".to_string()),
+                (LogLevel::Error, "Assertion `0` failed!".to_string()),
+            ]
+        );
+    }
+
+    /// A null, list or map entry is not a string: the run fails naming the
+    /// entry, and nothing is evaluated.
+    #[tokio::test]
+    async fn a_null_list_or_map_condition_fails_naming_its_index() {
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!([1]),
+            serde_json::json!({"a": 1}),
+        ] {
+            let (out, lines) = run(serde_json::json!({"conditions": ["1", bad]})).await;
+            assert_eq!(out.state, RunState::Failed, "{bad}");
+            assert!(
+                out.message
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("`conditions[1]`"),
+                "{bad}: {:?}",
+                out.message
+            );
+            assert!(lines.is_empty(), "{bad}: {lines:?}");
+        }
     }
 
     #[tokio::test]

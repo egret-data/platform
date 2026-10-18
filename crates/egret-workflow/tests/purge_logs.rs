@@ -438,10 +438,13 @@ async fn result_of(
 
 /// A one-task flow through the real worker, its lines stored by the real
 /// writer (`PgLogSink`): SUCCESS, `outputs.count` is the lines it deleted --
-/// the old lines of another execution of its namespace and of its child's,
-/// and **none of the purging execution's own** (measured: it has stored no
-/// line before the delete, and its one line, the INFO naming the count, is
-/// written after it and survives) -- and the sibling's lines stay.
+/// the old lines of another execution of its namespace and of its child's
+/// -- and the sibling's lines stay. None of the purging execution's own lines
+/// are among them **only because this flow has no task before `purge`**
+/// (measured: it has stored no line before the delete, and its one line, the
+/// INFO naming the count, is written after it and survives). A flow with an
+/// earlier task would lose that task's lines to the same delete, as in
+/// Kestra (module doc of `worker::handlers::purge_logs`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flow_purges_its_namespace_through_the_worker() {
     let Some(fx) = fx().await else { return };

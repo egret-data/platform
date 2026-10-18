@@ -21,6 +21,16 @@
 //! - **The flow's namespace is read from the execution row**
 //!   (`workflow.executions.namespace`, by id and workspace), never from the
 //!   render scope, so the task runs whether or not `[storage]` is configured.
+//! - **A non-UUID `executionId` FAILS the run** (Kestra: it matches no row,
+//!   count 0). Egret's execution ids are UUIDs, so a non-UUID can only be an
+//!   author's mistake.
+//!
+//! # What it also deletes (as Kestra)
+//!
+//! With the usual future `endDate`, the delete also takes the purging
+//! execution's own earlier lines and the lines of other in-scope executions
+//! that are still running. Lines are stored asynchronously (`spawn_writer`,
+//! `PgLogSink`), so `count` depends on what the writer has flushed by then.
 
 use egret_core::Result;
 use serde::Deserialize;
@@ -197,6 +207,19 @@ pub(crate) fn plan(
     }))
 }
 
+/// The INFO line of a purge that ran.
+/// With `flowId` the namespace matches exactly (see the module doc), so the
+/// line names the flow and does not claim the child namespaces.
+pub(crate) fn purged_message(n: u64, q: &PurgeQuery) -> String {
+    let namespaces = q.namespaces.join("', '");
+    match &q.flow_key {
+        Some(flow) => format!("purged {n} log lines of flow '{flow}' in namespace '{namespaces}'"),
+        None => {
+            format!("purged {n} log lines of namespace '{namespaces}' and its child namespaces")
+        }
+    }
+}
+
 fn counts(n: u64) -> serde_json::Value {
     serde_json::json!({"count": n, "executionLogsCount": n, "nonExecutionLogsCount": 0})
 }
@@ -232,12 +255,7 @@ impl TaskHandler for PurgeLogs {
         // A database failure is infrastructure: `Err`, so the run is
         // re-claimed. A re-run deletes what is still there, idempotently.
         let n = self.repo.purge(&q).await?;
-        task.log
-            .info(&format!(
-                "purged {n} log lines of namespace '{}' and its child namespaces",
-                q.namespaces.join("', '")
-            ))
-            .await;
+        task.log.info(&purged_message(n, &q)).await;
         Ok(Outcome::succeeded_with(counts(n)))
     }
 
@@ -349,6 +367,22 @@ mod tests {
         );
         let e = err(serde_json::json!({"endDate": END, "executionId": "nope"}));
         assert!(e.contains("executionId"), "{e}");
+    }
+
+    /// With `flowId` the namespace matches exactly, so the line names the
+    /// flow and not the child namespaces it does not reach.
+    #[test]
+    fn the_purged_line_names_the_scope_that_was_matched() {
+        let q = ok(serde_json::json!({"endDate": END}));
+        assert_eq!(
+            purged_message(3, &q),
+            "purged 3 log lines of namespace 'a.b' and its child namespaces"
+        );
+        let q = ok(serde_json::json!({"endDate": END, "flowId": "f"}));
+        assert_eq!(
+            purged_message(1, &q),
+            "purged 1 log lines of flow 'f' in namespace 'a.b'"
+        );
     }
 
     #[test]

@@ -141,7 +141,8 @@ impl<'de, T> Deserialize<'de> for Property<T> {
 ///   (`VariableRenderer.java:187-221`): every key is rendered, every string
 ///   leaf is rendered to a string, arrays and objects are walked, and
 ///   numbers, booleans and null are kept. Two keys that render to the same
-///   text keep the FIRST (`putIfAbsent`).
+///   text keep the FIRST (`putIfAbsent`), unless the first is null, which
+///   `putIfAbsent` replaces.
 /// - Anything else (an array, a number, a boolean, null) is not a map: an
 ///   error, as Jackson's `readValue(…, Map.class)` throws on its text.
 ///
@@ -198,7 +199,15 @@ fn render_object(
         let at = format!("{path}.{raw_key}");
         let key = render_str(raw_key, cx).map_err(|e| format!("`{at}`: {e}"))?;
         let value = render_value(value, &at, cx)?;
-        out.entry(key).or_insert(value);
+        // Java's `putIfAbsent` (`VariableRenderer.java:194`): a key already
+        // there is kept, unless it is mapped to null.
+        match out.get_mut(&key) {
+            Some(existing) if existing.is_null() => *existing = value,
+            Some(_) => {}
+            None => {
+                out.insert(key, value);
+            }
+        }
     }
     Ok(out)
 }
@@ -403,7 +412,7 @@ mod tests {
         );
     }
 
-    /// `map.putIfAbsent(key, value)` (`VariableRenderer.java:207`): when two
+    /// `map.putIfAbsent(key, value)` (`VariableRenderer.java:194`): when two
     /// keys render alike, the first in source order wins.
     #[test]
     fn render_map_keeps_the_first_of_two_keys_that_render_alike() {
@@ -413,6 +422,19 @@ mod tests {
         assert_eq!(
             render_map(&raw, "values", &cx).unwrap()["a"],
             json!("first")
+        );
+    }
+
+    /// Java's `Map.putIfAbsent` also replaces a key "mapped to null", so a
+    /// later key that renders alike takes the place of an earlier null.
+    #[test]
+    fn render_map_replaces_an_earlier_null_with_a_later_key_that_renders_alike() {
+        let mut cx = RenderContext::new();
+        cx.insert("k", json!("a"));
+        let raw = json!({"a": null, "{{ k }}": "x"});
+        assert_eq!(
+            serde_json::Value::Object(render_map(&raw, "values", &cx).unwrap()),
+            json!({"a": "x"})
         );
     }
 

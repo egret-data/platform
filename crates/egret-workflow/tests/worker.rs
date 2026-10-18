@@ -1659,8 +1659,8 @@ async fn a_stored_loop_whose_body_is_refused_spawns_and_its_run_fails(pool: sqlx
 /// The replay (`worker::replay`) inserts a new execution of the parent's
 /// frozen source and plans it with `executor::plan_stored` (user ruling
 /// 2026-10-12): that source passed the start gate when the original started,
-/// and an `OutputValues` in it is `unknown_task_type` only since
-/// no-silent-stall Task 1. Planned with `build_plan` instead, the replay's
+/// and a task in it of a type with no `TASK_TYPES` row ([`UNREGISTERED`]) is
+/// `unknown_task_type` only since no-silent-stall Task 1. Planned with `build_plan` instead, the replay's
 /// settle errs `Unplannable` and the chain never moves.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_stored_execution_replays_by_the_rules_it_started_under(pool: sqlx::PgPool) {
