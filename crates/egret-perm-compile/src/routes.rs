@@ -4099,7 +4099,62 @@ async fn undo_service_policy_migration(
 ) -> Result<Json<crate::migrate::UndoResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    // DG #3 (review I2): undo is symmetric with apply, which records one event
+    // per object it creates. Every object a migration of this profile created,
+    // summarised before undo runs; whichever is gone afterwards, undo deleted.
+    let created: Vec<(Vec<Uuid>, Vec<Uuid>)> =
+        sqlx::query_as("SELECT grant_ids, rule_ids FROM perm.migrated_from WHERE service_id = $1")
+            .bind(service_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    let mut grants_before = Vec::new();
+    let mut rules_before = Vec::new();
+    for (grant_ids, rule_ids) in &created {
+        for id in grant_ids {
+            if let Some(g) = get_grant_via(&mut tx, *id).await? {
+                grants_before.push((
+                    *id,
+                    crate::governance_events::grant_summary(&mut tx, &g).await?,
+                ));
+            }
+        }
+        for id in rule_ids {
+            if let Some(r) = get_rule_via(&mut tx, *id).await? {
+                rules_before.push((
+                    *id,
+                    crate::governance_events::rule_summary(&mut tx, &r).await?,
+                ));
+            }
+        }
+    }
     let response = crate::migrate::undo_in_tx(&mut tx, service_id, &body).await?;
+    for (id, before) in grants_before {
+        if get_grant_via(&mut tx, id).await?.is_none() {
+            crate::governance_events::record(
+                &mut tx,
+                egret_audit::governance::action::GRANT_DELETE,
+                egret_audit::governance::resource::PERM_GRANT,
+                id.to_string(),
+                crate::governance_events::before_after(Some(before), None),
+                &p,
+            )
+            .await?;
+        }
+    }
+    for (id, before) in rules_before {
+        if get_rule_via(&mut tx, id).await?.is_none() {
+            crate::governance_events::record(
+                &mut tx,
+                egret_audit::governance::action::RULE_DELETE,
+                egret_audit::governance::resource::PERM_RULE,
+                id.to_string(),
+                crate::governance_events::before_after(Some(before), None),
+                &p,
+            )
+            .await?;
+        }
+    }
     let service = profile_name_via(&mut tx, service_id).await?;
     crate::governance_events::record(
         &mut tx,

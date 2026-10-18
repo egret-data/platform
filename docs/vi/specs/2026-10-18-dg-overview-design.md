@@ -218,8 +218,8 @@ các sweep) không ghi gì (O13).
 | tạo/patch grant | `write_grant`, sau khi ghi dòng, trước recompile; `preview` cũng tới đây và rollback | `perm_grant:create`/`update` |
 | xoá grant | `delete_grant`, sau `delete_grant_in_tx` (`crates/egret-perm/src/store.rs:504`) | `perm_grant:delete` |
 | tạo/patch/xoá rule | `write_rule`; `delete_rule` | `perm_rule:*` |
-| migrate | `migrate_service_policies`, chỉ khi `commit` là true, trước `tx.commit()` | `policy_migration:apply` |
-| undo | `undo_service_policy_migration`, trước commit | `policy_migration:undo` |
+| migrate | `migrate_service_policies`, chỉ khi `commit` là true, trước `tx.commit()` | `policy_migration:apply`, cộng một `perm_grant:create` / `perm_rule:create` cho mỗi đối tượng nó tạo (chúng đi qua `write_grant`/`write_rule`): 1 + N sự kiện |
+| undo | `undo_service_policy_migration`, trước commit | `policy_migration:undo`, cộng một `perm_grant:delete` / `perm_rule:delete` cho mỗi đối tượng undo xoá, đối xứng với apply (review I2) |
 | compile thủ công | `compile`, viết lại để tự mở transaction, gọi `recompile_service_in_tx`, ghi, commit | `profile:compile` |
 | đặt/xoá clearance | `ClassificationPolicyRepo::set_policy`/`clear_policy`, trước commit; cả hai nhận thêm tham số `actor: &Principal` (thay `by: Option<Uuid>` của `set_policy`, giá trị là `actor.user_id`) | `tag_clearance:set`/`clear` |
 | tạo/sửa policy Ranger | `write_policy_checked`, trước commit (nó nhận thêm principal) | `ranger_policy:create`/`update` |

@@ -253,8 +253,8 @@ sync, sweeps) record nothing (O13).
 | create/patch grant | `write_grant`, after the row write, before the recompile; `preview` reaches it too and rolls back | `perm_grant:create`/`update` |
 | delete grant | `delete_grant`, after `delete_grant_in_tx` (`crates/egret-perm/src/store.rs:504`) | `perm_grant:delete` |
 | create/patch/delete rule | `write_rule`; `delete_rule` | `perm_rule:*` |
-| migrate | `migrate_service_policies`, only when `commit` is true, before `tx.commit()` | `policy_migration:apply` |
-| undo | `undo_service_policy_migration`, before commit | `policy_migration:undo` |
+| migrate | `migrate_service_policies`, only when `commit` is true, before `tx.commit()` | `policy_migration:apply`, plus one `perm_grant:create` / `perm_rule:create` per object it creates (they go through `write_grant`/`write_rule`): 1 + N events |
+| undo | `undo_service_policy_migration`, before commit | `policy_migration:undo`, plus one `perm_grant:delete` / `perm_rule:delete` per object undo removes, symmetric with apply (review I2) |
 | manual compile | `compile`, rewritten to open its transaction, call `recompile_service_in_tx`, record, commit | `profile:compile` |
 | clearance set/clear | `ClassificationPolicyRepo::set_policy`/`clear_policy`, before commit; both gain an `actor: &Principal` parameter (replacing `by: Option<Uuid>` on `set_policy`, whose value is `actor.user_id`) | `tag_clearance:set`/`clear` |
 | Ranger policy create/update | `write_policy_checked`, before commit (it gains the principal) | `ranger_policy:create`/`update` |

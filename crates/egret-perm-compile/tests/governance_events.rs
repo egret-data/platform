@@ -216,14 +216,14 @@ async fn events(f: &Fixture, resource_id: &str) -> Vec<Event> {
     .expect("events")
 }
 
-/// Governance events naming anything on this fixture's catalog or profile.
+/// Every governance event this fixture produced: all of them carry its
+/// steward as the actor, whatever object they name (a migration's per-object
+/// events name the objects, not the profile).
 async fn fixture_event_count(f: &Fixture) -> i64 {
     sqlx::query_scalar(
-        "SELECT count(*) FROM audit.audit_log \
-          WHERE kind = 'mutation' AND (detail::text LIKE '%' || $1 || '%' OR resource_id = $2)",
+        "SELECT count(*) FROM audit.audit_log WHERE kind = 'mutation' AND actor_user_id = $1",
     )
-    .bind(&f.catalog)
-    .bind(f.p.to_string())
+    .bind(f.steward)
     .fetch_one(&f.db.pool)
     .await
     .expect("count")
@@ -461,6 +461,11 @@ async fn a_proved_migration_and_its_undo_each_record_one_event() {
         events(&f, &pid).await.is_empty(),
         "a dry run records nothing"
     );
+    assert_eq!(
+        fixture_event_count(&f).await,
+        0,
+        "a dry run records nothing at all"
+    );
 
     let (status, body) = send(
         &f,
@@ -488,6 +493,11 @@ async fn a_proved_migration_and_its_undo_each_record_one_event() {
             "created_grants": [grant_id], "created_rules": []
         })
     );
+    // 1 + N: the migration, and each object it created.
+    assert_eq!(fixture_event_count(&f).await, 2);
+    let created = events(&f, &grant_id).await;
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0].action, "perm_grant:create");
 
     let (status, body) = send(
         &f,
@@ -505,6 +515,13 @@ async fn a_proved_migration_and_its_undo_each_record_one_event() {
         evs[1].detail,
         json!({ "service": f.profile, "policies": [name] })
     );
+    // Symmetric with apply: each object undo removes is a delete.
+    assert_eq!(fixture_event_count(&f).await, 4);
+    let on_grant = events(&f, &grant_id).await;
+    assert_eq!(on_grant.len(), 2, "{on_grant:?}");
+    assert_eq!(on_grant[1].action, "perm_grant:delete");
+    assert_eq!(on_grant[1].detail["after"], Value::Null);
+    assert_eq!(on_grant[1].detail["before"], on_grant[0].detail["after"]);
 }
 
 #[tokio::test]
