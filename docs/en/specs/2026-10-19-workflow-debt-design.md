@@ -1,6 +1,6 @@
 # Workflow debt package: what groups B, C1, C2 and WorkingDirectory left open
 
-**Status:** designed 2026-10-19. Not built. The user's order of 2026-10-18 puts this package after C2 merges and before the Kestra-parity roadmap (`docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` row 1 waits for it).
+**Status:** designed 2026-10-19. PR-1 built and verified 2026-10-19 on `feat/workflow-debt-kill-wd` (commits `571f3d4e`, `f1d5d4b4`, `ba8c6d33`, `791d6d58`, `8a0e889e`, `51f5b8a2`, `de0e34db`, `df2759d5`, `d972fb0a`); PR-2 not built. The user's order of 2026-10-18 puts this package after C2 merges and before the Kestra-parity roadmap (`docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` row 1 waits for it).
 
 **Where the claims come from:** every claim about egret's code was checked in the worktree `egret-coretasks` at `481d9101` (branch `feat/workflow-kestra-executor-tasks`, C2 at HEAD, which is what main looks like once C2 merges). Code is cited `path:line` relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, and its paths are relative to it. A claim that could not be checked statically says "to measure in Task N" and names the plan task that measures it. Where the debt notes said something the code no longer shows, the item is reported as stale, not planned.
 
@@ -36,6 +36,8 @@
 - **D11. (M6) A failed update stays a plain run failure.** Kestra's executor-exception path is recorded as a known divergence, not copied (§4.3).
 - **D12. (M7) A `LoopUntil` iteration gives each restarted descendant a new task-run id**, as Kestra recreates the task runs (§4.4).
 - **D13. (M8) Flow-trigger `executionLabels` are recorded as a divergence, not fixed** (§4.5).
+
+- **D14. The oracle driver resumes a run whose short deadline passed under load.** This is a fix in the oracle driver (test harness), not in production code, added 2026-10-19 after the ratchet-flake investigation (§3.2). It is PR-1 Task 1.6b.
 
 ## 1. Every debt item, verified
 
@@ -117,6 +119,12 @@ Any other error stays transient, as `finish_claimed_kill` already rules (`claim.
 
 **The message**, stored on each run it closes: `egret could not load this execution (<reason>), so it was killed without running its flow: no errors:, finally: or Flow trigger ran`. `<reason>` is the `WorkerError`'s text.
 
+*Note, 2026-10-19 (as built, PR-1 Task 4):*
+- **Rule 2 now holds a leaf only.** A run is held only when it is a leaf (a `Runnable` with a handler) that a worker leases. A leased `WorkingDirectory` block is not held: nobody would cancel it (its claim is never killed), and left `KILLING` it stalled for ever, so it is closed `KILLED` at once and its worker's later commit fails once on the load. A block already `KILLING` or `FINISHING` whose discard-only claim finds the execution unloadable is force-closed by that claim (`apply_block_claim_on`, test `a_discard_only_block_claim_of_an_unloadable_execution_closes_it`); a fault in any other block claim is returned as before. Tests: `a_force_close_closes_a_leased_block_claim_at_once`, `a_force_close_leaves_a_held_leaf_to_its_worker`.
+- **Rule 5, the report of a force-closed child, is deferred and guarded.** The report is a deferred job (`Job::Report`), so the parent is loaded only when the job runs; in a cascade the parent can be a descendant whose kill has not settled yet. The report **skips a parent that is already terminal** (read in plain SQL, without its lock; test `a_report_to_a_terminal_parent_does_not_lock_it`), and it **is dropped, with a warning, when loading the parent hits a row-content fault** (an unloadable live parent is closed by its own kill; test `an_unloadable_iterations_report_to_an_unloadable_live_parent_is_dropped`). Any other error from the report is returned and fails the kill (`a_report_that_cannot_lock_the_parent_still_fails_the_kill`). The guard drops a row-content fault from anywhere in the report's calls, not only from the parent's load.
+- **The signature gained `caller` and the result `own`.** `close(conn, execution, reason, own, caller) -> Closed`, where `Closed.own` says whether the caller's own fenced run was closed. `commit_kill_with` returns `LeaseLost` when it was not, but the transaction still commits the other runs it closed, so `LeaseLost` no longer means "nothing written" on this path.
+- **The attempt's `ended_at` is measured** (the open point of rule 3): `stamps::stamp_attempt_ends` writes an integer tick, milliseconds after the execution's `created_at`, as `started_at`; `close` writes the same key and unit. The audit key `"forced": true` is written only when the route's transaction (or a cascaded descendant) was force-closed.
+
 **Audit:** the route's existing record (`routes.rs:3085-3096`) gains `"forced": true` when the route's own transaction force-closed. A worker-side force-close finishes a kill the route already audited, so it writes a `tracing::warn!` only.
 
 **Kestra:** Kestra has no kill of an unloadable execution. Its executor answers an exception with `failedExecutionFromExecutor` (above), which fails the last unfinished task run or the execution. D4 keeps the shape and writes `KILLED`.
@@ -161,6 +169,8 @@ Mutation check: with the retry arm removed, the tick returns `Err`.
 - It is spawned in `crates/egret-bin/src/main.rs:1928-1946` beside the staging and KV sweepers, on every replica with a store. It runs whatever `storage_retention_days` says: these are scratch objects, not the author's files.
 - It is runner-agnostic, so it covers Kubernetes when WorkingDirectory reaches it.
 
+*Note, 2026-10-19 (as built, PR-1 Task 5):* the selection does not read the run's state, so it also sweeps the snapshots of a block that a kill's force-close closed as `KILLED` (§2.2): such a block keeps its `_wd` objects, and nothing claims a `KILLED` block again. The test `the_wd_sweep_removes_a_force_closed_blocks_snapshots` pins this, and adding `t.state <> 'KILLED'` to the selection turns it red. A discard that deletes successfully stamps `working_dir_swept_at` itself (`worker::working_dir::discard_snapshots`); a failed delete leaves it NULL for the sweep. A restart in place of an execution is not built (a replay is a new execution), so the swept mark has no reader that could resurrect a swept block; roadmap row 7 (execution operations) must clear or respect `working_dir_swept_at` when it adds one.
+
 ### 3.2 "Flake 335"
 
 **The assertion:** `oracle-exec/driver.rs:341-348` asserts that `workflow.flows` is empty before `publish_corpus` files the corpus. `publish_corpus` is the only writer of `workflow.flows` in the `executor` binary.
@@ -184,6 +194,18 @@ Mutation check: with the retry arm removed, the tick returns `Err`.
 **Reproduction (PR-1 Task 6):** a temporary, uncommitted `LIVE - 1` in `driver.rs`.
 - Before the fix: one census failure, and "left 341" everywhere else.
 - After the fix: the census failure everywhere.
+
+*Note, 2026-10-19 (as built, PR-1 Task 6):* the guard is `TRUNCATE workflow.flows, workflow.executions CASCADE` in `egret_side()`, in one statement. Measured with a temporary `LIVE = 292`: before the fix 17 tests failed, 1 on the census and 16 on "workflow.flows must be empty" with `left: 341`; after it 17 failed, all on the census. The ratchet then read 301 golden entries, 73 mismatching, 73 baselined, 0 broken. The comment in the code keeps the historical "335/345" figures (at `a7270435`); today the figures are 341 and 351.
+
+#### D14: the oracle driver and a short deadline (PR-1 Task 1.6b)
+
+**The cause.** The flake investigation (2026-10-19) found that the intermittent extra mismatch was not Task 1.1 to 1.3 or C2. It was a race in the oracle driver, from W3b (#576): when a run's deadline is short, the driver's `pass_time` can see it after the deadline has passed under load, so the driver stopped on a run that was due and left it `PAUSED`.
+
+**The fix.** `driver::run` now delegates to `run_with(.., before_pass_time: Duration)`, a seam with a delay (zero in the ratchet path; no env var). When `pass_time` returns `Ok(false)`, the driver calls `due_in_tree`, which walks the root's tree over `parent_execution_id` and asks `worker::due_retries(pool, i64::MAX)`, the selection `wake` runs. A due run in the tree makes the driver `continue`, so the next tick's `wake` resumes it; otherwise it stops. The existing step bound ends a spin as `Broken("did not settle within ..")`, so a never-resumed due run is a broken entry, which cannot be baselined. The pin test is `the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time` (a 300 ms gap on `valids/waitfor-multiple-tasks`); with `Ok(true) => continue` mutated to `break` it goes red (`left: Some("PAUSED")`). With a 300 ms delay on every entry the whole ratchet reads 73 mismatching with no regression (before the fix: 83 and 10 regressions); under 12 CPU burners, 4 runs of 4 were green.
+
+**What is still open ("mode 2").** Under heavy load `valids/waitfor-child-task-warning` can still match by accident, which makes the ratchet fail with "PROGRESS NOT BANKED". Wall time leaks into the Tick clock, so `reached_maximums` (`executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early. The proper fix is a virtual clock in the driver. The entry stays baselined, with a comment in `oracle-exec/baseline.txt`, and must not be banked from such a run. The tree walk follows `parent_execution_id` only (as `pass_time` does), so a due run in a child linked only by W6's own column is outside both.
+
+**Ratchet counts for PR-1:** 301 golden entries, 73 mismatching, 73 baselined, 0 broken, with the census LIVE 293 (351 corpus flows: 293 live, 48 draft-only, 6 unparseable, 4 name-contested). Source: the printout of `cargo test -p egret-workflow --test executor` in the Task 1.6 and Task 1.6b runs (`.superpowers/sdd/2026-10-19-workflow-debt/task-1.6-report.md` and `task-1.6b-report.md`), identical to the baseline before PR-1.
 
 ### 3.3 Plan checkboxes
 

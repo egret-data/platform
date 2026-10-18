@@ -2,7 +2,7 @@
 
 # Gói nợ workflow: những gì nhóm B, C1, C2 và WorkingDirectory còn để mở
 
-**Trạng thái:** thiết kế ngày 2026-10-19. Chưa xây. Thứ tự của user ngày 2026-10-18 đặt gói này sau khi C2 merge và trước roadmap parity với Kestra (dòng 1 của `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` chờ gói này).
+**Trạng thái:** thiết kế ngày 2026-10-19. PR-1 đã xây và kiểm chứng ngày 2026-10-19 trên `feat/workflow-debt-kill-wd` (commit `571f3d4e`, `f1d5d4b4`, `ba8c6d33`, `791d6d58`, `8a0e889e`, `51f5b8a2`, `de0e34db`, `df2759d5`, `d972fb0a`); PR-2 chưa xây. Thứ tự của user ngày 2026-10-18 đặt gói này sau khi C2 merge và trước roadmap parity với Kestra (dòng 1 của `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` chờ gói này).
 
 **Nguồn của các khẳng định:** mọi khẳng định về code egret đều đã kiểm tra ở worktree `egret-coretasks` tại `481d9101` (nhánh `feat/workflow-kestra-executor-tasks`, C2 ở HEAD, tức là hình dạng của main sau khi C2 merge). Code được trích dẫn dạng `path:line`, tính từ `crates/egret-workflow/src/` trừ khi ghi gốc khác. Kestra là bản checkout tại `data-portal/kestra`, đường dẫn của nó tính từ đó. Khẳng định nào không kiểm tra tĩnh được thì ghi "to measure in Task N" và nêu task của plan sẽ đo. Chỗ nào ghi chú nợ nói điều mà code không còn cho thấy, mục đó được báo là lỗi thời (stale), không đưa vào kế hoạch.
 
@@ -38,6 +38,8 @@
 - **D11. (M6) Update lỗi vẫn chỉ là run fail thường.** Đường executor-exception của Kestra được ghi lại như một khác biệt đã biết, không sao chép (§4.3).
 - **D12. (M7) Mỗi lần lặp `LoopUntil` cấp cho mỗi descendant được restart một task-run id mới**, vì Kestra tạo lại các task run (§4.4).
 - **D13. (M8) `executionLabels` của Flow trigger được ghi lại như một khác biệt, không sửa** (§4.5).
+
+- **D14. Driver của oracle chạy tiếp một run có hạn ngắn đã qua khi máy tải nặng.** Đây là một bản sửa trong driver của oracle (harness test), không phải code production, được thêm ngày 2026-10-19 sau cuộc điều tra ratchet flake (§3.2). Đó là PR-1 Task 1.6b.
 
 ## 1. Mọi mục nợ, đã kiểm chứng
 
@@ -119,6 +121,12 @@ Mọi lỗi khác vẫn là tạm thời, như `finish_claimed_kill` đã quy đ
 
 **Message**, lưu trên mỗi run mà nó đóng: `egret could not load this execution (<reason>), so it was killed without running its flow: no errors:, finally: or Flow trigger ran`. `<reason>` là text của `WorkerError`.
 
+*Ghi chú, 2026-10-19 (như đã xây, PR-1 Task 4):*
+- **Quy tắc 2 nay chỉ giữ leaf.** Một run chỉ được coi là đang giữ khi nó là leaf (một `Runnable` có handler) mà một worker đang lease. Một block `WorkingDirectory` có lease không được coi là đang giữ: không ai cancel nó (claim của nó không bao giờ bị kill), và để nó `KILLING` thì nó treo mãi, nên nó được đóng `KILLED` ngay và commit về sau của worker nó fail một lần ở bước load. Một block đã `KILLING` hoặc `FINISHING` mà claim discard-only thấy execution không load được thì bị chính claim đó force-close (`apply_block_claim_on`, test `a_discard_only_block_claim_of_an_unloadable_execution_closes_it`); lỗi ở mọi claim block khác vẫn được trả về như cũ. Test: `a_force_close_closes_a_leased_block_claim_at_once`, `a_force_close_leaves_a_held_leaf_to_its_worker`.
+- **Quy tắc 5, báo cáo của task con bị force-close, được hoãn và có chốt.** Báo cáo là một job hoãn (`Job::Report`), nên cha chỉ được load khi job chạy; trong cascade, cha có thể là một hậu duệ mà kill chưa settle xong. Báo cáo **bỏ qua cha đã terminal** (đọc bằng SQL thường, không lấy lock của nó; test `a_report_to_a_terminal_parent_does_not_lock_it`), và **bị bỏ, kèm cảnh báo, khi việc load cha gặp lỗi nội dung row** (cha còn sống mà không load được sẽ bị chính kill của nó đóng; test `an_unloadable_iterations_report_to_an_unloadable_live_parent_is_dropped`). Mọi lỗi khác của báo cáo được trả về và làm kill fail (`a_report_that_cannot_lock_the_parent_still_fails_the_kill`). Chốt này bỏ lỗi nội dung row từ bất kỳ lời gọi nào của báo cáo, không chỉ từ việc load cha.
+- **Chữ ký có thêm `caller` và kết quả có thêm `own`.** `close(conn, execution, reason, own, caller) -> Closed`, trong đó `Closed.own` cho biết run có fence của chính caller đã được đóng hay chưa. `commit_kill_with` trả `LeaseLost` khi chưa, nhưng transaction vẫn commit các run khác nó đã đóng, nên trên đường này `LeaseLost` không còn nghĩa là "chưa ghi gì".
+- **`ended_at` của attempt đã được đo** (điểm mở của quy tắc 3): `stamps::stamp_attempt_ends` ghi một tick nguyên, tính bằng mili giây sau `created_at` của execution, như `started_at`; `close` ghi cùng khoá và cùng đơn vị. Khoá audit `"forced": true` chỉ được ghi khi transaction của route (hoặc một hậu duệ trong cascade) bị force-close.
+
 **Audit:** bản ghi sẵn có của route (`routes.rs:3085-3096`) thêm `"forced": true` khi transaction của chính route đã đóng cưỡng bức. Force-close phía worker hoàn tất một kill mà route đã audit, nên chỉ ghi `tracing::warn!`.
 
 **Kestra:** Kestra không có kill cho execution không load được. Executor của nó đáp ứng một exception bằng `failedExecutionFromExecutor` (ở trên), làm fail task run chưa xong cuối cùng hoặc execution. D4 giữ hình dạng đó và ghi `KILLED`.
@@ -163,6 +171,8 @@ Kiểm tra mutation: bỏ nhánh retry thì tick trả `Err`.
 - Nó được spawn trong `crates/egret-bin/src/main.rs:1928-1946` cạnh các sweeper staging và KV, trên mọi replica có store. Nó chạy bất kể `storage_retention_days` nói gì: đây là object tạm, không phải file của tác giả.
 - Nó không phụ thuộc runner, nên bao cả Kubernetes khi WorkingDirectory tới đó.
 
+*Ghi chú, 2026-10-19 (như đã xây, PR-1 Task 5):* câu chọn không đọc state của run, nên nó cũng quét snapshot của block mà force-close của kill đã đóng thành `KILLED` (§2.2): block như vậy giữ các object `_wd` của nó, và không có gì claim một block `KILLED` lần nữa. Test `the_wd_sweep_removes_a_force_closed_blocks_snapshots` khoá điều này, và thêm `t.state <> 'KILLED'` vào câu chọn thì test đỏ. Một lần discard xoá thành công tự đóng dấu `working_dir_swept_at` (`worker::working_dir::discard_snapshots`); xoá lỗi để nó NULL cho sweep. Chưa có restart tại chỗ của một execution (replay là một execution mới), nên dấu swept không có nơi đọc nào có thể làm sống lại một block đã quét; dòng 7 của roadmap (thao tác execution) phải xoá hoặc tôn trọng `working_dir_swept_at` khi thêm nó.
+
 ### 3.2 "Flake 335"
 
 **Assertion:** `oracle-exec/driver.rs:341-348` khẳng định `workflow.flows` rỗng trước khi `publish_corpus` nạp corpus. `publish_corpus` là nơi duy nhất ghi `workflow.flows` trong binary `executor`.
@@ -186,6 +196,18 @@ Kiểm tra mutation: bỏ nhánh retry thì tick trả `Err`.
 **Tái hiện (PR-1 Task 6):** một `LIVE - 1` tạm thời, không commit, trong `driver.rs`.
 - Trước khi sửa: một lỗi census, và "left 341" ở mọi chỗ khác.
 - Sau khi sửa: lỗi census ở mọi chỗ.
+
+*Ghi chú, 2026-10-19 (như đã xây, PR-1 Task 6):* chốt là `TRUNCATE workflow.flows, workflow.executions CASCADE` trong `egret_side()`, trong một câu lệnh. Đo với `LIVE = 292` tạm thời: trước khi sửa 17 test fail, 1 ở census và 16 ở "workflow.flows must be empty" với `left: 341`; sau khi sửa 17 test fail, tất cả ở census. Ratchet sau đó đọc 301 golden entry, 73 mismatching, 73 baselined, 0 broken. Comment trong code giữ nguyên các con số lịch sử "335/345" (tại `a7270435`); hôm nay là 341 và 351.
+
+#### D14: driver của oracle và hạn ngắn (PR-1 Task 1.6b)
+
+**Nguyên nhân.** Cuộc điều tra flake (2026-10-19) thấy mismatch dư xuất hiện chập chờn không đến từ Task 1.1 đến 1.3 hay C2. Đó là một race trong driver của oracle, từ W3b (#576): khi hạn của một run ngắn, `pass_time` của driver có thể nhìn thấy nó sau khi hạn đã qua do máy tải, nên driver dừng ở một run đã đến hạn và để nó `PAUSED`.
+
+**Bản sửa.** `driver::run` nay giao cho `run_with(.., before_pass_time: Duration)`, một seam có độ trễ (bằng không ở đường ratchet; không có env var). Khi `pass_time` trả `Ok(false)`, driver gọi `due_in_tree`, hàm duyệt cây của root qua `parent_execution_id` và hỏi `worker::due_retries(pool, i64::MAX)`, đúng câu chọn mà `wake` chạy. Có run đến hạn trong cây thì driver `continue`, để tick sau `wake` chạy tiếp nó; nếu không thì dừng. Ngưỡng bước sẵn có kết thúc một vòng quay vô ích bằng `Broken("did not settle within ..")`, nên một run đến hạn mà không bao giờ được chạy tiếp là một entry broken, không thể đưa vào baseline. Test ghim là `the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time` (độ trễ 300 ms trên `valids/waitfor-multiple-tasks`); đổi `Ok(true) => continue` thành `break` thì nó đỏ (`left: Some("PAUSED")`). Với độ trễ 300 ms trên mọi entry, cả ratchet đọc 73 mismatching và không có regression (trước khi sửa: 83 và 10 regression); dưới 12 tiến trình ngốn CPU, 4 lần chạy trong 4 đều xanh.
+
+**Điều vẫn còn mở ("mode 2").** Khi máy tải rất nặng, `valids/waitfor-child-task-warning` vẫn có thể khớp một cách ngẫu nhiên, làm ratchet fail với "PROGRESS NOT BANKED". Thời gian thực rò vào đồng hồ Tick, nên `reached_maximums` (`executor/flowable/loop_until.rs`) kích hoạt `maxDuration` sớm một vòng lặp. Cách sửa đúng là một đồng hồ ảo trong driver. Entry vẫn nằm trong baseline, kèm comment trong `oracle-exec/baseline.txt`, và không được đưa vào từ một lần chạy như vậy. Việc duyệt cây chỉ đi theo `parent_execution_id` (như `pass_time`), nên một run đến hạn trong task con chỉ nối bằng cột riêng của W6 nằm ngoài cả hai.
+
+**Số liệu ratchet của PR-1:** 301 golden entry, 73 mismatching, 73 baselined, 0 broken, với census LIVE 293 (351 flow corpus: 293 live, 48 draft-only, 6 unparseable, 4 name-contested). Nguồn: kết quả in ra của `cargo test -p egret-workflow --test executor` trong các lần chạy Task 1.6 và Task 1.6b (`.superpowers/sdd/2026-10-19-workflow-debt/task-1.6-report.md` và `task-1.6b-report.md`), giống hệt baseline trước PR-1.
 
 ### 3.3 Checkbox của plan
 
