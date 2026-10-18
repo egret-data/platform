@@ -1454,7 +1454,7 @@ async fn recompile_locked_service_in_tx(
     let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
-    apply_diff_in_tx(
+    let summary = apply_diff_in_tx(
         tx,
         service_id,
         &compiled.profile_name,
@@ -1462,7 +1462,12 @@ async fn recompile_locked_service_in_tx(
         compiled.desired,
         compiled.skipped,
     )
-    .await
+    .await?;
+    // DG #3: the profile's last compile, on this compile's transaction — every
+    // compile path reaches this function, and a caller that rolls back takes
+    // the row with it (nothing changed on the engine).
+    crate::compile_runs::record_compile_ok_in_tx(tx, service_id, &summary).await?;
+    Ok(summary)
 }
 
 /// Recompile `service_id`'s profile in its own, self-contained transaction —
@@ -1476,10 +1481,38 @@ pub async fn recompile_service(
     _policy: &PolicyStore,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    let mut tx = store.pool().begin().await.map_err(db_err)?;
-    let summary = recompile_service_in_tx(&mut tx, service_id).await?;
-    tx.commit().await.map_err(db_err)?;
-    Ok(summary)
+    let result = async {
+        let mut tx = store.pool().begin().await.map_err(db_err)?;
+        let summary = recompile_service_in_tx(&mut tx, service_id).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(summary)
+    }
+    .await;
+    // DG #3: no write waits on this entry point, so nothing else would report
+    // that the profile is still serving its previous compile. The transaction
+    // is gone by now (dropped, so rolled back); the failure gets its own.
+    if let Err(e) = &result {
+        record_failure_logged(store.pool(), service_id, e).await;
+    }
+    result
+}
+
+/// [`crate::compile_runs::record_compile_failure`], logging (never returning)
+/// its own failure: the caller's answer is the compile's error.
+pub(crate) async fn record_failure_logged(
+    pool: &sqlx::PgPool,
+    service_id: i64,
+    error: &CompileError,
+) {
+    if let Err(w) =
+        crate::compile_runs::record_compile_failure(pool, service_id, &error.to_string()).await
+    {
+        tracing::warn!(
+            service_id,
+            error = %w,
+            "could not record a failed compile in perm.compile_runs"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
