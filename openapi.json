@@ -5929,6 +5929,58 @@
         }
       }
     },
+    "/api/control-plane/governance/attention": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "What needs attention in governance, per the reader's permissions.",
+        "description": "Findings computed from egret's own records, each only for a reader holding its source's permissions; the rest are listed in `notChecked`. A source that fails is reported as a `source_unavailable` finding and the others still answer. Counts the reader may not read are `null`.",
+        "operationId": "attention",
+        "responses": {
+          "200": {
+            "description": "Counts, findings and the checks not run for this reader",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Holds neither policy:read nor tag:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/governance/browse/{catalog_id}": {
       "get": {
         "tags": [
@@ -6062,6 +6114,89 @@
           },
           "403": {
             "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/changes": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "Recent governance changes, newest first.",
+        "description": "Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).",
+        "operationId": "changes",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, default 25, at most 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The previous page's `nextCursor` (`<ts_rfc3339>,<id>`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of governance changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangesPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Holds neither policy:read nor tag:read",
             "content": {
               "application/json": {
                 "schema": {
@@ -7006,7 +7141,7 @@
         "tags": [
           "perm"
         ],
-        "summary": "The manual/repair trigger. Unlike the mutating routes it has no write of\nits own to be atomic with, so it uses the pool-based `recompile_service`,\nwhich opens and commits its own transaction.",
+        "summary": "The manual/repair trigger. Unlike the mutating routes it has no write of\nits own to be atomic with, so it opens its own transaction around\n`recompile_service_in_tx` and the `profile:compile` governance event (DG\n#3); a refused compile also records its failure in `perm.compile_runs`.",
         "description": "It exists because the affected-service sets above are derived from the\nmutated ROW, and there are model-adjacent changes no row mutation covers —\nan engine newly bound to a profile, a profile that had no binding when a\ngrant was written, a tag renamed out from under a rule. This is how an\noperator brings one profile current without editing the model.",
         "operationId": "compile",
         "parameters": [
@@ -37366,6 +37501,37 @@
           }
         }
       },
+      "AttentionResponse": {
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "counts",
+          "findings",
+          "notChecked"
+        ],
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "description": "Critical, warning, info; then by kind."
+          },
+          "notChecked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotChecked"
+            }
+          }
+        }
+      },
       "AuditEntryDto": {
         "type": "object",
         "required": [
@@ -38374,6 +38540,73 @@
           }
         }
       },
+      "ChangeEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "action",
+          "sentence",
+          "targetExists",
+          "detail"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Party"
+              }
+            ]
+          },
+          "impersonator": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Party",
+                "description": "Set when an administrator acted as `actor`."
+              }
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "sentence": {
+            "type": "string",
+            "description": "One sentence, built here per action."
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Ref",
+                "description": "What the change was made to, when there is a page for it."
+              }
+            ]
+          },
+          "targetExists": {
+            "type": "boolean",
+            "description": "Whether that object still exists (a deleted grant's event names it and\nlinks nowhere)."
+          },
+          "detail": {
+            "description": "The recorded summary (`before`/`after`, …) as stored."
+          }
+        }
+      },
       "ChangeKind": {
         "type": "string",
         "description": "The stable machine code for one kind of difference between two published\ncontracts.\n\nA closed enum rather than a free string, and it is what\n[`Self::is_breaking`] matches on — so the classification is a single table\nthat a reader can check against the rule at the top of this module, rather\nthan a `breaking: true` written by hand at each construction site where one\nof them would eventually be wrong.\n\nSerialised in `snake_case` and **recorded in `dataapi.endpoint_versions`**,\nso these names are persisted data: renaming one silently reinterprets every\nstored row. Add variants; do not rename them.",
@@ -38414,6 +38647,34 @@
           "cache_changed",
           "database_changed"
         ]
+      },
+      "ChangesPage": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangeEntry"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retentionDays": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Days after which events are pruned; `null` when they are never pruned."
+          }
+        }
       },
       "ChartDataBody": {
         "type": "object",
@@ -39069,6 +39330,40 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "Counts": {
+        "type": "object",
+        "description": "Counts the reader may read; `null` for one they may not (never `0`).",
+        "properties": {
+          "catalogs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "grants": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "rules": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tags": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
@@ -43217,6 +43512,55 @@
           "is_not_null"
         ]
       },
+      "Finding": {
+        "type": "object",
+        "required": [
+          "kind",
+          "severity",
+          "count",
+          "sentence",
+          "sample"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The true total; `sample` holds at most five."
+          },
+          "sentence": {
+            "type": "string"
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Sample"
+            }
+          },
+          "ref": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Ref"
+              }
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set for `source_unavailable`: the kind that could not be checked."
+          }
+        }
+      },
       "FindingDto": {
         "type": "object",
         "description": "A validation finding, over the wire. Mirrors [`Finding`] field for field;\na separate type only because `Finding::code` is `&'static str` and this\ncrate's DTOs derive `utoipa::ToSchema`, which `Finding` itself does not\n(it is a `models`/`spec` type and must stay HTTP-agnostic, per this\ncrate's own module boundary — see `lib.rs`'s doc comment).",
@@ -45836,6 +46180,31 @@
           }
         }
       },
+      "NotChecked": {
+        "type": "object",
+        "description": "A check the reader may not run, and the permissions it needs.",
+        "required": [
+          "kind",
+          "requires",
+          "any"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "All of these, or (for `Any`) one of them."
+          },
+          "any": {
+            "type": "boolean",
+            "description": "`true` when holding any one of `requires` is enough."
+          }
+        }
+      },
       "NotEvaluatedReason": {
         "type": "string",
         "description": "Why a member was not evaluated.",
@@ -46461,6 +46830,25 @@
           },
           "transform": {
             "type": "string"
+          }
+        }
+      },
+      "Party": {
+        "type": "object",
+        "description": "Who acted. `label` is the user's name or email, `null` when the user no\nlonger exists (the id is kept).",
+        "required": [
+          "userId"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -47743,6 +48131,284 @@
           "slack"
         ]
       },
+      "Ref": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "grant"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "unmatched"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "profile"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "profiles"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "engine"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "engines"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "catalog"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "catalogs"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "catalog",
+              "schema",
+              "object",
+              "type"
+            ],
+            "properties": {
+              "catalog": {
+                "type": "string"
+              },
+              "schema": {
+                "type": "string"
+              },
+              "object": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "object"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tag"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tags"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A role's People page (a role event of the changes feed).",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "role"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The Governance Data area's index.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "data"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "data_catalog"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where a finding or a sample is fixed; the client builds the URL."
+      },
       "RegisterExternalEngine": {
         "type": "object",
         "description": "`POST /api/control-plane/engines/external`.",
@@ -48547,6 +49213,33 @@
           "noop",
           "grace"
         ]
+      },
+      "Sample": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Ref"
+              }
+            ]
+          }
+        }
       },
       "SaveQuery": {
         "type": "object",
@@ -49667,6 +50360,14 @@
             }
           }
         }
+      },
+      "Severity": {
+        "type": "string",
+        "enum": [
+          "critical",
+          "warning",
+          "info"
+        ]
       },
       "SkipReport": {
         "type": "object",

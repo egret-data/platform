@@ -123,6 +123,7 @@ async fn state(f: &Fixture) -> CpState {
         view_audit_timeout: std::time::Duration::from_secs(15),
         catalog_lister: Arc::new(UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
+        audit_retention_days: Some(90),
     }
 }
 

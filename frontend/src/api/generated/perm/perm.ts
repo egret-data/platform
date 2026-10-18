@@ -142,8 +142,9 @@ export const getPermCompileUrl = (serviceId: number,) => {
  * grant was written, a tag renamed out from under a rule. This is how an
  * operator brings one profile current without editing the model.
  * @summary The manual/repair trigger. Unlike the mutating routes it has no write of
-its own to be atomic with, so it uses the pool-based `recompile_service`,
-which opens and commits its own transaction.
+its own to be atomic with, so it opens its own transaction around
+`recompile_service_in_tx` and the `profile:compile` governance event (DG
+#3); a refused compile also records its failure in `perm.compile_runs`.
  */
 export const permCompile = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permCompileResponse> => {
 
@@ -193,8 +194,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     /**
  * @summary The manual/repair trigger. Unlike the mutating routes it has no write of
-its own to be atomic with, so it uses the pool-based `recompile_service`,
-which opens and commits its own transaction.
+its own to be atomic with, so it opens its own transaction around
+`recompile_service_in_tx` and the `profile:compile` governance event (DG
+#3); a refused compile also records its failure in `perm.compile_runs`.
  */
 export const usePermCompile = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permCompile>>, TError,{serviceId: number}, TContext>, request?: SecondParameter<typeof customInstance>}

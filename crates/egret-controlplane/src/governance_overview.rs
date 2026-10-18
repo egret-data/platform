@@ -99,6 +99,10 @@ pub enum Ref {
         name: String,
     },
     Tags,
+    /// A role's People page (a role event of the changes feed).
+    Role {
+        name: String,
+    },
     /// The Governance Data area's index.
     Data,
     DataCatalog {

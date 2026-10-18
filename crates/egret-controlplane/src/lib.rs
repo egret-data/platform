@@ -15,9 +15,11 @@ mod access;
 pub mod audit;
 mod error;
 mod governance_browse;
+mod governance_changes;
 mod governance_lineage;
 /// DG #3: the Governance Overview. Public so its sources can be tested.
 pub mod governance_overview;
+pub use governance_changes::{ChangeEntry, ChangesPage, Party};
 mod governance_tags;
 mod lineage_sweep;
 mod secrets;
@@ -120,6 +122,11 @@ pub struct CpState {
     /// Deadline for one browse listing, on an engine or on egret's
     /// warehouse; tests shorten it.
     pub browse_timeout: std::time::Duration,
+    /// Days after which audit rows (governance events among them) are pruned,
+    /// as `egret-bin`'s prune schedules it; `None` when nothing prunes them
+    /// (`audit.retention_days <= 0`, or audit disabled, which stops the
+    /// prune). Reported by `GET /governance/changes`.
+    pub audit_retention_days: Option<i64>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -144,6 +151,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(governance_lineage::router())
         .merge(governance_tags::router())
         .merge(governance_overview::router())
+        .merge(governance_changes::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -163,5 +171,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(governance_lineage::ControlPlaneGovernanceLineageApi::openapi());
     doc.merge(governance_tags::ControlPlaneGovernanceTagsApi::openapi());
     doc.merge(governance_overview::ControlPlaneGovernanceOverviewApi::openapi());
+    doc.merge(governance_changes::ControlPlaneGovernanceChangesApi::openapi());
     doc
 }

@@ -2385,6 +2385,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }),
         // Spec §2.3: 15 s per call, the view audit's budget.
         browse_timeout: std::time::Duration::from_secs(15),
+        // DG #3: what `GET /governance/changes` reports as the retention. The
+        // same decision as the prune scheduled above, which runs only when
+        // audit is enabled; otherwise nothing prunes.
+        audit_retention_days: if config.audit.enabled {
+            egret_dataapi::serving::scheduled_retention(config.audit.retention_days)
+        } else {
+            None
+        },
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

@@ -84,6 +84,7 @@ async fn setup() -> Option<Fixture> {
         view_audit_timeout: std::time::Duration::from_secs(15),
         catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
+        audit_retention_days: Some(90),
     });
 
     Some(Fixture {

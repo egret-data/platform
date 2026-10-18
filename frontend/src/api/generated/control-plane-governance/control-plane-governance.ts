@@ -21,8 +21,11 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AttentionResponse,
   BrowseResponse,
+  ChangesPage,
   ControlPlaneGovernanceBrowseParams,
+  ControlPlaneGovernanceChangesParams,
   ControlPlaneGovernanceObjectLineageParams,
   ControlPlaneGovernanceObjectTagsParams,
   ErrorBody,
@@ -52,6 +55,136 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type controlPlaneGovernanceAttentionResponse200 = {
+  data: AttentionResponse
+  status: 200
+}
+
+export type controlPlaneGovernanceAttentionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceAttentionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceAttentionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceAttentionResponseSuccess = (controlPlaneGovernanceAttentionResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceAttentionResponseError = (controlPlaneGovernanceAttentionResponse401 | controlPlaneGovernanceAttentionResponse403 | controlPlaneGovernanceAttentionResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceAttentionResponse = (controlPlaneGovernanceAttentionResponseSuccess | controlPlaneGovernanceAttentionResponseError)
+
+export const getControlPlaneGovernanceAttentionUrl = () => {
+
+
+
+
+  return `/api/control-plane/governance/attention`
+}
+
+/**
+ * Findings computed from egret's own records, each only for a reader holding its source's permissions; the rest are listed in `notChecked`. A source that fails is reported as a `source_unavailable` finding and the others still answer. Counts the reader may not read are `null`.
+ * @summary What needs attention in governance, per the reader's permissions.
+ */
+export const controlPlaneGovernanceAttention = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceAttentionResponse> => {
+
+  return customInstance<controlPlaneGovernanceAttentionResponse>(getControlPlaneGovernanceAttentionUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceAttentionQueryKey = () => {
+    return [
+    `/api/control-plane/governance/attention`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceAttentionQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceAttentionQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>> = ({ signal }) => controlPlaneGovernanceAttention({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceAttentionQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>>
+export type ControlPlaneGovernanceAttentionQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceAttention<TData = Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceAttention<TData = Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceAttention<TData = Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What needs attention in governance, per the reader's permissions.
+ */
+
+export function useControlPlaneGovernanceAttention<TData = Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceAttention>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceAttentionQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type controlPlaneGovernanceBrowseResponse200 = {
   data: BrowseResponse
@@ -325,6 +458,148 @@ export function useControlPlaneGovernanceListCatalogs<TData = Awaited<ReturnType
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getControlPlaneGovernanceListCatalogsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceChangesResponse200 = {
+  data: ChangesPage
+  status: 200
+}
+
+export type controlPlaneGovernanceChangesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneGovernanceChangesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceChangesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceChangesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceChangesResponseSuccess = (controlPlaneGovernanceChangesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceChangesResponseError = (controlPlaneGovernanceChangesResponse400 | controlPlaneGovernanceChangesResponse401 | controlPlaneGovernanceChangesResponse403 | controlPlaneGovernanceChangesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceChangesResponse = (controlPlaneGovernanceChangesResponseSuccess | controlPlaneGovernanceChangesResponseError)
+
+export const getControlPlaneGovernanceChangesUrl = (params?: ControlPlaneGovernanceChangesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/governance/changes?${stringifiedParams}` : `/api/control-plane/governance/changes`
+}
+
+/**
+ * Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).
+ * @summary Recent governance changes, newest first.
+ */
+export const controlPlaneGovernanceChanges = async (params?: ControlPlaneGovernanceChangesParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceChangesResponse> => {
+
+  return customInstance<controlPlaneGovernanceChangesResponse>(getControlPlaneGovernanceChangesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceChangesQueryKey = (params?: ControlPlaneGovernanceChangesParams,) => {
+    return [
+    `/api/control-plane/governance/changes`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceChangesQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError = ErrorBody>(params?: ControlPlaneGovernanceChangesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceChangesQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>> = ({ signal }) => controlPlaneGovernanceChanges(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceChangesQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>>
+export type ControlPlaneGovernanceChangesQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceChanges<TData = Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError = ErrorBody>(
+ params: undefined |  ControlPlaneGovernanceChangesParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceChanges<TData = Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError = ErrorBody>(
+ params?: ControlPlaneGovernanceChangesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceChanges<TData = Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError = ErrorBody>(
+ params?: ControlPlaneGovernanceChangesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Recent governance changes, newest first.
+ */
+
+export function useControlPlaneGovernanceChanges<TData = Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError = ErrorBody>(
+ params?: ControlPlaneGovernanceChangesParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceChanges>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceChangesQueryOptions(params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

@@ -369,6 +369,7 @@ fn app(f: &Fixture, w: &Wiring) -> axum::Router {
         view_audit_timeout: std::time::Duration::from_secs(600),
         catalog_lister: Arc::new(UnwiredCatalogLister),
         browse_timeout: w.timeout,
+        audit_retention_days: Some(90),
     })
 }
 
