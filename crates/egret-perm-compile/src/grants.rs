@@ -148,6 +148,17 @@ enum Expansion {
     NotYet,
 }
 
+/// [`principal_item`] over a principal set that has already been expanded:
+/// the one item builder `crate::engine_grants` shares with grants, so an
+/// engine grant's grantees are checked exactly as a grant's are.
+pub(crate) fn expanded_principal_item(
+    refs: &[Principal],
+    effect: Effect,
+    accesses: &[String],
+) -> Result<AccessItemInput, CompileError> {
+    principal_item(refs, effect, accesses, Expansion::Done)
+}
+
 /// Sort principals in `refs` into a Ranger item's `users`/`groups`/`roles`
 /// buckets and set `effect`/`accesses` on it. A `WorkspaceMembers` principal —
 /// and, once `expansion` is [`Expansion::Done`], a `Role` — refuses the whole

@@ -922,10 +922,11 @@ pub struct PreviewResponse {
 /// time, not one a steward discovers from a query that returns no rows.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SkipReport {
-    /// `grant` | `rule` | `clearance`.
+    /// `grant` | `rule` | `clearance` | `engine_grant`.
     pub source_kind: String,
     /// The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
-    /// whose classification gate could not be expressed (SP4c Task 2).
+    /// whose classification gate could not be expressed (SP4c Task 2), or for
+    /// `engine_grant` the `perm.engine_grants` id (F11).
     pub id: Uuid,
     pub reason: String,
 }
@@ -944,6 +945,9 @@ impl From<SkippedItem> for SkipReport {
                 // not express — `id` is the `tags.id`, not a grant or rule id
                 // (see `SkipReport::id`).
                 SourceKind::Clearance => "clearance".into(),
+                // F11: an engine grant with no grantee left, or whose
+                // impersonation target can no longer be compiled.
+                SourceKind::EngineGrant => "engine_grant".into(),
             },
             id: sk.id,
             reason: sk.reason,

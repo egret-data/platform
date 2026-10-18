@@ -112,7 +112,7 @@ async fn expanded(conn: &mut sqlx::PgConnection, p: Principal) -> BTreeSet<Strin
         },
         origin: GrantOrigin::Explicit,
     }];
-    expand_enumerated_principals(conn, &mut grants, &mut [])
+    expand_enumerated_principals(conn, &mut grants, &mut [], &mut [])
         .await
         .expect("expand");
     grants

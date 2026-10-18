@@ -106,7 +106,8 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_perm::{
-    list_grants_via, list_rules_via, CompileError, EngineType, Grant, PermStore, Rule, Selector,
+    list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
+    EngineType, Grant, PermStore, Rule, Selector,
 };
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
@@ -215,12 +216,15 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 /// plus, since SP4c Task 2, a third source that is not in the `perm` model at
 /// all: a TAG's classification clearance (`classification_policies`), compiled
 /// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
-/// grant or rule id.
+/// grant or rule id. And since F11 a fourth: an ENGINE GRANT
+/// (`perm.engine_grants`, [`crate::engine_grants`]), whose id is the engine
+/// grant's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Grant,
     Rule,
     Clearance,
+    EngineGrant,
 }
 
 impl SourceKind {
@@ -229,6 +233,7 @@ impl SourceKind {
             SourceKind::Grant => "grant",
             SourceKind::Rule => "rule",
             SourceKind::Clearance => "clearance",
+            SourceKind::EngineGrant => "engine_grant",
         }
     }
 }
@@ -442,7 +447,19 @@ async fn compile_desired(
     // so the pure compilers below never see one. See `crate::members`
     // for what a member is, what it costs, and why a role name cannot be left
     // for Ranger to resolve.
-    crate::members::expand_enumerated_principals(conn, &mut all_grants, &mut all_rules).await?;
+    // F11: the engine grants of every engine bound to this profile, expanded
+    // in the same call so a person named by a grant and an engine grant
+    // resolves to one name.
+    let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
+        .await
+        .map_err(db_err)?;
+    crate::members::expand_enumerated_principals(
+        conn,
+        &mut all_grants,
+        &mut all_rules,
+        &mut engine_grants,
+    )
+    .await?;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
@@ -509,6 +526,18 @@ async fn compile_desired(
             Err(other) => return Err(other),
         }
     }
+
+    compile_engine_grants(
+        conn,
+        service_id,
+        &svc.name,
+        engine,
+        &engine_grants,
+        &writable,
+        &mut desired,
+        &mut skipped,
+    )
+    .await?;
 
     for r in &all_rules {
         compile_one_rule(
@@ -649,6 +678,84 @@ async fn compile_desired(
         sweep,
         profile_name: svc.name,
     }))
+}
+
+/// F11 (spec §4.2): compile every engine grant of the profile into
+/// `desired`. A grant with no grantee left, or whose impersonation target can
+/// no longer be compiled (spec E11), or that the compiler cannot express, is
+/// SKIPPED with its reason rather than failing the profile: a user deleted or
+/// renamed elsewhere must not fail every recompile.
+#[allow(clippy::too_many_arguments)]
+async fn compile_engine_grants(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    profile_name: &str,
+    engine: EngineType,
+    engine_grants: &[EngineGrant],
+    writable: &HashMap<String, i64>,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+    skipped: &mut Vec<SkippedItem>,
+) -> Result<(), CompileError> {
+    let mut skip = |id: Uuid, reason: String| {
+        tracing::warn!(
+            service_id,
+            engine_grant_id = %id,
+            reason = %reason,
+            "engine grant skipped during recompile"
+        );
+        skipped.push(SkippedItem {
+            source_kind: SourceKind::EngineGrant,
+            id,
+            reason,
+        });
+    };
+    for g in engine_grants {
+        if g.principals.include.is_empty() {
+            skip(
+                g.id,
+                "the engine grant's principals name no engine principal (a role or group \
+                 reference that expands to no member)"
+                    .to_string(),
+            );
+            continue;
+        }
+        let target = match g.target_user_id {
+            Some(user_id) => {
+                match crate::engine_grants::impersonation_target_ok(conn, service_id, user_id)
+                    .await?
+                {
+                    Ok(username) => Some(username),
+                    Err(reason) => {
+                        skip(g.id, reason);
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        match crate::engine_grants::compile_engine_grant(g, target.as_deref(), profile_name, engine)
+        {
+            Ok(input) => {
+                let name = input.name.clone();
+                let body = stamp_service_type(access_to_ranger_json(&input), engine);
+                let target_service =
+                    target_service_id(&body, writable, &format!("engine grant {}", g.id))?;
+                desired.insert(
+                    (target_service, name),
+                    DesiredPolicy {
+                        body,
+                        source_kind: SourceKind::EngineGrant,
+                        grant_id: None,
+                        rule_id: None,
+                    },
+                );
+            }
+            Err(e @ CompileError::InvalidEngineGrant { .. })
+            | Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => skip(g.id, e.to_string()),
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(())
 }
 
 /// What one profile's compile produced: the desired policies keyed by the
@@ -1275,7 +1382,14 @@ async fn record_compiled(
     // (`COMPILER_CLEARANCE_PREFIX{tag_id}`), so the provenance question is
     // answered by the row that decides reaping rather than by a second table
     // that can cascade away beneath it.
-    if dp.source_kind == SourceKind::Clearance {
+    //
+    // **An ENGINE GRANT records none either** (F11, spec C10), for the same
+    // reason: it is neither a grant nor a rule, and its policy name
+    // (`perm-engine-{id}`) already carries its id.
+    if matches!(
+        dp.source_kind,
+        SourceKind::Clearance | SourceKind::EngineGrant
+    ) {
         return Ok(());
     }
     sqlx::query(

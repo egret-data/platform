@@ -112,7 +112,9 @@ use uuid::Uuid;
 
 use egret_auth::users::ensure_username_via;
 use egret_core::UserId;
-use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP};
+use egret_perm::{
+    CompileError, EngineGrant, Grant, Principal, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
+};
 
 /// The usernames of the users currently holding each role NAME in `roles` —
 /// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
@@ -349,8 +351,8 @@ async fn mint_for_compile(
 /// a write a compile must not make for someone it does not name. It is built
 /// from the SAME shared reads the passes and People use —
 /// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
-/// over the refs the whole model holds (grant principals, rule exemptions, a
-/// clearance's `required_roles`; `public` excluded; a workspace ref parsed as
+/// over the refs the whole model holds (grant principals, rule exemptions,
+/// engine-grant principals (F11), a clearance's `required_roles`; `public` excluded; a workspace ref parsed as
 /// the member pass parses it), which is what every recompile reads. No
 /// membership predicate is restated here, so a change to one moves this sweep
 /// with it.
@@ -363,6 +365,7 @@ pub(crate) async fn premint_model_usernames(
     let refs: Vec<(String, String)> = sqlx::query_as(
         "SELECT kind::text, ref FROM perm.grant_principals \
          UNION SELECT kind::text, ref FROM perm.rule_exemptions \
+         UNION SELECT kind::text, ref FROM perm.engine_grant_principals \
          UNION SELECT 'role', unnest(required_roles) FROM classification_policies",
     )
     .fetch_all(&mut *conn)
@@ -589,7 +592,11 @@ fn is_expanded_group(p: &Principal) -> bool {
 /// principal names, across `grants` and `rules`. A workspace ref that does not
 /// parse as a uuid is NOT collected — see [`expand_enumerated_principals`] for
 /// why that is the same answer the evaluator gives.
-fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> Referenced {
+fn referenced_principals(
+    grants: &[Grant],
+    rules: &[Rule],
+    engine_grants: &[EngineGrant],
+) -> Referenced {
     let mut out = Referenced::default();
     let mut scan = |set: &PrincipalSet| {
         for p in set.include.iter().chain(set.exclude.iter()) {
@@ -614,6 +621,9 @@ fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> Referenced {
     }
     for r in rules {
         scan(&r.exempt);
+    }
+    for g in engine_grants {
+        scan(&g.principals);
     }
     out
 }
@@ -669,12 +679,13 @@ pub(crate) async fn expand_enumerated_principals(
     conn: &mut sqlx::PgConnection,
     grants: &mut [Grant],
     rules: &mut [Rule],
+    engine_grants: &mut [EngineGrant],
 ) -> Result<(), CompileError> {
     let Referenced {
         workspaces: wanted,
         roles: wanted_roles,
         groups: wanted_groups,
-    } = referenced_principals(grants, rules);
+    } = referenced_principals(grants, rules, engine_grants);
     if wanted.is_empty() && wanted_roles.is_empty() && wanted_groups.is_empty() {
         return Ok(());
     }
@@ -782,6 +793,10 @@ pub(crate) async fn expand_enumerated_principals(
     }
     for r in rules.iter_mut() {
         substitute(&mut r.exempt, &expansions);
+    }
+    // F11: an engine grant's grantees are expanded exactly as a grant's.
+    for g in engine_grants.iter_mut() {
+        substitute(&mut g.principals, &expansions);
     }
     Ok(())
 }
@@ -1001,7 +1016,7 @@ mod tests {
             origin: egret_perm::GrantOrigin::Explicit,
         };
         assert_eq!(
-            referenced_principals(&[grant], &[])
+            referenced_principals(&[grant], &[], &[])
                 .groups
                 .into_iter()
                 .collect::<Vec<_>>(),
@@ -1095,7 +1110,7 @@ mod tests {
             principals: set,
             origin: egret_perm::GrantOrigin::Explicit,
         };
-        let found = referenced_principals(&[grant], &[]).workspaces;
+        let found = referenced_principals(&[grant], &[], &[]).workspaces;
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![ws]);
     }
 }

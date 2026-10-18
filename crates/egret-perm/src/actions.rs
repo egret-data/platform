@@ -491,6 +491,14 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+    /// An engine grant (F11, `perm.engine_grants`) the compiler cannot express:
+    /// an unknown capability, a capability of another engine than the
+    /// profile's, a value that breaks the catalogue's rules, or an exclude.
+    /// The route refuses each of these before writing, so reaching the
+    /// compiler with one means a row written around it; the recompile skips
+    /// that one grant rather than failing the whole profile.
+    #[error("engine grant {id} cannot be compiled: {reason}")]
+    InvalidEngineGrant { id: uuid::Uuid, reason: String },
 }
 
 impl CompileError {
