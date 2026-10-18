@@ -839,8 +839,28 @@ async fn bump_and_recompile(
         })?;
     egret_perm_compile::recompile_services_in_tx(tx, bound)
         .await
-        .map_err(Refusal::overlap)?;
+        .map_err(|e| {
+            // The recompile waits on profile locks and, when it mints, on the
+            // compile-mint lock; a wait past this hold's `lock_timeout` is the
+            // same busy refusal as the bump's above, not an overlap.
+            if compile_is_lock_timeout(&e) {
+                Refusal(format!(
+                    "{BUSY_REFUSAL} in time, because other classification changes were being \
+                     written; retry"
+                ))
+            } else {
+                Refusal::overlap(e)
+            }
+        })?;
     Ok(())
+}
+
+/// [`is_lock_timeout`] for an error the compiler returns. `CompileError::Db`
+/// carries the database error as text only (`egret_perm`), so this reads the
+/// message Postgres gives SQLSTATE 55P03 ("canceling statement due to lock
+/// timeout"), as sqlx renders it.
+fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
+    matches!(e, egret_perm::CompileError::Db(m) if m.contains("lock timeout"))
 }
 
 /// The rows a hold's step-3 write puts on the view.
@@ -2174,6 +2194,18 @@ pub(crate) fn lock_key(prefix: &str, ns: &str, name: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A recompile that ran out of `lock_timeout` is the busy refusal, not an
+    /// overlap: `CompileError::Db` carries sqlx's rendering of SQLSTATE 55P03.
+    #[test]
+    fn a_recompile_lock_timeout_is_recognised_and_nothing_else_is() {
+        assert!(compile_is_lock_timeout(&egret_perm::CompileError::Db(
+            "error returned from database: canceling statement due to lock timeout".into()
+        )));
+        assert!(!compile_is_lock_timeout(&egret_perm::CompileError::Db(
+            "error returned from database: deadlock detected".into()
+        )));
+    }
 
     #[test]
     fn the_paths_trino_sends_are_classified() {

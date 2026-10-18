@@ -1315,8 +1315,9 @@ async fn record_compiled(
 /// sweep then finds nothing to mint. The sweep reads statement by statement,
 /// so a person a concurrent commit names after it is still minted by a pass,
 /// out of order; every compile mint therefore also takes one transaction-scoped
-/// lock (`crate::members::mint_for_compile`), which is what rules the cycle
-/// out — the sweep keeps it to one acquisition in the common case.
+/// lock ([`crate::members::lock_compile_mints_in_tx`], which states the order:
+/// profiles, then that lock, then any row write or mint), which is what rules
+/// the cycle out — the sweep keeps it to one acquisition in the common case.
 pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,

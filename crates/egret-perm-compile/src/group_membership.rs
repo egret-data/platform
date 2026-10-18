@@ -106,6 +106,16 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         lock_services_in_tx(tx, &services)
             .await
             .map_err(|e| to_core(e, Some(group_names)))?;
+        // Before the membership write: its `user_groups` insert holds `FOR
+        // KEY SHARE` on the user, `hard_delete`'s DELETE holds the row itself,
+        // and the recompile below mints under this lock — taken later, a
+        // compile minting that user would wait on us while we waited on it
+        // (`crate::members::lock_compile_mints_in_tx`).
+        if !services.is_empty() {
+            crate::members::lock_compile_mints_in_tx(tx)
+                .await
+                .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        }
         Ok(services)
     }
 

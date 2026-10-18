@@ -252,33 +252,59 @@ pub(crate) async fn role_usernames(
     Ok(out)
 }
 
-/// Mint `user_id`'s username for a compile, under the one compile-mint lock.
+/// Take the one compile-mint lock on `conn`'s transaction: a
+/// transaction-scoped advisory lock every username mint a compile makes is
+/// taken under ([`mint_for_compile`]), released at commit or rollback.
 ///
-/// **Why a lock as well as the ascending sweep.** [`premint_model_usernames`]
-/// mints everyone it can see in ascending id order, but it reads the model
-/// and the memberships statement by statement, under READ COMMITTED, and the
-/// passes after it read again: someone named, or left without a username,
-/// by a write that commits in between is minted by a pass, AFTER rows the
-/// sweep already locked, which is out of order. Two compiles doing that over
-/// one pair of people deadlock, as the sweep alone was meant to prevent. So
-/// every mint a compile makes first takes this transaction-scoped advisory
-/// lock: whoever holds a `users` row lock from a compile's mint holds it too,
-/// so two compiles never hold one row each while waiting for the other's.
+/// **Why there is a lock as well as the ascending sweep.**
+/// [`premint_model_usernames`] mints everyone it can see in ascending id
+/// order, but it reads statement by statement under READ COMMITTED, and the
+/// passes after it read again: a person named, or left without a username, by
+/// a write that commits in between is minted by a pass AFTER rows the sweep
+/// already locked — out of order, and two compiles doing that over one pair of
+/// people deadlock. Under this lock no two compiles mint at once.
 ///
-/// It is taken AFTER the profile locks (every recompile entry locks its
-/// profiles before it compiles, `crate::trigger::recompile_service_in_tx`)
-/// and no compile asks for a profile lock while it holds it, so it adds no
-/// cycle with those; `crate::view_tags::lock_view_tags_in_tx` comes first in
-/// any transaction that takes both. Re-taking it in the same transaction is
-/// free, and nothing is taken when nobody needs a username — the steady state.
-/// A mint outside a compile (`ensure_username` on login or token issue, the
-/// People allocation route) touches one row and does not take it.
+/// **The order every transaction takes it in: profile locks
+/// ([`crate::trigger::lock_services_in_tx`]), then this lock, then any row
+/// write or mint.** A mint `UPDATE`s `users.username`, a `citext UNIQUE`
+/// column, so it takes `FOR UPDATE` on the row, which waits on the `FOR KEY
+/// SHARE` that any insert of a row referencing that user holds (a
+/// `user_groups` membership, a `catalog_tag_assignments.assigned_by`, a
+/// `classification_policies.created_by`), and on a `DELETE FROM users`. A
+/// writer that took such a row lock first and only then reached its recompile
+/// would wait here on a compile that waits on its row: a deadlock, surfacing
+/// as a failed login or a refused write. So a writer that recompiles after
+/// touching a user-referencing row calls this right after its profile locks,
+/// BEFORE that write: the group-membership port
+/// (`PermGroupRecompiler::lock_affected_in_tx`, which every membership writer
+/// and `UserRepo::hard_delete` goes through), the catalog-tag write and the
+/// classification write (`egret-bi`). A writer whose own row writes take no
+/// lock on a `users` row (a grant, a rule, an `access_grants` row, which has
+/// no foreign key to `users`) may leave it to the compile.
+///
+/// It adds no cycle with the profile locks: it is always taken after them, and
+/// nothing asks for a profile lock while holding it, because every recompile
+/// locks its whole profile set first. `crate::view_tags::lock_view_tags_in_tx`
+/// and the group and member advisory locks (`egret_auth::groups`) come before
+/// the profile locks in any transaction that takes them. Re-taking it in the
+/// same transaction is free. A mint outside a compile — `ensure_username` on
+/// login or token issue, the People allocation route — touches one row in its
+/// own short transaction and does not take it.
+pub async fn lock_compile_mints_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Mint `user_id`'s username for a compile, under
+/// [`lock_compile_mints_in_tx`]. Nothing is locked when nobody needs a
+/// username, the steady state.
 async fn mint_for_compile(
     conn: &mut sqlx::PgConnection,
     user_id: Uuid,
 ) -> Result<String, CompileError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
-        .execute(&mut *conn)
+    lock_compile_mints_in_tx(conn)
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
     ensure_username_via(conn, UserId(user_id))

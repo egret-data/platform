@@ -112,6 +112,7 @@ pub mod view_tags;
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
 pub use group_membership::PermGroupRecompiler;
+pub use members::lock_compile_mints_in_tx;
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,
     unassign_platform_role_and_recompile,

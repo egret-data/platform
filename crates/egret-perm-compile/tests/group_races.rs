@@ -427,3 +427,94 @@ async fn an_add_during_a_user_delete_leaves_no_stale_username() {
         "the add must wait on U's membership lock while the delete holds it"
     );
 }
+
+/// **2026-10-18 design R5 rebase, review I1.** A membership add of a user with
+/// no username, racing a compile that mints that same user, must not deadlock.
+///
+/// `U` has no username, holds role `R` (named by a grant on profile A) and is
+/// being added to group `G` (named by a grant on profile B). The add parks
+/// after its `user_groups` insert, which holds `FOR KEY SHARE` on `U`. A
+/// recompile of A then mints `U`; a mint updates `users.username`, a unique
+/// column, so it needs `FOR UPDATE` on that row. Before the add took the
+/// compile-mint lock with its profile locks (`lock_affected_in_tx`), the
+/// recompile held that lock and waited on the add's row lock, the add's own
+/// recompile then waited on the lock, and Postgres aborted one of them: a
+/// failed login or admin write. Now the recompile waits on the lock the add
+/// already holds, and both commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_membership_add_racing_a_compile_that_mints_the_same_user_both_commit() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let a = seed(&db).await;
+    let b = seed(&db).await;
+
+    let uid = new_user(&db, &format!("{}@egret.local", unique("mintrace")), None).await;
+    let role = unique("mintrace-role");
+    let rid: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role)
+            .fetch_one(&db.pool)
+            .await
+            .expect("role");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
+         VALUES ('user', $1, $2, 'platform')",
+    )
+    .bind(uid)
+    .bind(rid)
+    .execute(&db.pool)
+    .await
+    .expect("role grant");
+    let g_name = unique("mintrace-group");
+    let gid = new_group(&db, &g_name).await;
+    // Stored, not compiled: a compile now would mint `U` before the race.
+    let role_grant = a
+        .perm
+        .create_grant(&grant(
+            &a,
+            Effect::Allow,
+            vec![principal(PrincipalKind::Role, &role)],
+            vec![],
+        ))
+        .await
+        .expect("role grant on A");
+    b.perm
+        .create_grant(&grant(&b, Effect::Allow, vec![group(&g_name)], vec![]))
+        .await
+        .expect("group grant on B");
+
+    let (pausing, h) = Pausing::new(Stage::BeforeRecompile);
+    let pausing = Arc::new(pausing);
+    let add = {
+        let groups = b.groups.clone();
+        let pausing = pausing.clone();
+        tokio::spawn(async move { groups.add_member(gid, UserId(uid), &*pausing).await })
+    };
+    h.reached
+        .await
+        .expect("add parked after its membership insert");
+
+    let compile = {
+        let (perm, policy, sid) = (a.perm.clone(), a.policy.clone(), a.service_id);
+        tokio::spawn(async move { recompile_service(&perm, &policy, sid).await })
+    };
+    // Let the compile reach its mint (the old order) or the lock (the new).
+    tokio::time::sleep(CHANCE).await;
+    let _ = h.go.send(());
+
+    let added = add.await.expect("join");
+    let compiled_a = compile.await.expect("join");
+    assert!(added.is_ok(), "the membership add: {added:?}");
+    assert!(compiled_a.is_ok(), "the recompile of A: {compiled_a:?}");
+
+    let username: String = sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+        .bind(uid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("U is minted");
+    assert_eq!(
+        named(&grant_body(&a, role_grant).await, "policyItems"),
+        vec![username],
+        "A's role grant names U by the minted username"
+    );
+}

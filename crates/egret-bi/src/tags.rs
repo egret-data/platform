@@ -509,6 +509,25 @@ impl ClassificationPolicyRepo {
         }
         let mut tx = self.db.pool.begin().await?;
         let reach = TagViewReach::of(&mut tx, tag_id).await?;
+        // Before the write, whose `created_by` holds `FOR KEY SHARE` on the
+        // author: every profile this transaction will lock — the clearance
+        // recompile's (every compiler-targeted profile) and the re-tag bump's
+        // (the views' warehouses) — then the compile-mint lock the recompile
+        // mints under. Taken after that write, a concurrent compile minting
+        // the author would wait on this transaction while it waited on that
+        // compile (`egret_perm_compile::lock_compile_mints_in_tx`).
+        let mut services =
+            egret_perm_compile::affected_services_for_classification(&mut tx).await?;
+        services.extend(
+            egret_catalog_registry::services_bound_to_warehouses(&mut *tx, &reach.warehouses)
+                .await?,
+        );
+        services.sort_unstable();
+        services.dedup();
+        if !services.is_empty() {
+            egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
+            egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
+        }
         sqlx::query(
             "INSERT INTO classification_policies \
                  (tag_id, required_roles, required_groups, created_by, updated_at) \
