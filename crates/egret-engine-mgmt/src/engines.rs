@@ -5224,6 +5224,46 @@ async fn restore_engine_authz_service(st: &CpState, engine_id: Uuid, previous: O
     }
 }
 
+/// Recompile the profile an engine has just LEFT (engine grants spec C11/E10).
+/// An engine grant compiles into its engine's profile; the bind path compiles
+/// only the profile the engine moves to, and the delete paths compiled none,
+/// so a former profile kept serving the engine's `perm-engine-` policies.
+///
+/// After commit, fire-and-forget and logged with the repair URL, as
+/// [`restore_engine_authz_service`] does: not in the binding's transaction,
+/// because the port recompiles one profile per call under its own
+/// `lock_services_in_tx`, and two calls in one transaction would not take both
+/// profile locks in one ascending order. `only_if_shared` (the delete paths):
+/// with no engine left on the profile nothing downloads it, and the next bind
+/// recompiles it, so only a profile another engine still binds is recompiled.
+async fn recompile_former_profile(st: &CpState, previous: Option<i64>, only_if_shared: bool) {
+    let (Some(sid), Some(compiler)) = (previous, st.perm_compiler.clone()) else {
+        return;
+    };
+    if only_if_shared {
+        match st
+            .engine_mgmt
+            .count_engines_bound_to_authz_service(sid)
+            .await
+        {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(service_id = sid, error = %e,
+                    "could not tell whether an engine's former policy profile is still bound; \
+                     it may serve a stale policy set until POST \
+                     /api/control-plane/perm/compile/{sid} succeeds");
+                return;
+            }
+        }
+    }
+    if let Err(e) = compiler.recompile_profile(sid).await {
+        tracing::error!(service_id = sid, error = %e,
+            "could not recompile the policy profile an engine left; it will serve a stale \
+             policy set until POST /api/control-plane/perm/compile/{sid} succeeds");
+    }
+}
+
 /// Every refusal a profile bind makes BEFORE it writes anything, shared by
 /// `PUT /engines/{id}` ([`apply_authz_service_update`]) and external-engine
 /// registration so the two cannot drift: the profile must exist (400), its
@@ -5545,6 +5585,11 @@ async fn update_engine(
     // re-pointed. See `restore_engine_authz_service`.
     if out.is_err() && rebound {
         restore_engine_authz_service(&st, engine_id, previous_authz_service_id).await;
+    }
+    // The update stood: the profile the engine left must stop serving what the
+    // engine's grants compiled there (spec E10).
+    if out.is_ok() && rebound {
+        recompile_former_profile(&st, previous_authz_service_id, false).await;
     }
     out
 }
@@ -5963,6 +6008,9 @@ async fn delete_engine(
 
     // 6. Cross-seam cleanup after commit: logged, never returned.
     cleanup_deleted_engine(&st, &engine, &attachments).await;
+    // 7. A profile another engine still binds loses the engine grants that
+    //    cascaded with the row (spec E10).
+    recompile_former_profile(&st, engine.authz_service_id, true).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6004,9 +6052,10 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
         DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
         DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
     }
-    // The profile this engine was bound to loses its engine with the row; the
-    // grants it compiled stay as the profile's own (as for a provisioned
-    // engine, whose delete does not recompile either).
+    // The profile this engine was bound to loses its engine with the row. Its
+    // catalog grants stay the profile's own; its ENGINE grants cascaded with
+    // the row, so a profile another engine still binds is recompiled (spec E10).
+    recompile_former_profile(st, engine.authz_service_id, true).await;
     tracing::info!(engine = %engine.name,
         "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)
