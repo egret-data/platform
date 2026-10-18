@@ -826,6 +826,136 @@ async fn a_worker_that_loses_a_deadlock_to_a_kill_still_finishes_it(pool: sqlx::
     assert_eq!(exec_state(&pool, child).await, "KILLED");
 }
 
+/// **Debt D5: a kill-only claim whose `KILLED` commit loses a deadlock still
+/// finishes it** (`claim::commit_kill`'s retry, which no test drove: the test
+/// above drives `run_one`'s). The child's run is `KILLING` with no lease, as a
+/// reaped kill leaves it, so the next tick takes it kill-only: one cancel,
+/// then `commit_kill`. That commit locks the child (`load`), then -- the child
+/// ends, and `settle` reports to the subflow parent -- the parent. The test
+/// transaction holds the parent, then locks the child: the reverse. Its
+/// `deadlock_timeout` is raised so the worker is the `40P01` victim. The retry
+/// waits for the test's commit, finds the fence still `KILLING` under its
+/// lease, and commits.
+///
+/// **The positive control** is the database's own deadlock count
+/// (`pg_stat_database.deadlocks`; `#[sqlx::test]` gives each test its own
+/// database, so no other test's deadlock is counted): exactly one, the
+/// worker's first attempt. Without it this test would pass on a schedule in
+/// which no deadlock happened and the retry never ran.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_kill_only_claim_that_loses_a_deadlock_still_commits_killed(pool: sqlx::PgPool) {
+    // Arrange: a parent waiting on a subflow child whose run was claimed,
+    // reaped and killed.
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    let source = "id: kdead\nnamespace: t\ntasks:\n  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n";
+    let parent = start(&pool, ws, source).await;
+    let child = subflow_child(&pool, parent).await;
+    let claimed = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1, "the child's run");
+    let (run_id, attempt) = (claimed[0].id, claimed[0].attempt as usize);
+    egret_workflow::worker::reap(&pool, std::time::Duration::ZERO)
+        .await
+        .expect("reap");
+    assert_eq!(
+        kill(&app, ws, child, "?cascade=false", user).await.status(),
+        202
+    );
+    assert_eq!(run_row(&pool, child, "a").await.0, "KILLING");
+    assert_eq!(deadlocks(&pool).await, 0, "the fixture: no deadlock yet");
+
+    let mut kill_tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+        .execute(&mut *kill_tx)
+        .await
+        .unwrap();
+    let kill_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *kill_tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(parent)
+        .execute(&mut *kill_tx)
+        .await
+        .unwrap();
+
+    // Act: the kill-only claim commits KILLED and, reporting to the parent,
+    // waits on it.
+    let reg = std::sync::Arc::new(CancelRecorder::default());
+    let worker = {
+        let (pool, reg) = (pool.clone(), reg.clone());
+        tokio::spawn(async move { egret_workflow::worker::tick(&pool, 10, &*reg).await })
+    };
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let blocked: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            )
+            .bind(kill_pid)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if blocked.is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "the worker's KILLED commit never waited on the parent"
+    );
+    // Close the cycle: the worker is the victim. Waiting on the worker, this
+    // lock is granted only once the worker's transaction is aborted.
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(child)
+        .execute(&mut *kill_tx)
+        .await
+        .expect("the lock is granted once the worker is aborted");
+    kill_tx.commit().await.unwrap();
+
+    // Assert
+    let ticked = tokio::time::timeout(std::time::Duration::from_secs(60), worker)
+        .await
+        .expect("the worker returns")
+        .expect("the worker task");
+    let counted = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let n = deadlocks(&pool).await;
+            if n > 0 {
+                return n;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the positive control: Postgres counted a deadlock");
+    assert_eq!(counted, 1, "one deadlock: the worker's first attempt");
+    assert!(
+        ticked.is_ok(),
+        "the deadlock victim must retry its KILLED commit: {ticked:?}"
+    );
+    let (state, claimed_at, ended_at, attempts) = run_row(&pool, child, "a").await;
+    assert_eq!(state, "KILLED");
+    assert_eq!(claimed_at, None);
+    assert!(ended_at.is_some());
+    assert_eq!(last_attempt_state(&attempts).as_deref(), Some("KILLED"));
+    assert_eq!(reg.cancels(), vec![(run_id, attempt)], "cancelled once");
+    assert!(!reg.ran(), "a kill-only claim runs no handler");
+    assert_eq!(exec_state(&pool, child).await, "KILLED");
+}
+
+/// The deadlocks Postgres has detected in this test's own database. The
+/// victim's backend reports it to the cumulative statistics, which a reader
+/// sees after that backend flushes, so a caller polls.
+async fn deadlocks(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 // ── The invariant (decision 4) ──────────────────────────────────────────────
 
 /// **After the route returns, no live run of any execution in the killed tree
