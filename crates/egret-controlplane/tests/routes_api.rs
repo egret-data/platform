@@ -1521,7 +1521,7 @@ async fn role_assignees_lists_users_and_groups() {
 
     let group_name = format!("assignee-group-{}", Uuid::new_v4().simple());
     let group_id = groups
-        .create_local(&group_name)
+        .create_local(&group_name, &egret_perm_compile::PermGroupRecompiler)
         .await
         .expect("create group");
     roles
@@ -2891,7 +2891,10 @@ async fn delete_user_route_enforces_guards() {
         .expect("insert target user");
     let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
     let group_id = groups
-        .create_local(&format!("delete-test-group-{}", Uuid::new_v4().simple()))
+        .create_local(
+            &format!("delete-test-group-{}", Uuid::new_v4().simple()),
+            &egret_perm_compile::PermGroupRecompiler,
+        )
         .await
         .expect("create group");
     groups
@@ -3121,4 +3124,102 @@ impl egret_controlplane::MaterializedViewLister for NoListing {
     ) -> Result<Vec<egret_controlplane::MvRow>, String> {
         Err("no StarRocks in this test".to_string())
     }
+}
+
+/// 2026-10-18 design R1 at the route: `DELETE` and `PATCH /groups/{id}` on a
+/// local group that a rule exemption still names answer 409, and the message
+/// names the entry (the console's dialogs show it). Nothing is written.
+#[tokio::test]
+async fn a_referenced_group_answers_409_naming_the_entry() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "groups_ref_admin", true).await;
+    let group_name = format!("ref-group-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/groups",
+            &admin,
+            Some(serde_json::json!({ "name": group_name })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
+    let group_id = j["id"].as_str().expect("group id").to_string();
+
+    // A tag row filter exempting the group, written behind the perm routes'
+    // back — this test is about the group routes.
+    let tag_key = format!("ref-tag-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $1)")
+        .bind(&tag_key)
+        .execute(&f.db.pool)
+        .await
+        .expect("tag");
+    let rule_name = format!("ref-rule-{}", Uuid::new_v4().simple());
+    let rule_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.rules (name, kind, filter_expr, selector_kind, tag_key) \
+         VALUES ($1, 'row_filter', '1 = 1', 'tag', $2) RETURNING id",
+    )
+    .bind(&rule_name)
+    .bind(&tag_key)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("rule");
+    sqlx::query(
+        "INSERT INTO perm.rule_exemptions (rule_id, kind, ref, mode) \
+         VALUES ($1, 'group', $2, 'include')",
+    )
+    .bind(rule_id)
+    .bind(&group_name)
+    .execute(&f.db.pool)
+    .await
+    .expect("exemption");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/groups/{group_id}"), &admin, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert!(
+        j.to_string().contains(&format!(
+            "group `{group_name}` is named by 1 permission entry; remove them first: \
+             rule `{rule_name}` (exempt include)"
+        )),
+        "the 409 names the entry; body={j}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/groups/{group_id}"),
+            &admin,
+            Some(serde_json::json!({ "name": format!("{group_name}-renamed") })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert!(
+        j.to_string().contains(&format!(
+            "rule `{rule_name}` (exempt include) naming `{group_name}`"
+        )),
+        "the 409 names the entry and the name it refers to; body={j}"
+    );
+
+    let still: i64 = sqlx::query_scalar("SELECT count(*) FROM groups WHERE name = $1")
+        .bind(&group_name)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(still, 1, "neither request wrote anything");
 }

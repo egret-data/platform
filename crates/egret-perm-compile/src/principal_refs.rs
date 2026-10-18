@@ -82,10 +82,22 @@
 //! because of a principal the patch does not touch (R6). PATCH takes the whole
 //! body, so every edit re-sends every principal; a ref the STORED row already
 //! holds in the same position (same kind, ref and include/exclude) is therefore
-//! not re-checked. A principal deleted after it was validly written is not a
-//! defect — nobody carries the name any more, so a deny or exclude on it still
-//! denies everyone who does — and refusing every later edit of the row (even an
-//! actions-only one) until the author removed it would be. The accepted
+//! not re-checked. A USER or ROLE deleted after it was validly written is not
+//! a defect — nobody carries the name any more, so a deny or exclude on it
+//! still denies everyone who does — and refusing every later edit of the row
+//! (even an actions-only one) until the author removed it would be.
+//!
+//! **A GROUP is different (2026-10-18 design R1, R2).** A group name can be
+//! carried again: a new local group, a rename into it, or an IdP claim would
+//! inherit every grant and exemption left naming it. So a local group's
+//! delete or rename is refused while anything names it (`GroupRepo::rename`,
+//! `GroupRepo::delete_local`), checked under the per-group lock that every
+//! grant and rule write takes BEFORE it resolves refs (R3), so the check
+//! cannot go stale. A leftover reference to a group with no row can still
+//! exist — stored before J-F3, or written directly — and the OIDC login
+//! refuses to create a group of that name (`GroupRepo::upsert_claimed_oidc_groups`).
+//! A new local group of that name is allowed, with a warning (R4): its members
+//! are only ever added by a platform admin. The accepted
 //! trade-off: a bad ref stored BEFORE this check existed also survives a patch
 //! unchanged; Task 2's report ([`unresolved_principals_via`], `GET
 //! /perm/unresolved-principals`, and a startup `warn!` per fail-open row)

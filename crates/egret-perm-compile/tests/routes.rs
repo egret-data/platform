@@ -3267,6 +3267,128 @@ async fn a_grant_on_a_group_written_during_a_member_remove_does_not_name_the_rem
     );
 }
 
+/// **2026-10-18 design R3 (spec E7): a grant on `G` written while `G` is being
+/// deleted, then an IdP login claiming `G`.** The delete of local group `G` is
+/// parked right after its reference check — nothing named `G` yet, so it is
+/// allowed — holding `G`'s lock. A steward then creates "allow `G`".
+///
+/// Before R3 `write_grant` resolved its refs BEFORE taking the group locks: it
+/// saw `G` (the delete had not committed), then waited on `G`'s lock, and once
+/// the delete committed it stored a reference to a group that no longer
+/// existed — the dangling name an IdP claim or a later group of that name
+/// would inherit. With the lock first, the grant waits, sees the delete
+/// committed, and is refused ("no group has this name"). The other order (the
+/// grant first) is the delete's 409, pinned in `group_grants.rs`.
+///
+/// The third party: a login whose IdP claims `G` afterwards. Whatever it
+/// creates, no stored grant may name `G` without a row of that name, and none
+/// may reach the login's user.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_deleted_group() {
+    use pausing::{Pausing, Stage};
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let group = unique("race-delete");
+    let group_id: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert group");
+
+    let (pausing, h) = Pausing::new(Stage::AfterAffected);
+    let pausing = Arc::new(pausing);
+    let delete = {
+        let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+        let pausing = pausing.clone();
+        tokio::spawn(async move { groups.delete_local(group_id, &*pausing).await })
+    };
+    h.reached
+        .await
+        .expect("delete parked after its reference check, holding the group's lock");
+
+    let mut body = grant_body(f.catalog_id, "unused");
+    body["principals"] = json!({ "include": [{ "kind": "group", "ref": group }], "exclude": [] });
+    let mut post = {
+        let app = f.app();
+        let token = token.clone();
+        tokio::spawn(async move {
+            into_json(
+                app.oneshot(req("POST", "/perm/grants", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        })
+    };
+    let early = tokio::time::timeout(std::time::Duration::from_millis(800), &mut post)
+        .await
+        .ok();
+    let _ = h.go.send(());
+    assert_eq!(delete.await.expect("join").expect("delete"), 1);
+    let (status, created) = match early {
+        Some(done) => done,
+        None => post.await,
+    }
+    .expect("join");
+
+    let dangling: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM perm.grant_principals p \
+          WHERE p.kind = 'group' AND p.ref = $1 \
+            AND NOT EXISTS (SELECT 1 FROM groups g WHERE g.name = p.ref)",
+    )
+    .bind(&group)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("read");
+    assert_eq!(
+        dangling, 0,
+        "no grant may store a reference to the deleted group (grant answered {status}: {created})"
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {created}");
+    assert!(
+        created.to_string().contains("no group has this name"),
+        "the grant is refused by validation: {created}"
+    );
+
+    // The third party: an IdP login claiming the freed name.
+    let tag = unique("race-idp").replace('_', "-");
+    let login_id = egret_auth::oidc::provision_and_sync(
+        &f.users,
+        &egret_auth::groups::GroupRepo::new(f.db.clone()),
+        &egret_auth::oidc::OidcClaims {
+            subject: format!("sub-{tag}"),
+            email: format!("{tag}@idp.local"),
+            name: "IdP".into(),
+            groups: vec![group.clone()],
+        },
+        &egret_perm_compile::PermGroupRecompiler,
+    )
+    .await
+    .expect("login");
+    let username: Option<String> = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(login_id.0)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("username");
+    if let Some(username) = username {
+        let reached: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM policy.authz_policies \
+              WHERE service_id = $1 AND policy_jsonb::text LIKE '%' || $2 || '%'",
+        )
+        .bind(f.service_id)
+        .bind(&username)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read");
+        assert_eq!(
+            reached, 0,
+            "no policy may reach the IdP's user through `{group}`"
+        );
+    }
+}
+
 /// `explain` resolves the target's tags itself — it never made the caller
 /// supply them, because that would answer a question the caller had already
 /// decided.

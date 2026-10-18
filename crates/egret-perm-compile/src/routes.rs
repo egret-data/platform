@@ -1146,7 +1146,21 @@ pub(crate) async fn write_grant(
     // `bob` becomes un-editable — even an actions-only change is a 400 — the
     // moment `bob` is deleted, though the exclude still denies everyone who
     // carries the name (nobody). Only while the effect is unchanged (above).
+    //
+    // **The group locks come FIRST, before the refs are resolved** (2026-10-18
+    // design R3, spec E7). Resolution checks that each group name has a
+    // `groups` row; a delete or rename of that group holds the same per-group
+    // lock while it checks that nothing names the group (R1). Validating
+    // before locking let a grant that saw `G` wait on `G`'s lock while the
+    // delete committed, and then store a reference to a group that no longer
+    // existed — the dangling name an IdP claim could later take over. Locked
+    // first, whichever runs second sees the first committed: the delete
+    // finds this grant and answers 409, or this grant finds no `G` and is
+    // refused. The names are known from the body, since resolution only
+    // rewrites USER refs, and the lock order is unchanged: group locks, then
+    // profile locks (below).
     let mut principals = body.principals;
+    lock_named_groups(tx, [&principals].into_iter().chain(old_principals.as_ref())).await?;
     resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
     let g = Grant {
@@ -1171,19 +1185,15 @@ pub(crate) async fn write_grant(
     let services = merge_service_ids(&old_services, &new_services);
 
     // **J-F3 Task 1b, fix round 1: the per-group lock, before any profile
-    // lock.** A group compiles to its members, and a membership write decides
-    // which profiles to recompile by reading which grants name the group. If
-    // this grant newly names `G` while a REMOVE from `G` is in flight, that
-    // REMOVE may have read "nothing names G" and will recompile nothing, while
-    // this write compiles with the leaver still a member: they stay granted.
-    // Taking `G`'s lock here makes the two serialise — see
-    // `egret_auth::groups`' module doc, "Two concurrent writers", for the
-    // lock order (group locks, then profile locks) this keeps.
-    lock_named_groups(
-        tx,
-        [&g.principals].into_iter().chain(old_principals.as_ref()),
-    )
-    .await?;
+    // lock** — taken above, before the refs were resolved (R3). A group
+    // compiles to its members, and a membership write decides which profiles
+    // to recompile by reading which grants name the group. If this grant
+    // newly names `G` while a REMOVE from `G` is in flight, that REMOVE may
+    // have read "nothing names G" and will recompile nothing, while this
+    // write compiles with the leaver still a member: they stay granted.
+    // Holding `G`'s lock makes the two serialise — see `egret_auth::groups`'
+    // module doc, "Two concurrent writers", for the lock order (group locks,
+    // then profile locks) this keeps.
 
     // The affected set is derived from the grant's own catalog, so it can be
     // resolved (and locked) before the row is written — and it MUST be, or
@@ -1313,7 +1323,11 @@ pub(crate) async fn write_rule(
     // `exempt.include` naming nobody masks someone the author meant to exempt,
     // and an `exempt.exclude` naming nobody would subtract nobody. A patch
     // passes the stored exemptions for the same R6 reason.
+    // The group locks first, for the reason [`write_grant`] gives at the same
+    // point (R3, spec E7): validate-then-lock let an exemption store a
+    // reference to a group deleted while it waited.
     let mut exempt = body.exempt;
+    lock_named_groups(tx, [&exempt].into_iter().chain(old_exempt.as_ref())).await?;
     resolve_principal_refs(tx, "exempt", &mut exempt, old_exempt.as_ref()).await?;
 
     let r = Rule {
@@ -1361,9 +1375,9 @@ pub(crate) async fn write_rule(
     let new_services = affected_services_for_rule(tx, &r).await?;
     let services = merge_service_ids(&old_services, &new_services);
 
-    // The per-group lock, for the same reason and in the same position as in
-    // `write_grant`: an exemption naming a group compiles to its members.
-    lock_named_groups(tx, [&r.exempt].into_iter().chain(old_exempt.as_ref())).await?;
+    // The per-group locks were taken before the refs were resolved (above),
+    // for the same reason as in `write_grant`: an exemption naming a group
+    // compiles to its members.
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {

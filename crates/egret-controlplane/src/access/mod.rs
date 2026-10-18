@@ -610,7 +610,10 @@ async fn create_group(
     Json(body): Json<CreateGroupInput>,
 ) -> Result<(StatusCode, Json<GroupDto>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:create").await?;
-    let id = st.groups.create_local(&body.name).await?;
+    let id = st
+        .groups
+        .create_local(&body.name, &egret_perm_compile::PermGroupRecompiler)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(GroupDto {
@@ -633,7 +636,7 @@ async fn create_group(
         (status = 204, description = "Group renamed"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing group:update permission", body = ErrorBody),
-        (status = 409, description = "Cannot rename an OIDC-synced group", body = ErrorBody),
+        (status = 409, description = "Cannot rename an OIDC-synced group; or another group already has the new name; or grants or rule exemptions still name the old or the new name (the message lists them; remove them first)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -644,8 +647,8 @@ async fn rename_group(
     Json(body): Json<RenameGroupInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:update").await?;
-    // J-F3 Task 1b: principals name a group by NAME, so a rename moves its
-    // members from the old name's policies to the new one's — recompiled here.
+    // Principals name a group by NAME, so the repo refuses (409, listing
+    // them) while anything names the old or the new name (2026-10-18 R1).
     let rows = st
         .groups
         .rename(id, &body.name, &egret_perm_compile::PermGroupRecompiler)
@@ -667,7 +670,7 @@ async fn rename_group(
         (status = 204, description = "Group deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing group:delete permission", body = ErrorBody),
-        (status = 409, description = "Cannot delete an OIDC-synced group", body = ErrorBody),
+        (status = 409, description = "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them; remove them first)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -677,7 +680,8 @@ async fn delete_group(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:delete").await?;
-    // J-F3 Task 1b: the delete cascades every membership away — recompiled.
+    // The delete cascades every membership away — recompiled. Refused (409,
+    // listing them) while grants or rule exemptions name the group (R1).
     let rows = st
         .groups
         .delete_local(id, &egret_perm_compile::PermGroupRecompiler)

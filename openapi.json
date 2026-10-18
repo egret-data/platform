@@ -6532,7 +6532,7 @@
             }
           },
           "409": {
-            "description": "Cannot delete an OIDC-synced group",
+            "description": "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them; remove them first)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6605,7 +6605,7 @@
             }
           },
           "409": {
-            "description": "Cannot rename an OIDC-synced group",
+            "description": "Cannot rename an OIDC-synced group; or another group already has the new name; or grants or rule exemptions still name the old or the new name (the message lists them; remove them first)",
             "content": {
               "application/json": {
                 "schema": {

@@ -67,7 +67,7 @@ async fn minted_token_carries_user_groups_from_db(pool: sqlx::PgPool) {
     // the real `groups_of_user` DB path into the minted claim set.
     let groups = GroupRepo::new(db.clone());
     let group_id = groups
-        .create_local("data-team")
+        .create_local("data-team", &egret_perm_compile::PermGroupRecompiler)
         .await
         .expect("create local group");
     groups

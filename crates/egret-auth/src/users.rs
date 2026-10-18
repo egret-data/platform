@@ -651,7 +651,10 @@ mod tests {
             .unwrap();
 
         // Group membership.
-        let group_id = groups.create_local("hard-delete-test-group").await.unwrap();
+        let group_id = groups
+            .create_local("hard-delete-test-group", &NoProfiles)
+            .await
+            .unwrap();
         groups.add_member(group_id, uid, &NoProfiles).await.unwrap();
         assert_eq!(
             groups.groups_of_user(uid).await.unwrap(),

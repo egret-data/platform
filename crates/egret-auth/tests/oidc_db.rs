@@ -374,7 +374,10 @@ async fn a_group_created_mid_sync_is_not_joined_without_its_lock() {
 /// A `source = 'local'` group, created the way the console's create does.
 async fn local_group(groups: &GroupRepo, tag: &str) -> (String, uuid::Uuid) {
     let name = uniq(tag);
-    let id = groups.create_local(&name).await.unwrap();
+    let id = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
     (name, id)
 }
 

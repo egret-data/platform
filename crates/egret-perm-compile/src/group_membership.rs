@@ -37,8 +37,11 @@
 //!   (`egret_auth::oidc::provision_and_sync`, from the callback route), only
 //!   for the groups the login actually moved;
 //! - `GroupRepo::delete_local` — `user_groups.group_id` is `ON DELETE CASCADE`;
-//! - `GroupRepo::rename` — principals name a group by NAME, so a rename moves
-//!   every member from the old name to the new one;
+//!   since 2026-10-18 (R1) refused while anything names the group, so an
+//!   allowed delete reaches nothing;
+//! - `GroupRepo::rename` — principals name a group by NAME; since R1 refused
+//!   while anything names the old or the new name, so an allowed rename
+//!   reaches nothing either;
 //! - `UserRepo::hard_delete` — the control plane's user delete and the Data
 //!   API's service-account delete (`user_groups.user_id` cascades too).
 //!

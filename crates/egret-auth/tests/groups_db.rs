@@ -32,10 +32,16 @@ async fn group_local_crud_and_membership() {
 
     // Create a local group.
     let name = uniq("t_group");
-    let group_id = groups.create_local(&name).await.unwrap();
+    let group_id = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
 
     // Duplicate name errors (Conflict).
-    assert!(groups.create_local(&name).await.is_err());
+    assert!(groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .is_err());
 
     // Add two members.
     let u1 = users
@@ -135,7 +141,10 @@ async fn groups_of_user_returns_membership() {
     let users = UserRepo::new(db.clone());
 
     let name = uniq("t_groups_of_user");
-    let group_id = groups.create_local(&name).await.unwrap();
+    let group_id = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
 
     let user_id = users
         .insert_local(&format!("{}@test.local", uniq("gn_user")), "GnUser", "x")
@@ -167,7 +176,10 @@ async fn every_membership_writer_calls_the_recompile_port() {
     let rc = Recorder::default();
 
     let name = uniq("t_port_group");
-    let gid = groups.create_local(&name).await.unwrap();
+    let gid = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
     let uid = users
         .insert_local(&format!("{}@test.local", uniq("port")), "P", "x")
         .await
@@ -277,7 +289,10 @@ async fn an_admin_add_to_an_oidc_group_is_refused_and_a_remove_is_not() {
     );
 
     let local = uniq("t_local_group");
-    let local_gid = groups.create_local(&local).await.unwrap();
+    let local_gid = groups
+        .create_local(&local, &Recorder::default())
+        .await
+        .unwrap();
     groups.add_member(local_gid, uid, &rc).await.unwrap();
     assert!(
         is_member(local_gid).await,
@@ -344,12 +359,18 @@ async fn the_provenance_report_lists_only_the_two_unknown_shapes() {
         .await
         .unwrap();
     // (a): two OIDC users and one local user in a local group → count 2.
-    let mixed_local = groups.create_local(&uniq("t_prov_mixed")).await.unwrap();
+    let mixed_local = groups
+        .create_local(&uniq("t_prov_mixed"), &Recorder::default())
+        .await
+        .unwrap();
     seed(o1, mixed_local).await;
     seed(o2, mixed_local).await;
     seed(l1, mixed_local).await;
     // Neither: a local group with only local members.
-    let pure_local = groups.create_local(&uniq("t_prov_local")).await.unwrap();
+    let pure_local = groups
+        .create_local(&uniq("t_prov_local"), &Recorder::default())
+        .await
+        .unwrap();
     seed(l2, pure_local).await;
     // (b): a local user in an OIDC group; the OIDC member beside them is not.
     let oidc_name = uniq("t_prov_oidc");
@@ -415,4 +436,90 @@ async fn the_provenance_report_lists_only_the_two_unknown_shapes() {
             .await
             .unwrap();
     assert_eq!((before, after), (7, 7), "the report changes no row");
+}
+
+/// 2026-10-18 design R1, this crate's half: while the port reports a reference
+/// to the group (delete), or to its old or new name (rename), the write is
+/// refused with `Conflict` BEFORE any profile lock or recompile, writes
+/// nothing, and the message lists each entry — for a rename, with the name it
+/// refers to. A rename INTO a name another group has is `Conflict` too.
+/// (The real port is in `egret-perm-compile/tests/group_grants.rs`.)
+#[tokio::test]
+async fn a_referenced_group_cannot_be_deleted_or_renamed() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let name = uniq("t_ref_group");
+    let target = uniq("t_ref_target");
+    let gid = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
+    let grant_id = uuid::Uuid::new_v4();
+    let rule_id = uuid::Uuid::new_v4();
+    let rc = Recorder::with_references(vec![
+        egret_auth::groups::GroupReference {
+            group_name: name.clone(),
+            source: "grant".into(),
+            id: grant_id,
+            rule_name: None,
+            effect: Some("deny".into()),
+            position: "include".into(),
+        },
+        egret_auth::groups::GroupReference {
+            group_name: target.clone(),
+            source: "rule".into(),
+            id: rule_id,
+            rule_name: Some("mask_email".into()),
+            effect: None,
+            position: "exclude".into(),
+        },
+    ]);
+
+    let err = groups.delete_local(gid, &rc).await.unwrap_err();
+    assert!(
+        matches!(&err, egret_core::Error::Conflict(m) if m == &format!(
+            "group `{name}` is named by 1 permission entry; remove them first: \
+             grant {grant_id} (deny, include)"
+        )),
+        "{err:?}"
+    );
+    assert_eq!(rc.take(), Vec::<Call>::new(), "refused before any lock");
+
+    let err = groups.rename(gid, &target, &rc).await.unwrap_err();
+    assert!(
+        matches!(&err, egret_core::Error::Conflict(m) if m == &format!(
+            "cannot rename group `{name}` to `{target}`: these names are named by 2 \
+             permission entries; remove them first: grant {grant_id} (deny, include) \
+             naming `{name}`, rule `mask_email` (exempt exclude) naming `{target}`"
+        )),
+        "{err:?}"
+    );
+    assert_eq!(rc.take(), Vec::<Call>::new(), "refused before any lock");
+
+    let taken = groups
+        .create_local(&uniq("t_ref_taken"), &Recorder::default())
+        .await;
+    let taken_name: String = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
+        .bind(taken.unwrap())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let err = groups
+        .rename(gid, &taken_name, &Recorder::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, egret_core::Error::Conflict(m) if m.contains("already exists")),
+        "{err:?}"
+    );
+
+    let still: String = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
+        .bind(gid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(still, name, "nothing written");
 }

@@ -4083,7 +4083,11 @@ async fn principal_search_finds_a_user_older_than_the_two_hundred_newest_and_a_g
             .expect("insert a newer user");
     }
     let group = format!("grp-{tag}");
-    f.groups.create_local(&group).await.expect("insert group");
+    sqlx::query("INSERT INTO groups (name, source) VALUES ($1, 'local')")
+        .bind(&group)
+        .execute(&f.db.pool)
+        .await
+        .expect("insert group");
 
     let search = |q: String| {
         let app = f.app_empty();
