@@ -324,7 +324,8 @@ Các câu mang sự trung thực mà chương trình đã học ở #1 và #2: n
     cũng không bị quy lỗi), và chỉ với profile chưa quiet/silent (liveness đã báo). Báo cáo
     `lastKnownVersion = -1` là "chưa báo": không xác nhận và cũng không tính là chậm. Bộ lấy tag của Trino báo `-1`
     trong một lần poll tag sau mỗi lần tải policy, và plugin nào cũng báo vậy ở lần poll đầu sau khi khởi động lại.
-    Cái giá được chấp nhận: plugin không bao giờ báo version nào thì không bị đánh dấu chậm. Ngưỡng vẫn 90 s cho cả
+    Cái giá được chấp nhận (quyết định (b) của brief Task 7): plugin vẫn poll nhưng không bao giờ báo version nào
+    thì không luật độ lệch nào đánh dấu; `plugin_quiet` và `plugin_silent` chỉ bắt được plugin khi nó ngừng poll. Ngưỡng vẫn 90 s cho cả
     hai kind (xác nhận cần hai lần poll, khoảng 60 s ở poll 30 s mặc định).
   - Một kind chỉ được xét khi profile có dòng của kind đó poll trong 24 h. StarRocks không bao giờ tải tag, nên
     không bao giờ báo thiếu lần tải tag cho nó.

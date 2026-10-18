@@ -388,8 +388,9 @@ Sentences carry the honesty this programme learned in #1 and #2: a label never c
     evidence nor blame), and only for a profile that is not already quiet or silent (liveness covers it). A
     report of `lastKnownVersion = -1` is "not yet reported": it neither confirms nor counts as behind. Trino's
     tag retriever reports `-1` for one tag poll after every policy download, and every plugin reports it on its
-    first poll after a restart. The cost, accepted: a plugin that never reports a version is not flagged as
-    behind. The threshold stays 90 s for both kinds (confirmation takes two polls, about 60 s at the rendered
+    first poll after a restart. The cost, accepted (decision (b) of the Task 7 brief): a plugin that keeps
+    polling but never reports a version is flagged by no drift rule; `plugin_quiet` and `plugin_silent` catch a
+    plugin only once it stops polling. The threshold stays 90 s for both kinds (confirmation takes two polls, about 60 s at the rendered
     30 s poll).
   - A kind is judged only when the profile has a row of that kind polled within 24 h. StarRocks never
     downloads tags, so a missing tags download is never reported for it.

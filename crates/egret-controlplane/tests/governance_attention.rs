@@ -958,3 +958,50 @@ async fn the_snapshot_is_read_only() {
         .unwrap();
     assert_eq!(written, 0);
 }
+
+#[tokio::test]
+async fn an_engine_on_a_plugin_egret_does_not_model_is_reported_with_its_note() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    // Every image egret knows is modelled today, so "unmodelled" on a
+    // provisioned engine is an image egret has not measured (a floating tag).
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status) VALUES \
+         ('m_floating', 'starrocks', 'egret', \
+          '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1-latest\"}}'::jsonb, 'running'), \
+         ('m_pinned', 'trino', 'egret', '{\"imageVersion\":\"483\"}'::jsonb, 'running'), \
+         ('m_rw', 'risingwave', 'egret', '{}'::jsonb, 'running')",
+    )
+    .execute(&f.db.pool)
+    .await
+    .expect("engines");
+    // An external engine declaring a pair egret does not model.
+    engine(&f, "m_external", "trino", "external", "running", None).await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET ranger_plugin_version = '2.9.0' WHERE name = 'm_external'",
+    )
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let token = session(&f, &["engine:read", "tag:read"]).await;
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        labels(&body, "plugin_unmodelled"),
+        ["m_external", "m_floating"],
+        "{body}"
+    );
+    let fnd = finding(&body, "plugin_unmodelled").unwrap();
+    assert_eq!(fnd["severity"], "warning");
+    let floating = &fnd["sample"][1];
+    assert!(
+        floating["detail"]
+            .as_str()
+            .unwrap()
+            .contains("starrocks/fe-ubuntu:4.1-latest"),
+        "{floating}"
+    );
+    assert_eq!(floating["ref"]["type"], "engine");
+    assert_eq!(fnd["ref"], json!({"type": "engines"}));
+}
