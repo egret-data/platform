@@ -28,7 +28,13 @@ import type {
   AllocatedUsername,
   ClassifiedPolicy,
   CompileResponse,
+  EngineCapabilitiesResponse,
+  EngineGrantView,
+  EngineGrantWriteResponse,
+  EngineGrantsResponse,
   ErrorBody,
+  ExplainCapabilityRequest,
+  ExplainCapabilityResponse,
   ExplainPrincipalRequest,
   ExplainPrincipalResponse,
   ExplainRequest,
@@ -37,6 +43,7 @@ import type {
   GroupPrincipal,
   MigrateRequest,
   MigrateResponse,
+  NewEngineGrant,
   NewGrant,
   NewRule,
   PeoplePage,
@@ -199,6 +206,666 @@ export const usePermCompile = <TError = ErrorBody,
       > => {
       return useMutation(getPermCompileMutationOptions(options), queryClient);
     }
+    export type permListEngineCapabilitiesResponse200 = {
+  data: EngineCapabilitiesResponse
+  status: 200
+}
+
+export type permListEngineCapabilitiesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListEngineCapabilitiesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListEngineCapabilitiesResponseSuccess = (permListEngineCapabilitiesResponse200) & {
+  headers: Headers;
+};
+export type permListEngineCapabilitiesResponseError = (permListEngineCapabilitiesResponse401 | permListEngineCapabilitiesResponse403) & {
+  headers: Headers;
+};
+
+export type permListEngineCapabilitiesResponse = (permListEngineCapabilitiesResponseSuccess | permListEngineCapabilitiesResponseError)
+
+export const getPermListEngineCapabilitiesUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/engine-capabilities`
+}
+
+export const permListEngineCapabilities = async ( options?: Parameters<typeof customInstance>[1]): Promise<permListEngineCapabilitiesResponse> => {
+
+  return customInstance<permListEngineCapabilitiesResponse>(getPermListEngineCapabilitiesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListEngineCapabilitiesQueryKey = () => {
+    return [
+    `/api/control-plane/perm/engine-capabilities`
+    ] as const;
+    }
+
+
+export const getPermListEngineCapabilitiesQueryOptions = <TData = Awaited<ReturnType<typeof permListEngineCapabilities>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListEngineCapabilitiesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListEngineCapabilities>>> = ({ signal }) => permListEngineCapabilities({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListEngineCapabilitiesQueryResult = NonNullable<Awaited<ReturnType<typeof permListEngineCapabilities>>>
+export type PermListEngineCapabilitiesQueryError = ErrorBody
+
+
+export function usePermListEngineCapabilities<TData = Awaited<ReturnType<typeof permListEngineCapabilities>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListEngineCapabilities>>,
+          TError,
+          Awaited<ReturnType<typeof permListEngineCapabilities>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListEngineCapabilities<TData = Awaited<ReturnType<typeof permListEngineCapabilities>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListEngineCapabilities>>,
+          TError,
+          Awaited<ReturnType<typeof permListEngineCapabilities>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListEngineCapabilities<TData = Awaited<ReturnType<typeof permListEngineCapabilities>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermListEngineCapabilities<TData = Awaited<ReturnType<typeof permListEngineCapabilities>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineCapabilities>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListEngineCapabilitiesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permListAllEngineGrantsResponse200 = {
+  data: EngineGrantView[]
+  status: 200
+}
+
+export type permListAllEngineGrantsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListAllEngineGrantsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListAllEngineGrantsResponseSuccess = (permListAllEngineGrantsResponse200) & {
+  headers: Headers;
+};
+export type permListAllEngineGrantsResponseError = (permListAllEngineGrantsResponse401 | permListAllEngineGrantsResponse403) & {
+  headers: Headers;
+};
+
+export type permListAllEngineGrantsResponse = (permListAllEngineGrantsResponseSuccess | permListAllEngineGrantsResponseError)
+
+export const getPermListAllEngineGrantsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/engine-grants`
+}
+
+export const permListAllEngineGrants = async ( options?: Parameters<typeof customInstance>[1]): Promise<permListAllEngineGrantsResponse> => {
+
+  return customInstance<permListAllEngineGrantsResponse>(getPermListAllEngineGrantsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListAllEngineGrantsQueryKey = () => {
+    return [
+    `/api/control-plane/perm/engine-grants`
+    ] as const;
+    }
+
+
+export const getPermListAllEngineGrantsQueryOptions = <TData = Awaited<ReturnType<typeof permListAllEngineGrants>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListAllEngineGrantsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListAllEngineGrants>>> = ({ signal }) => permListAllEngineGrants({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListAllEngineGrantsQueryResult = NonNullable<Awaited<ReturnType<typeof permListAllEngineGrants>>>
+export type PermListAllEngineGrantsQueryError = ErrorBody
+
+
+export function usePermListAllEngineGrants<TData = Awaited<ReturnType<typeof permListAllEngineGrants>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListAllEngineGrants>>,
+          TError,
+          Awaited<ReturnType<typeof permListAllEngineGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListAllEngineGrants<TData = Awaited<ReturnType<typeof permListAllEngineGrants>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListAllEngineGrants>>,
+          TError,
+          Awaited<ReturnType<typeof permListAllEngineGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListAllEngineGrants<TData = Awaited<ReturnType<typeof permListAllEngineGrants>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermListAllEngineGrants<TData = Awaited<ReturnType<typeof permListAllEngineGrants>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListAllEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListAllEngineGrantsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permDeleteEngineGrantResponse200 = {
+  data: EngineGrantWriteResponse
+  status: 200
+}
+
+export type permDeleteEngineGrantResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permDeleteEngineGrantResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permDeleteEngineGrantResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permDeleteEngineGrantResponseSuccess = (permDeleteEngineGrantResponse200) & {
+  headers: Headers;
+};
+export type permDeleteEngineGrantResponseError = (permDeleteEngineGrantResponse401 | permDeleteEngineGrantResponse403 | permDeleteEngineGrantResponse404) & {
+  headers: Headers;
+};
+
+export type permDeleteEngineGrantResponse = (permDeleteEngineGrantResponseSuccess | permDeleteEngineGrantResponseError)
+
+export const getPermDeleteEngineGrantUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/engine-grants/${encodeURIComponent(id)}`
+}
+
+export const permDeleteEngineGrant = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<permDeleteEngineGrantResponse> => {
+
+  return customInstance<permDeleteEngineGrantResponse>(getPermDeleteEngineGrantUrl(id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermDeleteEngineGrantMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permDeleteEngineGrant>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permDeleteEngineGrant>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['permDeleteEngineGrant'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permDeleteEngineGrant>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  permDeleteEngineGrant(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermDeleteEngineGrantMutationResult = NonNullable<Awaited<ReturnType<typeof permDeleteEngineGrant>>>
+
+    export type PermDeleteEngineGrantMutationError = ErrorBody
+
+    export const usePermDeleteEngineGrant = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permDeleteEngineGrant>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permDeleteEngineGrant>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getPermDeleteEngineGrantMutationOptions(options), queryClient);
+    }
+    export type permPatchEngineGrantResponse200 = {
+  data: EngineGrantWriteResponse
+  status: 200
+}
+
+export type permPatchEngineGrantResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permPatchEngineGrantResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permPatchEngineGrantResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permPatchEngineGrantResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permPatchEngineGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permPatchEngineGrantResponseSuccess = (permPatchEngineGrantResponse200) & {
+  headers: Headers;
+};
+export type permPatchEngineGrantResponseError = (permPatchEngineGrantResponse400 | permPatchEngineGrantResponse401 | permPatchEngineGrantResponse403 | permPatchEngineGrantResponse404 | permPatchEngineGrantResponse409) & {
+  headers: Headers;
+};
+
+export type permPatchEngineGrantResponse = (permPatchEngineGrantResponseSuccess | permPatchEngineGrantResponseError)
+
+export const getPermPatchEngineGrantUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/engine-grants/${encodeURIComponent(id)}`
+}
+
+export const permPatchEngineGrant = async (id: string,
+    newEngineGrant: NewEngineGrant, options?: Parameters<typeof customInstance>[1]): Promise<permPatchEngineGrantResponse> => {
+
+  return customInstance<permPatchEngineGrantResponse>(getPermPatchEngineGrantUrl(id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(newEngineGrant)
+  }
+);}
+
+
+
+
+
+export const getPermPatchEngineGrantMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchEngineGrant>>, TError,{id: string;data: NewEngineGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permPatchEngineGrant>>, TError,{id: string;data: NewEngineGrant}, TContext> => {
+
+const mutationKey = ['permPatchEngineGrant'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permPatchEngineGrant>>, {id: string;data: NewEngineGrant}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  permPatchEngineGrant(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermPatchEngineGrantMutationResult = NonNullable<Awaited<ReturnType<typeof permPatchEngineGrant>>>
+    export type PermPatchEngineGrantMutationBody = NewEngineGrant
+    export type PermPatchEngineGrantMutationError = ErrorBody
+
+    export const usePermPatchEngineGrant = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchEngineGrant>>, TError,{id: string;data: NewEngineGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permPatchEngineGrant>>,
+        TError,
+        {id: string;data: NewEngineGrant},
+        TContext
+      > => {
+      return useMutation(getPermPatchEngineGrantMutationOptions(options), queryClient);
+    }
+    export type permListEngineGrantsResponse200 = {
+  data: EngineGrantsResponse
+  status: 200
+}
+
+export type permListEngineGrantsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListEngineGrantsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListEngineGrantsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permListEngineGrantsResponseSuccess = (permListEngineGrantsResponse200) & {
+  headers: Headers;
+};
+export type permListEngineGrantsResponseError = (permListEngineGrantsResponse401 | permListEngineGrantsResponse403 | permListEngineGrantsResponse404) & {
+  headers: Headers;
+};
+
+export type permListEngineGrantsResponse = (permListEngineGrantsResponseSuccess | permListEngineGrantsResponseError)
+
+export const getPermListEngineGrantsUrl = (engineId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/engines/${encodeURIComponent(engineId)}/grants`
+}
+
+export const permListEngineGrants = async (engineId: string, options?: Parameters<typeof customInstance>[1]): Promise<permListEngineGrantsResponse> => {
+
+  return customInstance<permListEngineGrantsResponse>(getPermListEngineGrantsUrl(engineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListEngineGrantsQueryKey = (engineId: string,) => {
+    return [
+    `/api/control-plane/perm/engines/${encodeURIComponent(engineId)}/grants`
+    ] as const;
+    }
+
+
+export const getPermListEngineGrantsQueryOptions = <TData = Awaited<ReturnType<typeof permListEngineGrants>>, TError = ErrorBody>(engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListEngineGrantsQueryKey(engineId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListEngineGrants>>> = ({ signal }) => permListEngineGrants(engineId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: engineId !== null && engineId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListEngineGrantsQueryResult = NonNullable<Awaited<ReturnType<typeof permListEngineGrants>>>
+export type PermListEngineGrantsQueryError = ErrorBody
+
+
+export function usePermListEngineGrants<TData = Awaited<ReturnType<typeof permListEngineGrants>>, TError = ErrorBody>(
+ engineId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListEngineGrants>>,
+          TError,
+          Awaited<ReturnType<typeof permListEngineGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListEngineGrants<TData = Awaited<ReturnType<typeof permListEngineGrants>>, TError = ErrorBody>(
+ engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListEngineGrants>>,
+          TError,
+          Awaited<ReturnType<typeof permListEngineGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListEngineGrants<TData = Awaited<ReturnType<typeof permListEngineGrants>>, TError = ErrorBody>(
+ engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermListEngineGrants<TData = Awaited<ReturnType<typeof permListEngineGrants>>, TError = ErrorBody>(
+ engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListEngineGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListEngineGrantsQueryOptions(engineId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permCreateEngineGrantResponse201 = {
+  data: EngineGrantWriteResponse
+  status: 201
+}
+
+export type permCreateEngineGrantResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permCreateEngineGrantResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permCreateEngineGrantResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permCreateEngineGrantResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permCreateEngineGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permCreateEngineGrantResponseSuccess = (permCreateEngineGrantResponse201) & {
+  headers: Headers;
+};
+export type permCreateEngineGrantResponseError = (permCreateEngineGrantResponse400 | permCreateEngineGrantResponse401 | permCreateEngineGrantResponse403 | permCreateEngineGrantResponse404 | permCreateEngineGrantResponse409) & {
+  headers: Headers;
+};
+
+export type permCreateEngineGrantResponse = (permCreateEngineGrantResponseSuccess | permCreateEngineGrantResponseError)
+
+export const getPermCreateEngineGrantUrl = (engineId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/engines/${encodeURIComponent(engineId)}/grants`
+}
+
+export const permCreateEngineGrant = async (engineId: string,
+    newEngineGrant: NewEngineGrant, options?: Parameters<typeof customInstance>[1]): Promise<permCreateEngineGrantResponse> => {
+
+  return customInstance<permCreateEngineGrantResponse>(getPermCreateEngineGrantUrl(engineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(newEngineGrant)
+  }
+);}
+
+
+
+
+
+export const getPermCreateEngineGrantMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permCreateEngineGrant>>, TError,{engineId: string;data: NewEngineGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permCreateEngineGrant>>, TError,{engineId: string;data: NewEngineGrant}, TContext> => {
+
+const mutationKey = ['permCreateEngineGrant'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permCreateEngineGrant>>, {engineId: string;data: NewEngineGrant}> = (props) => {
+          const {engineId,data} = props ?? {};
+
+          return  permCreateEngineGrant(engineId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermCreateEngineGrantMutationResult = NonNullable<Awaited<ReturnType<typeof permCreateEngineGrant>>>
+    export type PermCreateEngineGrantMutationBody = NewEngineGrant
+    export type PermCreateEngineGrantMutationError = ErrorBody
+
+    export const usePermCreateEngineGrant = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permCreateEngineGrant>>, TError,{engineId: string;data: NewEngineGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permCreateEngineGrant>>,
+        TError,
+        {engineId: string;data: NewEngineGrant},
+        TContext
+      > => {
+      return useMutation(getPermCreateEngineGrantMutationOptions(options), queryClient);
+    }
     export type permExplainResponse200 = {
   data: ExplainResponse
   status: 200
@@ -342,6 +1009,112 @@ export const usePermExplain = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermExplainMutationOptions(options), queryClient);
+    }
+    export type permExplainCapabilityResponse200 = {
+  data: ExplainCapabilityResponse
+  status: 200
+}
+
+export type permExplainCapabilityResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permExplainCapabilityResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permExplainCapabilityResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permExplainCapabilityResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permExplainCapabilityResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permExplainCapabilityResponseSuccess = (permExplainCapabilityResponse200) & {
+  headers: Headers;
+};
+export type permExplainCapabilityResponseError = (permExplainCapabilityResponse400 | permExplainCapabilityResponse401 | permExplainCapabilityResponse403 | permExplainCapabilityResponse404 | permExplainCapabilityResponse409) & {
+  headers: Headers;
+};
+
+export type permExplainCapabilityResponse = (permExplainCapabilityResponseSuccess | permExplainCapabilityResponseError)
+
+export const getPermExplainCapabilityUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/explain/capability`
+}
+
+/**
+ * Evaluate one user and one engine capability on the artifact the engine's profile serves. Undecidable is returned as such: on a delegating Trino profile every impersonation question is Undecidable, because the self-impersonation baseline names `{USER}`, which egret's evaluator does not expand.
+ */
+export const permExplainCapability = async (explainCapabilityRequest: ExplainCapabilityRequest, options?: Parameters<typeof customInstance>[1]): Promise<permExplainCapabilityResponse> => {
+
+  return customInstance<permExplainCapabilityResponse>(getPermExplainCapabilityUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(explainCapabilityRequest)
+  }
+);}
+
+
+
+
+
+export const getPermExplainCapabilityMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permExplainCapability>>, TError,{data: ExplainCapabilityRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permExplainCapability>>, TError,{data: ExplainCapabilityRequest}, TContext> => {
+
+const mutationKey = ['permExplainCapability'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permExplainCapability>>, {data: ExplainCapabilityRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permExplainCapability(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermExplainCapabilityMutationResult = NonNullable<Awaited<ReturnType<typeof permExplainCapability>>>
+    export type PermExplainCapabilityMutationBody = ExplainCapabilityRequest
+    export type PermExplainCapabilityMutationError = ErrorBody
+
+    export const usePermExplainCapability = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permExplainCapability>>, TError,{data: ExplainCapabilityRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permExplainCapability>>,
+        TError,
+        {data: ExplainCapabilityRequest},
+        TContext
+      > => {
+      return useMutation(getPermExplainCapabilityMutationOptions(options), queryClient);
     }
     export type permExplainPrincipalResponse200 = {
   data: ExplainPrincipalResponse

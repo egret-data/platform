@@ -14,11 +14,12 @@
  * time, not one a steward discovers from a query that returns no rows.
  */
 export interface SkipReport {
-  /** `grant` | `rule` | `clearance`. */
+  /** `grant` | `rule` | `clearance` | `engine_grant`. */
   source_kind: string;
   /**
      * The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
-     * whose classification gate could not be expressed (SP4c Task 2).
+     * whose classification gate could not be expressed (SP4c Task 2), or for
+     * `engine_grant` the `perm.engine_grants` id (F11).
      */
   id: string;
   reason: string;

@@ -380,6 +380,31 @@ describe("PolicyMigrationPage — preview before migrate", () => {
     expect(within(self).getByText("allow-analysts")).toBeInTheDocument();
   });
 
+  /** F11: an engine grant compiles to `perm-engine-<id>`, another compiler
+   *  prefix; a preview counts it by kind like the other three. */
+  it("counts a preview's compiled engine grant policies by kind", async () => {
+    const user = userEvent.setup();
+    const base = proved();
+    vi.mocked(migrateServicePolicies).mockResolvedValueOnce({
+      ...base,
+      profiles: [
+        { ...base.profiles[0], added_policies: ["perm-grant-9a", "perm-engine-7c"] },
+        base.profiles[1],
+      ],
+    });
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+
+    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const self = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
+    expect(
+      within(self).getByText("1 compiled grant policy, 1 compiled engine grant policy (named when written)"),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/perm-engine-7c/)).toBeNull();
+  });
+
   it("renders a disagreement as the disagreeing probe, and does not enable Migrate", async () => {
     const user = userEvent.setup();
     vi.mocked(migrateServicePolicies).mockResolvedValue(

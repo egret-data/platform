@@ -2036,3 +2036,40 @@ describe("SubjectUserField — the subject's ref is the allocated username (fact
     expect(screen.queryByRole("option", { name: /Bob Roe/ })).not.toBeInTheDocument();
   });
 });
+
+describe("ExplainResultView — an engine grant (F11)", () => {
+  /**
+   * A decision attributed to `perm-engine-{uuid}` names the engine grant and the
+   * Ranger policy, and says nothing about a clearance: before this branch the
+   * attribution fell through to the clearance block, which assumes a tag.
+   */
+  test("renders the engine grant and its Ranger policy, and no clearance", async () => {
+    const id = "44444444-4444-4444-8444-444444444444";
+    answer.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            tags: [],
+            tag_policies_in_download: 0,
+            accesses: [
+              {
+                access_type: "select",
+                decision: { kind: "allowed", policy_id: 70, policy_name: `perm-engine-${id}` },
+                attribution: { kind: "engine_grant", engine_grant_id: id },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    await renderAnswer();
+    expect(screen.getByText(`Engine grant ${id}`)).toBeInTheDocument();
+    expect(screen.getByText(`perm-engine-${id}`)).toBeInTheDocument();
+    expect(screen.queryByTestId("clearance-attribution")).toBeNull();
+  });
+});
