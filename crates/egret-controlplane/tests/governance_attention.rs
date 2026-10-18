@@ -1070,3 +1070,26 @@ async fn a_long_compile_error_is_shortened_in_its_sample() {
     assert!(head.starts_with("recompiling profile \"k_long\" would emit xxx"));
     assert!(tail.contains("last success none recorded"), "{tail}");
 }
+
+/// Review M6: a Trino profile whose policies are polled but whose tag poll
+/// stopped 10 minutes ago has a quiet tag poll, which is what it is told; it
+/// is not "behind" on its tag version.
+#[tokio::test]
+async fn a_tag_poll_gone_quiet_is_reported_as_quiet_not_behind() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let s = live_profile(&f, "t_tags_quiet", "trino").await;
+    counters(&f, s, 5, 3, 3600).await;
+    poll(&f, s, "trino@p-t_tags_quiet", "policies", 5, 10).await;
+    poll(&f, s, "trino@p-t_tags_quiet", "tags", 3, 600).await;
+    let token = session(&f, &["policy:read", "engine:read"]).await;
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(labels(&body, "plugin_behind").is_empty(), "{body}");
+    assert_eq!(labels(&body, "plugin_quiet"), ["t_tags_quiet"], "{body}");
+    assert_eq!(
+        finding(&body, "plugin_quiet").unwrap()["sentence"],
+        "No plugin has polled the tags of profile t_tags_quiet for 10 minutes, while its policies are polled."
+    );
+}

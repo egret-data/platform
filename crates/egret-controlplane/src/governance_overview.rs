@@ -690,6 +690,16 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
         let age = newest.map(|at| (now - at).num_seconds());
         let silent = age.is_none_or(|a| a >= SILENT_SECS);
         let quiet = !silent && age.is_some_and(|a| a >= QUIET_SECS);
+        // Review M6: the tags kind on its own. A plugin whose policies are
+        // polled but whose tag poll stopped (5 min to 24 h) has a quiet tag
+        // poll; that is what it is told, and its tag version is not judged.
+        let tags_age = rows
+            .iter()
+            .filter(|r| r.kind == "tags")
+            .map(|r| (now - r.at).num_seconds())
+            .min();
+        let tags_quiet =
+            !silent && !quiet && tags_age.is_some_and(|a| (QUIET_SECS..SILENT_SECS).contains(&a));
         let (engine_id, engine) = p.running[0].clone();
         let sentence = match which {
             Drift::Silent if silent => Some(format!(
@@ -702,6 +712,12 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
                 "No plugin has polled profile {} for {} minutes.",
                 p.name,
                 age.unwrap_or(0) / 60
+            )),
+            Drift::Quiet if tags_quiet => Some(format!(
+                "No plugin has polled the tags of profile {} for {} minutes, while its policies \
+                 are polled.",
+                p.name,
+                tags_age.unwrap_or(0) / 60
             )),
             Drift::Behind if !silent && !quiet => behind(p, &rows, now),
             _ => None,
@@ -770,9 +786,12 @@ fn behind(p: &DriftProfile, rows: &[&LedgerRow], now: DateTime<Utc>) -> Option<S
         ("tags", p.tag_version, "tag"),
     ] {
         let of_kind: Vec<&&LedgerRow> = rows.iter().filter(|r| r.kind == kind).collect();
+        // A kind nobody polled within 5 min is not judged here: within 24 h it
+        // is reported as quiet (review M6), and a kind with no download at
+        // all (StarRocks never downloads tags) is never judged.
         if !of_kind
             .iter()
-            .any(|r| (now - r.at).num_seconds() < SILENT_SECS)
+            .any(|r| (now - r.at).num_seconds() < QUIET_SECS)
         {
             continue;
         }

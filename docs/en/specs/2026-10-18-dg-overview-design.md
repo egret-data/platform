@@ -393,7 +393,10 @@ Sentences carry the honesty this programme learned in #1 and #2: a label never c
     plugin only once it stops polling. The threshold stays 90 s for both kinds (confirmation takes two polls, about 60 s at the rendered
     30 s poll).
   - A kind is judged only when the profile has a row of that kind polled within 24 h. StarRocks never
-    downloads tags, so a missing tags download is never reported for it.
+    downloads tags, so a missing tags download is never reported for it. A kind whose newest poll is older than
+    5 min is not judged for `plugin_behind` either: when the profile's policies are still polled, its tag poll is
+    reported as quiet ("No plugin has polled the tags of profile P for N minutes, while its policies are polled.",
+    review M6).
 - `updated_at` is set by other updates too, which can only delay `plugin_behind`, never raise it falsely; the
   spec says so and Task 1 measures it.
 - `tags_without_clearance`: "N classifications have no clearance: they gate nothing." Not "unprotected".

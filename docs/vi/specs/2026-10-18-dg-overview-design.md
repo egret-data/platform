@@ -328,7 +328,9 @@ Các câu mang sự trung thực mà chương trình đã học ở #1 và #2: n
     thì không luật độ lệch nào đánh dấu; `plugin_quiet` và `plugin_silent` chỉ bắt được plugin khi nó ngừng poll. Ngưỡng vẫn 90 s cho cả
     hai kind (xác nhận cần hai lần poll, khoảng 60 s ở poll 30 s mặc định).
   - Một kind chỉ được xét khi profile có dòng của kind đó poll trong 24 h. StarRocks không bao giờ tải tag, nên
-    không bao giờ báo thiếu lần tải tag cho nó.
+    không bao giờ báo thiếu lần tải tag cho nó. Một kind có lần poll mới nhất cũ hơn 5 phút cũng không bị xét
+    `plugin_behind`: khi policies của profile vẫn được poll, việc poll tag được báo là quiet ("No plugin has polled
+    the tags of profile P for N minutes, while its policies are polled.", review M6).
 - `updated_at` cũng bị các update khác đặt, điều đó chỉ có thể làm `plugin_behind` đến muộn, không bao giờ báo sai;
   spec nói vậy và Task 1 đo điều đó.
 - `tags_without_clearance`: "N classifications have no clearance: they gate nothing." Không nói "unprotected".
