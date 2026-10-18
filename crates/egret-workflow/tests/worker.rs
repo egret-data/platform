@@ -2071,6 +2071,80 @@ async fn a_loop_iteration_copies_its_parents_labels_and_a_subflow_child_does_not
     assert_eq!(child, None, "`inheritLabels` is not honoured");
 }
 
+/// **A `Loop` iteration inherits its parent's `variables`; a `Subflow` child
+/// does not** (final review I2, ruling D10). Kestra's
+/// `Execution.loopExecution` builds the iteration with `this.variables`, so a
+/// `SetVariables` before the loop is visible in its body; a `Subflow` child is
+/// a new execution of another flow and reads that flow's own `variables:`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_iteration_inherits_its_parents_variables_and_a_subflow_child_does_not(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: vars-child\nnamespace: t\nvariables:\n  x: child\ntasks:\n  - id: out\n    \
+         type: io.kestra.plugin.core.output.OutputValues\n    values:\n      \
+         v: \"{{ vars.x }}\"\n",
+    )
+    .await;
+    let source = "id: vars-parent\nnamespace: t\ntasks:\n  - id: set\n    \
+         type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      x: 1\n  \
+         - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[1]'\n    \
+         tasks:\n      - id: out\n        type: io.kestra.plugin.core.output.OutputValues\n        \
+         values:\n          v: \"{{ vars.x }}\"\n  \
+         - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+         flowId: vars-child\n";
+    let parent = start_updates(&pool, ws, source).await;
+
+    // Act
+    settle_everything(&pool, &core_handlers()).await;
+
+    // Assert
+    let iteration: (Option<serde_json::Value>, Uuid) = sqlx::query_as(
+        "SELECT variables, id FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("the iteration");
+    assert_eq!(
+        iteration.0,
+        Some(serde_json::json!({"x": 1})),
+        "the iteration copies the parent's variables"
+    );
+    assert_eq!(
+        run_outputs(&pool, iteration.1, "out").await,
+        Some(serde_json::json!({"values": {"v": "1"}})),
+        "and its body renders them"
+    );
+    let child: (Option<serde_json::Value>, Uuid) = sqlx::query_as(
+        "SELECT variables, id FROM workflow.executions WHERE trigger_execution_id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("the subflow child");
+    assert_eq!(child.0, None, "a Subflow child copies nothing");
+    assert_eq!(
+        run_outputs(&pool, child.1, "out").await,
+        Some(serde_json::json!({"values": {"v": "child"}})),
+        "it reads its own flow's `variables:`"
+    );
+    assert_eq!(
+        execution_history(&pool, parent)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("SUCCESS"))
+    );
+}
+
 /// **The brief's property: a `Loop` over two values spawns two executions,
 /// ordered by `loopRun.index` and NOT by the creation instant.**
 ///
