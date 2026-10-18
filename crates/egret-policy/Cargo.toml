@@ -16,6 +16,8 @@ egret-engine-mgmt-api.workspace = true
 # (principal picker) from the core hub; gates run through
 # `egret_core::authz::require` against the injected PDP (B1b-2).
 egret-auth.workspace = true
+# DG #3: hand-written policy writes record governance events in their transaction.
+egret-audit.workspace = true
 # The one service-def hierarchy walker (SP4d Task 4). See the import comment
 # in `default_policies.rs`: this seeder and the Ranger evaluator must walk the
 # same hierarchy, so the walker lives in the pure evaluator crate and this one

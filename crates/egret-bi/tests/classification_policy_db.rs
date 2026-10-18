@@ -45,7 +45,7 @@ async fn set_get_update_clear_and_cascade() {
     let g1 = Uuid::new_v4();
     let g2 = Uuid::new_v4();
     let groups = vec![g1, g2];
-    pol.set_policy(tag.id, &roles, &groups, Some(by))
+    pol.set_policy(tag.id, &roles, &groups, &principal_of(by))
         .await
         .expect("set policy");
     assert_eq!(
@@ -56,7 +56,7 @@ async fn set_get_update_clear_and_cascade() {
     // set_policy again UPSERTS (updates) BOTH lists for the same tag.
     let roles2 = vec!["clearance_top".to_string()];
     let groups2 = vec![Uuid::new_v4()];
-    pol.set_policy(tag.id, &roles2, &groups2, Some(by))
+    pol.set_policy(tag.id, &roles2, &groups2, &principal_of(by))
         .await
         .expect("update policy");
     assert_eq!(
@@ -66,7 +66,7 @@ async fn set_get_update_clear_and_cascade() {
 
     // A GROUP-ONLY policy (no roles) is a legal gate.
     let group_only = vec![Uuid::new_v4()];
-    pol.set_policy(tag.id, &[], &group_only, Some(by))
+    pol.set_policy(tag.id, &[], &group_only, &principal_of(by))
         .await
         .expect("set group-only");
     assert_eq!(
@@ -75,7 +75,7 @@ async fn set_get_update_clear_and_cascade() {
     );
 
     // list_policies surfaces the (tag_id, roles, groups) triple for the PDP / UI.
-    pol.set_policy(tag.id, &roles2, &groups2, Some(by))
+    pol.set_policy(tag.id, &roles2, &groups2, &principal_of(by))
         .await
         .expect("re-set for list");
     let listed = pol.list_policies().await.expect("list");
@@ -87,7 +87,7 @@ async fn set_get_update_clear_and_cascade() {
     );
 
     // both lists empty is a legal (informational, NO gate) policy row.
-    pol.set_policy(tag.id, &[], &[], Some(by))
+    pol.set_policy(tag.id, &[], &[], &principal_of(by))
         .await
         .expect("set empty");
     assert_eq!(
@@ -96,11 +96,13 @@ async fn set_get_update_clear_and_cascade() {
     );
 
     // clear_policy removes the row.
-    pol.clear_policy(tag.id).await.expect("clear");
+    pol.clear_policy(tag.id, &principal_of(by))
+        .await
+        .expect("clear");
     assert_eq!(pol.get_policy(tag.id).await.expect("get"), None);
 
     // deleting the tag CASCADEs any policy row away.
-    pol.set_policy(tag.id, &roles, &groups, Some(by))
+    pol.set_policy(tag.id, &roles, &groups, &principal_of(by))
         .await
         .expect("re-set policy");
     assert!(pol.get_policy(tag.id).await.expect("get").is_some());
@@ -137,7 +139,7 @@ async fn set_policy_rejects_injection_payloads() {
 
     // A quote-injection entry → rejected.
     let bad_quote = pol
-        .set_policy(tag.id, &["bad\"role".to_string()], &[], Some(by))
+        .set_policy(tag.id, &["bad\"role".to_string()], &[], &principal_of(by))
         .await;
     assert!(
         matches!(bad_quote, Err(egret_bi::BiError::BadRequest(_))),
@@ -150,7 +152,7 @@ async fn set_policy_rejects_injection_payloads() {
             tag.id,
             &["x\"]) || true || context.roles.containsAny([\"y".to_string()],
             &[],
-            Some(by),
+            &principal_of(by),
         )
         .await;
     assert!(
@@ -162,7 +164,7 @@ async fn set_policy_rejects_injection_payloads() {
     // and a MIXED list with one bad entry rejects the WHOLE call (no partial write).
     for bad in ["back\\slash", "brack]et", "has space", "pi|pe", "", "UPPER"] {
         let r = pol
-            .set_policy(tag.id, &[bad.to_string()], &[], Some(by))
+            .set_policy(tag.id, &[bad.to_string()], &[], &principal_of(by))
             .await;
         assert!(
             matches!(r, Err(egret_bi::BiError::BadRequest(_))),
@@ -174,7 +176,7 @@ async fn set_policy_rejects_injection_payloads() {
             tag.id,
             &["finance_cleared".to_string(), "bad\"role".to_string()],
             &[],
-            Some(by),
+            &principal_of(by),
         )
         .await;
     assert!(
@@ -194,11 +196,23 @@ async fn set_policy_rejects_injection_payloads() {
         "role:sub-team".to_string(),
     ];
     let good_groups = vec![Uuid::new_v4()];
-    pol.set_policy(tag.id, &good, &good_groups, Some(by))
+    pol.set_policy(tag.id, &good, &good_groups, &principal_of(by))
         .await
         .expect("valid clearance role names must be accepted");
     assert_eq!(
         pol.get_policy(tag.id).await.expect("get"),
         Some((good, good_groups))
     );
+}
+
+/// DG #3: the acting principal of a clearance write, for a user that exists.
+fn principal_of(id: uuid::Uuid) -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(id),
+        email: "actor@egret.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }

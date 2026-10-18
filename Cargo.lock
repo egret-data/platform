@@ -3561,6 +3561,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "egret-audit",
  "egret-auth",
  "egret-core",
  "egret-engine-mgmt-api",

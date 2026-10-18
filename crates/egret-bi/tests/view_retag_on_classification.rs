@@ -353,12 +353,20 @@ async fn a_tag_gaining_or_losing_its_clearance_retags_the_views() {
     let policies = ClassificationPolicyRepo::new(fx.db.clone(), egret_events::EventBus::new());
 
     let before = fx.tag_version().await;
-    policies.clear_policy(fx.pii).await.expect("clear");
+    policies
+        .clear_policy(fx.pii, &test_actor(&fx.db.pool).await)
+        .await
+        .expect("clear");
     assert!(fx.rows(fx.w1, &v.name).await.is_empty());
     assert_eq!(fx.tag_version().await, before + 1);
 
     policies
-        .set_policy(fx.pii, &[unique("vr-role")], &[], None)
+        .set_policy(
+            fx.pii,
+            &[unique("vr-role")],
+            &[],
+            &test_actor(&fx.db.pool).await,
+        )
         .await
         .expect("set");
     assert_eq!(fx.rows(fx.w1, &v.name).await, derived(fx.pii, &["id"]));
@@ -438,4 +446,31 @@ async fn one_classification_moves_each_affected_service_by_exactly_one() {
             "service {s} (index {i}) moves by exactly one"
         );
     }
+}
+
+/// DG #3: the acting principal of a clearance write, for a user that exists.
+fn principal_of(id: uuid::Uuid) -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(id),
+        email: "actor@egret.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
+}
+
+/// DG #3: a clearance write takes its acting principal, stored as
+/// `created_by` (which references `users(id)`), so this is a real user.
+async fn test_actor(pool: &sqlx::PgPool) -> egret_core::Principal {
+    let id: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!(
+                "actor_{}@egret.local",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .fetch_one(pool)
+            .await
+            .expect("insert actor");
+    principal_of(id)
 }
