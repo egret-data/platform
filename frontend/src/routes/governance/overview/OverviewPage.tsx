@@ -4,6 +4,7 @@ import { useAuth } from "@/auth/useAuth";
 import { ListPageShell } from "@/components/explore/ListPageShell";
 import { AttentionSection } from "@/routes/governance/overview/AttentionSection";
 import { CountsStrip } from "@/routes/governance/overview/CountsStrip";
+import { RecentChanges } from "@/routes/governance/overview/RecentChanges";
 
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -47,6 +48,9 @@ export default function OverviewPage() {
           onRetry={() => void attention.refetch()}
           canReadTags={canReadTags}
         />
+      </Section>
+      <Section id="overview-changes" title="Recent changes">
+        <RecentChanges />
       </Section>
     </ListPageShell>
   );
