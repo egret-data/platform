@@ -28,7 +28,7 @@ work; an `ExecutableTask` spawns another execution; an
        39     46  FlowableTask              io.kestra.plugin.core.flow.Loop
        25     29  FlowableTask              io.kestra.plugin.core.flow.If
        24     36  FlowableTask              io.kestra.plugin.core.flow.Sequential
-       23     25  RunnableTask              io.kestra.plugin.core.output.OutputValues
+       23     25  RunnableTask             *io.kestra.plugin.core.output.OutputValues
        22     24  ExecutableTask            io.kestra.plugin.core.flow.Subflow
        20     26  RunnableTask             *io.kestra.plugin.core.flow.Sleep
        12     12  FlowableTask              io.kestra.plugin.core.flow.Pause
@@ -96,8 +96,8 @@ declares whose Kestra class is not a `FlowableTask` is one of
 `core.log.Log`, `core.debug.Return`, `core.execution.Fail`,
 `core.flow.Sleep`.
 
-    204  in the population
-     69  declare some other non-flowable task
+    221  in the population
+     52  declare some other non-flowable task
   -----
     273  TOTAL, the comparable `runs` entries
 
@@ -105,7 +105,7 @@ declares whose Kestra class is not a `FlowableTask` is one of
   --------------------------------
 
   The plan's Step 1 says 194 and asks for it to be re-derived. It is
-  204. The 194 is reproducible and it comes from two errors in the
+  221. The 194 is reproducible and it comes from two errors in the
   same quick pass, both of which this file has to avoid:
 
   (a) it swept `triggers:` in. A textual pass over `type:` lines cannot
@@ -119,22 +119,22 @@ declares whose Kestra class is not a `FlowableTask` is one of
 
   Reproducing both errors over the same corpus gives:
 
-      197  entries whose every `type:` line, triggers included, is one
+      213  entries whose every `type:` line, triggers included, is one
            of the four or lives under `core.flow.*`
-       20  of those are NOT in the population above
-       27  population members the naive pass drops
-      204  = 197 - 20 + 27, the population
+       21  of those are NOT in the population above
+       29  population members the naive pass drops
+      221  = 213 - 21 + 29, the population
 
-  Every one of the 27 the naive pass drops declares a `triggers:` --
+  Every one of the 29 the naive pass drops declares a `triggers:` --
   derived, and the generator refuses to write this file if one does not.
-  The 20 it admits are the module classification's, and this is what
+  The 21 it admits are the module classification's, and this is what
   they declare that a handler cannot run (the rows overlap):
 
-       20  ExecutableTask           io.kestra.plugin.core.flow.Subflow
+       21  ExecutableTask           io.kestra.plugin.core.flow.Subflow
 
   Believe this file's figure over the plan's, and note WHICH way the
   error ran: the brief's 194 is not conservative, it is a different set.
-  It admits 20 entries the population excludes and excludes 27 it admits.
+  It admits 21 entries the population excludes and excludes 29 it admits.
 
 
 3. HOW MANY OF THEM NEED AN OUTPUT, NOT JUST A RUN
@@ -146,19 +146,19 @@ An expression that reads `{{ outputs... }}`, `{{ taskrun... }}` or
 comments are cut before scanning -- one corpus comment writes
 `tasksWithState()` in prose.
 
-     47  read at least one of the three
-    157  read none of them
+     59  read at least one of the three
+    162  read none of them
   -----
-    204  TOTAL, the population
+    221  TOTAL, the population
 
   By marker. The rows CAN overlap -- one flow may write both -- and
-  measured, NONE does, so they sum to 47 exactly:
+  1 of them do, so these do not sum to 59:
 
-       16  outputs
-       30  taskrun
+       28  outputs
+       31  taskrun
         1  tasksWithState
     -----
-       47  TOTAL
+       60  TOTAL
 
   The three are NOT one dependency, and lumping them overstates the
   problem. `taskrun.` reads the CURRENT run's own metadata -- its id,
@@ -167,7 +167,7 @@ comments are cut before scanning -- one corpus comment writes
   here. `outputs.` and `tasksWithState()` read ANOTHER task's result, and
   those are the entries where an exact handler output is load-bearing:
 
-       17  read another task's result (`outputs.` or `tasksWithState()`)
+       29  read another task's result (`outputs.` or `tasksWithState()`)
 
   This is what W3c's `runIf:` fix banks nothing against: W3a's harness
   render context reaches `inputs` and `vars` and stops. The real driver
@@ -320,27 +320,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    201  reproduced today, and by nothing the driver removes
+    212  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      31  not reproduced today, and nothing found here blocks it
-     69  not reproduced today, and blocked -- by cause below
+     58  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 201 + 31 = **232**
-  CEILING, feed retained = 201 + 0 + 31 = 232
+  CEILING, feed removed  = 212 + 31 = **243**
+  CEILING, feed retained = 212 + 0 + 31 = 243
 
-  Today the ratchet matches 201. The two ceilings are the same
+  Today the ratchet matches 212. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **232 is the bound this package should be held to**, because removing
+  **243 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  232 -- reported as a decision, not as progress.
+  243 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -380,13 +380,12 @@ Two rules, and they are deliberately different:
   What blocks the rest, by cause. The rows OVERLAP -- an entry may be
   blocked several times over -- so they do not sum to the bucket:
 
-       23  handler    io.kestra.plugin.core.output.OutputValues
        14  construct  finally:
        10  construct  afterExecution:
-        7  construct  flow-level outputs:
         7  construct  io.kestra.plugin.core.execution.Labels
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
+        4  construct  flow-level outputs:
         4  refusal    egret over-accepts it -- W1's validation, not a handler
         3  construct  flow concurrency:
         3  construct  flow sla:
@@ -401,12 +400,12 @@ Two rules, and they are deliberately different:
         1  handler    io.kestra.plugin.core.kv.Set
         1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       69  DISTINCT entries blocked (the rows above overlap)
+       58  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
-       30  a missing handler
-       47  a construct no W3b task owns
+        8  a missing handler
+       44  a construct no W3b task owns
         0  a state RunState cannot hold
         4  an over-acceptance -- W1's validation
 
@@ -470,7 +469,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 232 - 6 = 226
+    working expectation = 243 - 6 = 237
 
   Two of them deserve a sentence each:
 

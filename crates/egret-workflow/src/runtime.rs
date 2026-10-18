@@ -907,7 +907,7 @@ impl Served {
 /// for `none`, `docker` and (through [`register_runner_tasks`]) `kubernetes`,
 /// so a handler added to one and not the other fails by name.
 pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
-    use crate::worker::handlers::{fail, kv, log, namespace, ret, sleep, storage};
+    use crate::worker::handlers::{fail, kv, log, namespace, output_values, ret, sleep, storage};
 
     // Every deployment: `Handlers::with_core_tasks`, then the storage,
     // namespace and KV `register`s -- all through `add_publishable`.
@@ -917,6 +917,8 @@ pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
         ret::TYPE_ID,
         fail::TYPE_ID,
         sleep::TYPE_ID,
+        // Group C1 Task 2.
+        output_values::TYPE_ID,
         storage::WRITE,
         storage::SIZE,
         storage::CONCAT,

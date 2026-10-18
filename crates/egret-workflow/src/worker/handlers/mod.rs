@@ -45,6 +45,7 @@ pub mod kestra;
 pub mod kv;
 pub mod log;
 pub mod namespace;
+pub mod output_values;
 pub mod python;
 pub mod ret;
 pub mod script;

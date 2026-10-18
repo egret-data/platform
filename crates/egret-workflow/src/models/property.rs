@@ -125,11 +125,111 @@ impl<'de, T> Deserialize<'de> for Property<T> {
     }
 }
 
+/// Kestra's `Property.asMap` (`Property.java:264-287`) over a property's raw
+/// value, as `runContext.render(values).asMap(String.class, Object.class)`
+/// reads it (`OutputValues.java:71`). Group C1 Task 2; C2's `SetVariables` and
+/// `Labels` reuse it.
+///
+/// - A **string** that, trimmed, starts with an opening Pebble delimiter
+///   (`{{` or `{%`) and ends with a closing one (`}}` or `%}`) --
+///   `PebbleUtil.startsWithOpeningBlockDelimiter` /
+///   `endsWithClosingBlockDelimiter` -- is rendered whole and its text read
+///   as a JSON object.
+/// - Any **other string** is read as a JSON object first
+///   (`MAPPER.readValue(expression, Map.class)`), then walked as below.
+/// - An **object** is walked as `VariableRenderer.render(Map)` does
+///   (`VariableRenderer.java:187-221`): every key is rendered, every string
+///   leaf is rendered to a string, arrays and objects are walked, and
+///   numbers, booleans and null are kept. Two keys that render to the same
+///   text keep the FIRST (`putIfAbsent`).
+/// - Anything else (an array, a number, a boolean, null) is not a map: an
+///   error, as Jackson's `readValue(…, Map.class)` throws on its text.
+///
+/// `field` is the property's name, the prefix of every error:
+/// `` `values.<key>`: <render error> ``. The output keeps source order
+/// (`serde_json`'s `preserve_order`, Kestra's `LinkedHashMap`).
+pub fn render_map(
+    raw: &serde_json::Value,
+    field: &str,
+    cx: &RenderContext,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    use serde_json::Value;
+    match raw {
+        Value::Object(map) => render_object(map, field, cx),
+        Value::String(source) => {
+            let trimmed = source.trim();
+            let whole = (trimmed.starts_with("{{") || trimmed.starts_with("{%"))
+                && (trimmed.ends_with("}}") || trimmed.ends_with("%}"));
+            if whole {
+                let text = render_str(source, cx).map_err(|e| format!("`{field}`: {e}"))?;
+                match serde_json::from_str::<Value>(&text) {
+                    Ok(Value::Object(map)) => Ok(map),
+                    _ => Err(format!(
+                        "`{field}`: the expression rendered `{text}`, which is not a JSON object"
+                    )),
+                }
+            } else {
+                match serde_json::from_str::<Value>(source) {
+                    Ok(Value::Object(map)) => render_object(&map, field, cx),
+                    _ => Err(format!("`{field}`: `{source}` is not a JSON object")),
+                }
+            }
+        }
+        other => Err(format!(
+            "`{field}`: expected a map, got {}",
+            match other {
+                Value::Array(_) => "an array",
+                Value::Number(_) => "a number",
+                Value::Bool(_) => "a boolean",
+                _ => "null",
+            }
+        )),
+    }
+}
+
+/// [`render_map`]'s walk of one object, at `path`.
+fn render_object(
+    map: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    cx: &RenderContext,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (raw_key, value) in map {
+        let at = format!("{path}.{raw_key}");
+        let key = render_str(raw_key, cx).map_err(|e| format!("`{at}`: {e}"))?;
+        let value = render_value(value, &at, cx)?;
+        out.entry(key).or_insert(value);
+    }
+    Ok(out)
+}
+
+/// `VariableRenderer.renderObject`: strings rendered, arrays and objects
+/// walked, every other scalar kept.
+fn render_value(
+    value: &serde_json::Value,
+    path: &str,
+    cx: &RenderContext,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    Ok(match value {
+        Value::String(s) => Value::String(render_str(s, cx).map_err(|e| format!("`{path}`: {e}"))?),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, v)| render_value(v, &format!("{path}[{i}]"), cx))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(map) => Value::Object(render_object(map, path, cx)?),
+        other => other.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::Property;
+    use super::{render_map, Property};
     use crate::runners::env::{RenderContext, RenderError};
 
     fn cx(value: serde_json::Value) -> RenderContext {
@@ -268,5 +368,82 @@ mod tests {
     fn bare_property_rejects_null() {
         let err = serde_norway::from_str::<Property<String>>("null").unwrap_err();
         assert!(err.to_string().contains("null"), "unexpected error: {err}");
+    }
+    /// `render_map` (group C1 Task 2): Kestra's `Property.asMap` over a map
+    /// source walks it with `VariableRenderer.render(Map)`
+    /// (`VariableRenderer.java:187-221`): keys rendered, string leaves
+    /// rendered to strings, lists and maps walked, other scalars kept.
+    #[test]
+    fn render_map_renders_keys_and_string_leaves_and_keeps_other_scalars() {
+        let mut cx = RenderContext::new();
+        cx.insert("n", json!(2)).insert("k", json!("key"));
+        let raw = json!({"a": "{{ n + 1 }}", "{{ k }}": [1, "{{ n }}", {"x": true}], "z": null});
+        let out = render_map(&raw, "values", &cx).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(out),
+            json!({"a": "3", "key": [1, "2", {"x": true}], "z": null})
+        );
+    }
+
+    /// A string source that is one whole expression is rendered and its text
+    /// read as a JSON object (`Property.java:274-276`); text that is not one
+    /// is an error, not an empty map.
+    #[test]
+    fn render_map_parses_a_whole_expression_as_a_json_object() {
+        let mut cx = RenderContext::new();
+        cx.insert("m", json!({"p": 1}));
+        let out = render_map(&json!("{{ m | toJson }}"), "values", &cx).unwrap();
+        assert_eq!(serde_json::Value::Object(out), json!({"p": 1}));
+        let err = render_map(&json!("{{ 'not a map' }}"), "values", &cx).unwrap_err();
+        assert!(
+            err.starts_with(
+                "`values`: the expression rendered `not a map`, which is not a JSON object"
+            ),
+            "{err}"
+        );
+    }
+
+    /// `map.putIfAbsent(key, value)` (`VariableRenderer.java:207`): when two
+    /// keys render alike, the first in source order wins.
+    #[test]
+    fn render_map_keeps_the_first_of_two_keys_that_render_alike() {
+        let mut cx = RenderContext::new();
+        cx.insert("k", json!("a"));
+        let raw = json!({"a": "first", "{{ k }}": "second"});
+        assert_eq!(
+            render_map(&raw, "values", &cx).unwrap()["a"],
+            json!("first")
+        );
+    }
+
+    /// A string that is not an expression is read as a JSON object
+    /// (`MAPPER.readValue(expression, Map.class)`, `Property.java:280`) and
+    /// then walked; anything else that is not an object is an error.
+    #[test]
+    fn render_map_reads_a_literal_string_as_a_json_object_or_refuses_it() {
+        let mut cx = RenderContext::new();
+        cx.insert("n", json!(5));
+        let out = render_map(&json!(r#"{"a": "{{ n }}"}"#), "values", &cx).unwrap();
+        assert_eq!(serde_json::Value::Object(out), json!({"a": "5"}));
+        for raw in [
+            json!("plain text"),
+            json!([1, 2]),
+            json!(42),
+            json!(true),
+            json!(null),
+        ] {
+            let err = render_map(&raw, "values", &cx).unwrap_err();
+            assert!(err.starts_with("`values`"), "{raw}: {err}");
+        }
+    }
+
+    /// A render failure names where it happened.
+    #[test]
+    fn render_map_names_the_key_whose_value_failed_to_render() {
+        let cx = RenderContext::new();
+        let err = render_map(&json!({"a": {"b": "{{ nope.nope }}"}}), "values", &cx).unwrap_err();
+        assert!(err.starts_with("`values.a.b`: "), "{err}");
+        let err = render_map(&json!({"{{ nope }}": 1}), "values", &cx).unwrap_err();
+        assert!(err.starts_with("`values.{{ nope }}`: "), "{err}");
     }
 }

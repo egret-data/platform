@@ -6279,10 +6279,10 @@ found.
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
-| 8 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below |
+| 3 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **36** | **none of the above** | named individually in `UNATTRIBUTED` |
+| **30** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an
@@ -13297,3 +13297,38 @@ execution-history tokens. Task 5's reconstruction derives the four `Exit` runs
 (`is_an_exit`) and adds them back, as it does for `Subflow`. The handler-surface
 ceiling went 228 → 232: `Exit` is in `W3A_FLOWABLES`, which is the set the
 executor drives.
+
+## Group C1 Task 2: `OutputValues`, and eleven entries bank
+
+**What changed.** `io.kestra.plugin.core.output.OutputValues` has a
+`spec::registry` row, a worker handler (`worker::handlers::output_values`,
+which renders `values:` through `models::property::render_map`, Kestra's
+`Property.asMap`), a `runtime::served_for` key and a place in `driver::registry`.
+The census moved 254 → 274 live, `UNKNOWN_TYPE_REFUSED` 61 → 40 and
+`VALIDATE_REFUSED` 26 → 27: 21 flows left the unported-type bucket, 20 publish,
+and `valids/task-runif` now reaches its `Subflow` to `dummy_namespace/dummy_flow`
+and is refused there (`SUBFLOW_LOOKUPS_ON_REFUSED` 2 → 3). Twenty-one
+`PUBLISHED_BUT_REFUSED` rows went, eighteen `RUNS_REFUSED` entries (41 → 23),
+and the ratchet went from 100 mismatching / 100 baselined to 89 / 89.
+
+**Banked (11):** `flow-with-array-outputs`, `output-values`, `replay`,
+`task-runif`, `waitfor`, `waitfor-max-iterations`, `waitfor-multiple-tasks`,
+`waitfor-multiple-tasks-failed`, `waitfor-no-success`, `webhook-outputs`,
+`webhook-wait`.
+
+**Still baselined, with the cause measured by unbaselining them (7):** the
+three `after-execution*`, the two `flow-concurrency-queue-*after-execution` and
+`sleep-long` are held by `afterExecution:`, which egret does not run (the
+`afterExecution:` run is the one missing from egret's trace);
+`waitfor-child-task-warning` runs one more `WaitFor` iteration than the golden
+under `maxDuration: PT3S`, the poller-latency shape `loop-until-restart` is
+held by. `baseline.txt` says so on the line above each.
+
+**Pinned figures re-derived, not reset**: `EGRET_TOP_LEVEL_PAIRS` 727 → 753 and
+`EGRET_PAIRS_BEFORE_RESTRICTION` 944 → 970 (the twenty newly-running entries'
+26 pairs); asserted pairs 506 → 528, unasserted 610 → 588; the baselined run
+terminals 356 → 331, executions 135 → 124, run-history tokens 1388 → 1281 and
+execution-history tokens 488 → 437; the field breakdown `execution` 29 → 30,
+`runs` 45 → 52, `order` 20 → 26, total 96 → 85. The `Subflow` banks are fifteen
+(`task-runif` joins), and the baselined webhook entries one. The
+handler-surface ceiling went 232 → 243 and its population 204 → 221.

@@ -208,6 +208,13 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // Group C1 Task 2 (`worker::handlers::output_values`): FQCN only, no
+    // alias, and no reference -- it renders `values:` and nothing else.
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::output_values::TYPE_ID,
+        aliases: &[],
+        references: &[],
+    },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.flow.Sleep",
         aliases: &[],

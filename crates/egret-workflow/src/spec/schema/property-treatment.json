@@ -947,6 +947,25 @@
       "keepAmount": "honoured",
       "type": "honoured"
     },
+    "io.kestra.plugin.core.output.OutputValues": {
+      "allowFailure": "honoured",
+      "allowWarning": "honoured",
+      "assets": "ignored",
+      "description": "honoured",
+      "disabled": "honoured",
+      "id": "honoured",
+      "logLevel": "ignored",
+      "logToFile": "ignored",
+      "policyRefs": "ignored",
+      "retry": "honoured",
+      "runIf": "honoured",
+      "taskCache": "ignored",
+      "timeout": "honoured",
+      "type": "honoured",
+      "values": "honoured",
+      "version": "ignored",
+      "workerSelector": "ignored"
+    },
     "io.kestra.plugin.core.storage.Concat": {
       "allowFailure": "honoured",
       "allowWarning": "honoured",

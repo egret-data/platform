@@ -4,7 +4,9 @@
 mod execution;
 mod flow;
 mod input;
-mod property;
+// `pub(crate)` since group C1 Task 2: `property::render_map` is reached by its
+// module path from the worker handlers that read a map property.
+pub(crate) mod property;
 mod state;
 mod task;
 mod trigger;

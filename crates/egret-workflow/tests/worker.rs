@@ -1554,10 +1554,12 @@ async fn a_stored_allow_failure_run_fails_with_the_not_a_leaf_line(pool: sqlx::P
     fails_with_line(&pool, ex, "w", not_a_leaf_line("w", af)).await;
 }
 
-const OUTPUT_VALUES: &str = "io.kestra.plugin.core.output.OutputValues";
+/// A type Kestra ships and egret has no `TASK_TYPES` row for. It was
+/// `core.output.OutputValues` until group C1 Task 2 registered that.
+const UNREGISTERED: &str = "io.kestra.plugin.core.http.Request";
 
 /// **A stored execution of a type with no `TASK_TYPES` row reaches
-/// `NoHandler` and FAILS with its line.** `OutputValues` is
+/// `NoHandler` and FAILS with its line.** Such a type is
 /// `unknown_task_type` since no-silent-stall Task 1, so re-validating the
 /// stored source stopped it at `Unplannable`.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1565,13 +1567,13 @@ async fn a_stored_unregistered_type_run_fails_with_the_no_handler_line(pool: sql
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let stored = format!(
-        "id: stored-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+        "id: stored-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {UNREGISTERED}\n    \
          values:\n      k: v\n"
     );
     let served = "id: stored-ov\nnamespace: t\ntasks:\n  - id: o\n    \
                   type: io.kestra.plugin.core.log.Log\n    message: hi\n";
-    let ex = started_before_the_gate(&pool, ws, served, &stored, "o", OUTPUT_VALUES).await;
-    fails_with_line(&pool, ex, "o", no_handler_line(OUTPUT_VALUES)).await;
+    let ex = started_before_the_gate(&pool, ws, served, &stored, "o", UNREGISTERED).await;
+    fails_with_line(&pool, ex, "o", no_handler_line(UNREGISTERED)).await;
 }
 
 /// `a` then a `Loop` over one value whose body is `body`.
@@ -1599,7 +1601,7 @@ async fn a_stored_loop_whose_body_is_refused_spawns_and_its_run_fails(pool: sqlx
     let (_db, ws) = seed(&pool).await;
     let stored = log_then_loop(
         "stored-loop",
-        &format!("      - id: o\n        type: {OUTPUT_VALUES}\n        values:\n          k: v\n"),
+        &format!("      - id: o\n        type: {UNREGISTERED}\n        values:\n          k: v\n"),
     );
     let served = log_then_loop("stored-loop", LOG_BODY);
     let ex = start_execution(&pool, ws, None, &served, serde_json::json!({}))
@@ -1640,7 +1642,7 @@ async fn a_stored_loop_whose_body_is_refused_spawns_and_its_run_fails(pool: sqlx
     );
     assert_eq!(
         lines.of(child),
-        vec![(LogLevel::Error, no_handler_line(OUTPUT_VALUES))]
+        vec![(LogLevel::Error, no_handler_line(UNREGISTERED))]
     );
     let last = execution_history(&pool, ex).await;
     assert_eq!(
@@ -1667,14 +1669,14 @@ async fn a_stored_execution_replays_by_the_rules_it_started_under(pool: sqlx::Pg
     let retry = "    retry:\n      type: constant\n      behavior: CREATE_NEW_EXECUTION\n\
                  \x20     maxAttempts: 2\n      interval: PT0S\n";
     let stored = format!(
-        "id: stored-replay\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+        "id: stored-replay\nnamespace: t\ntasks:\n  - id: o\n    type: {UNREGISTERED}\n    \
          values:\n      k: v\n{retry}"
     );
     let served = format!(
         "id: stored-replay\nnamespace: t\ntasks:\n  - id: o\n    \
          type: io.kestra.plugin.core.log.Log\n    message: hi\n{retry}"
     );
-    let root = started_before_the_gate(&pool, ws, &served, &stored, "o", OUTPUT_VALUES).await;
+    let root = started_before_the_gate(&pool, ws, &served, &stored, "o", UNREGISTERED).await;
     let lines = std::sync::Arc::new(Lines::default());
     let reg = core_handlers_logging_to(&lines);
 
@@ -1695,7 +1697,7 @@ async fn a_stored_execution_replays_by_the_rules_it_started_under(pool: sqlx::Pg
     };
     drain(&pool, &reg).await;
 
-    let line = (LogLevel::Error, no_handler_line(OUTPUT_VALUES));
+    let line = (LogLevel::Error, no_handler_line(UNREGISTERED));
     assert_eq!(
         run_state(&pool, root, "o").await.as_deref(),
         Some("RETRIED")
@@ -1748,13 +1750,13 @@ async fn a_new_start_of_each_refused_flow_is_still_refused(pool: sqlx::PgPool) {
         // the refusal that remains (spec §2).
         "id: new-af\nnamespace: t\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n".to_string(),
         format!(
-            "id: new-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+            "id: new-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {UNREGISTERED}\n    \
              values:\n      k: v\n"
         ),
         log_then_loop(
             "new-loop",
             &format!(
-                "      - id: o\n        type: {OUTPUT_VALUES}\n        values:\n          k: v\n"
+                "      - id: o\n        type: {UNREGISTERED}\n        values:\n          k: v\n"
             ),
         ),
     ];
