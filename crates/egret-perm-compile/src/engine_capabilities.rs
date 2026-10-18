@@ -177,8 +177,9 @@ pub const NOT_GRANTABLE: &[NotGrantable] = &[
     NotGrantable {
         engine: EngineType::Trino,
         what: "trinouser impersonate",
-        why: "only for one named user: a wildcard or pattern would let the grantee become \
-              anyone, admins included",
+        why: "with a wildcard or pattern (any user): not grantable, it would let the grantee \
+              become anyone, admins included. Impersonating ONE named user is the grantable \
+              `trino.impersonate_user` capability",
     },
     NotGrantable {
         engine: EngineType::Trino,
@@ -530,6 +531,20 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The one not-grantable row that shares its key and access with a
+    /// grantable capability must say it is about the wildcard, so a UI cannot
+    /// read it as "impersonation is not grantable".
+    #[test]
+    fn the_wildcard_impersonation_row_says_it_is_the_wildcard() {
+        let row = NOT_GRANTABLE
+            .iter()
+            .find(|n| n.what == "trinouser impersonate")
+            .expect("row");
+        assert!(row.why.contains("wildcard"), "{}", row.why);
+        assert!(row.why.contains("any user"), "{}", row.why);
+        assert!(row.why.contains("trino.impersonate_user"), "{}", row.why);
     }
 
     /// Each `what` names a key, or a `key access` pair, that the def declares,

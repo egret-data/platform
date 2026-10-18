@@ -88,6 +88,7 @@ use crate::trigger::{
     SourceKind,
 };
 
+mod engine_grants;
 mod error;
 mod people;
 pub use error::PermHttpError;
@@ -130,6 +131,23 @@ pub fn perm_router() -> Router<PermState> {
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
         .route("/perm/overlaps", get(list_overlaps))
+        .route(
+            "/perm/engine-capabilities",
+            get(engine_grants::list_engine_capabilities),
+        )
+        .route(
+            "/perm/engines/{engine_id}/grants",
+            get(engine_grants::list_engine_grants).post(engine_grants::create_engine_grant),
+        )
+        .route(
+            "/perm/engine-grants",
+            get(engine_grants::list_all_engine_grants),
+        )
+        .route(
+            "/perm/engine-grants/{id}",
+            axum::routing::patch(engine_grants::patch_engine_grant)
+                .delete(engine_grants::delete_engine_grant),
+        )
         .route(
             "/perm/unresolved-principals",
             get(list_unresolved_principals),
@@ -185,6 +203,12 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         delete_rule,
         list_overlaps,
         list_unresolved_principals,
+        engine_grants::list_engine_capabilities,
+        engine_grants::list_engine_grants,
+        engine_grants::list_all_engine_grants,
+        engine_grants::create_engine_grant,
+        engine_grants::patch_engine_grant,
+        engine_grants::delete_engine_grant,
         people::list_people,
         people::read_user,
         people::allocate_username,
@@ -200,6 +224,21 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         undo_service_policy_migration
     ),
     components(schemas(
+        engine_grants::EngineCapabilitiesResponse,
+        engine_grants::EngineCapabilities,
+        engine_grants::CapabilityView,
+        engine_grants::CapabilityResource,
+        engine_grants::NotGrantableView,
+        engine_grants::EngineGrantsResponse,
+        engine_grants::EngineRef,
+        engine_grants::ProfileRef,
+        engine_grants::Reach,
+        engine_grants::ReachEngine,
+        engine_grants::EngineGrantView,
+        engine_grants::ManagedKind,
+        engine_grants::ManagedEntry,
+        engine_grants::NewEngineGrant,
+        engine_grants::EngineGrantWriteResponse,
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
         crate::principal_refs::UnresolvedPrincipal,
