@@ -1678,6 +1678,7 @@ pub async fn affected_services_for_classification(
 /// - **Grant arm:** catalog-scoped, exactly like [`affected_services_for_grant`]
 ///   — a `role` principal in `perm.grant_principals` only reaches the profiles
 ///   bound to that grant's catalog.
+/// - **Engine-grant arm** (F11): the profile of the grant's engine.
 ///
 /// **There is deliberately no rule-EXEMPTION arm**, and that is not the
 /// defensive omission it looks like. `validate_rule_shape` refuses a `Role` in
@@ -1727,6 +1728,8 @@ pub async fn affected_services_for_role_membership(
                 .map_err(db_err)?,
         );
     }
+    // F11: the profile of every engine whose engine grants name the role.
+    ids.extend(engine_grant_profiles_naming_via(conn, "role", &[role_name]).await?);
 
     normalize_service_order(&mut ids);
     Ok(ids)
@@ -1826,6 +1829,7 @@ pub async fn affected_services_for_workspace_members(
 ///   [`affected_services_for_grant`].
 /// - **Rule exemptions**: a PATH selector is catalog-scoped; a TAG selector
 ///   reaches every compiler-targeted profile (this module's Task 9 section).
+/// - **Engine grants** (F11): the profile of the grant's engine.
 ///
 /// **There is deliberately no clearance arm.** A tag's `required_groups` is not
 /// expanded — a group-only gate still compiles to nothing and reports the skip
@@ -1888,13 +1892,58 @@ pub async fn affected_services_for_group_membership(
                 .map_err(db_err)?,
         );
     }
+    // F11: the profile of every engine whose engine grants name the group.
+    ids.extend(engine_grant_profiles_naming_via(conn, "group", &names).await?);
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// F11 (spec §4.5): the profiles of every engine whose engine grants name a
+/// principal of `kind` in `refs` — the engine arm of the two membership
+/// affected sets. An engine grant reaches exactly its engine's profile.
+async fn engine_grant_profiles_naming_via(
+    conn: &mut sqlx::PgConnection,
+    kind: &str,
+    refs: &[&str],
+) -> Result<Vec<i64>, CompileError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grant_principals p \
+           JOIN perm.engine_grants g ON g.id = p.engine_grant_id \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE p.kind = $1::perm.principal_kind AND p.ref = ANY($2) \
+            AND e.authz_service_id IS NOT NULL",
+    )
+    .bind(kind)
+    .bind(refs)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// F11 (spec E21, amended): the profiles of every engine whose impersonation
+/// grants target `user_id`. Deleting that user cascades those grants away, so
+/// the delete must recompile these profiles in its own transaction or the
+/// compiled policy keeps naming a username the next person can be minted.
+pub async fn affected_services_for_user_delete(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<i64>, CompileError> {
+    let mut ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE g.target_user_id = $1 AND e.authz_service_id IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
 
 /// Every stored reference to a group in `group_names` by NAME: the grant
-/// principals and rule exemptions [`affected_services_for_group_membership`]
-/// reads, one row each, ordered by name, source, id and position. The body of
+/// principals, rule exemptions and (F11) engine-grant principals
+/// [`affected_services_for_group_membership`] reads, one row each, ordered by name, source, id and position. The body of
 /// `egret_auth::groups::GroupMembershipRecompiler::group_references_in_tx`
 /// (2026-10-18 design R8), which the OIDC login asks before creating a group
 /// for a claimed name with no row.
@@ -1919,6 +1968,10 @@ pub async fn group_references_via(
          SELECT e.ref, 'rule', r.id, r.name, NULL::text, e.mode::text \
            FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
           WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) AND e.ref <> $2 \
+         UNION ALL \
+         SELECT ep.ref, 'engine_grant', ep.engine_grant_id, NULL::text, 'allow', 'include' \
+           FROM perm.engine_grant_principals ep \
+          WHERE ep.kind = 'group'::perm.principal_kind AND ep.ref = ANY($1) AND ep.ref <> $2 \
          ORDER BY group_name, source, id, position",
     )
     .bind(group_names)

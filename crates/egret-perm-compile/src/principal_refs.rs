@@ -375,7 +375,8 @@ async fn lookup_user(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, P
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnresolvedPrincipal {
-    /// `"grant"` or `"rule"`.
+    /// `"grant"`, `"rule"` or `"engine_grant"` (F11: always an allow include,
+    /// so it never fails open).
     pub source: String,
     /// The grant's or the rule's id.
     pub id: Uuid,
@@ -454,6 +455,10 @@ pub async fn unresolved_principals_via(
          UNION ALL \
          SELECT 'rule', r.id, r.name, re.kind::text, re.ref, re.mode::text, NULL \
            FROM perm.rule_exemptions re JOIN perm.rules r ON r.id = re.rule_id \
+         UNION ALL \
+         SELECT 'engine_grant', ep.engine_grant_id, NULL, ep.kind::text, ep.ref, 'include', \
+                'allow' \
+           FROM perm.engine_grant_principals ep \
          ORDER BY source, id, position, kind, ref",
     )
     .fetch_all(&mut *conn)
@@ -608,11 +613,14 @@ fn dedup_keeping_first(list: &mut Vec<Principal>) {
 // Stored `user` refs naming a username (People & groups Task 5, spec §4.4)
 // ---------------------------------------------------------------------------
 
-/// One stored grant principal or rule exemption that names a username as a
-/// `user` ref.
+/// One stored grant principal, rule exemption or (F11) engine-grant principal
+/// that names a username as a `user` ref.
+///
+/// An engine grant's impersonation TARGET is not one: it is stored by user id
+/// (spec E21, amended), so no stored name can go stale and be inherited.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct StoredUserRef {
-    /// `"grant"` or `"rule"`.
+    /// `"grant"`, `"rule"` or `"engine_grant"`.
     pub source: String,
     /// The grant's or the rule's id.
     pub id: Uuid,
@@ -645,6 +653,10 @@ pub(crate) async fn stored_user_refs_naming_via(
          UNION ALL \
          SELECT 'rule', rule_id, mode::text, ref \
            FROM perm.rule_exemptions \
+          WHERE kind = 'user' AND ref::citext = $1::citext \
+         UNION ALL \
+         SELECT 'engine_grant', engine_grant_id, 'include', ref \
+           FROM perm.engine_grant_principals \
           WHERE kind = 'user' AND ref::citext = $1::citext \
          ORDER BY source, id, position, ref",
     )

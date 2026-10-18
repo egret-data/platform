@@ -65,8 +65,8 @@ use sqlx::{Postgres, Transaction};
 use egret_perm::CompileError;
 
 use crate::trigger::{
-    affected_services_for_group_membership, group_references_via, lock_services_in_tx,
-    recompile_services_in_tx,
+    affected_services_for_group_membership, affected_services_for_user_delete,
+    group_references_via, lock_services_in_tx, recompile_services_in_tx,
 };
 
 /// The production [`egret_auth::groups::GroupMembershipRecompiler`]: the
@@ -111,6 +111,37 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         // and the recompile below mints under this lock — taken later, a
         // compile minting that user would wait on us while we waited on it
         // (`crate::members::lock_compile_mints_in_tx`).
+        if !services.is_empty() {
+            crate::members::lock_compile_mints_in_tx(tx)
+                .await
+                .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        }
+        Ok(services)
+    }
+
+    /// F11 (spec E21, amended): the groups' services plus the profiles of
+    /// every engine grant targeting `user_id`, locked in one ascending pass.
+    async fn lock_affected_by_user_delete_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        user_id: uuid::Uuid,
+        group_names: &[String],
+    ) -> egret_core::Result<Vec<i64>> {
+        let mut services = affected_services_for_group_membership(tx, group_names)
+            .await
+            .map_err(|e| to_core(e, Some(group_names)))?;
+        services.extend(
+            affected_services_for_user_delete(tx, user_id)
+                .await
+                .map_err(|e| to_core(e, Some(group_names)))?,
+        );
+        services.sort_unstable();
+        services.dedup();
+        lock_services_in_tx(tx, &services)
+            .await
+            .map_err(|e| to_core(e, Some(group_names)))?;
+        // Same reason as `lock_affected_in_tx`: before the DELETE holds the
+        // user row.
         if !services.is_empty() {
             crate::members::lock_compile_mints_in_tx(tx)
                 .await

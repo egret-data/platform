@@ -280,7 +280,9 @@ profile, có loại `risingwave`, hoặc có `status = 'deleting'` sẽ từ ch�
 | `affected_services_for_group_membership` (`trigger.rs:1722`) và `_role_membership` (`:1574`) | thêm profile của các engine có grant nêu tên group / role |
 | `premint_model_usernames` (`members.rs:357-367`) | `UNION SELECT kind::text, ref FROM perm.engine_grant_principals` |
 | `unresolved_principals_via` (`principal_refs.rs:447-459`) | một nhánh `engine_grant`; `failsOpen` luôn là false (allow include) |
-| `stored_user_refs_naming_via` (`principal_refs.rs:637-650`) | principal `user` của engine grant VÀ giá trị impersonation (`source = 'engine_grant_target'`): cấp phát một username mà một đích cũ đang nêu tên sẽ cho người được cấp trở thành người đó |
+| `stored_user_refs_naming_via` (`principal_refs.rs:637-650`) | principal `user` của engine grant (`source = 'engine_grant'`). Không có nhánh cho đích impersonation: đích được lưu theo user id (E21, đã sửa đổi), nên không có tên lưu trữ nào có thể cũ đi |
+| `UserRepo::hard_delete` (`crates/egret-auth/src/users.rs:295`), qua `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx` | khoá và recompile thêm profile của các engine grant có ĐÍCH là user đó (E21, đã sửa đổi): grant bị cascade theo user, và cùng transaction đó dọn các policy đã biên dịch của chúng, vốn nêu username mà lần xoá giải phóng |
+| `recompile_role_referencing_profiles` (`crates/egret-perm-compile/src/role_membership.rs:251`) | principal `role` của engine grant được đưa vào lượt quét role lúc khởi động |
 
 Các đường recompile theo workspace-member và tag không cần đổi: engine grant không nêu tên workspace hay tag nào.
 

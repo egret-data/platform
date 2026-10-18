@@ -279,7 +279,9 @@ profile, of type `risingwave`, or with `status = 'deleting'` refuses the write (
 | `affected_services_for_group_membership` (`trigger.rs:1722`) and `_role_membership` (`:1574`) | add the profiles of engines whose grants name the group / role |
 | `premint_model_usernames` (`members.rs:357-367`) | `UNION SELECT kind::text, ref FROM perm.engine_grant_principals` |
 | `unresolved_principals_via` (`principal_refs.rs:447-459`) | an `engine_grant` arm; `failsOpen` is always false (allow include) |
-| `stored_user_refs_naming_via` (`principal_refs.rs:637-650`) | engine-grant `user` principals AND impersonation values (`source = 'engine_grant_target'`): allocating a username a stale target names would let the grantee become that person |
+| `stored_user_refs_naming_via` (`principal_refs.rs:637-650`) | engine-grant `user` principals (`source = 'engine_grant'`). No arm for impersonation targets: they are stored by user id (E21, amended), so no stored name can go stale |
+| `UserRepo::hard_delete` (`crates/egret-auth/src/users.rs:295`), via `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx` | also locks and recompiles the profiles of engine grants that TARGET the user (E21, amended): the grants cascade with the user, and the same transaction reaps their compiled policies, which name the username the delete frees |
+| `recompile_role_referencing_profiles` (`crates/egret-perm-compile/src/role_membership.rs:251`) | engine-grant `role` principals join the boot-time role sweep |
 
 The workspace-member and tag recompile paths need no change: engine grants name no workspace and no tag.
 

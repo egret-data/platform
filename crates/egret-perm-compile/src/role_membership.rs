@@ -255,6 +255,8 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT ref FROM perm.grant_principals WHERE kind = 'role'::perm.principal_kind \
          UNION \
+         SELECT ref FROM perm.engine_grant_principals WHERE kind = 'role'::perm.principal_kind \
+         UNION \
          SELECT unnest(required_roles) FROM classification_policies \
          ORDER BY 1",
     )

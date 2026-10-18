@@ -163,6 +163,34 @@ pub trait GroupMembershipRecompiler: Send + Sync {
         tx: &mut Transaction<'static, Postgres>,
         names: &[String],
     ) -> Result<Vec<GroupReference>>;
+
+    /// What [`crate::users::UserRepo::hard_delete`] locks before deleting
+    /// `user_id`: the services [`lock_affected_in_tx`](Self::lock_affected_in_tx)
+    /// would lock for the user's groups, PLUS every service whose compiled
+    /// policies name the user other than through a group, all locked in one
+    /// ascending pass. Recompiled with
+    /// [`recompile_in_tx`](Self::recompile_in_tx) after the delete.
+    ///
+    /// **Engine grants (F11, spec E21 amended).** An impersonation grant stores
+    /// its target by user id and is deleted with the user, but the policy it
+    /// compiled names the target's USERNAME, which the delete frees for the
+    /// next person to be minted. The production recompiler adds the profiles
+    /// of those grants here, so the same transaction reaps the policy.
+    ///
+    /// The default covers the groups only: right for a recompiler with no
+    /// engine grants to answer for (the test doubles). The production
+    /// recompiler overrides it.
+    async fn lock_affected_by_user_delete_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        _user_id: Uuid,
+        group_names: &[String],
+    ) -> Result<Vec<i64>> {
+        if group_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.lock_affected_in_tx(tx, group_names).await
+    }
 }
 
 /// One stored reference to a group by NAME
@@ -172,13 +200,15 @@ pub trait GroupMembershipRecompiler: Send + Sync {
 pub struct GroupReference {
     /// The group name the reference stores.
     pub group_name: String,
-    /// `"grant"` (a grant principal) or `"rule"` (a rule exemption).
+    /// `"grant"` (a grant principal), `"rule"` (a rule exemption) or
+    /// `"engine_grant"` (an engine grant's principal, F11).
     pub source: String,
-    /// The grant's id, or the rule's.
+    /// The grant's id, the rule's, or the engine grant's.
     pub id: Uuid,
-    /// The rule's name; `None` for a grant.
+    /// The rule's name; `None` for a grant or an engine grant.
     pub rule_name: Option<String>,
-    /// The grant's effect (`"allow"` / `"deny"`); `None` for a rule.
+    /// The grant's effect (`"allow"` / `"deny"`; an engine grant is always
+    /// `"allow"`); `None` for a rule.
     pub effect: Option<String>,
     /// `"include"` or `"exclude"`.
     pub position: String,
@@ -335,6 +365,12 @@ pub(crate) fn referenced_conflict(
         .map(|r| {
             let mut entry = match (r.source.as_str(), &r.rule_name) {
                 ("rule", Some(rule)) => format!("rule `{rule}` (exempt {})", r.position),
+                ("engine_grant", _) => format!(
+                    "engine grant {} ({}, {})",
+                    r.id,
+                    r.effect.as_deref().unwrap_or("allow"),
+                    r.position
+                ),
                 _ => format!(
                     "grant {} ({}, {})",
                     r.id,
@@ -1233,4 +1269,39 @@ pub async fn warn_unknown_membership_provenance(
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F11 (spec §4.5): an engine grant naming a group is listed by its own
+    /// noun, not as a "grant" a steward would look for in Data and not find.
+    #[test]
+    fn an_engine_grant_reference_is_listed_as_an_engine_grant() {
+        let id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
+        let reference = GroupReference {
+            group_name: "ops".into(),
+            source: "engine_grant".into(),
+            id,
+            rule_name: None,
+            effect: Some("allow".into()),
+            position: "include".into(),
+        };
+        match referenced_conflict(
+            "group `ops` is".into(),
+            &[reference],
+            false,
+            ReferenceDetail::Entries,
+        ) {
+            egret_core::Error::Conflict(msg) => assert_eq!(
+                msg,
+                format!(
+                    "group `ops` is named by 1 permission entry; remove them first: \
+                     engine grant {id} (allow, include)"
+                )
+            ),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
 }
