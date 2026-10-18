@@ -52,6 +52,12 @@ const WorkflowsRoutes = lazy(() => import("@/routes/workflows/WorkflowsRoutes"))
 const DataRoutes = lazy(() => import("@/routes/governance/data/DataRoutes"));
 
 /**
+ * The Governance Overview (DG redesign #3), the Governance index, code-split
+ * like Data and People. `npm run test:bundle:governance-overview` checks it.
+ */
+const OverviewPage = lazy(() => import("@/routes/governance/overview/OverviewPage"));
+
+/**
  * The Governance People area (DG redesign #2): the People & groups index and
  * the principal pages, code-split like Data (FE-ROUTE-2). Nothing under
  * `routes/governance/people/` may be imported statically from the entry graph,
@@ -74,6 +80,15 @@ function PeopleFallback() {
   return (
     <div className="p-4" data-testid="governance-people-loading">
       <ListSkeleton cols={3} />
+    </div>
+  );
+}
+
+/** What the Overview shows while its chunk loads: a skeleton in the page frame. */
+function OverviewFallback() {
+  return (
+    <div className="p-4" data-testid="governance-overview-loading">
+      <ListSkeleton cols={2} />
     </div>
   );
 }
@@ -520,22 +535,27 @@ function ControlPlaneRoutes() {
 // the system-admin Control Plane. Same shape as `ControlPlaneRoutes` — one area
 // gate, then a per-route permission.
 //
-// The landing is Data (DG redesign spec Part 1, "until #3 lands, the Governance
-// index opens Data"). Data takes either Governance read permission, which is
-// exactly what `RequireGovernanceAccess` admits, so every user who reaches this
-// index can open it. The target is absolute: this also renders for the `*`
-// catch-all, where react-router 7 resolves a relative target against the
-// unmatched URL and loops (see `exploreRedirectTo`).
-function GovernanceIndex() {
-  return <Navigate to="/governance/data" replace />;
-}
-
+// The landing is the Overview (DG redesign #3, spec O11). It takes either
+// Governance read permission, which is exactly what `RequireGovernanceAccess`
+// admits, so every user who reaches the index can open it. An unknown
+// Governance URL lands there too; that redirect is absolute, because
+// react-router 7 resolves a relative target against the unmatched URL and
+// loops (see `exploreRedirectTo`).
 function GovernanceRoutes() {
   return (
     <RequireGovernanceAccess>
       <AppShell>
         <Routes>
-          <Route index element={<GovernanceIndex />} />
+          <Route
+            index
+            element={
+              <RequirePermission perm={["policy:read", "tag:read"]}>
+                <LazyRouteArea area="Overview" fallback={<OverviewFallback />}>
+                  <OverviewPage />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
           {/* DG redesign #1: the catalog tree and the object pages. Either read
               permission opens it: the tree reveals catalog structure, which the
               browse API serves to `policy:read` or `tag:read`. */}
@@ -603,7 +623,7 @@ function GovernanceRoutes() {
           <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
           {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}
           <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
-          <Route path="*" element={<GovernanceIndex />} />
+          <Route path="*" element={<Navigate to="/governance" replace />} />
         </Routes>
       </AppShell>
     </RequireGovernanceAccess>

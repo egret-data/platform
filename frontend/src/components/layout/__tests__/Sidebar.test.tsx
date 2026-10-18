@@ -11,7 +11,7 @@
  *   - QueryClientProvider (useWorkspaceFeatures reads useMyWorkspaces)
  *   - collapsed: boolean + onToggle: () => void props
  */
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -386,12 +386,14 @@ describe("Sidebar – Governance app", () => {
   });
 
   // #2 P8: Data permissions, Mask & filter rules and Explain access are gone.
-  test("Data comes first, then People & groups, then the existing items (spec Part 1, #2 P2, P8)", () => {
+  // #3 O11: the Overview goes first.
+  test("Overview comes first, then Data, People & groups and the existing items (#3 O11, #2 P2, P8)", () => {
     renderSidebar("/governance/data");
     const labels = within(screen.getByTestId("app-sidebar"))
       .getAllByRole("link")
       .map((a) => a.textContent);
     expect(labels).toEqual([
+      "Overview",
       "Data",
       "People & groups",
       "Policies",
@@ -400,6 +402,55 @@ describe("Sidebar – Governance app", () => {
     ]);
     expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
     expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
+  });
+
+  test("the first group is \"Governance overview\" with one item, Overview, linking to the index", () => {
+    renderSidebar("/governance");
+    const headings = within(screen.getByTestId("app-sidebar"))
+      .getAllByRole("button", { expanded: true })
+      .map((b) => b.textContent);
+    expect(headings[0]).toBe("Governance overview");
+    const overview = screen.getByRole("link", { name: "Overview" });
+    expect(overview).toHaveAttribute("href", "/governance");
+    expect(groupOf("Governance overview")).toContainElement(overview);
+    expect(within(groupOf("Governance overview")!).getAllByRole("link")).toHaveLength(1);
+  });
+
+  test("Overview is the current page on /governance and not on /governance/data", () => {
+    renderSidebar("/governance");
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    cleanup();
+    renderSidebar("/governance/data");
+    expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("aria-current", "page");
+  });
+
+  test.each([["policy:read"], ["tag:read"]])("Overview shows for a user holding only %s", (perm) => {
+    renderSidebar("/governance", { user_id: "9", email: "o@example.com", platform_roles: [], permissions: [perm] });
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("href", "/governance");
+  });
+
+  test("no group heading of one app equals a heading of another (collapsed state is one key)", () => {
+    const headingsAt = (path: string) => {
+      renderSidebar(path);
+      const hs = within(screen.getByTestId("app-sidebar"))
+        .getAllByRole("button", { expanded: true })
+        .map((b) => b.textContent ?? "");
+      cleanup();
+      return hs;
+    };
+    const governance = headingsAt("/governance");
+    const controlPlane = headingsAt("/control-plane/workspaces");
+    const explore = headingsAt("/explore/ws1/sql");
+    expect(governance).toContain("Governance overview");
+    expect(controlPlane).toContain("Overview");
+    for (const [a, b] of [
+      [governance, controlPlane],
+      [governance, explore],
+      [controlPlane, explore],
+    ]) {
+      expect(a.filter((h) => b.includes(h))).toEqual([]);
+    }
   });
 
   test("People & groups is gated policy:read: a tag:read steward does not see it", () => {

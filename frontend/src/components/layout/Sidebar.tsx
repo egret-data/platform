@@ -21,7 +21,16 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
  * no `perm` (e.g. Workspaces, Audit log) are platform_admin-only. `feature` is the workspace entitlement key (e.g.
  * `apps`) that unlocks an Explore item; items with no `feature` are
  * unaffected by entitlements. */
-type NavItem = { label: string; icon: LucideIcon; perm?: string | readonly string[]; feature?: string; to?: string };
+type NavItem = {
+  label: string;
+  icon: LucideIcon;
+  perm?: string | readonly string[];
+  feature?: string;
+  /** The path under the app's base; `""` is the base itself. */
+  to?: string;
+  /** Active only on its own path, not on the paths below it (an item at the app's base). */
+  end?: boolean;
+};
 type NavGroup = { heading: string; items: NavItem[] };
 
 const EXPLORE_GROUPS: NavGroup[] = [
@@ -79,9 +88,17 @@ function holdsAny(permissions: readonly string[], perm: NavItem["perm"]): boolea
 // Control Plane). Headings must stay distinct from every other app's headings —
 // collapsed-group state is one localStorage key across all three apps.
 const GOVERNANCE_GROUPS: NavGroup[] = [
+  // DG redesign #3 (spec O11): the Overview, the Governance index, first.
+  // "Governance overview", not "Overview": Control Plane has a group headed
+  // "Overview" and collapsed-group state is one key across the apps. `end`,
+  // because its path is the area's base and would match every page under it.
+  {
+    heading: "Governance overview",
+    items: [{ label: "Overview", icon: Gauge, perm: ["policy:read", "tag:read"], to: "", end: true }],
+  },
   // The DG redesign (spec 2026-10-16 Part 1): Data, the catalog tree and its
-  // object pages, comes first. Either Governance read permission opens it, as
-  // its route does (`App.tsx`). Overview will go above it (sub-project #3).
+  // object pages. Either Governance read permission opens it, as its route
+  // does (`App.tsx`).
   {
     heading: "Data",
     items: [{ label: "Data", icon: Database, perm: ["policy:read", "tag:read"], to: "data" }],
@@ -227,13 +244,13 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
     }`;
 
-  const renderItem = ({ label, icon: Icon, to }: NavItem) => {
-    const path = `${base}/${to ?? slug(label)}`;
+  const renderItem = ({ label, icon: Icon, to, end }: NavItem) => {
+    const path = to === "" ? base : `${base}/${to ?? slug(label)}`;
     if (collapsed) {
       return (
         <Tooltip key={label}>
           <TooltipTrigger asChild>
-            <NavLink to={path} className={linkClass}>
+            <NavLink to={path} end={end} className={linkClass}>
               <Icon className="h-4 w-4 shrink-0" />
             </NavLink>
           </TooltipTrigger>
@@ -246,6 +263,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <NavLink
         key={label}
         to={path}
+        end={end}
         className={linkClass}
       >
         <Icon className="h-4 w-4 shrink-0" />
