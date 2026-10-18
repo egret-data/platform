@@ -160,3 +160,80 @@ engines (SQL, as §1.2 DEV-2). Vite dev server from this worktree on a free port
 
 **Not confident:** whether the impersonation UI lets admin reach a Governance write as `ua` (it may need `ua` to hold
 `policy:update`); the exact actor label (name or email).
+
+### 2.1 Result (read this first)
+
+Every seeded finding appeared, with its link reaching the thing named, for the readers whose permissions allow it.
+Every governance write made through the UI or the API appeared in Recent changes, with the right actor; the
+impersonated write read "Administrator as Ana". A preview and a refused write recorded nothing. The live check found
+eleven defects (§2.4); all are fixed in `a502e234` with tests first. The frontend fixes were re-checked in the browser.
+The backend fixes are covered by tests only: rebuilding the image was stopped by the disk watchdog (free space fell to
+25 GiB while another package built in parallel), so the fixed sentences were not seen live.
+
+### 2.2 Stack and deviations
+
+- Image `egret-backend:vg-dgov2` from `85bc983c`, warm build, 13 min. DB `egret_dgov_live2` in `dgov-pg`;
+  `vg-egret`, `vg-rustfs`, `vg-trino-coord` (Trino 483, JWT/TLS), `vg-sr` (StarRocks 4.1.6, Ranger), poll 5 s.
+  Vite 8 from this worktree on port 5396; Playwright MCP Chromium at 1280×900 and 390×844.
+- DEV-1/DEV-2 (SQL) as §1.2: engine rows (pinned images: Trino 483, `starrocks/fe-ubuntu:4.1.6`), catalog `ice`
+  attached to both.
+- DEV-3 (SQL) seeds: S1's `group ghost` principal; S2's hand-written mask; S3's failed lineage row; S7's catalog
+  `ext` with a failed attachment; S9's catalog `lonely`; the migratable hand-written policy `vg ua reads orders`;
+  S6's `at` moved 25 h back; S8's model-row move.
+- DEV-4 (forged poller): S5 used the anonymous download endpoint with plugin id `starrocks@forged-vgsr` reporting the
+  old version, because a stopped StarRocks is quiet, and the Overview does not judge `plugin_behind` for a profile it
+  already reports as quiet or silent.
+- DEV-5: there is no manual-compile control in the UI; `POST /perm/compile/{id}` was called with curl.
+- DEV-6: users and roles through the API: `vs` (`policy:read`, `policy:update`), `vt` (`tag:read`), `ua`
+  (Ana; given `vg_steward` before the impersonation so the impersonated write is allowed).
+- Logins: admin by curl, then in the browser admin, `vs`, `vt`, admin, each at least 60 s apart; no 429.
+
+### 2.3 Every cell
+
+| id | observed | verdict |
+|---|---|---|
+| S1 | Critical "1 stored principal reference match nobody…" (D1), sample "group ghost" → grant page naming "user ua, group ghost"; Open → Unmatched names listing it | pass, D1 |
+| S2 | Warning rule_overlaps, sample → rule page of `vg-email-mask`; detail printed Ranger's resource map (D4) | pass, D4 |
+| S3 | Warning lineage_failed, link → `/governance/data/ice/s/v_bad?tab=lineage`; the Lineage tab says "could not be loaded … not found" because the seeded view does not exist in the catalog (fixture) | pass, D3 |
+| S4 | after 5 min: Warning "No plugin has polled profile vgsr for 5 minutes." | pass |
+| S5 | 100 s after the bump: Critical "No plugin of profile vgsr has reported holding policy version 8, set at 2026-10-18 20:00:21 UTC."; plugin_quiet gone | pass, D12 |
+| S6 | Critical plugin_silent, plugin_quiet absent | pass |
+| S7 | Warning catalog_apply_failed, sample → catalog page showing "Failed to apply on vgsr" | pass, D2 |
+| S8 | compile answered 409; Critical compile_failed with the refusal; the 600-character line filled the card (D14); a `profile:compile` error event | pass, D14 |
+| S9 | Info tags_without_clearance → tag page; Info catalogs_without_engine → Data page "this catalog is not attached to any engine" | pass |
+| B1 | URL stays `/governance`, h1 Overview, counts strip, Critical/Warning/Info groups; every link clicked through | pass |
+| B2 | `/governance/nope` → `/governance`; Back skips the bad URL | pass |
+| B3 | "Governance overview" first; Overview current on `/governance`, Data current on `/governance/data`; the two-line heading was centred (D7) | pass, D7 |
+| B4 | `vs`: no engine, plugin, catalog-apply or tag finding; five "Not checked for you" lines naming `engine:read`, `catalog_registry:read`, `tag:read`; no classifications count; no clearance event | pass |
+| B5 | `vt`: lineage and catalog findings only; the clearance event and no grant event; "Recorded since" claimed more than a filtered reader can know (D13) | pass, D13 |
+| B6 | through the UI: grant (Data → Grant access), rule edit, clearance (tag page), hand-written policy disabled (profile page), migration (migrate page); compile by API (DEV-5). Each appeared with "Administrator" and a link. The preview recorded nothing; a refused grant (409) recorded nothing | pass |
+| B7 | "Administrator as Ana changed a grant: allow read, write on ice.sales to user ua" | pass |
+| B8 | 390 px: no horizontal scroll (`scrollWidth` 390, nothing past the right edge), Recent changes as cards. 1280 dark: the warning word unreadable (D15); a long sentence pushed Open under it (D16) | pass, D15, D16 |
+| B9 | every link and button in `main` is tabbable; links showed the browser's default outline, not the shared ring (D17) | pass, D17 |
+
+### 2.4 Defects (all fixed in `a502e234`)
+
+| id | defect | fix | checked |
+|---|---|---|---|
+| D1 | "1 stored principal reference match nobody" | singular agrees | test |
+| D2 | "1 catalog attachment … to their engine" | "its engine" | test |
+| D3 | "lineage of 1 view, so the tables they read" | "it reads" | test |
+| D4 | overlap detail "catalog=[ice] column=[email] …" | shown as `ice.s.t.email, in profile vgtr` | test |
+| D7 | wrapped sidebar heading centred | `text-left` | browser |
+| D12 | one-profile drift sample repeated the sentence | detail dropped when the finding names one profile | test |
+| D13 | "Recorded since <date>" for a filtered reader | "The oldest change you can see is from <date>.", only once every page is loaded | test, browser |
+| D14 | 600-character compile error in the sample | first line cut to 200 characters with "…" | test |
+| D15 | warning word invisible in dark mode | colour on the icon, the word in the text colour | browser |
+| D16 | Open wrapped under a long sentence | sentence `flex-1`, Open fixed at the right | browser |
+| D17 | Overview links without the shared focus ring | `focus-visible:ring-2 ring-ring` on every link | test, browser |
+
+Screenshots (scratchpad `dgov12-shots/`): `b1-admin-1280-light.png`, `b4-steward-vs-1280-light.png`,
+`b5-tagger-vt-1280-light.png`, `s5-behind-admin-1280-light-2.png`, `b8-admin-1280-dark.png`,
+`b8-admin-390-dark.png`, `fix-1280-dark.png`, `fix-b8-390-light-changes.png`, `fix-b9-focus-1280-light.png`.
+
+### 2.5 Left behind
+
+Nothing of this run: containers `vg-*`, network `vg-net`, DB `egret_dgov_live2`, image `egret-backend:vg-dgov2`,
+the vite server, the forged poller, the env file, TLS key and keystore and cookie jar are gone. One mistake: during the
+cancelled rebuild a `docker builder prune --filter until=1m` removed 7.3 GB of BuildKit cache, which other packages'
+backend builds also use; their next image build is cold.
