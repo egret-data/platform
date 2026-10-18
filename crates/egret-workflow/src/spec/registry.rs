@@ -210,7 +210,7 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
     },
     // Group C2 Task 5 (2026-10-18): Kestra's three `ExecutionUpdatableTask`s,
     // FQCN only, no alias, no reference. Like `Exit` they have no worker
-    // handler on purpose: `advance()` plans them `executor::TaskKind::Update`
+    // handler on purpose: `advance()` plans them `executor::TaskKind::ExecutionUpdate`
     // and the worker's render pass computes them (`executor::update`), so they
     // are in [`EXECUTOR_LEVEL`] and every deployment serves them.
     TaskTypeSpec {

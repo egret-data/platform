@@ -773,7 +773,7 @@ mod tests {
                     // this fixture never sets `rendered` on one, so it would
                     // wait at `CREATED`; the update tests below assert its
                     // `CREATED RUNNING SUCCESS` directly.
-                    TaskKind::Update { .. } => {
+                    TaskKind::ExecutionUpdate { .. } => {
                         panic!("{corpus_id}: no flow in this fixture declares an update task")
                     }
                     TaskKind::Executable { .. } => {
@@ -3549,7 +3549,7 @@ mod tests {
             /// A typed kind the executor drives ITSELF and whose children are
             /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], since
             /// kill-and-exit Task 3 [`TaskKind::Exit`], and since group C2
-            /// Task 3 [`TaskKind::Update`].
+            /// Task 3 [`TaskKind::ExecutionUpdate`].
             ///
             /// **A fourth tier, for the reason `Subflow` needed a third.** A
             /// `Pause` is not `Opaque` (no worker ever sees it and no `Pause`
@@ -3635,9 +3635,9 @@ mod tests {
                 | TaskKind::LoopUntil { .. }
                 | TaskKind::AllowFailure { .. }
                 | TaskKind::WorkingDirectory { .. } => PlannedAs::Descends,
-                TaskKind::Pause { .. } | TaskKind::Exit { .. } | TaskKind::Update { .. } => {
-                    PlannedAs::Waits
-                }
+                TaskKind::Pause { .. }
+                | TaskKind::Exit { .. }
+                | TaskKind::ExecutionUpdate { .. } => PlannedAs::Waits,
             }
         }
 
@@ -4308,7 +4308,7 @@ mod tests {
         // (2026-10-18, group C2 Task 5: the twelve rows whose unported types
         // were `io.kestra.plugin.core.execution.SetVariables`, `UnsetVariables`
         // or `Labels` are gone -- all three are registered and executor-level
-        // (`spec::registry::EXECUTOR_LEVEL`, planned `TaskKind::Update`).)
+        // (`spec::registry::EXECUTOR_LEVEL`, planned `TaskKind::ExecutionUpdate`).)
         PublishedButRefused {
             id: "valids/retry-with-flowable-errors",
             cause: "an `AllowFailure` flowable with `retry:` on the block itself. Kestra retries the failing child; egret refuses the block-level `retry:` on purpose (spec §2, a non-goal for the AllowFailure flowable package), so the flow is refused where Kestra ran it.",

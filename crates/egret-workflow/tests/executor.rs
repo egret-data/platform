@@ -5379,7 +5379,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // **Group C2 Task 3 moved the three update types the same way.**
     // `SetVariables`, `UnsetVariables` and `Labels` are still unregistered
     // (Task 5 registers them), so `build_plan` refuses them and this test
-    // reads them from `plan_stored`, which plans them `TaskKind::Update` now
+    // reads them from `plan_stored`, which plans them `TaskKind::ExecutionUpdate` now
     // instead of an opaque `Runnable`: `flowable` rather than `fed` and
     // over-fed (no update run in the golden carries `SUBMITTED`). Derived and
     // added back below, per type, for `is_a_subflow`'s reason.
@@ -5492,7 +5492,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             entry.id, run.task
                         );
                     }
-                    Some(TaskKind::Update { op, .. }) => {
+                    Some(TaskKind::ExecutionUpdate { op, .. }) => {
                         flowable += 1;
                         *is_an_update.entry(op.type_id().to_string()).or_default() += 1;
                         assert!(
@@ -5641,7 +5641,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         assert!(
             !over_fed.contains_key(t),
             "`{t}` must contribute NO over-submitted run since it is planned \
-             `TaskKind::Update`; it contributed {:?}",
+             `TaskKind::ExecutionUpdate`; it contributed {:?}",
             over_fed.get(t)
         );
     }

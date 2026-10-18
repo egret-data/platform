@@ -942,7 +942,7 @@ const CREATE_REFUSED: usize = 4;
 ///
 /// **281 -> 293 at group C2 Task 5 (2026-10-18)**: SetVariables,
 /// UnsetVariables and Labels have `TASK_TYPES` rows and are `EXECUTOR_LEVEL`
-/// (`spec::registry::EXECUTOR_LEVEL`, planned `executor::TaskKind::Update`;
+/// (`spec::registry::EXECUTOR_LEVEL`, planned `executor::TaskKind::ExecutionUpdate`;
 /// no worker handler, no [`registry`] entry, no `runtime::served_for` key), so
 /// every deployment serves them. 12 flows leave [`UNKNOWN_TYPE_REFUSED`]: the
 /// seven `valids/*labels*` flows, `valids/set-variables`,

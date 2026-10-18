@@ -438,7 +438,7 @@ pub(crate) fn open(
     match plan.tasks[task].kind {
         TaskKind::Loop { .. } => loop_::open(plan, state, run, task, now),
         // Group C2 Task 3 (spec §3.1).
-        TaskKind::Update { .. } => match state.runs[run].rendered {
+        TaskKind::ExecutionUpdate { .. } => match state.runs[run].rendered {
             // The worker's render pass has not computed it yet (spec §3.1).
             None => Step::Waiting,
             // Computed and recorded: `CREATED RUNNING SUCCESS` in one round, as
@@ -547,7 +547,7 @@ pub(crate) fn descend(
         // since `open` emits the pair in one round and the worker's
         // `render_updates` applies it in one pass -- so it ends as it would
         // have. Returned without the `Done` mapping, as `open`'s pair is.
-        TaskKind::Update { .. } => {
+        TaskKind::ExecutionUpdate { .. } => {
             return Step::Commands(vec![Command::SetRunState {
                 run,
                 state: RunState::Success,

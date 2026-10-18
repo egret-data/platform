@@ -97,14 +97,14 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 
 ### 3.1 Plan and states
 
-- **Plan:** a new `TaskKind::Update { op, spec }` in `executor/plan.rs`, where `op` is one of `Set`, `Unset` or `Labels`. Each type is a `spec::registry` row with no handler and is listed in `EXECUTOR_LEVEL` (`spec/registry.rs:333`), so every deployment serves it, as with `Exit`.
+- **Plan:** a new `TaskKind::ExecutionUpdate { op, spec }` in `executor/plan.rs`, where `op` is one of `Set`, `Unset` or `Labels`. Each type is a `spec::registry` row with no handler and is listed in `EXECUTOR_LEVEL` (`spec/registry.rs:333`), so every deployment serves it, as with `Exit`.
 - **The update is computed at `CREATED`**, in a render pass of its own (`worker/render.rs::render_updates`, after `render_expressions`), like a `Loop`'s `values:` (`renders_at`, `worker/render.rs:1345`). The pass renders the task's properties against the execution's current variables and labels and computes the new value.
   - **On error,** it fails the run with the message: `Command::FailUnstarted`, `CREATED FAILED` with one attempt `[FAILED]` (D6).
   - **On success,** it records the new value in `RenderSide` and completes the run in the same pass: `CREATED RUNNING SUCCESS`, with one attempt `CREATED RUNNING SUCCESS`. Settle writes the new `variables` or `labels` to the execution row, in the same transaction that holds the execution lock.
 - **Runs that update in the same round** (two branches of a `Parallel`) are applied in run order. Each one sees the result of the one before it, so the outcome does not depend on timing.
 - **`runIf` falsy** gives `CREATED SKIPPED`, through the existing path, with nothing written.
 
-**(2026-10-18, final review)** The text above is corrected to the build. The pass is `render_updates`, separate from `render_expressions` because an update CHANGES the surface every later render of the settle reads; the plan kind is `Update { op, spec }`; the attempt is `CREATED RUNNING SUCCESS`, the golden's. And the completion moved from `advance()` into the pass (final review I1): when it was left to `advance()`, a computed update beside a failing one in the same `Parallel` or `Dag` was failed by `fail_the_rest` (`CREATED FAILED`, no attempt) while settle still wrote its change. Now the change and the `SUCCESS` land together, and only the failing update fails, as in Kestra. `flowable::open`'s `Update` arm is kept as the same completion, for a caller that sets `rendered` itself.
+**(2026-10-18, final review)** The text above is corrected to the build. The pass is `render_updates`, separate from `render_expressions` because an update CHANGES the surface every later render of the settle reads; the plan kind is `ExecutionUpdate { op, spec }`; the attempt is `CREATED RUNNING SUCCESS`, the golden's. And the completion moved from `advance()` into the pass (final review I1): when it was left to `advance()`, a computed update beside a failing one in the same `Parallel` or `Dag` was failed by `fail_the_rest` (`CREATED FAILED`, no attempt) while settle still wrote its change. Now the change and the `SUCCESS` land together, and only the failing update fails, as in Kestra. `flowable::open`'s `ExecutionUpdate` arm is kept as the same completion, for a caller that sets `rendered` itself.
 
 ### 3.2 Execution variables (migration 0195)
 

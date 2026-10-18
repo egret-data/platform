@@ -532,7 +532,7 @@ mod tests {
 }
 
 /// Group C2 Task 3: the executor's half -- planning the three types as
-/// [`TaskKind::Update`](super::TaskKind::Update), [`Command::FailUnstarted`],
+/// [`TaskKind::ExecutionUpdate`](super::TaskKind::ExecutionUpdate), [`Command::FailUnstarted`],
 /// and `advance()` completing a computed update. `rendered` is set by hand
 /// here, standing in for the worker's render pass (Task 4).
 ///
@@ -747,7 +747,7 @@ mod advance_tests {
             let p = plan(&src);
 
             // Assert
-            let TaskKind::Update { op: got, spec } = &p.tasks[0].kind else {
+            let TaskKind::ExecutionUpdate { op: got, spec } = &p.tasks[0].kind else {
                 panic!("{type_id}: planned {:?}", p.tasks[0].kind);
             };
             assert_eq!(*got, op, "{type_id}");

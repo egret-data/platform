@@ -835,7 +835,7 @@ impl Surface {
                                     Some(crate::executor::exit::TYPE_ID.to_string())
                                 }
                                 // Group C2 Task 3: one FQCN per op.
-                                TaskKind::Update { op, .. } => Some(op.type_id().to_string()),
+                                TaskKind::ExecutionUpdate { op, .. } => Some(op.type_id().to_string()),
                                 _ => None,
                             },
                         }),
@@ -1483,7 +1483,7 @@ pub(super) fn render_updates(
             let Some(task) = plan.tasks.get(run.task) else {
                 return false;
             };
-            matches!(task.kind, TaskKind::Update { .. })
+            matches!(task.kind, TaskKind::ExecutionUpdate { .. })
                 && run.history.last() == Some(&RunState::Created)
                 && run.rendered.is_none()
                 && (task.run_if.is_none()
@@ -1505,8 +1505,8 @@ pub(super) fn render_updates(
             side.run_ids.push((ix, id));
         }
         let cx = surface.context(plan, state, Some(ix));
-        let TaskKind::Update { op, spec } = &plan.tasks[state.runs[ix].task].kind else {
-            unreachable!("filtered on TaskKind::Update above")
+        let TaskKind::ExecutionUpdate { op, spec } = &plan.tasks[state.runs[ix].task].kind else {
+            unreachable!("filtered on TaskKind::ExecutionUpdate above")
         };
         let change = crate::executor::update::compute(
             *op,

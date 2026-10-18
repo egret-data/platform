@@ -119,7 +119,7 @@ impl Plan {
             TaskKind::Runnable { .. }
             | TaskKind::Executable { .. }
             | TaskKind::Exit { .. }
-            | TaskKind::Update { .. } => Vec::new(),
+            | TaskKind::ExecutionUpdate { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
             | TaskKind::Loop { tasks, .. }
@@ -638,7 +638,7 @@ pub enum TaskKind {
     ///
     /// `spec` is the leaf spec's JSON text, not a `serde_json::Value`, because
     /// this enum derives `Eq`.
-    Update {
+    ExecutionUpdate {
         op: super::update::UpdateOp,
         spec: String,
     },
@@ -1365,7 +1365,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         (ModelKind::Leaf { spec }, _) if super::update::UpdateOp::of(&task.r#type).is_some() => {
             let op = super::update::UpdateOp::of(&task.r#type)
                 .expect("the guard above matched this type");
-            out[ix].kind = TaskKind::Update {
+            out[ix].kind = TaskKind::ExecutionUpdate {
                 op,
                 spec: spec.to_string(),
             };

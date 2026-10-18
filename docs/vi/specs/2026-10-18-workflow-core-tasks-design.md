@@ -99,14 +99,14 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 
 ### 3.1 Plan và trạng thái
 
-- **Plan:** thêm `TaskKind::Update { op, spec }` trong `executor/plan.rs`, với `op` là một trong `Set`, `Unset`, `Labels`. Mỗi type là một dòng `spec::registry` không có handler và được liệt kê trong `EXECUTOR_LEVEL` (`spec/registry.rs:333`), nên mọi deployment đều phục vụ được, giống `Exit`.
+- **Plan:** thêm `TaskKind::ExecutionUpdate { op, spec }` trong `executor/plan.rs`, với `op` là một trong `Set`, `Unset`, `Labels`. Mỗi type là một dòng `spec::registry` không có handler và được liệt kê trong `EXECUTOR_LEVEL` (`spec/registry.rs:333`), nên mọi deployment đều phục vụ được, giống `Exit`.
 - **Phần cập nhật được tính khi run còn ở `CREATED`**, trong một pass render riêng (`worker/render.rs::render_updates`, sau `render_expressions`), giống `values:` của `Loop` (`renders_at`, `worker/render.rs:1345`). Pass này render các thuộc tính của task dựa trên variables và labels hiện tại của execution, rồi tính giá trị mới.
   - **Lỗi:** run fail kèm message: `Command::FailUnstarted`, `CREATED FAILED` với một attempt `[FAILED]` (D6).
   - **Thành công:** giá trị mới được ghi vào `RenderSide` và run được hoàn tất ngay trong pass đó: `CREATED RUNNING SUCCESS`, với một attempt `CREATED RUNNING SUCCESS`. Bước settle ghi `variables` hoặc `labels` mới vào dòng execution, trong cùng transaction đang giữ khoá execution.
 - **Nhiều run cập nhật trong cùng một round** (hai nhánh của một `Parallel`) được áp dụng lần lượt theo thứ tự run. Run sau thấy kết quả của run trước, nên kết quả không phụ thuộc thời điểm.
 - **`runIf` falsy** cho ra `CREATED SKIPPED` qua đường sẵn có, không ghi gì.
 
-**(2026-10-18, final review)** Đoạn trên đã được sửa cho khớp với bản build. Pass là `render_updates`, tách khỏi `render_expressions` vì update LÀM ĐỔI surface mà mọi lần render sau trong settle đọc; kind trong plan là `Update { op, spec }`; attempt là `CREATED RUNNING SUCCESS`, đúng golden. Và việc hoàn tất run đã chuyển từ `advance()` vào pass (final review I1): khi còn để cho `advance()`, một update đã tính nằm cạnh một update lỗi trong cùng `Parallel` hoặc `Dag` bị `fail_the_rest` đánh fail (`CREATED FAILED`, không attempt) trong khi settle vẫn ghi thay đổi của nó. Giờ thay đổi và `SUCCESS` đi cùng nhau, và chỉ update lỗi bị fail, giống Kestra. Nhánh `Update` của `flowable::open` được giữ lại với cùng cách hoàn tất, cho caller tự đặt `rendered`.
+**(2026-10-18, final review)** Đoạn trên đã được sửa cho khớp với bản build. Pass là `render_updates`, tách khỏi `render_expressions` vì update LÀM ĐỔI surface mà mọi lần render sau trong settle đọc; kind trong plan là `ExecutionUpdate { op, spec }`; attempt là `CREATED RUNNING SUCCESS`, đúng golden. Và việc hoàn tất run đã chuyển từ `advance()` vào pass (final review I1): khi còn để cho `advance()`, một update đã tính nằm cạnh một update lỗi trong cùng `Parallel` hoặc `Dag` bị `fail_the_rest` đánh fail (`CREATED FAILED`, không attempt) trong khi settle vẫn ghi thay đổi của nó. Giờ thay đổi và `SUCCESS` đi cùng nhau, và chỉ update lỗi bị fail, giống Kestra. Nhánh `ExecutionUpdate` của `flowable::open` được giữ lại với cùng cách hoàn tất, cho caller tự đặt `rendered`.
 
 ### 3.2 Variables của execution (migration 0195)
 

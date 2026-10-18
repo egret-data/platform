@@ -530,7 +530,7 @@ W3A_FLOWABLES = {
 #
 # Group C2 Task 5 (2026-10-18): `SetVariables`, `UnsetVariables` and `Labels`
 # are `ExecutionUpdatableTask`s too; `build_plan` gives each a
-# `TaskKind::Update` and the worker's render pass computes it, so no worker
+# `TaskKind::ExecutionUpdate` and the worker's render pass computes it, so no worker
 # claims them either (`spec::registry::EXECUTOR_LEVEL`).
 W3A_EXECUTOR_LEVEL = {
     "io.kestra.plugin.core.execution.Exit",

@@ -13473,7 +13473,7 @@ rows (FQCN only) and are in `spec::registry::EXECUTOR_LEVEL`, as `Exit` is: no
 worker handler, no `driver::registry` entry and no `runtime::served_for` key,
 because `runtime::Served::serves` answers true for every executor-level type
 (`spec::unrunnable`'s `the_executor_level_types_publish_on_a_deployment_with_no_handlers`
-pins it on an empty `Served`). `build_plan` plans each `TaskKind::Update`
+pins it on an empty `Served`). `build_plan` plans each `TaskKind::ExecutionUpdate`
 (group C2 Task 3) and the worker's render pass computes it (Task 4). The census
 moved 281 → 293 live and `UNKNOWN_TYPE_REFUSED` 33 → 21 (`VALIDATE_REFUSED`
 stays 27). The last twelve `unknown_task_type` rows of `PUBLISHED_BUT_REFUSED`

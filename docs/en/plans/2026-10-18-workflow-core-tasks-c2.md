@@ -10,7 +10,7 @@
 - `io.kestra.plugin.core.execution.Labels`
 
 **Architecture:**
-- A new plan kind `TaskKind::Update { op, spec }` (`executor/plan.rs`). No worker ever claims one; each type is in `spec::registry::EXECUTOR_LEVEL`, as `Exit` is.
+- A new plan kind `TaskKind::ExecutionUpdate { op, spec }` (`executor/plan.rs`). No worker ever claims one; each type is in `spec::registry::EXECUTOR_LEVEL`, as `Exit` is.
 - The pure computation (deep merge, dotted unset, the three label forms, every refusal) lives in a new module `executor/update.rs`, tested without a DB.
 - A new worker render pass (`worker/render.rs::render_updates`, run after `render_expressions`) computes the update while the run is `CREATED`, as it does a `Loop`'s `values:`. It updates the in-memory `Surface` so later renders in the same settle see the new `vars`/`labels`, and records the final value in `RenderSide`. `settle` writes it to `workflow.executions` in the same transaction.
 - `advance()` turns a computed run into `CREATED RUNNING SUCCESS` (one attempt `CREATED RUNNING SUCCESS`) in one round. A failed computation is `CREATED FAILED` with **one attempt whose history is `[FAILED]`**, through a new command.
@@ -83,7 +83,7 @@ Recorded in the spec by Task 6, under "Default decisions".
 | `crates/egret-workflow/src/worker/render.rs` | `vars` rule in `Surface::load`; the `render_updates` pass; `Surface` setters; `RenderSide` fields | 1, 4 |
 | `crates/egret-workflow/src/worker/replay.rs` | copy `variables` | 1 |
 | `crates/egret-workflow/src/executor/update.rs` (new) | `UpdateOp`, the three `Spec`s, `TYPE_ID`s, `compute` and its pure helpers | 2 |
-| `crates/egret-workflow/src/executor/plan.rs` | `TaskKind::Update`, the `build_plan` arm, `direct_task_children` | 3 |
+| `crates/egret-workflow/src/executor/plan.rs` | `TaskKind::ExecutionUpdate`, the `build_plan` arm, `direct_task_children` | 3 |
 | `crates/egret-workflow/src/executor/command.rs`, `state.rs` | `Command::FailUnstarted` and its `apply` arm | 3 |
 | `crates/egret-workflow/src/executor/flowable/mod.rs` | `open`/`descend` arms | 3 |
 | `crates/egret-workflow/src/executor/mod.rs` | exhaustive-match arms in tests; `PUBLISHED_BUT_REFUSED` | 3, 5 |
@@ -335,7 +335,7 @@ fn labels_string_form_refuses_a_nested_object() {
 ### Task 3: the plan kind, `FailUnstarted`, and `advance()` (spec §3.1, D6)
 
 **Files:**
-- Modify: `crates/egret-workflow/src/executor/plan.rs` (`TaskKind::Update` after `Exit` at `:619`; `direct_task_children` at `:119`; the `build_plan` arm beside `Exit`'s at `:1333-1339`)
+- Modify: `crates/egret-workflow/src/executor/plan.rs` (`TaskKind::ExecutionUpdate` after `Exit` at `:619`; `direct_task_children` at `:119`; the `build_plan` arm beside `Exit`'s at `:1333-1339`)
 - Modify: `crates/egret-workflow/src/executor/command.rs` (`Command::FailUnstarted { run: RunIx, at: Tick }`, documented like `SkipRun`)
 - Modify: `crates/egret-workflow/src/executor/state.rs` (`apply` arm, beside `SkipRun` at `:922-930`)
 - Modify: `crates/egret-workflow/src/executor/flowable/mod.rs` (`open` at `:426-441`; `descend`'s match at about `:480-525`)
@@ -344,7 +344,7 @@ fn labels_string_form_refuses_a_nested_object() {
 **Interfaces:**
 - Consumes: `executor::update::{UpdateOp, SET_VARIABLES, UNSET_VARIABLES, LABELS}`.
 - Produces:
-  - `TaskKind::Update { op: UpdateOp, spec: String }` — `spec` is the leaf spec's JSON text (`serde_json::to_string(spec)`).
+  - `TaskKind::ExecutionUpdate { op: UpdateOp, spec: String }` — `spec` is the leaf spec's JSON text (`serde_json::to_string(spec)`).
   - `Command::FailUnstarted { run: RunIx, at: Tick }` — `apply` pushes `RunState::Failed` onto the run and one `Attempt { history: vec![RunState::Failed], started_at: at, ended_at: None }`.
   - The contract with Task 4: **a run of kind `Update` with `rendered.is_some()` has had its change computed and recorded; `advance()` then completes it.** Task 4 sets `rendered = Some(String::new())`.
 
@@ -353,14 +353,14 @@ fn labels_string_form_refuses_a_nested_object() {
   - `fail_unstarted_records_one_failed_attempt`: apply `FailUnstarted` to a `CREATED` run → history `[Created, Failed]`, attempts `[[Failed]]`; the execution then fails (as the golden `set-variables-duplicate` reads `CREATED RUNNING FAILED`).
   - `an_update_with_a_falsy_run_if_is_skipped`: `runIf: "false"` and `rendered_run_if = Some("false")` → `[Created, Skipped]`.
   - `two_updates_in_one_parallel_complete_in_the_same_round`: `Parallel` of two `Labels`, both rendered → both `CREATED RUNNING SUCCESS`.
-  - `build_plan_plans_the_three_types_as_updates`: each FQCN → `TaskKind::Update { op, spec }` with `spec` parsing back to the leaf's properties (no `id`/`type` needed either way, but assert `variables`/`labels` is present).
+  - `build_plan_plans_the_three_types_as_updates`: each FQCN → `TaskKind::ExecutionUpdate { op, spec }` with `spec` parsing back to the leaf's properties (no `id`/`type` needed either way, but assert `variables`/`labels` is present).
 - [ ] **Step 2: run, expect compile failure.**
 - [ ] **Step 3: implement.**
-  - `plan.rs`: the variant with a doc comment in the `Exit` style (an `ExecutionUpdatableTask`; computed at `CREATED` by the worker's render pass; completed by `advance()` in one round; no children). `build_plan` arm, before the `Subflow` arm: `(ModelKind::Leaf { spec }, _) if let Some(op) = UpdateOp::of(&task.r#type)` → `TaskKind::Update { op, spec: spec.to_string() }` (use a guard that compiles on the crate's edition, e.g. `if super::update::UpdateOp::of(&task.r#type).is_some()` and compute `op` inside). `direct_task_children`: add `| TaskKind::Update { .. }` to the leaf arm.
+  - `plan.rs`: the variant with a doc comment in the `Exit` style (an `ExecutionUpdatableTask`; computed at `CREATED` by the worker's render pass; completed by `advance()` in one round; no children). `build_plan` arm, before the `Subflow` arm: `(ModelKind::Leaf { spec }, _) if let Some(op) = UpdateOp::of(&task.r#type)` → `TaskKind::ExecutionUpdate { op, spec: spec.to_string() }` (use a guard that compiles on the crate's edition, e.g. `if super::update::UpdateOp::of(&task.r#type).is_some()` and compute `op` inside). `direct_task_children`: add `| TaskKind::ExecutionUpdate { .. }` to the leaf arm.
   - `flowable::open`: after the `runIf` gate,
 
 ```rust
-TaskKind::Update { .. } => match state.runs[run].rendered {
+TaskKind::ExecutionUpdate { .. } => match state.runs[run].rendered {
     // The worker's render pass has not computed it yet (spec §3.1).
     None => Step::Waiting,
     // Computed and recorded: `CREATED RUNNING SUCCESS` in one round, as
@@ -372,7 +372,7 @@ TaskKind::Update { .. } => match state.runs[run].rendered {
 },
 ```
 
-  - `flowable::descend`: `TaskKind::Update { .. } => return Step::Commands(vec![Command::SetRunState { run, state: RunState::Success }])` with a comment: a `RUNNING` update can only be one whose `StartRun` and `SUCCESS` were split by a reader between the two (none exists; the pair is one round), so it ends as it would have.
+  - `flowable::descend`: `TaskKind::ExecutionUpdate { .. } => return Step::Commands(vec![Command::SetRunState { run, state: RunState::Success }])` with a comment: a `RUNNING` update can only be one whose `StartRun` and `SUCCESS` were split by a reader between the two (none exists; the pair is one round), so it ends as it would have.
   - `FailUnstarted`'s `apply` arm, documented with the golden measurement (`[["FAILED"]]` vs `loop-null`'s `[]`).
   - The other exhaustive matches: `classify`/`observed` → `PlannedAs::Waits` (the `Exit` tier); the `run_to_fixpoint_rendering` fixture arm panics like `Exit`'s; `render.rs:787` `task.type` → `Some(op.type_id().to_string())`. For `Command` matches outside `executor`, `FailUnstarted` behaves like `SkipRun` (it ends a run that never ran: no spawn, no subflow).
 - [ ] **Step 4: run** `cargo test -p egret-workflow --lib executor`, expect PASS; `cargo check -p egret-workflow --all-targets` clean. Run the ratchet: counts unchanged (the types are still unregistered, so nothing new publishes).
@@ -388,7 +388,7 @@ TaskKind::Update { .. } => match state.runs[run].rendered {
 - Test: `crates/egret-workflow/tests/worker.rs`
 
 **Interfaces:**
-- Consumes: `executor::update::{compute, Change}`, `TaskKind::Update`, `Command::FailUnstarted` (Task 3).
+- Consumes: `executor::update::{compute, Change}`, `TaskKind::ExecutionUpdate`, `Command::FailUnstarted` (Task 3).
 - Produces (all `pub(super)` in `worker`):
 
 ```rust
@@ -434,7 +434,7 @@ pub(super) struct RenderSide {
 let (id, fresh) = surface.reserve_id(ix);
 if fresh { side.run_ids.push((ix, id)); }
 let cx = surface.context(plan, state, Some(ix));
-let TaskKind::Update { op, spec } = &plan.tasks[state.runs[ix].task].kind else { unreachable!() };
+let TaskKind::ExecutionUpdate { op, spec } = &plan.tasks[state.runs[ix].task].kind else { unreachable!() };
 match crate::executor::update::compute(*op, spec, &cx, surface.vars(), surface.current_labels()) {
     Ok(Change::Variables(v)) => {
         let v = serde_json::Value::Object(v);
