@@ -802,6 +802,12 @@ async fn a_clearing_role_holder_with_no_username_is_minted_into_deny_exceptions(
 /// reads and never mints. A holder still without a username stays NULL, and
 /// the answer is what it was before — a username nobody carries is not a
 /// holder, even the one the holder WOULD be minted.
+///
+/// The gate is written in a transaction that is never committed, and the audit
+/// runs on that same connection. A committed gate names R in the model, so any
+/// sibling test's recompile in this binary would legitimately mint R's holder
+/// (the compile half of R5) before the assertion below — a flake that blamed
+/// the audit for another test's compile.
 #[tokio::test]
 async fn owner_cleared_does_not_mint_a_holders_username() {
     let Some(db) = test_db().await else { return };
@@ -812,21 +818,35 @@ async fn owner_cleared_does_not_mint_a_holders_username() {
     let local = unique("clr-audit");
     let holder = new_user(&db, &format!("{local}@egret.local"), None).await;
     grant_role(&db, holder, role_id).await;
-    gate(&db, tag_id, &[&role_name], &[]).await;
 
-    let mut conn = db.pool.acquire().await.expect("conn");
+    let mut tx = db.pool.begin().await.expect("tx");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}'::uuid[])",
+    )
+    .bind(tag_id)
+    .bind(vec![role_name.clone()])
+    .execute(&mut *tx)
+    .await
+    .expect("classification policy, uncommitted");
+
     let answer = egret_perm_compile::view_audit::owner_cleared(
-        &mut conn,
+        &mut tx,
         &local,
         &std::collections::BTreeSet::from([tag_id]),
     )
     .await
     .expect("owner_cleared");
-    drop(conn);
+    let username: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(holder)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read username");
+    tx.rollback().await.expect("rollback");
 
     assert_eq!(
-        stored_username(&db, holder).await,
-        None,
+        username, None,
         "a GET-served audit must not write `users.username`"
     );
     assert_eq!(

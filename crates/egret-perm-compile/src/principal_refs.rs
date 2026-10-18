@@ -83,12 +83,19 @@
 //! because of a principal the patch does not touch (R6). PATCH takes the whole
 //! body, so every edit re-sends every principal; a ref the STORED row already
 //! holds in the same position (same kind, ref and include/exclude) is therefore
-//! not re-checked. A USER or ROLE deleted after it was validly written is not
-//! a defect — nobody carries the name any more, so a deny or exclude on it
-//! still denies everyone who does — and refusing every later edit of the row
-//! (even an actions-only one) until the author removed it would be.
+//! not re-checked. A USER or ROLE deleted after it was validly written is kept
+//! rather than refused: refusing every later edit of the row (even an
+//! actions-only one) until the author removed it would block unrelated work.
+//! That is NOT because nobody can carry the name again — both can, and this
+//! is a known gap, a pre-existing follow-up not closed here. A user's
+//! `hard_delete` frees `users.username`, and `ensure_username` can then mint
+//! the same base slug for the next person, who inherits every direct `user`
+//! ref left naming it (an allow grants them; a deny or exclude still binds
+//! them). A role name can be recreated (`roles` is keyed by scope and name),
+//! and its new holders inherit every `role` ref likewise. Until that closes,
+//! a ref to a deleted user or role names whoever next carries the name.
 //!
-//! **A GROUP is different (2026-10-18 design R1, R2).** A group name can be
+//! **A GROUP is guarded (2026-10-18 design R1, R2).** A group name can be
 //! carried again: a new local group, a rename into it, or an IdP claim would
 //! inherit every grant and exemption left naming it. So a local group's
 //! delete or rename is refused while anything names it (`GroupRepo::rename`,
