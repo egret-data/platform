@@ -62,7 +62,7 @@ Brief dùng để viết spec này mang những tiền đề mà code hoặc eng
 | E8 | Giá trị là cụ thể: không `*`, `?`, `{`, `}`, không macro kiểu `{USER}`, không giá trị rỗng, kiểm tra ở route và bằng một `CHECK` | quyết định mặc định (2026-10-18) |
 | E9 | Mọi response về engine grant đều mang `reach`: mọi engine bind vào profile mà grant biên dịch vào, để nhãn không bao giờ nói ít engine hơn số grant thực sự với tới (C5) | user, 2026-10-18 |
 | E10 | Rebind của một engine provisioned cũng recompile profile trước đó; xoá engine recompile profile trước đó của nó khi còn engine khác bind vào (C11). Cả hai đều fire-and-forget sau commit, có log, như `restore_engine_authz_service` làm (`engines.rs:5201-5226`) | quyết định mặc định (2026-10-18) |
-| E11 | Đích impersonation phải là một `users.username` hiện có (viết lại theo cách viết đã lưu), không bao giờ là `egret-lineage` hay `egret_delegator`, không bao giờ là user có tên trong một policy `egret-admin - …` của profile; kiểm tra lại lúc biên dịch, đích nào không đạt thì bị bỏ qua và được báo cáo | quyết định mặc định (2026-10-18) |
+| E11 | Đích impersonation phải là một `users.username` hiện có (phân giải ra id của user và lưu theo id, E21), không bao giờ là `egret-lineage` hay `egret_delegator`, không bao giờ là user có tên trong một policy `egret-admin - …` của profile; kiểm tra lại lúc biên dịch, đích nào không đạt thì bị bỏ qua và được báo cáo | quyết định mặc định (2026-10-18) |
 | E12 | Các policy hạ tầng được seed của profile được liệt kê theo từng engine dưới dạng entry `managed` chỉ đọc, ánh xạ sang một capability khi tập khoá resource của chúng khớp (§5.2) | user, 2026-10-18 |
 | E13 | `POST /perm/explain/capability` đánh giá một user và một capability trên artifact mà profile của engine phục vụ, bằng `egret-ranger-eval`; Undecidable được trả về đúng như vậy (C8, C9) | quyết định mặc định (2026-10-18), thay cho việc mở rộng `/perm/explain` |
 | E14 | Route, quyền và hình dạng transaction như `write_grant`: đọc cần `policy:read`, ghi cần `policy:update`, một transaction giữ group lock, dòng engine (`FOR SHARE`), profile lock, dòng dữ liệu, và lần recompile (§5) | user, 2026-10-18 |
@@ -72,7 +72,7 @@ Brief dùng để viết spec này mang những tiền đề mà code hoặc eng
 | E18 | Audit: một hook có tên trong ba handler ghi, ghi log hình dạng `Mutation`; được nối với `egret_audit` bởi gói nào merge sau trong #3 và F11 (C12) | quyết định mặc định (2026-10-18) |
 | E19 | Migration 0195 đổi tên mọi policy có sẵn có tên bắt đầu bằng `perm-engine-` mà không thuộc compiler, để sweep không bao giờ dọn mất một policy viết tay (§3.3) | quyết định mặc định (2026-10-18) |
 | E20 | Ngoài phạm vi: tab "Engine permissions" (#4), deny, giới hạn theo workspace, dạy evaluator hiểu `{USER}`, RisingWave | user, 2026-10-18 |
-| E21 | Ghi nhận, không sửa: `egret_delegator` không phải username reserved (C6); username được giải phóng của một user bị xoá cứng có thể được cấp lại cho người khác, người này sẽ thừa hưởng các ref, nay gồm cả đích impersonation (`crates/egret-perm-compile/src/principal_refs.rs:82-96`); update engine external recompile profile mới rồi profile cũ trong một transaction, mỗi cái qua `lock_services_in_tx` riêng của nó, nên hai profile lock không được lấy theo cùng một thứ tự tăng dần (`external.rs:406`, `:430-439`) | quyết định mặc định (2026-10-18) |
+| E21 | **Sửa đổi 2026-10-18 (controller, an toàn chặt):** ĐÍCH impersonation được lưu theo danh tính, `perm.engine_grants.target_user_id uuid REFERENCES users(id) ON DELETE CASCADE`, không bao giờ theo tên; compiler render `users.username` HIỆN TẠI của user từ id và bỏ qua grant khi user không có username. Vì thế một username được giải phóng rồi cấp lại cho người khác không bao giờ thừa hưởng một grant impersonation, và xoá user thì xoá luôn grant. Ghi nhận, không sửa: `egret_delegator` không phải username reserved (C6); principal được cấp quyền vẫn dùng cơ chế ref theo tên, nên username được giải phóng của một user bị xoá cứng vẫn có thể được cấp lại cho người khác, người này sẽ thừa hưởng các ref PHÍA ĐƯỢC CẤP (`crates/egret-perm-compile/src/principal_refs.rs:82-96`); update engine external recompile profile mới rồi profile cũ trong một transaction, mỗi cái qua `lock_services_in_tx` riêng của nó, nên hai profile lock không được lấy theo cùng một thứ tự tăng dần (`external.rs:406`, `:430-439`) | quyết định mặc định (2026-10-18), phần đích-theo-id do controller sửa đổi |
 
 ## 1. Những gì đang có
 
@@ -163,6 +163,7 @@ CREATE TABLE perm.engine_grants (
                     'trino.execute_function', 'starrocks.impersonate_user',
                     'starrocks.use_global_function', 'starrocks.manage_blacklist')),
     resource_values text[] NOT NULL,
+    target_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
     CHECK (array_position(resource_values, NULL) IS NULL),
@@ -171,9 +172,13 @@ CREATE TABLE perm.engine_grants (
              WHEN 'trino.set_catalog_session_property' THEN 2
              WHEN 'trino.execute_procedure' THEN 3
              WHEN 'trino.execute_function' THEN 3
+             WHEN 'trino.impersonate_user' THEN 0
+             WHEN 'starrocks.impersonate_user' THEN 0
              WHEN 'starrocks.manage_blacklist' THEN 0
              ELSE 1 END),
-    UNIQUE (engine_id, capability, resource_values)
+    CHECK ((capability IN ('trino.impersonate_user', 'starrocks.impersonate_user'))
+           = (target_user_id IS NOT NULL)),
+    UNIQUE NULLS NOT DISTINCT (engine_id, capability, resource_values, target_user_id)
 );
 CREATE INDEX engine_grants_engine_idx ON perm.engine_grants (engine_id);
 
@@ -187,7 +192,9 @@ CREATE TABLE perm.engine_grant_principals (
 CREATE INDEX engine_grant_principals_ref_idx ON perm.engine_grant_principals (kind, ref);
 ```
 
-Dùng `resource_values` chứ không phải `values`, vì `VALUES` là từ khoá reserved. Không có cột `mode`: chỉ allow, chỉ include (E5).
+Dùng `resource_values` chứ không phải `values`, vì `VALUES` là từ khoá reserved. Capability impersonation lưu đích ở
+`target_user_id` và không có `resource_values` (E21, đã sửa đổi): API vẫn nhận và trả username, route phân giải nó ra id
+và mọi lần đọc render lại từ id. Không có cột `mode`: chỉ allow, chỉ include (E5).
 `manage_blacklist` không lưu giá trị nào; compiler tự cung cấp `*`. Danh sách capability trong `CHECK` và catalogue
 Rust là một sự thật ở hai nơi, nên một test DB insert mọi id trong catalogue và một id không tồn tại (§7).
 

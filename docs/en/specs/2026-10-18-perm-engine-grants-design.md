@@ -60,7 +60,7 @@ filename-based (`crates/egret-metastore/src/lib.rs:173-221`); `apply_diff_in_tx`
 | E8 | Values are concrete: no `*`, `?`, `{`, `}`, no `{USER}`-style macro, no empty value, checked in the route and by a `CHECK` | default decision (2026-10-18) |
 | E9 | Every engine-grant response carries `reach`: every engine bound to the profile the grant compiles into, so a label never claims fewer engines than the grant reaches (C5) | user, 2026-10-18 |
 | E10 | A provisioned engine's rebind recompiles the former profile too; an engine delete recompiles its former profile when another engine still binds it (C11). Both fire-and-forget after commit, logged, as `restore_engine_authz_service` does (`engines.rs:5201-5226`) | default decision (2026-10-18) |
-| E11 | Impersonation targets must be a current `users.username` (rewritten to the stored spelling), never `egret-lineage` or `egret_delegator`, never a user named in an `egret-admin - …` policy of the profile; re-checked at compile, where a target that fails is skipped and reported | default decision (2026-10-18) |
+| E11 | Impersonation targets must be a current `users.username` (resolved to the user's id and stored by id, E21), never `egret-lineage` or `egret_delegator`, never a user named in an `egret-admin - …` policy of the profile; re-checked at compile, where a target that fails is skipped and reported | default decision (2026-10-18) |
 | E12 | Seeded infrastructure policies of the profile are listed per engine as `managed` read-only entries, mapped to a capability where their resource keys match one (§5.2) | user, 2026-10-18 |
 | E13 | `POST /perm/explain/capability` evaluates one user and one capability on the artifact the engine's profile serves, with `egret-ranger-eval`; Undecidable is returned as such (C8, C9) | default decision (2026-10-18), in place of extending `/perm/explain` |
 | E14 | Routes, permissions and transaction shape as `write_grant`: `policy:read` reads, `policy:update` writes, one transaction holding group locks, the engine row (`FOR SHARE`), the profile locks, the row, and the recompile (§5) | user, 2026-10-18 |
@@ -70,7 +70,7 @@ filename-based (`crates/egret-metastore/src/lib.rs:173-221`); `apply_diff_in_tx`
 | E18 | Audit: a named hook in the three write handlers that logs the `Mutation` shape; wired to `egret_audit` by whichever of #3 and F11 merges second (C12) | default decision (2026-10-18) |
 | E19 | Migration 0195 renames any pre-existing policy whose name starts with `perm-engine-` and is not compiler-owned, so the sweep can never reap a hand-written policy (§3.3) | default decision (2026-10-18) |
 | E20 | Out of scope: the "Engine permissions" tab (#4), deny, workspace scoping, teaching the evaluator `{USER}`, RisingWave | user, 2026-10-18 |
-| E21 | Recorded, not fixed: `egret_delegator` is not a reserved username (C6); a hard-deleted user's freed username can be re-minted to another person who then inherits refs, now including impersonation targets (`crates/egret-perm-compile/src/principal_refs.rs:82-96`); the external engine update recompiles new-then-old profile in one transaction, each through its own `lock_services_in_tx`, so the two profile locks are not taken in one ascending order (`external.rs:406`, `:430-439`) | default decision (2026-10-18) |
+| E21 | **Amended 2026-10-18 (controller, safety tight):** an impersonation TARGET is stored by identity, `perm.engine_grants.target_user_id uuid REFERENCES users(id) ON DELETE CASCADE`, never by name; the compiler renders the user's CURRENT `users.username` from the id and skips the grant when the user has none. A freed username re-minted to another person therefore never inherits an impersonation grant, and deleting the user deletes the grant. Recorded, not fixed: `egret_delegator` is not a reserved username (C6); grantee principals keep the name-based ref machinery, so a hard-deleted user's freed username can still be re-minted to another person who then inherits the GRANTEE refs (`crates/egret-perm-compile/src/principal_refs.rs:82-96`); the external engine update recompiles new-then-old profile in one transaction, each through its own `lock_services_in_tx`, so the two profile locks are not taken in one ascending order (`external.rs:406`, `:430-439`) | default decision (2026-10-18), target-by-id amended by the controller |
 
 ## 1. What exists
 
@@ -162,6 +162,7 @@ CREATE TABLE perm.engine_grants (
                     'trino.execute_function', 'starrocks.impersonate_user',
                     'starrocks.use_global_function', 'starrocks.manage_blacklist')),
     resource_values text[] NOT NULL,
+    target_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
     CHECK (array_position(resource_values, NULL) IS NULL),
@@ -170,9 +171,13 @@ CREATE TABLE perm.engine_grants (
              WHEN 'trino.set_catalog_session_property' THEN 2
              WHEN 'trino.execute_procedure' THEN 3
              WHEN 'trino.execute_function' THEN 3
+             WHEN 'trino.impersonate_user' THEN 0
+             WHEN 'starrocks.impersonate_user' THEN 0
              WHEN 'starrocks.manage_blacklist' THEN 0
              ELSE 1 END),
-    UNIQUE (engine_id, capability, resource_values)
+    CHECK ((capability IN ('trino.impersonate_user', 'starrocks.impersonate_user'))
+           = (target_user_id IS NOT NULL)),
+    UNIQUE NULLS NOT DISTINCT (engine_id, capability, resource_values, target_user_id)
 );
 CREATE INDEX engine_grants_engine_idx ON perm.engine_grants (engine_id);
 
@@ -186,7 +191,9 @@ CREATE TABLE perm.engine_grant_principals (
 CREATE INDEX engine_grant_principals_ref_idx ON perm.engine_grant_principals (kind, ref);
 ```
 
-`resource_values`, not `values`, because `VALUES` is reserved. No `mode` column: allow-only, include-only (E5).
+`resource_values`, not `values`, because `VALUES` is reserved. An impersonation capability stores its target in
+`target_user_id` and no `resource_values` (E21, amended): the API still takes and returns the username, which the route
+resolves to the id and every read renders from it. No `mode` column: allow-only, include-only (E5).
 `manage_blacklist` stores no value; the compiler supplies `*`. The capability list in the `CHECK` and the Rust
 catalogue are one fact in two places, so a DB test inserts every catalogue id and one unknown id (§7).
 
