@@ -1784,7 +1784,7 @@ async fn run_block_claim(
     let done = async {
         match &render {
             None => {
-                working_dir::discard(c).await;
+                working_dir::discard(pool, c).await;
                 BlockDone::Discarded
             }
             Some(render) => working_dir::run_claim(pool, c, render).await,
@@ -1827,7 +1827,7 @@ async fn run_block_claim(
         apply_block_claim_with(at, &renewed, &done).await
     })?;
     if matches!(done, BlockDone::Finished { .. }) {
-        working_dir::discard(c).await;
+        working_dir::discard(pool, c).await;
     }
     Ok(Committed::Yes)
 }

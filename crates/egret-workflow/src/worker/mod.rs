@@ -142,6 +142,10 @@ pub use render::execution_render_context;
 /// Exported so `tests/worker.rs`'s positive control asserts against the bound
 /// itself rather than against a copy of the number.
 pub use subflow::MAX_SPAWN_CHAIN;
+/// Test-only (`test-util`; debt D6): a block's discard on a store the test
+/// gives, so `tests/working_dir_claims.rs` can make its delete fail.
+#[cfg(any(test, feature = "test-util"))]
+pub use working_dir::discard_snapshots;
 
 use crate::executor::RunState;
 use crate::runners::RenderContext;

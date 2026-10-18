@@ -1935,6 +1935,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             egret_workflow::storage::nsfiles::staging::StagingSweepConfig::default(),
             reaper_cancel.clone(),
         );
+        // Workflow debt D6: the hourly sweep of the `_wd/{block}/` snapshots
+        // a crash, a forced kill or a failed discard left, 24 h after the
+        // block ended. On every replica with a store: a pass takes an
+        // advisory lock, so one sweep runs per database at a time.
+        egret_workflow::storage::wd_sweep::spawn_wd_sweeper(
+            db.pool.clone(),
+            fs.clone(),
+            egret_workflow::storage::wd_sweep::WdSweepConfig::default(),
+            reaper_cancel.clone(),
+        );
         // W9c spec §11: the hourly KV expiry sweep, its first pass an hour
         // after start, over every workspace. On every replica with a store:
         // each key is try-locked, so two replicas never sweep one key twice.

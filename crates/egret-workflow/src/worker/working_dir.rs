@@ -948,19 +948,44 @@ async fn collect_outputs(
 }
 
 /// Remove every snapshot of block run `c.id`, after its finish claim has
-/// committed. Best effort: an object left behind is the pruner's to sweep
-/// (spec §7.2), and the block is already finished.
-pub(crate) async fn discard(c: &Claimed) {
+/// committed (or, discard-only, before it commits), and stamp
+/// `working_dir_swept_at` once the delete succeeded. Best effort: an object
+/// left behind stays unstamped, and the `_wd` sweep
+/// ([`crate::storage::wd_sweep`]) removes it 24 h after the block ended
+/// (debt D6). The block is already finished.
+pub(crate) async fn discard(pool: &PgPool, c: &Claimed) {
     let Some(store) = crate::storage::current() else {
         return;
     };
-    let prefix = store.working_dir_prefix(c.workspace_id, c.execution_id, c.id);
-    if let Err(e) = store.store.delete_prefix(&prefix).await {
+    discard_snapshots(pool, &store, c.workspace_id, c.execution_id, c.id).await;
+}
+
+/// [`discard`] on `fs`, for block run `block` of `execution` in `workspace`.
+/// `pub` (behind `test-util`) so `tests/working_dir_claims.rs` can hand it a
+/// store whose deletes fail.
+pub async fn discard_snapshots(
+    pool: &PgPool,
+    fs: &FileStore,
+    workspace: uuid::Uuid,
+    execution: uuid::Uuid,
+    block: uuid::Uuid,
+) {
+    let prefix = fs.working_dir_prefix(workspace, execution, block);
+    if let Err(e) = fs.store.delete_prefix(&prefix).await {
         tracing::warn!(
-            execution = %c.execution_id,
-            run = %c.id,
-            "the snapshots of a finished WorkingDirectory could not be removed (the pruner will \
-             sweep them): {e}"
+            %execution,
+            run = %block,
+            "the snapshots of a finished WorkingDirectory could not be removed (the `_wd` sweep \
+             will remove them): {e}"
+        );
+        return;
+    }
+    if let Err(e) = crate::storage::wd_sweep::stamp(pool, block).await {
+        tracing::warn!(
+            %execution,
+            run = %block,
+            "the snapshots of a finished WorkingDirectory were removed but could not be marked \
+             so (the `_wd` sweep will list the block once more): {e}"
         );
     }
 }
