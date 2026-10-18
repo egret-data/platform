@@ -2788,11 +2788,15 @@ mod tests {
                 "{id}: the wide reading must contain the narrow one"
             );
         }
+        // (85, 57) -> (88, 59) at group C1 Task 3 (2026-10-18, measured):
+        // `valids/if-in-parallel` plans again now that `Assert` is registered;
+        // its `for_each` body is `return` and `if` (direct) and `after_if`.
         assert_eq!(
             (wide, narrow),
-            (85, 57),
-            "85 tasks are inside a loop by the shipped reading and 57 by the \
-             direct-children one. Plan Task 3 moved 78 and 55 by +7 and +2: \
+            (88, 59),
+            "88 tasks are inside a loop by the shipped reading and 59 by the \
+             direct-children one (85 and 57 until group C1 Task 3 registered \
+             `Assert` and `valids/if-in-parallel` planned again). Plan Task 3 moved 78 and 55 by +7 and +2: \
              `valids/working-directory-taskrun` (one `WorkingDirectory` child, one \
              task inside it) and `-taskrun-nested` (five tasks inside its \
              `WorkingDirectory`, one direct child of the `Loop`) plan now, where \
@@ -4261,16 +4265,11 @@ mod tests {
         // was `io.kestra.plugin.core.output.OutputValues` are gone -- it is
         // registered (`worker::handlers::output_values`) -- and the five rows
         // that also named another type now name only the types still missing.)
-        PublishedButRefused {
-            id: "valids/assert",
-            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/if-in-parallel",
-            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
+        //
+        // (2026-10-18, group C1 Task 3: the two rows whose only unported type
+        // was `io.kestra.plugin.core.execution.Assert`, `valids/assert` and
+        // `valids/if-in-parallel`, are gone -- it is registered
+        // (`worker::handlers::assert`).)
         PublishedButRefused {
             id: "valids/labels-update-nested-value-list",
             cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
@@ -5810,11 +5809,14 @@ tasks:
                 .filter(|&ix| stripped.is_loop_body(ix))
                 .count();
         }
+        // (41, 85) -> (42, 88) at group C1 Task 3 (2026-10-18, measured):
+        // `valids/if-in-parallel` plans again (`Assert` is registered).
         assert_eq!(
             (flows, wide),
-            (41, 85),
-            "the 41 corpus flows holding a `Loop` that `build_plan` plans and the \
-             85 tasks the wide reading names inside one -- the same 85 \
+            (42, 88),
+            "the 42 corpus flows holding a `Loop` that `build_plan` plans and the \
+             88 tasks the wide reading names inside one (41 and 85 until group C1 \
+             Task 3 registered `Assert`) -- the same 88 \
              `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount` \
              derives. Plan Task 3 took the two `WorkingDirectory` flows \
              `valids/working-directory-taskrun` and `-taskrun-nested` out of the \

@@ -799,7 +799,9 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // the four `valids/exit*` entries bank; 100 + 201 = 301.
         // 100 -> 89 baselined, 201 -> 212 matching at group C1 Task 2: the
         // eleven entries `OutputValues` held bank; 89 + 212 = 301.
-        (301, 212, 89),
+        // 89 -> 88 baselined, 212 -> 213 matching at group C1 Task 3:
+        // `valids/assert` banks; 88 + 213 = 301.
+        (301, 213, 88),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2327,7 +2329,9 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
 // 38 -> 40 at WorkingDirectory Task 8: `valids/working-directory-taskrun` and
 // `-nested`, the two entries whose one `Loop` body is a WorkingDirectory, which
 // egret now plans and runs (measured by the census, not by hand).
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
+// 40 -> 41 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`
+// plans and runs its `Loop` now.
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -2360,8 +2364,12 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
 /// unported type was `OutputValues` now run past it, banked or not, and carry
 /// 26 more top-level pairs (measured: the test prints `egret produces 753`).
 /// The nested figure does not move.
-const EGRET_TOP_LEVEL_PAIRS: usize = 753;
-const EGRET_NESTED_PAIRS: usize = 125;
+/// **755 and 130 since group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel` are planned and run (`Assert` has a handler);
+/// `if-in-parallel`'s three iterations carry the five nested pairs (measured:
+/// the test prints `egret produces 755 + 130`).
+const EGRET_TOP_LEVEL_PAIRS: usize = 755;
+const EGRET_NESTED_PAIRS: usize = 130;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2451,7 +2459,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // + 6) at kill-and-exit Task 3.
         // + the 22 top-level pairs of the eleven entries group C1 Task 2 banked
         // (`OutputValues` has a handler); measured.
-        (425, 103, 528),
+        // + the 1 top-level pair of `valids/assert` (`before` before `fail`),
+        // banked at group C1 Task 3; measured.
+        (426, 103, 529),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2470,7 +2480,8 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // four banked `valids/exit*` entries moved to the matching side.
         // 610 -> 588 at group C1 Task 2: the 22 top-level pairs of the eleven
         // entries it banked moved to the matching side.
-        (464, 124, 588),
+        // 588 -> 587 at group C1 Task 3: `valids/assert`'s one pair.
+        (463, 124, 587),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2889,7 +2900,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// **356 since kill-and-exit Task 3 banked the four `valids/exit*` entries**
 /// (two run terminals each in three, four in `valids/exit-nested`).
 /// **331 since group C1 Task 2 (2026-10-18)**: 25 run terminals on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler).
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 331;
+// 331 -> 329 at group C1 Task 3 (2026-10-18, measured): `valids/assert`'s two
+// runs moved to the banked side.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 329;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2914,7 +2927,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // top-level execution each and no sub-execution, are banked.
 // 135 -> 124 at group C1 Task 2: the eleven entries group C1 Task 2 banked (`OutputValues` has a handler),
 // one top-level execution each and no sub-execution.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 124;
+// 124 -> 123 at group C1 Task 3: `valids/assert` (one top-level execution, no
+// sub-execution) is banked.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 123;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2931,7 +2946,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 124;
 /// **1388 since kill-and-exit Task 3**: 31 on the four `valids/exit*` entries
 /// (6 + 6 + 6 + 13: `was_true` is the one run with a `SUBMITTED`).
 /// **1281 since group C1 Task 2 (2026-10-18)**: 107 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1281;
+/// **1273 since group C1 Task 3 (2026-10-18)**: 8 on `valids/assert`'s two
+/// runs (`CREATED SUBMITTED RUNNING <state>` each; measured).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1273;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2951,7 +2968,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1281;
 /// **488 since kill-and-exit Task 3**: three on each of the four `valids/exit*`
 /// executions (`CREATED RUNNING <state>`).
 /// **437 since group C1 Task 2 (2026-10-18)**: 51 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 437;
+/// **434 since group C1 Task 3 (2026-10-18)**: three on `valids/assert`'s
+/// one execution (`CREATED RUNNING FAILED`).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 434;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3090,7 +3109,10 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 // gained, counted before the restriction (which removes none of them).
 // 944 -> 970 at group C1 Task 2: the 26 pairs `EGRET_TOP_LEVEL_PAIRS` gained,
 // none of which the restriction removes (`RESTRICTION_REMOVES` is unchanged).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 970;
+// 970 -> 977 at group C1 Task 3 (2026-10-18, measured): the pairs egret
+// produces for `valids/assert` and `valids/if-in-parallel`, which used to be
+// refused at start.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 977;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4096,6 +4118,8 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "egret.container",
             "egret.script.python",
             "io.kestra.plugin.core.debug.Return",
+            // Group C1 Task 3.
+            "io.kestra.plugin.core.execution.Assert",
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
             "io.kestra.plugin.core.kv.Delete",
@@ -4125,11 +4149,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ],
-        "the thirty handlers the driver runs (the four core storage tasks since \
+        "the thirty-one handlers the driver runs (the four core storage tasks since \
          W9a Task 11, the five whole-file ones since Task 12, the four namespace-file \
          tasks since W9b Tasks 6 and 7, the six KV tasks since W9c Task 5, the six \
-         script kinds since WorkingDirectory Task 8, and `OutputValues` since group \
-         C1 Task 2). If this list ever grew to cover \
+         script kinds since WorkingDirectory Task 8, `OutputValues` since group \
+         C1 Task 2, and `Assert` since group C1 Task 3). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );
@@ -4282,7 +4306,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // 29 -> 30 at group C1 Task 2 (measured): `valids/waitfor-child-task-warning`
 // runs past its `OutputValues` and its execution history has one more
 // `PAUSED RUNNING` than the golden's.
-const MISMATCH_ON_EXECUTION: usize = 30;
+// 30 -> 31 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`
+// runs, and its `assert` FAILS on the `Loop`'s own `outputs:`, so the execution
+// FAILS where Kestra's SUCCEEDED.
+const MISMATCH_ON_EXECUTION: usize = 31;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4300,7 +4327,9 @@ const MISMATCH_ON_EXECUTION: usize = 30;
 // 45 -> 52 at group C1 Task 2 (measured by this census): the seven entries
 // that run past `OutputValues` and still mismatch now differ on `runs` as
 // traces, not as refusals.
-const MISMATCH_ON_RUNS: usize = 52;
+// 52 -> 53 at group C1 Task 3 (2026-10-18, measured): the same entry's `assert`
+// run (FAILED, not SUCCESS).
+const MISMATCH_ON_RUNS: usize = 53;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4344,9 +4373,9 @@ const MISMATCH_ON_ORDER: usize = 26;
 // `valids/exit*` entries plan and are run (and match).
 // 41 -> 23 at group C1 Task 2: `OutputValues` is registered, so the eighteen
 // entries whose only unregistered type it was plan and are run (eleven match).
-const RUNS_REFUSED: [&str; 23] = [
-    "valids/assert",
-    "valids/if-in-parallel",
+// 23 -> 21 at group C1 Task 3: `Assert` is registered, so `valids/assert` and
+// `valids/if-in-parallel` plan and are run (`assert` matches).
+const RUNS_REFUSED: [&str; 21] = [
     "valids/labels-update-nested-value-list",
     "valids/labels-update-nested-value-map",
     "valids/labels-update-task",
@@ -4386,7 +4415,9 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 /// **100 since the AllowFailure flowable**: its three targets match.
 /// **96 since kill-and-exit Task 3**: the four `valids/exit*` entries match.
 /// **85 since group C1 Task 2**: the eleven entries `OutputValues` held match.
-const MISMATCHING_RUNS_ENTRIES: usize = 85;
+// 85 -> 84 at group C1 Task 3 (2026-10-18, measured): `valids/assert` banked;
+// `valids/if-in-parallel` moved from `refused` to a traced mismatch.
+const MISMATCHING_RUNS_ENTRIES: usize = 84;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4800,7 +4831,10 @@ async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 
     assert_eq!(
         (entries_with_a_body, loop_bodies),
-        (38, 82),
+        // (38, 82) -> (39, 85) at group C1 Task 3: `valids/if-in-parallel`
+        // plans again (`Assert` is registered), and its `for_each` body holds
+        // `return`, `if` and `after_if`. Measured.
+        (39, 85),
         "the population: 36 comparable entries hold a `Loop` that egret plans, \
          with 75 tasks inside a loop body between them. Both are derived; if \
          they move, the `Loop` slice of the corpus has changed. It was (39, 81) \
@@ -4871,7 +4905,8 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
         (
             TOP_LEVEL_SPAWN_KEYS_IDENTICAL,
             TOP_LEVEL_SPAWN_KEYS_DIFFER,
-            40
+            // 40 -> 41 at group C1 Task 3: `valids/if-in-parallel` runs.
+            41
         ),
         "the totals asserted beside the parts. Both figures are what W3b Task 4 \
          built the spawner for and could not measure, because the oracle still \
@@ -5148,7 +5183,9 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // no-silent-stall Task 1: -3 identical, three entries whose keys matched and
 // that are refused at start now (`RUNS_REFUSED`), so egret produces no key
 // list for them at all.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 33;
+// 33 -> 34 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`'s
+// three iterations match.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 34;
 const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 7;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
@@ -5235,10 +5272,12 @@ fn the_default_concurrency_limit_is_one_and_the_corpus_can_tell() {
          times"
     );
     assert_eq!(
-        defaulted, 23,
-        "the population: top-level `Loop`s in the comparable corpus that write no \
-         `concurrencyLimit` and resolve at least one value, in a flow egret plans \
-         (24 until no-silent-stall Task 1 refused one such flow at start)"
+        defaulted, 24,
+        "the population: top-level `Loop`s in the comparable corpus whose \
+         `concurrencyLimit` is 1 (unwritten, or written as 1) and resolve at least \
+         one value, in a flow egret plans (24 until no-silent-stall Task 1 refused \
+         `valids/if-in-parallel` at start for its `Assert`, 23 until group C1 Task 3 \
+         registered `Assert` and it plans again; it writes `concurrencyLimit: 1`)"
     );
 }
 
@@ -7021,7 +7060,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // Group C1 Task 2 (2026-10-18): `OutputValues` has a handler, and the
         // five entries it alone held here banked (`flow-with-array-outputs`,
         // `output-values`, `replay`, `webhook-outputs`, `webhook-wait`).
-        ("valids/assert", "no handler: Assert"),
+        //
+        // Group C1 Task 3 (2026-10-18): `Assert` has a handler, and
+        // `valids/assert`, which it alone held here, banked.
         ("valids/purge_logs_execution_only", "no handler: PurgeLogs"),
         ("valids/purge_logs_full_arguments", "no handler: PurgeLogs"),
         ("valids/purge_logs_no_arguments", "no handler: PurgeLogs"),
@@ -7431,9 +7472,10 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // `valids/exit*` entries declare no `timeout:` either.
     // (2, 98, 100) -> (2, 87, 89) at group C1 Task 2: nor do the eleven
     // entries it banked.
+    // (2, 87, 89) -> (2, 86, 88) at group C1 Task 3: nor does `valids/assert`.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 87, 89),
+        (2, 86, 88),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

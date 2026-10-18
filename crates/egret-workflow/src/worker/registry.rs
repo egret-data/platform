@@ -134,6 +134,8 @@ impl Handlers {
         r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));
         // Group C1 Task 2: renders a map, needs nothing else.
         r.add_publishable(Arc::new(handlers::output_values::OutputValues));
+        // Group C1 Task 3: renders conditions, needs nothing else.
+        r.add_publishable(Arc::new(handlers::assert::Assert));
         // W9a Task 11: the two core storage tasks that need no connection.
         // `Write` takes the store its CALLER passes (spec §4.6: the store is a
         // parameter, never read from a global here; fix round 1) -- `runtime`
@@ -308,14 +310,16 @@ mod tests {
     ///
     /// W9a Task 11 adds `core.storage.Write` and `Size`, the two storage tasks
     /// that need no pool, and Task 12 the five whole-file storage tasks.
-    /// Group C1 Task 2 adds `core.output.OutputValues`.
+    /// Group C1 Task 2 adds `core.output.OutputValues`, Task 3
+    /// `core.execution.Assert`.
     #[test]
-    fn the_core_registry_holds_the_twelve_kestra_type_ids_and_the_one_alias() {
+    fn the_core_registry_holds_the_thirteen_kestra_type_ids_and_the_one_alias() {
         assert_eq!(
             Handlers::with_core_tasks(None).type_ids(),
             vec![
                 "core.log",
                 "io.kestra.plugin.core.debug.Return",
+                "io.kestra.plugin.core.execution.Assert",
                 "io.kestra.plugin.core.execution.Fail",
                 "io.kestra.plugin.core.flow.Sleep",
                 "io.kestra.plugin.core.log.Log",

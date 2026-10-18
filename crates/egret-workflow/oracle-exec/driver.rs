@@ -171,6 +171,10 @@ pub fn registry(pool: &PgPool) -> Handlers {
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::output_values::OutputValues,
     ));
+    // Group C1 Task 3: renders `conditions:`, reaches nothing.
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::assert::Assert,
+    ));
     // W9a Task 12: the five whole-file storage tasks, over the same store.
     {
         use egret_workflow::worker::handlers::storage as st;
@@ -918,7 +922,14 @@ const CREATE_REFUSED: usize = 4;
 /// `Subflow` to `dummy_namespace/dummy_flow`, which no corpus flow defines, and
 /// is refused there (`not found: referenced object`), so it moves to
 /// [`VALIDATE_REFUSED`] -- the W10 Task 6 shape, one flow between the buckets.
-const LIVE: usize = 274;
+///
+/// **274 -> 276 at group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel`, the two corpus flows that declare
+/// `io.kestra.plugin.core.execution.Assert` and no other unported type, publish
+/// live now that it has a `TASK_TYPES` row, a worker handler
+/// (`worker::handlers::assert`, in [`registry`] and `Handlers::with_core_tasks`)
+/// and a `runtime::served_for` key. Both leave [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 276;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -986,7 +997,10 @@ const LIVE: usize = 274;
 /// **61 -> 40 at group C1 Task 2 (2026-10-18)**: the 21 flows whose only
 /// unported type was `OutputValues` (see [`LIVE`]). The five that also declare
 /// `Assert`, `SetVariables` or `UnsetVariables` stay here.
-const UNKNOWN_TYPE_REFUSED: usize = 40;
+///
+/// **40 -> 38 at group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel` (see [`LIVE`]).
+const UNKNOWN_TYPE_REFUSED: usize = 38;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -1085,7 +1099,7 @@ fn census(filed: &BTreeMap<String, Filed>) {
     // 345 -> 351 with the six `working-directory-real-*` corpus flows added at
     // WorkingDirectory Task 8 (`corpus/valids/`; see `corpus.json`). The live
     // count, 244 -> 250 (254 since kill-and-exit Task 3, 274 since group C1
-    // Task 2), is asserted through
+    // Task 2, 276 since Task 3), is asserted through
     // `LIVE` above.
     assert_eq!(filed.len(), 351, "every corpus flow is accounted for");
     assert_eq!(live.len(), LIVE, "live versions: {live:?}");

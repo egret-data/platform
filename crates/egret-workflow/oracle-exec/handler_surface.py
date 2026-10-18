@@ -437,6 +437,8 @@ W3B_HANDLERS = {
     "io.kestra.plugin.core.storage.Size",
     # Group C1 Task 2 (`worker::handlers::output_values`).
     "io.kestra.plugin.core.output.OutputValues",
+    # Group C1 Task 3 (`worker::handlers::assert`).
+    "io.kestra.plugin.core.execution.Assert",
     "io.kestra.plugin.core.storage.Delete",
     "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
     "io.kestra.plugin.core.storage.Concat",
@@ -983,9 +985,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # latency lets it stop at three attempts where egret makes four); 100 since
     # kill-and-exit Task 3 banked the four `valids/exit*` entries (the
     # executor runs `io.kestra.plugin.core.execution.Exit`); 89 since group C1
-    # Task 2 banked the eleven entries `OutputValues` held (it has a handler).
-    if len(baseline) != 89:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 89; the split "
+    # Task 2 banked the eleven entries `OutputValues` held (it has a handler);
+    # 88 since group C1 Task 3 banked `valids/assert` (`Assert` has a handler).
+    if len(baseline) != 88:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 88; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1635,8 +1638,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 89",
-         "not 89",
+    case("baseline.txt is no longer 88",
+         "not 88",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

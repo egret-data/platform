@@ -39,6 +39,7 @@
 //! Kestra does: a render throws inside `run`, and a task whose `run` throws is
 //! `FAILED`, not a worker fault.
 
+pub mod assert;
 pub mod container;
 pub mod fail;
 pub mod kestra;

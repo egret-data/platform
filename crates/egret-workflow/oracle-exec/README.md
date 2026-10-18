@@ -6282,7 +6282,7 @@ found.
 | 3 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **30** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked) |
+| **29** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an
@@ -13332,3 +13332,36 @@ execution-history tokens 488 → 437; the field breakdown `execution` 29 → 30,
 `runs` 45 → 52, `order` 20 → 26, total 96 → 85. The `Subflow` banks are fifteen
 (`task-runif` joins), and the baselined webhook entries one. The
 handler-surface ceiling went 232 → 243 and its population 204 → 221.
+
+## Group C1 Task 3: `Assert`, and one entry banks
+
+**What changed.** `io.kestra.plugin.core.execution.Assert` has a
+`spec::registry` row, a worker handler (`worker::handlers::assert`: each
+`conditions:` entry rendered with `render_str` and read with
+`executor::is_truthy`; a render error counts as a failure; one INFO line
+`<s> succeeded, <f> failed` in place of Kestra's two counters), a
+`runtime::served_for` key and a place in `driver::registry`. The census moved
+274 → 276 live and `UNKNOWN_TYPE_REFUSED` 40 → 38: `valids/assert` and
+`valids/if-in-parallel`, the two flows whose only unported type was `Assert`,
+publish. Two `PUBLISHED_BUT_REFUSED` rows and two `RUNS_REFUSED` entries
+(23 → 21) went, and the ratchet went from 89 mismatching / 89 baselined to
+88 / 88.
+
+**Banked (1):** `assert` (its third condition is falsy, so `fail` FAILS, as in
+Kestra).
+
+**Still baselined, with the cause measured (1):** `if-in-parallel` runs, and
+its `assert` FAILS where Kestra's SUCCEEDED: all three conditions read
+`outputs.for_each.outputs[i].outputs.*`, the `Loop`'s own `outputs:`, which
+egret does not produce, and each fails to render (`undefined value`; measured
+by logging the handler's failures during the ratchet run). The same unclaimed
+cause holds `loop-outputs*`.
+
+The handler-surface ceiling went 243 → 245 (population 221 → 223): `Assert` is
+now in `W3B_HANDLERS`. The derived figures that moved, each with a dated note
+where it is pinned: `EGRET_TOP_LEVEL_PAIRS` 753 → 755, `EGRET_NESTED_PAIRS`
+125 → 130, `EGRET_PAIRS_BEFORE_RESTRICTION` 970 → 977, spawned entries
+40 → 41, top-level spawn keys identical 33 → 34, the field breakdown
+(execution 30 → 31, runs 52 → 53, total 85 → 84), loop bodies (38, 82) →
+(39, 85), the default-limit loop population 23 → 24, and the baselined
+terminals, executions and history tokens by `assert`'s share.

@@ -576,7 +576,6 @@ valids/after-execution-error
 valids/after-execution-finally
 valids/after-execution-flowable
 valids/all-flowable
-valids/assert
 valids/dag
 valids/disable-flowable
 valids/errors
@@ -600,6 +599,7 @@ valids/flow-with-outputs-failed
 valids/full
 valids/if
 valids/if-in-flowable
+# group C1 Task 3 (2026-10-18): `Assert` runs now; held by the `Loop`'s own `outputs:`, which egret does not produce: all three conditions read `outputs.for_each.outputs[i].outputs.*` and fail to render (`undefined value`), so `assert` FAILS where Kestra SUCCEEDED (measured).
 valids/if-in-parallel
 valids/labels-update-nested-value-list
 valids/labels-update-nested-value-map
