@@ -470,3 +470,41 @@ async fn deleting_the_target_user_deletes_the_grant_and_reaps_its_policy_at_once
         "no explicit recompile: the delete itself reaped the compiled policy"
     );
 }
+
+/// Security review M1: the user delete reads which profile each targeting
+/// grant compiles into, so it holds those engines' rows `FOR SHARE` (group
+/// locks, then engine rows, then profiles: the write path's order). An
+/// uncommitted rebind of the engine (an UPDATE of its row) makes the delete
+/// wait, so it recompiles the profile the engine is bound to once the rebind
+/// lands, never the one it left.
+#[tokio::test]
+async fn a_user_delete_waits_on_an_uncommitted_rebind_of_a_targeting_grants_engine() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let (_ua, a) = person(pool).await;
+    let (uc, _c) = person(pool).await;
+    create(
+        &e,
+        "starrocks.impersonate_user",
+        &[],
+        Some(uc),
+        vec![p(PrincipalKind::User, &a)],
+    )
+    .await;
+    let mut rebind = pool.begin().await.expect("begin");
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = authz_service_id WHERE id = $1")
+        .bind(e.engine)
+        .execute(&mut *rebind)
+        .await
+        .expect("rebind");
+    let db = e.db.clone();
+    let h = tokio::spawn(async move {
+        UserRepo::new(db)
+            .hard_delete(UserId(uc), &PermGroupRecompiler)
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert!(!h.is_finished(), "the delete must wait on the engine row");
+    rebind.commit().await.expect("commit");
+    h.await.expect("join").expect("hard delete");
+}

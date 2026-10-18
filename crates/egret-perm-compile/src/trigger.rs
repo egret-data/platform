@@ -1921,22 +1921,37 @@ async fn engine_grant_profiles_naming_via(
 }
 
 /// F11 (spec E21, amended): the profiles of every engine whose impersonation
-/// grants target `user_id`. Deleting that user cascades those grants away, so
+/// grants target `user_id`, with those engines' rows held `FOR SHARE`. Deleting that user cascades those grants away, so
 /// the delete must recompile these profiles in its own transaction or the
 /// compiled policy keeps naming a username the next person can be minted.
 pub async fn affected_services_for_user_delete(
     conn: &mut sqlx::PgConnection,
     user_id: Uuid,
 ) -> Result<Vec<i64>, CompileError> {
-    let mut ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
-           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
-          WHERE g.target_user_id = $1 AND e.authz_service_id IS NOT NULL",
+    // Security review M1: the engines' rows `FOR SHARE`, ascending, BEFORE
+    // their profiles are read, so a concurrent rebind (which UPDATEs the row)
+    // either commits first — and this reads the profile it moved to — or waits
+    // until this delete has recompiled. Same order as an engine-grant write:
+    // group locks, engine rows, profile locks.
+    let engines: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT engine_id FROM perm.engine_grants WHERE target_user_id = $1 \
+          ORDER BY engine_id",
     )
     .bind(user_id)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
+    let mut ids: Vec<i64> = Vec::new();
+    for engine_id in engines {
+        let profile: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT authz_service_id FROM engine_mgmt.engines WHERE id = $1 FOR SHARE",
+        )
+        .bind(engine_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        ids.extend(profile.flatten());
+    }
     normalize_service_order(&mut ids);
     Ok(ids)
 }
