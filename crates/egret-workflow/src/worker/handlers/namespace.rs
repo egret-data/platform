@@ -228,7 +228,7 @@ pub fn register(
 
 /// The running flow's namespace: the render scope's (Task 5's
 /// `flow_namespace`) and nothing else.
-pub(super) fn flow_namespace(task: &TaskInput) -> Option<String> {
+pub(crate) fn flow_namespace(task: &TaskInput) -> Option<String> {
     task.render
         .files()
         .and_then(|f| f.0.flow_namespace().map(str::to_string))

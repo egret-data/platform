@@ -204,6 +204,8 @@ pub fn registry(pool: &PgPool) -> Handlers {
     );
     // W9c Task 5: the six KV tasks over the same store.
     egret_workflow::worker::handlers::kv::register(&mut r, pool.clone(), Some(files));
+    // Group C1 Task 4: `PurgeLogs`, over the same pool.
+    egret_workflow::worker::handlers::purge_logs::register(&mut r, pool.clone());
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));
@@ -929,7 +931,15 @@ const CREATE_REFUSED: usize = 4;
 /// live now that it has a `TASK_TYPES` row, a worker handler
 /// (`worker::handlers::assert`, in [`registry`] and `Handlers::with_core_tasks`)
 /// and a `runtime::served_for` key. Both leave [`UNKNOWN_TYPE_REFUSED`].
-const LIVE: usize = 276;
+///
+/// **276 -> 281 at group C1 Task 4 (2026-10-18)**: the five
+/// `valids/purge_logs_*`, the corpus flows that declare
+/// `io.kestra.plugin.core.log.PurgeLogs` and no other unported type, publish
+/// live now that it has a `TASK_TYPES` row, a worker handler
+/// (`worker::handlers::purge_logs`, registered by its own `register` in
+/// [`registry`] and `runtime::handlers_for`) and a `runtime::served_for` key.
+/// All five leave [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 281;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -1000,7 +1010,10 @@ const LIVE: usize = 276;
 ///
 /// **40 -> 38 at group C1 Task 3 (2026-10-18)**: `valids/assert` and
 /// `valids/if-in-parallel` (see [`LIVE`]).
-const UNKNOWN_TYPE_REFUSED: usize = 38;
+///
+/// **38 -> 33 at group C1 Task 4 (2026-10-18)**: the five
+/// `valids/purge_logs_*` (see [`LIVE`]).
+const UNKNOWN_TYPE_REFUSED: usize = 33;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -1099,7 +1112,7 @@ fn census(filed: &BTreeMap<String, Filed>) {
     // 345 -> 351 with the six `working-directory-real-*` corpus flows added at
     // WorkingDirectory Task 8 (`corpus/valids/`; see `corpus.json`). The live
     // count, 244 -> 250 (254 since kill-and-exit Task 3, 274 since group C1
-    // Task 2, 276 since Task 3), is asserted through
+    // Task 2, 276 since Task 3, 281 since Task 4), is asserted through
     // `LIVE` above.
     assert_eq!(filed.len(), 351, "every corpus flow is accounted for");
     assert_eq!(live.len(), LIVE, "live versions: {live:?}");

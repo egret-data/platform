@@ -741,6 +741,9 @@ pub async fn handlers_for(
     // W9c Task 5: `Set`, `Get`, `GetKeys`, `Delete`, `Put` and `PurgeKV`,
     // which need the pool too.
     crate::worker::handlers::kv::register(&mut handlers, pool.clone(), crate::storage::current());
+    // Group C1 Task 4: `PurgeLogs`, which needs the pool too (it deletes
+    // `workflow.task_logs` rows, scoped to the flow's namespace).
+    crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {
@@ -908,11 +911,11 @@ impl Served {
 /// so a handler added to one and not the other fails by name.
 pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
     use crate::worker::handlers::{
-        assert, fail, kv, log, namespace, output_values, ret, sleep, storage,
+        assert, fail, kv, log, namespace, output_values, purge_logs, ret, sleep, storage,
     };
 
     // Every deployment: `Handlers::with_core_tasks`, then the storage,
-    // namespace and KV `register`s -- all through `add_publishable`.
+    // namespace, KV and PurgeLogs `register`s -- all through `add_publishable`.
     let publishable: Vec<&str> = vec![
         // `Handlers::with_core_tasks`.
         log::TYPE_ID,
@@ -945,6 +948,8 @@ pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
         kv::DELETE,
         kv::PUT,
         kv::PURGE_KV,
+        // `handlers::purge_logs::register` (group C1 Task 4).
+        purge_logs::TYPE_ID,
     ];
     let mut out = std::collections::BTreeSet::new();
     let mut add_publishable = |type_id: &str| {

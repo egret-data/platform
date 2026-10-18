@@ -115,6 +115,8 @@ fn leaf_handler_fields(t: &str) -> Option<Vec<&'static str>> {
         h::output_values::TYPE_ID => fields_of::<h::output_values::Spec>(),
         // Group C1 Task 3.
         h::assert::TYPE_ID => fields_of::<h::assert::Spec>(),
+        // Group C1 Task 4.
+        h::purge_logs::TYPE_ID => fields_of::<h::purge_logs::Spec>(),
         h::storage::WRITE => fields_of::<h::storage::WriteSpec>(),
         h::storage::SIZE => fields_of::<h::storage::UriSpec>(),
         h::storage::DELETE => fields_of::<h::storage::DeleteSpec>(),

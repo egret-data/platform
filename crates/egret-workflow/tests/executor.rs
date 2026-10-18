@@ -801,7 +801,9 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // eleven entries `OutputValues` held bank; 89 + 212 = 301.
         // 89 -> 88 baselined, 212 -> 213 matching at group C1 Task 3:
         // `valids/assert` banks; 88 + 213 = 301.
-        (301, 213, 88),
+        // 88 -> 84 baselined, 213 -> 217 matching at group C1 Task 4: four
+        // `valids/purge_logs_*` bank; 84 + 217 = 301.
+        (301, 217, 84),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2902,7 +2904,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// **331 since group C1 Task 2 (2026-10-18)**: 25 run terminals on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler).
 // 331 -> 329 at group C1 Task 3 (2026-10-18, measured): `valids/assert`'s two
 // runs moved to the banked side.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 329;
+// 329 -> 325 at group C1 Task 4 (2026-10-18, measured): the four banked
+// `valids/purge_logs_*` entries' one run each.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 325;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2929,7 +2933,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // one top-level execution each and no sub-execution.
 // 124 -> 123 at group C1 Task 3: `valids/assert` (one top-level execution, no
 // sub-execution) is banked.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 123;
+// 123 -> 119 at group C1 Task 4: the four banked `valids/purge_logs_*` (one
+// top-level execution each, no sub-execution).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 119;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2948,7 +2954,10 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 123;
 /// **1281 since group C1 Task 2 (2026-10-18)**: 107 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
 /// **1273 since group C1 Task 3 (2026-10-18)**: 8 on `valids/assert`'s two
 /// runs (`CREATED SUBMITTED RUNNING <state>` each; measured).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1273;
+/// **1257 since group C1 Task 4 (2026-10-18)**: 16 on the four banked
+/// `valids/purge_logs_*` entries' one run each (`CREATED SUBMITTED RUNNING
+/// SUCCESS`; measured).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1257;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2970,7 +2979,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1273;
 /// **437 since group C1 Task 2 (2026-10-18)**: 51 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
 /// **434 since group C1 Task 3 (2026-10-18)**: three on `valids/assert`'s
 /// one execution (`CREATED RUNNING FAILED`).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 434;
+/// **422 since group C1 Task 4 (2026-10-18)**: three on each of the four
+/// banked `valids/purge_logs_*` executions (`CREATED RUNNING SUCCESS`).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 422;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4129,6 +4140,8 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.kv.Put",
             "io.kestra.plugin.core.kv.Set",
             "io.kestra.plugin.core.log.Log",
+            // Group C1 Task 4.
+            "io.kestra.plugin.core.log.PurgeLogs",
             "io.kestra.plugin.core.namespace.DeleteFiles",
             "io.kestra.plugin.core.namespace.DownloadFiles",
             "io.kestra.plugin.core.namespace.PurgeFiles",
@@ -4309,7 +4322,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // 30 -> 31 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`
 // runs, and its `assert` FAILS on the `Loop`'s own `outputs:`, so the execution
 // FAILS where Kestra's SUCCEEDED.
-const MISMATCH_ON_EXECUTION: usize = 31;
+// 31 -> 32 at group C1 Task 4 (2026-10-18, measured): `valids/purge_logs_full_arguments`
+// runs, and its `purge_logs` FAILS on the decided scope rule (namespace
+// `purge.namespace` from a flow of `io.kestra.tests`), so the execution FAILS
+// where Kestra's SUCCEEDED. Permanent (spec §2.3).
+const MISMATCH_ON_EXECUTION: usize = 32;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4329,7 +4346,9 @@ const MISMATCH_ON_EXECUTION: usize = 31;
 // traces, not as refusals.
 // 52 -> 53 at group C1 Task 3 (2026-10-18, measured): the same entry's `assert`
 // run (FAILED, not SUCCESS).
-const MISMATCH_ON_RUNS: usize = 53;
+// 53 -> 54 at group C1 Task 4 (2026-10-18, measured): the same entry's
+// `purge_logs` run (FAILED, not SUCCESS).
+const MISMATCH_ON_RUNS: usize = 54;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4366,7 +4385,8 @@ const MISMATCH_ON_ORDER: usize = 26;
 ///   `PurgeLogs`). `executor`'s `PUBLISHED_BUT_REFUSED` holds each with its
 ///   cause; it has three more rows, flows with no golden entry. (`Exit` left
 ///   at kill-and-exit Task 3, and its four entries with it; `OutputValues` at
-///   group C1 Task 2, and its eighteen.)
+///   group C1 Task 2, and its eighteen; `Assert` at Task 3, and its two;
+///   `PurgeLogs` at Task 4, and its five.)
 // 49 -> 45 at WorkingDirectory Task 3 (not Task 8): its four `WorkingDirectory`
 // valids are planned now, so `unsupported_working_directory` refuses none of them.
 // 45 -> 41 at kill-and-exit Task 3: `Exit` is registered, so the four
@@ -4375,7 +4395,9 @@ const MISMATCH_ON_ORDER: usize = 26;
 // entries whose only unregistered type it was plan and are run (eleven match).
 // 23 -> 21 at group C1 Task 3: `Assert` is registered, so `valids/assert` and
 // `valids/if-in-parallel` plan and are run (`assert` matches).
-const RUNS_REFUSED: [&str; 21] = [
+// 21 -> 16 at group C1 Task 4: `PurgeLogs` is registered, so the five
+// `valids/purge_logs_*` plan and are run.
+const RUNS_REFUSED: [&str; 16] = [
     "valids/labels-update-nested-value-list",
     "valids/labels-update-nested-value-map",
     "valids/labels-update-task",
@@ -4386,11 +4408,6 @@ const RUNS_REFUSED: [&str; 21] = [
     "valids/pause-errors-finally-after-execution",
     "valids/pause_on_pause",
     "valids/primitive-labels-flow",
-    "valids/purge_logs_execution_only",
-    "valids/purge_logs_full_arguments",
-    "valids/purge_logs_no_arguments",
-    "valids/purge_logs_trigger_only",
-    "valids/purge_logs_with_batch_size",
     "valids/retry-with-flowable-errors",
     "valids/set-variables",
     "valids/set-variables-duplicate",
@@ -4417,7 +4434,10 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 /// **85 since group C1 Task 2**: the eleven entries `OutputValues` held match.
 // 85 -> 84 at group C1 Task 3 (2026-10-18, measured): `valids/assert` banked;
 // `valids/if-in-parallel` moved from `refused` to a traced mismatch.
-const MISMATCHING_RUNS_ENTRIES: usize = 84;
+// 84 -> 80 at group C1 Task 4 (2026-10-18, measured): four `valids/purge_logs_*`
+// banked; `valids/purge_logs_full_arguments` moved from `refused` to a traced
+// mismatch (the decided scope rule, spec §2.3).
+const MISMATCHING_RUNS_ENTRIES: usize = 80;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -7063,11 +7083,16 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         //
         // Group C1 Task 3 (2026-10-18): `Assert` has a handler, and
         // `valids/assert`, which it alone held here, banked.
-        ("valids/purge_logs_execution_only", "no handler: PurgeLogs"),
-        ("valids/purge_logs_full_arguments", "no handler: PurgeLogs"),
-        ("valids/purge_logs_no_arguments", "no handler: PurgeLogs"),
-        ("valids/purge_logs_trigger_only", "no handler: PurgeLogs"),
-        ("valids/purge_logs_with_batch_size", "no handler: PurgeLogs"),
+        //
+        // Group C1 Task 4 (2026-10-18): `PurgeLogs` has a handler; four of
+        // the five entries it held here banked, and
+        // `valids/purge_logs_full_arguments` is held by the decided scope
+        // rule (spec §2.3), named below.
+        (
+            "valids/purge_logs_full_arguments",
+            "PurgeLogs scope: a flow purges logs only of its own namespace and its \
+             children (the user's ruling 2026-10-18); `purge.namespace` is refused",
+        ),
         // The five the feed hid that Task 1's derivation could not see: a fed
         // terminal hides everything the task would have DONE.
         (
@@ -7473,9 +7498,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // (2, 98, 100) -> (2, 87, 89) at group C1 Task 2: nor do the eleven
     // entries it banked.
     // (2, 87, 89) -> (2, 86, 88) at group C1 Task 3: nor does `valids/assert`.
+    // (2, 86, 88) -> (2, 82, 84) at group C1 Task 4: nor do the four
+    // `valids/purge_logs_*` it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 86, 88),
+        (2, 82, 84),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

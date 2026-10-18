@@ -13365,3 +13365,39 @@ where it is pinned: `EGRET_TOP_LEVEL_PAIRS` 753 → 755, `EGRET_NESTED_PAIRS`
 (execution 30 → 31, runs 52 → 53, total 85 → 84), loop bodies (38, 82) →
 (39, 85), the default-limit loop population 23 → 24, and the baselined
 terminals, executions and history tokens by `assert`'s share.
+
+## Group C1 Task 4: `PurgeLogs`, four entries bank and one is held by the scope rule
+
+**What changed.** `io.kestra.plugin.core.log.PurgeLogs` has a
+`spec::registry` row, a worker handler (`worker::handlers::purge_logs`, over
+`LogRepo::purge`), a `runtime::served_for` key and a place in
+`driver::registry` (its own `purge_logs::register`, beside `kv::register`, as
+in `runtime::handlers_for`). Every delete is limited to the execution's
+workspace; with no `namespace` the scope is the flow's own namespace and its
+dot-children; a given `namespace` must pass
+`nsfiles::access::authorize(…, Resource::Logs, Access::Purge)` or the run
+FAILS and nothing is deleted (spec §2.3, the user's ruling 2026-10-18). The
+census moved 276 → 281 live and `UNKNOWN_TYPE_REFUSED` 38 → 33: the five
+`valids/purge_logs_*`. Five `PUBLISHED_BUT_REFUSED` rows and five
+`RUNS_REFUSED` entries (21 → 16) went, and the ratchet went from 88
+mismatching / 88 baselined to 84 / 84.
+
+**Banked (4):** `purge_logs_execution_only`, `purge_logs_no_arguments`,
+`purge_logs_trigger_only` and `purge_logs_with_batch_size` (one run each,
+SUCCESS, as in Kestra).
+
+**Held permanently (1):** `purge_logs_full_arguments` runs in
+`io.kestra.tests` with `namespace: purge.namespace`, and egret FAILS it where
+Kestra SUCCEEDED, by the decided rule. Measured during the ratchet run (a
+temporary probe, reverted): `a flow of namespace 'io.kestra.tests' may not
+purge logs of namespace 'purge.namespace': …`. Its `baseline.txt` line says it
+is permanent, not a gap.
+
+The handler-surface ceiling went 245 → 250 (population 223 → 228): `PurgeLogs`
+is now in `W3B_HANDLERS`. The derived figures that moved, each with a dated
+note where it is pinned: the field breakdown (execution 31 → 32, runs 53 → 54,
+total 84 → 80), the bank split (301, 213, 88) → (301, 217, 84), the timeout
+split (2, 86, 88) → (2, 82, 84), baselined terminals 329 → 325, executions
+123 → 119, run-history tokens 1273 → 1257 and execution-history tokens
+434 → 422. No ordered-pair, spawn or loop-body figure moved: each of the five
+flows is one top-level task.

@@ -222,6 +222,15 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // Group C1 Task 4 (`worker::handlers::purge_logs`): FQCN only, no alias,
+    // and no reference -- `namespace`, `flowId` and `executionId` are scope
+    // filters checked at run time (`nsfiles::access::authorize`), not
+    // objects publish resolves.
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::purge_logs::TYPE_ID,
+        aliases: &[],
+        references: &[],
+    },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.flow.Sleep",
         aliases: &[],

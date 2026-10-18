@@ -621,11 +621,9 @@ valids/pause-behavior
 valids/pause-errors-finally-after-execution
 valids/pause_on_pause
 valids/primitive-labels-flow
-valids/purge_logs_execution_only
+# Permanent, not a gap (group C spec §2.3, the user's ruling 2026-10-18): a flow
+# purges logs only of its own namespace and its children; Kestra OSS checks nothing.
 valids/purge_logs_full_arguments
-valids/purge_logs_no_arguments
-valids/purge_logs_trigger_only
-valids/purge_logs_with_batch_size
 valids/restart-child
 valids/restart-loop
 valids/restart-parent

@@ -47,6 +47,7 @@ pub mod kv;
 pub mod log;
 pub mod namespace;
 pub mod output_values;
+pub mod purge_logs;
 pub mod python;
 pub mod ret;
 pub mod script;
