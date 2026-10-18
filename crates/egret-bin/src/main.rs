@@ -2191,6 +2191,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // Design R7 (2026-10-18): recompile every profile whose model names a
+    // role, so a body an older compile wrote without a holder who had no
+    // username names them now (role expansion mints since R5). Idempotent and
+    // best-effort: an unchanged profile writes nothing, and a failure is
+    // logged and never blocks boot.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                egret_perm_compile::role_membership::recompile_role_referencing_profiles(&pool)
+                    .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "the boot recompile of role-referencing profiles did not run"
+                );
+            }
+        });
+    }
     // Design R5 (2026-10-17): one `warn!` per group membership whose
     // provenance is unknown — local groups with OIDC-provider members (a login
     // before R1 may have added them), and local users in OIDC groups (no login

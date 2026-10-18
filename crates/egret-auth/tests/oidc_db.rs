@@ -300,6 +300,14 @@ impl egret_auth::groups::GroupMembershipRecompiler for CreatesGroupMidSync {
     ) -> egret_core::Result<()> {
         Ok(())
     }
+
+    async fn group_references_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _names: &[String],
+    ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
+        Ok(Vec::new())
+    }
 }
 
 /// J-F3 final review I2: the sync must insert only the memberships it locked
@@ -366,7 +374,10 @@ async fn a_group_created_mid_sync_is_not_joined_without_its_lock() {
 /// A `source = 'local'` group, created the way the console's create does.
 async fn local_group(groups: &GroupRepo, tag: &str) -> (String, uuid::Uuid) {
     let name = uniq(tag);
-    let id = groups.create_local(&name).await.unwrap();
+    let id = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
     (name, id)
 }
 
@@ -576,4 +587,63 @@ async fn claimed_local_groups_reports_local_names_with_membership() {
         .unwrap();
 
     assert_eq!(got, vec![(held, true), (not_held, false)]);
+}
+
+/// 2026-10-18 design R2, this crate's half: a claimed name with no `groups`
+/// row is created and joined only when the port says nothing in the model
+/// names it. The one the port reports is refused — no row, no membership —
+/// and the login still succeeds; the other claimed name is created and
+/// joined as before. A referenced name that already HAS a row is never asked
+/// about, so it is joined as before too. (The real port, and the compiled
+/// policies, are in `egret-perm-compile/tests/group_grants.rs`.)
+#[tokio::test]
+async fn a_login_does_not_create_a_group_the_model_still_names() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let dangling = uniq("dangling");
+    let fresh = uniq("fresh");
+    let existing = uniq("existing");
+    groups.upsert_oidc_group(&existing).await.unwrap();
+    let reference = |name: &str| egret_auth::groups::GroupReference {
+        group_name: name.to_string(),
+        source: "grant".into(),
+        id: uuid::Uuid::new_v4(),
+        rule_name: None,
+        effect: Some("allow".into()),
+        position: "include".into(),
+    };
+    let rc = Recorder::with_references(vec![reference(&dangling), reference(&existing)]);
+
+    let refused = groups
+        .upsert_claimed_oidc_groups(&[dangling.clone(), fresh.clone(), existing.clone()], &rc)
+        .await
+        .unwrap();
+    assert_eq!(refused, vec![dangling.clone()]);
+
+    let user_id = provision_and_sync(
+        &users,
+        &groups,
+        &claims(
+            &uniq("sub"),
+            &format!("{}@idp.local", uniq("u")),
+            &[&dangling, &fresh, &existing],
+        ),
+        &rc,
+    )
+    .await
+    .expect("a refused name does not refuse the login");
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM groups WHERE name = $1")
+        .bind(&dangling)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "no `groups` row for a name the model still names");
+    let mut expected = vec![existing, fresh];
+    expected.sort();
+    assert_eq!(names_of(&db, user_id).await, expected);
 }

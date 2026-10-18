@@ -1296,7 +1296,40 @@ async fn record_compiled(
 /// transaction (`egret-bi::catalog_tags`'s tag write is exactly that case —
 /// same shape as `egret_perm::sync_assignment_grants_in_tx`). Does not
 /// commit; the caller does, same as that function.
+///
+/// **Locks, then pre-mints, then compiles — the order every recompile path
+/// takes.** A compile can mint usernames (group, workspace and, since the
+/// 2026-10-18 design R5, role expansion, plus the clearance compile), and each
+/// of those mints is ascending only WITHIN its own call; the calls together
+/// are not. Run alone that is harmless, but against a concurrent
+/// [`recompile_services_in_tx`], whose pre-mint sweep takes the same `users`
+/// row locks in one global ascending order, the two could each hold a row the
+/// other wanted, and Postgres killed one (observed: one full-suite run in
+/// seven, `tests/role_grants.rs`). So this entry takes the profile locks first
+/// (J-F3 order: profiles, then rows; re-taking a lock a caller already holds
+/// is free) and then runs the same ascending
+/// [`crate::members::premint_model_usernames`] sweep, after which the
+/// per-pass expansions find every name already minted and take no `users`
+/// lock at all. A caller that loops over several profiles must lock them all
+/// first ([`lock_services_in_tx`]), as every caller does today; the repeated
+/// sweep then finds nothing to mint. The sweep reads statement by statement,
+/// so a person a concurrent commit names after it is still minted by a pass,
+/// out of order; every compile mint therefore also takes one transaction-scoped
+/// lock ([`crate::members::lock_compile_mints_in_tx`], which states the order:
+/// profiles, then that lock, then any row write or mint), which is what rules
+/// the cycle out — the sweep keeps it to one acquisition in the common case.
 pub async fn recompile_service_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<CompileSummary, CompileError> {
+    lock_services_in_tx(tx, &[service_id]).await?;
+    crate::members::premint_model_usernames(tx).await?;
+    recompile_locked_service_in_tx(tx, service_id).await
+}
+
+/// [`recompile_service_in_tx`] without its lock and pre-mint, for a caller
+/// that has already taken both over a whole set ([`recompile_services_in_tx`]).
+async fn recompile_locked_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
@@ -1514,7 +1547,9 @@ pub async fn affected_services_for_classification(
 /// the holders at compile time in **two** places — a clearance's
 /// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
 /// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
-/// same `role_usernames`. Two triggers over one enumeration is two chances for
+/// same `role_usernames`, which mints a holder's missing username (2026-10-18
+/// design R5), so a holder is named from the compile their grant triggers, not
+/// from a later one. Two triggers over one enumeration is two chances for
 /// one of them to be forgotten, which is the shape of the defect SP4a shipped
 /// four times; so this returns the UNION and each consumer contributes its own
 /// arm below.
@@ -1739,6 +1774,42 @@ pub async fn affected_services_for_group_membership(
     Ok(ids)
 }
 
+/// Every stored reference to a group in `group_names` by NAME: the grant
+/// principals and rule exemptions [`affected_services_for_group_membership`]
+/// reads, one row each, ordered by name, source, id and position. The body of
+/// `egret_auth::groups::GroupMembershipRecompiler::group_references_in_tx`
+/// (2026-10-18 design R8), which the OIDC login asks before creating a group
+/// for a claimed name with no row.
+///
+/// The SAME two tables as the affected set, and every rule regardless of its
+/// selector, because a reference this misses is one a group created under
+/// that name would inherit. `public` is filtered out, as it is there: it is
+/// never expanded, so a `groups` row with that name takes nothing over.
+pub async fn group_references_via(
+    conn: &mut sqlx::PgConnection,
+    group_names: &[String],
+) -> Result<Vec<egret_auth::groups::GroupReference>, CompileError> {
+    if group_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT p.ref AS group_name, 'grant' AS source, g.id, \
+                NULL::text AS rule_name, g.effect::text AS effect, p.mode::text AS position \
+           FROM perm.grant_principals p JOIN perm.grants g ON g.id = p.grant_id \
+          WHERE p.kind = 'group'::perm.principal_kind AND p.ref = ANY($1) AND p.ref <> $2 \
+         UNION ALL \
+         SELECT e.ref, 'rule', r.id, r.name, NULL::text, e.mode::text \
+           FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) AND e.ref <> $2 \
+         ORDER BY group_name, source, id, position",
+    )
+    .bind(group_names)
+    .bind(crate::rules::PUBLIC_GROUP)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
 /// Take the row locks a recompile of `service_ids` will need, in ascending id
 /// order, **before** the model write they accompany.
 ///
@@ -1849,9 +1920,16 @@ pub async fn recompile_services_in_tx(
     // (see `lock_services_in_tx`). Re-taking a lock this transaction already
     // holds is free, so callers that pre-locked lose nothing.
     lock_services_in_tx(tx, service_ids).await?;
+    // After the profile locks (J-F3 order: profiles, then rows), mint every
+    // username this loop would mint in ONE ascending sweep, so the per-profile
+    // expansions below take no `users` row lock out of order
+    // (`crate::members::premint_model_usernames`).
+    if !service_ids.is_empty() {
+        crate::members::premint_model_usernames(tx).await?;
+    }
     let mut out = Vec::with_capacity(service_ids.len());
     for &service_id in service_ids {
-        let summary = recompile_service_in_tx(tx, service_id).await?;
+        let summary = recompile_locked_service_in_tx(tx, service_id).await?;
         if !summary.skipped.is_empty() {
             tracing::warn!(
                 service_id,

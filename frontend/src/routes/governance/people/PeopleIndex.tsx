@@ -223,8 +223,8 @@ function PeopleList({
         <Note>A member with no username gets one when a grant naming the group is compiled.</Note>
       ) : kind === "role" ? (
         <Note>
-          Holders are users. A holder is named on engines once they have a username; a group holding a role is not
-          counted, as engines do not apply it.
+          Holders are users. A holder with no username gets one when a grant naming the role is compiled; a group
+          holding a role is not counted, as engines do not apply it.
         </Note>
       ) : null}
       <nav aria-label="Pages" className="flex flex-wrap items-center justify-end gap-2">

@@ -92,11 +92,10 @@
 //! `Compiled::sweep` (the profile and its tag service). Two transactions
 //! recompiling profiles A and B that name one tag service T both lock T's
 //! `policy.authz_services` row, so the second waits for the first to commit.
-//! **The limit:** a caller that does not pre-lock (it calls
-//! `recompile_service_in_tx` directly) reads the model and the assignments in
-//! `compile_desired` BEFORE `apply_diff_in_tx` takes T's lock, so its overlap
-//! check runs on a snapshot another transaction may change before it commits.
-//! That limit stands.
+//! A caller that does not pre-lock is covered too since the 2026-10-18 design
+//! R5 rebase: `recompile_service_in_tx` itself now takes `lock_services_in_tx`
+//! (so the tag service too) before `compile_desired` reads the model and the
+//! assignments, which closes the snapshot gap this paragraph used to record.
 //!
 //! **The policy editor is serialised with them (fix round 1, review I1).** Its
 //! write (`egret_policy::admin`'s `write_policy_checked`) takes `FOR UPDATE` on

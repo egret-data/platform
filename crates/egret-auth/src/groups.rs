@@ -140,6 +140,48 @@ pub trait GroupMembershipRecompiler: Send + Sync {
         tx: &mut Transaction<'static, Postgres>,
         service_ids: &[i64],
     ) -> Result<()>;
+
+    /// Every grant principal and rule exemption that names a group in `names`
+    /// by NAME, read on `tx` — the stored references a group of that name
+    /// would inherit. `public` is never returned: a reference to it does not
+    /// depend on a `groups` row (every engine resolves it), so no row of that
+    /// name can take anything over.
+    ///
+    /// **Why the login asks (2026-10-18 design R2, R8).** A reference has no
+    /// FK to `groups`, so a group's delete or rename leaves every reference
+    /// to the old name behind, and the compiler expands a name into the
+    /// members of whichever group carries it NOW. Before R2 an IdP claim of
+    /// such a name created an OIDC group, and that group inherited every
+    /// allow, exclude and exemption written for the one that was gone.
+    /// [`GroupRepo::upsert_claimed_oidc_groups`] calls this, under the
+    /// per-group locks, for the claimed names that have no row, and refuses
+    /// to create any that come back. It is required, with no default body,
+    /// for the reason the module doc gives: a default that answered "nothing
+    /// references it" would be the takeover.
+    async fn group_references_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> Result<Vec<GroupReference>>;
+}
+
+/// One stored reference to a group by NAME
+/// ([`GroupMembershipRecompiler::group_references_in_tx`]). Defined here so
+/// this crate can act on references without learning the `perm` schema.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
+pub struct GroupReference {
+    /// The group name the reference stores.
+    pub group_name: String,
+    /// `"grant"` (a grant principal) or `"rule"` (a rule exemption).
+    pub source: String,
+    /// The grant's id, or the rule's.
+    pub id: Uuid,
+    /// The rule's name; `None` for a grant.
+    pub rule_name: Option<String>,
+    /// The grant's effect (`"allow"` / `"deny"`); `None` for a rule.
+    pub effect: Option<String>,
+    /// `"include"` or `"exclude"`.
+    pub position: String,
 }
 
 /// The names of every group `user_id` directly belongs to, on `conn`.
@@ -231,6 +273,12 @@ impl HeldGroupLocks {
     }
 }
 
+/// The one group name every engine resolves for every user (Ranger's
+/// built-in), so a reference to it never depends on a `groups` row. The same
+/// literal as `egret_perm::PUBLIC_GROUP` (this crate does not depend on
+/// `egret-perm`; `egret_perm_compile::group_membership` pins the two equal).
+pub const PUBLIC_GROUP: &str = "public";
+
 /// How many lock-and-re-read passes a writer makes before giving up. Each pass
 /// that locks something new is caused by a concurrent rename or membership
 /// change landing between a read and its lock; two in a row is already rare.
@@ -239,6 +287,73 @@ pub(crate) const MAX_LOCK_PASSES: usize = 8;
 pub(crate) fn unstable() -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(
         "the groups this membership write touches kept changing under it; retry"
+    ))
+}
+
+/// How much a delete or rename refused because the model names the group
+/// (2026-10-18 design R1) says about the entries.
+///
+/// **The caller decides, from what the requester may read** (default decision
+/// 2026-10-18, review M-2). `group:delete` and `group:update` can be granted
+/// without `policy:read`, and the entries are policy metadata — grant ids,
+/// effects, rule names. So the route lists them only to a requester who holds
+/// `policy:read`; anyone else gets the count and who to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceDetail {
+    /// List each entry (at most [`MAX_LISTED_REFERENCES`], then a count).
+    Entries,
+    /// Only how many entries there are.
+    CountOnly,
+}
+
+/// How many entries a "still named" refusal lists before it counts the rest.
+const MAX_LISTED_REFERENCES: usize = 20;
+
+/// The `Conflict` a delete or rename answers while `references` name the group
+/// (2026-10-18 design R1): `"{subject} named by N permission entries; remove
+/// them first: grant <id> (deny, include), rule `mask_email` (exempt include),
+/// …"`, at most [`MAX_LISTED_REFERENCES`] entries plus a count of the rest.
+/// `name_each` appends which group name each entry refers to (a rename checks
+/// two).
+pub(crate) fn referenced_conflict(
+    subject: String,
+    references: &[GroupReference],
+    name_each: bool,
+    detail: ReferenceDetail,
+) -> egret_core::Error {
+    let n = references.len();
+    let entries = if n == 1 { "entry" } else { "entries" };
+    if detail == ReferenceDetail::CountOnly {
+        return egret_core::Error::Conflict(format!(
+            "{subject} named by {n} permission {entries}; ask an admin with policy:read and \
+             policy:update to remove them first"
+        ));
+    }
+    let mut listed: Vec<String> = references
+        .iter()
+        .take(MAX_LISTED_REFERENCES)
+        .map(|r| {
+            let mut entry = match (r.source.as_str(), &r.rule_name) {
+                ("rule", Some(rule)) => format!("rule `{rule}` (exempt {})", r.position),
+                _ => format!(
+                    "grant {} ({}, {})",
+                    r.id,
+                    r.effect.as_deref().unwrap_or("?"),
+                    r.position
+                ),
+            };
+            if name_each {
+                entry.push_str(&format!(" naming `{}`", r.group_name));
+            }
+            entry
+        })
+        .collect();
+    if n > MAX_LISTED_REFERENCES {
+        listed.push(format!("and {} more", n - MAX_LISTED_REFERENCES));
+    }
+    egret_core::Error::Conflict(format!(
+        "{subject} named by {n} permission {entries}; remove them first: {}",
+        listed.join(", ")
     ))
 }
 
@@ -285,6 +400,14 @@ impl GroupRepo {
     }
 
     /// Insert (source='oidc') or return the existing group id by name.
+    ///
+    /// **The login must not use this** — it uses
+    /// [`upsert_claimed_oidc_groups`](Self::upsert_claimed_oidc_groups). This
+    /// takes no lock and checks no reference, so a name the model still names
+    /// after its group was deleted or renamed would be created here and
+    /// inherit every grant written for the old group. It stays for callers
+    /// that provision a named group ON PURPOSE: the operator command in
+    /// `egret-bin` and tests.
     pub async fn upsert_oidc_group(&self, name: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO groups (name, source) VALUES ($1, 'oidc') \
@@ -295,6 +418,107 @@ impl GroupRepo {
         .await
         .map_err(db_err)?;
         Ok(id)
+    }
+
+    /// Create an OIDC group for each name in an IdP `groups` claim that has no
+    /// `groups` row yet — UNLESS the model still names it. Returns the names
+    /// it refused, sorted; the login logs each one and carries on
+    /// ([`crate::oidc::provision_and_sync`]).
+    ///
+    /// **The IdP cannot create a group whose name the model still names
+    /// (2026-10-18 design R2).** Grants and rule exemptions store a group by
+    /// NAME, with no FK to `groups`, and deleting or renaming a group leaves
+    /// them behind, expanding to nobody. Before R2 the login created an OIDC
+    /// group for any claimed name, and the next login synced its members into
+    /// it: every allow, every exclude from a deny and every mask exemption
+    /// written for the old group then reached whoever the IdP put in a group
+    /// of that name. So a claimed name with no row is created only if
+    /// [`GroupMembershipRecompiler::group_references_in_tx`] finds nothing
+    /// naming it. A refused name has no OIDC row, so
+    /// [`sync_user_oidc_groups`](Self::sync_user_oidc_groups) does not join it
+    /// either. The login itself is not refused.
+    ///
+    /// **A name that already has a row is never blocked**, local or OIDC, and
+    /// behaves as it did before: the references to it are references to THAT
+    /// group, written while it existed (the authoring boundary refuses a group
+    /// name with no row). `public` is created as before without a check —
+    /// every engine resolves it, so a row of that name takes nothing over.
+    ///
+    /// **Locks.** One transaction takes the per-group lock for every claimed
+    /// non-`public` name, sorted, before it reads which have a row: the group
+    /// step of the module doc's order, with no user and no profile lock. Every
+    /// grant and rule write takes the same lock for each group it names BEFORE
+    /// it checks that the group has a row (2026-10-18 design R3), and a local
+    /// group's delete or rename takes it before checking that nothing names
+    /// the group (R1). So none of them interleaves with this check: a grant
+    /// that runs first can only name a group that has a row (a patch re-reads
+    /// under the lock which stored refs it may keep unchecked), which this
+    /// login then treats as existing; one that runs second sees the row this login
+    /// created, or no row, and is refused. A delete that runs first has
+    /// already refused if anything named the group, so the name it frees is
+    /// named by nothing. The INSERT is `ON CONFLICT (name) DO NOTHING`, so a
+    /// row created concurrently by `create_local`, which takes no group lock,
+    /// is left as that writer made it.
+    ///
+    /// These locks can still take part in a deadlock with a membership
+    /// writer's second lock pass, which is not globally ordered (module doc).
+    /// Postgres aborts one transaction; if it is this one the login answers
+    /// 500, and a retry succeeds.
+    pub async fn upsert_claimed_oidc_groups(
+        &self,
+        names: &[String],
+        port: &dyn GroupMembershipRecompiler,
+    ) -> Result<Vec<String>> {
+        let mut claimed: Vec<String> = names.to_vec();
+        claimed.sort();
+        claimed.dedup();
+        if claimed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let checked: Vec<String> = claimed
+            .iter()
+            .filter(|n| n.as_str() != PUBLIC_GROUP)
+            .cloned()
+            .collect();
+
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        lock_group_names_via(&mut tx, &checked)
+            .await
+            .map_err(db_err)?;
+        let existing: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
+                .bind(&checked)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        let missing: Vec<String> = checked
+            .iter()
+            .filter(|n| !existing.contains(n))
+            .cloned()
+            .collect();
+        let refused: std::collections::BTreeSet<String> = if missing.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            port.group_references_in_tx(&mut tx, &missing)
+                .await?
+                .into_iter()
+                .map(|r| r.group_name)
+                .filter(|n| missing.contains(n))
+                .collect()
+        };
+
+        for name in claimed.iter().filter(|n| !refused.contains(*n)) {
+            sqlx::query(
+                "INSERT INTO groups (name, source) VALUES ($1, 'oidc') \
+                 ON CONFLICT (name) DO NOTHING",
+            )
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(refused.into_iter().collect())
     }
 
     /// Which of `names` name a LOCAL (admin-managed) group, each paired with
@@ -455,35 +679,91 @@ impl GroupRepo {
 
     /// Create a local (admin-managed) group; returns its id.
     /// Errors with `Conflict` if a group with the same name already exists.
-    pub async fn create_local(&self, name: &str) -> Result<Uuid> {
+    ///
+    /// **A name that grants or rule exemptions still name is allowed, with a
+    /// warning (2026-10-18 design R4).** The new group inherits those
+    /// references, but it starts with no members, and only a platform admin
+    /// (`group:manage_members`) can add any — who already controls every
+    /// group's membership. A rename INTO such a name is refused instead
+    /// ([`rename`](Self::rename)), because a rename brings members along and
+    /// needs only `group:update`. The check is one read after the insert, for
+    /// the log line only: its failure is logged and the create stands.
+    pub async fn create_local(
+        &self,
+        name: &str,
+        port: &dyn GroupMembershipRecompiler,
+    ) -> Result<Uuid> {
         let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id",
         )
         .bind(name)
         .fetch_one(&self.db.pool)
         .await;
-        match res {
-            Ok(id) => Ok(id),
-            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
-                egret_core::Error::Conflict(format!("group already exists: {name}")),
-            ),
-            Err(e) => Err(db_err(e)),
+        let id = match res {
+            Ok(id) => id,
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                return Err(egret_core::Error::Conflict(format!(
+                    "group already exists: {name}"
+                )))
+            }
+            Err(e) => return Err(db_err(e)),
+        };
+        let references = async {
+            let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+            let refs = port
+                .group_references_in_tx(&mut tx, &[name.to_string()])
+                .await?;
+            tx.rollback().await.map_err(db_err)?;
+            Ok::<_, egret_core::Error>(refs)
         }
+        .await;
+        match references {
+            Ok(refs) if !refs.is_empty() => tracing::warn!(
+                group_id = %id,
+                group = ?name,
+                references = refs.len(),
+                "a new local group takes a name that grants or rule exemptions already name; \
+                 they now apply to its members"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                group_id = %id,
+                group = ?name,
+                error = %e,
+                "could not check whether a new local group's name is already referenced"
+            ),
+        }
+        Ok(id)
     }
 
     /// Rename a local group. No-op (0 rows) if the group is oidc-sourced or
     /// does not exist; returns the number of rows affected.
     ///
-    /// **A rename is a membership change for TWO names.** Grants and rule
-    /// exemptions name a group by NAME (`perm.grant_principals.ref`), with no FK
-    /// to `groups`, so after the rename every principal naming the OLD name
-    /// expands to nobody — a deny or exclude on it evaporates — and any naming
-    /// the NEW name starts expanding to these members. Both are recompiled.
+    /// **Refused with `Conflict` while anything names the OLD or the NEW name
+    /// (2026-10-18 design R1).** Grants and rule exemptions name a group by
+    /// NAME (`perm.grant_principals.ref`), with no FK to `groups`. A rename
+    /// would leave every reference to the old name behind, expanding to
+    /// nobody — a deny or exclude on it evaporates for the former members, and
+    /// the name is left for the next group, or IdP claim, to inherit. And it
+    /// would hand these members every grant still naming the new name — with
+    /// only `group:update`, which a non-admin can be delegated, where adding
+    /// members takes a platform admin. So the caller removes those entries
+    /// first; the refusal lists them. `public` never counts (it does not
+    /// depend on a row). A new name that another group already has is a
+    /// `Conflict` too ("group already exists"), as in `create_local`.
+    ///
+    /// The checks run under both names' per-group locks, which every grant and
+    /// rule write takes before it validates the names it stores (R3), so
+    /// their answer holds until this commits. A rename that is allowed names
+    /// nothing either way, so it changes no compiled body; the recompile stays
+    /// for any reference the check cannot see (none today) and costs nothing
+    /// when the affected set is empty.
     pub async fn rename(
         &self,
         id: Uuid,
         name: &str,
         recompiler: &dyn GroupMembershipRecompiler,
+        detail: ReferenceDetail,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -509,14 +789,50 @@ impl GroupRepo {
                 return Err(unstable());
             }
         };
+        let old = &names[0];
+        if old == name {
+            // Same name: no membership moves, so nothing to check or recompile.
+            return Ok(1);
+        }
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE name = $1)")
+                .bind(name)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if taken {
+            return Err(egret_core::Error::Conflict(format!(
+                "group already exists: {name}"
+            )));
+        }
+        let references = recompiler.group_references_in_tx(&mut tx, &names).await?;
+        if !references.is_empty() {
+            return Err(referenced_conflict(
+                format!("cannot rename group `{old}` to `{name}`: these names are"),
+                &references,
+                true,
+                detail,
+            ));
+        }
         let services = recompiler.lock_affected_in_tx(&mut tx, &names).await?;
-        let rows = sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
-            .bind(id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?
-            .rows_affected();
+        // `create_local` takes no group lock, so a group of the new name can
+        // still be created between the `taken` read above and this UPDATE: the
+        // unique index refuses it, answered like `create_local`'s.
+        let rows =
+            match sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
+                .bind(id)
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(done) => done.rows_affected(),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    return Err(egret_core::Error::Conflict(format!(
+                        "group already exists: {name}"
+                    )))
+                }
+                Err(e) => return Err(db_err(e)),
+            };
         if rows > 0 {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
@@ -527,15 +843,26 @@ impl GroupRepo {
     /// Delete a local group. No-op (0 rows) if the group is oidc-sourced or
     /// does not exist, so callers can 409 on a synced group.
     ///
+    /// **Refused with `Conflict` while any grant or rule exemption names the
+    /// group (2026-10-18 design R1).** References are by NAME with no FK, so a
+    /// delete would leave them behind: a deny or exclude on the group would
+    /// stop applying to its former members, and the name would wait for the
+    /// next group of that name — or an IdP claim — to inherit every allow and
+    /// exemption written for this one. The refusal lists the entries to remove
+    /// first. `public` never counts. Checked under the group's lock, which
+    /// every grant and rule write takes before it validates (R3), so the
+    /// answer holds until this commits.
+    ///
     /// `user_groups.group_id` is `ON DELETE CASCADE`
     /// (`migrations/0002_identity.sql`), so this removes EVERY member at once —
-    /// the largest REMOVE there is — and is recompiled like one. The affected
-    /// set is read from the group's name before the row is gone; afterwards a
-    /// principal still naming it expands to nobody.
+    /// the largest REMOVE there is — and is recompiled like one. Since R1 an
+    /// allowed delete names nothing, so the affected set is empty; the
+    /// recompile stays for any reference the check cannot see (none today).
     pub async fn delete_local(
         &self,
         id: Uuid,
         recompiler: &dyn GroupMembershipRecompiler,
+        detail: ReferenceDetail,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -558,6 +885,17 @@ impl GroupRepo {
                 return Err(unstable());
             }
         };
+        let references = recompiler
+            .group_references_in_tx(&mut tx, std::slice::from_ref(&name))
+            .await?;
+        if !references.is_empty() {
+            return Err(referenced_conflict(
+                format!("group `{name}` is"),
+                &references,
+                false,
+                detail,
+            ));
+        }
         let services = recompiler
             .lock_affected_in_tx(&mut tx, std::slice::from_ref(&name))
             .await?;

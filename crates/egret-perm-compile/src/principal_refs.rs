@@ -61,7 +61,8 @@
 //! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
 //!   A role is NOT free text: it is expanded at compile time into its holders'
 //!   usernames by `crate::members::role_usernames`, which joins `roles` by name
-//!   with no scope filter (`crates/egret-perm-compile/src/members.rs:155-162`).
+//!   with no scope filter and mints a holder's missing username (2026-10-18
+//!   design R5).
 //!   A name with no `roles` row expands to nobody — on an exclude, the same fail
 //!   open. The picker's free-text role input (`PrincipalPicker.tsx`) is a UI
 //!   shortcut, not a statement that roles are external.
@@ -82,10 +83,32 @@
 //! because of a principal the patch does not touch (R6). PATCH takes the whole
 //! body, so every edit re-sends every principal; a ref the STORED row already
 //! holds in the same position (same kind, ref and include/exclude) is therefore
-//! not re-checked. A principal deleted after it was validly written is not a
-//! defect — nobody carries the name any more, so a deny or exclude on it still
-//! denies everyone who does — and refusing every later edit of the row (even an
-//! actions-only one) until the author removed it would be. The accepted
+//! not re-checked. A USER or ROLE deleted after it was validly written is kept
+//! rather than refused: refusing every later edit of the row (even an
+//! actions-only one) until the author removed it would block unrelated work.
+//! That is NOT because nobody can carry the name again — both can, and this
+//! is a known gap, a pre-existing follow-up not closed here. A user's
+//! `hard_delete` frees `users.username`, and `ensure_username` can then mint
+//! the same base slug for the next person, who inherits every direct `user`
+//! ref left naming it (an allow grants them; a deny or exclude still binds
+//! them). A role name can be recreated (`roles` is keyed by scope and name),
+//! and its new holders inherit every `role` ref likewise. Until that closes,
+//! a ref to a deleted user or role names whoever next carries the name.
+//!
+//! **A GROUP is guarded (2026-10-18 design R1, R2).** A group name can be
+//! carried again: a new local group, a rename into it, or an IdP claim would
+//! inherit every grant and exemption left naming it. So a local group's
+//! delete or rename is refused while anything names it (`GroupRepo::rename`,
+//! `GroupRepo::delete_local`), checked under the per-group lock that every
+//! grant and rule write takes BEFORE it resolves refs (R3), so the check
+//! cannot go stale. A patch's kept set (R6, below) is re-read under those
+//! locks too (`still_stored`): kept on a copy read before them, a group
+//! dropped by a concurrent patch and then deleted would be stored again
+//! unchecked (fix round 1, I-1). A leftover reference to a group with no row can still
+//! exist — stored before J-F3, or written directly — and the OIDC login
+//! refuses to create a group of that name (`GroupRepo::upsert_claimed_oidc_groups`).
+//! A new local group of that name is allowed, with a warning (R4): its members
+//! are only ever added by a platform admin. The accepted
 //! trade-off: a bad ref stored BEFORE this check existed also survives a patch
 //! unchanged; Task 2's report ([`unresolved_principals_via`], `GET
 //! /perm/unresolved-principals`, and a startup `warn!` per fail-open row)
@@ -108,6 +131,21 @@ struct Unknown {
     r#ref: String,
     position: String,
     why: String,
+}
+
+/// The refs `stale` and `fresh` both hold, each in the same position — the set
+/// a patch may keep without re-checking (design R6), when `stale` is the row
+/// read BEFORE the per-group locks and `fresh` the row read under them (fix
+/// round 1, I-1). A ref only `fresh` holds is not kept: its group was not
+/// locked by this write, so it could be dropped and deleted before commit.
+pub(crate) fn still_stored(stale: &PrincipalSet, fresh: &PrincipalSet) -> PrincipalSet {
+    let both = |a: &[Principal], b: &[Principal]| -> Vec<Principal> {
+        a.iter().filter(|p| b.contains(p)).cloned().collect()
+    };
+    PrincipalSet {
+        include: both(&stale.include, &fresh.include),
+        exclude: both(&stale.exclude, &fresh.exclude),
+    }
 }
 
 /// Resolve every principal in `set` (include AND exclude) against the table its

@@ -529,3 +529,62 @@ async fn a_group_only_gate_reports_its_skip_to_the_author() {
         "and the earlier role gate's deny must be gone — the gate no longer names a role"
     );
 }
+
+/// **2026-10-18 design R5 rebase, re-review.** A tag delete racing a clearance
+/// `set_policy` on the same tag must not deadlock.
+///
+/// `set_policy` takes the profile locks and the compile-mint lock BEFORE its
+/// `classification_policies` insert, whose `tag_id` foreign key needs `FOR KEY
+/// SHARE` on the tag. The delete used to row-lock the tag FIRST and reach for
+/// the profiles only at its recompile: opposite orders. A third transaction
+/// holds the profile row so `set_policy` queues on it first and the delete
+/// second. Before the delete took the view-tag lock and its profile locks up
+/// front, `set_policy` won the profile, waited on the tag the delete held,
+/// the delete waited on the profile, and Postgres aborted one. Now the delete
+/// waits on `set_policy`'s view-tag lock before touching the tag, and both
+/// commit, delete last.
+#[tokio::test]
+async fn a_tag_delete_racing_a_clearance_on_the_same_tag_both_commit() {
+    let Some(db) = connect().await else { return };
+    let _permit = SERIAL.acquire().await.expect("permit");
+    let f = seed(&db, "trino").await;
+    let tags = TagRepo::new(db.clone());
+    let pol = ClassificationPolicyRepo::new(db.clone(), EventBus::new());
+    let tag = tags
+        .create(&unique_key("clrtrig-race"), "Raced", "", "#ff0000", None)
+        .await
+        .expect("create tag");
+    let (role_name, _username) = new_role_with_holder(&db, "clrtrig-race-role").await;
+
+    let mut holder = db.pool.begin().await.expect("holder tx");
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(f.tag_service_id.min(f.profile_id))
+        .execute(&mut *holder)
+        .await
+        .expect("hold a profile row");
+
+    let set = {
+        let pol = pol.clone();
+        let tag_id = tag.id;
+        tokio::spawn(async move { pol.set_policy(tag_id, &[role_name], &[], None).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let delete = {
+        let tags = tags.clone();
+        let tag_id = tag.id;
+        tokio::spawn(async move { tags.delete(tag_id).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    holder.rollback().await.expect("release");
+
+    let set = set.await.expect("join");
+    let deleted = delete.await.expect("join");
+    assert!(set.is_ok(), "set_policy: {set:?}");
+    assert!(deleted.is_ok(), "delete: {deleted:?}");
+    assert!(
+        clearance_policies(&db, f.tag_service_id, tag.id)
+            .await
+            .is_empty(),
+        "the delete committed last, so the clearance it reaped stays reaped"
+    );
+}

@@ -28,8 +28,9 @@
 //! into that bucket, so a role grant matched nobody in the engine while
 //! `egret_perm::eval::matches_principal` matched it — meaning `explain`
 //! reported an access the engine did not grant. A role now expands to its
-//! holders' usernames exactly as a workspace does, through the one
-//! [`role_usernames`] SP4c's clearance compiler also uses.
+//! holders' usernames exactly as a workspace does — minting a missing one, as
+//! below, since the 2026-10-18 design R5 — through the one [`role_usernames`]
+//! SP4c's clearance compiler also uses.
 //!
 //! **Why enumeration and not a Ranger group.** D7
 //! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) measured on
@@ -61,7 +62,9 @@
 //! bootstrap admin, so D3 would compile to a policy naming nobody. This
 //! module calls `egret_auth::users::ensure_username_via` on the compile's own
 //! connection, which is idempotent and stable (the value it allocates is the
-//! one the engine token minter will hand out later).
+//! one the engine token minter will hand out later). A ROLE holder is minted
+//! too since the 2026-10-18 design R5 ([`role_usernames`] says why reading
+//! alone was not enough there either).
 //!
 //! # What "member" means here, and the two places it is narrower than egret's
 //!
@@ -107,7 +110,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use egret_auth::users::{ensure_username_via, usernames_via};
+use egret_auth::users::ensure_username_via;
 use egret_core::UserId;
 use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP};
 
@@ -143,16 +146,29 @@ use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Ru
 /// must not count as holding the role) and `expand_enumerated_principals`'s
 /// membership predicate.
 ///
-/// **The name emitted is the STORED `users.username`, read and never minted.**
-/// `usernames_via` is the read-only, never-minting half of the username API:
-/// `ensure_username` lowercases, slugifies and appends `-2`/`-3` on collision,
-/// so a re-derived slug names the WRONG person while compiling, deploying and
-/// reporting success. A holder with no username yet is absent from the map and
-/// is logged, not guessed — and absent is the right answer, not merely the safe
-/// one: the bare username is the only identity an engine ever sees for a
-/// person, so a user without one is not a principal on any engine, cannot
-/// appear in an `include` item either, and therefore cannot be granted the
-/// access an `exclude` would have subtracted.
+/// **The name emitted is the STORED `users.username`, never a re-derivation**
+/// (module doc): `ensure_username` lowercases, slugifies and appends `-2`/`-3`
+/// on collision, so a re-derived slug names the WRONG person while compiling,
+/// deploying and reporting success.
+///
+/// **A holder with no username yet is MINTED by a compile (2026-10-18 design
+/// R5), and left out only by a read.** This used to read alone and argue that
+/// absent was the right answer, because a person with no username is no
+/// principal on any engine. That held at compile time and went stale the
+/// moment they got one: the first query mints a username and recompiles
+/// nothing, so *allow `{public}`, deny role R* reached a holder of R, an
+/// exclude on R stopped subtracting them, and a clearing role's holder was
+/// refused a column Cedar clears them for (R6). Group and workspace expansion
+/// already minted for the same reason (module doc), so
+/// [`MissingUsername::Mint`] does the same here, on the caller's connection,
+/// in ascending user-id order. [`MissingUsername::Omit`] keeps the read-only
+/// answer for `crate::view_audit::owner_cleared`, which is served on GET
+/// routes and compares against a username it was given, so a holder without
+/// one can never be its owner. Both read the one predicate below, so the
+/// compile and the audit cannot disagree about who holds a role.
+///
+/// The holders are joined to `users`, as group and workspace expansion are:
+/// an `access_grants` row whose user is gone names nobody.
 ///
 /// Ordering is sorted + deduplicated because the compiled body is diffed
 /// byte-for-byte against what is stored (`apply_diff_in_tx`); an unstable
@@ -160,6 +176,7 @@ use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Ru
 pub(crate) async fn role_usernames(
     conn: &mut sqlx::PgConnection,
     roles: &[String],
+    missing: MissingUsername,
 ) -> Result<BTreeMap<String, Vec<String>>, CompileError> {
     // Every requested role appears in the map, even with no holders, so a
     // caller can tell "expanded to nobody" from "never looked up".
@@ -174,30 +191,57 @@ pub(crate) async fn role_usernames(
 
     let holders = role_holders_via(conn, &wanted).await?;
 
-    let ids: Vec<Uuid> = {
-        let mut set: BTreeSet<Uuid> = BTreeSet::new();
-        for h in &holders {
-            set.insert(h.user_id);
+    let mut names: HashMap<Uuid, String> = HashMap::new();
+    // A `BTreeSet`, so the mints below take each `users` row lock in
+    // ascending id order, the order group and workspace expansion mint in:
+    // two compiles minting the same holders then queue instead of deadlocking.
+    let mut unnamed: BTreeSet<Uuid> = BTreeSet::new();
+    for h in &holders {
+        match &h.username {
+            Some(u) => {
+                names.insert(h.user_id, u.clone());
+            }
+            None => {
+                unnamed.insert(h.user_id);
+            }
         }
-        set.into_iter().collect()
-    };
-    let names = usernames_via(conn, &ids)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    }
+    if missing == MissingUsername::Mint {
+        for user_id in unnamed {
+            let minted = mint_for_compile(conn, user_id).await?;
+            tracing::info!(
+                %user_id,
+                username = %minted,
+                "minted a username for a role holder so the compiled policy can name them"
+            );
+            names.insert(user_id, minted);
+        }
+    }
 
     for RoleHolderRow {
         role_name: role,
         user_id,
+        ..
     } in &holders
     {
         match names.get(user_id) {
             Some(name) => out.entry(role.clone()).or_default().push(name.clone()),
-            None => tracing::warn!(
+            // Unreachable after `Mint` (a mint either returns a name or fails
+            // the compile), so a warning there means a broken invariant. After
+            // `Omit` it is the expected answer for someone who has never used
+            // an engine, on a GET route: not worth a warning per request.
+            None if missing == MissingUsername::Mint => tracing::warn!(
                 %user_id,
                 role = %role,
-                "a holder of this role has no `users.username` yet, so it is not named in the \
-                 compiled policy — that identity does not exist on any engine either (the bare \
-                 username is what an engine sees), and it is never guessed from the email"
+                "a role holder is still unnamed after minting, so the compiled policy does not \
+                 name them"
+            ),
+            None => tracing::debug!(
+                %user_id,
+                role = %role,
+                "a holder of this role has no `users.username` yet, so this read does not name \
+                 them — it never mints (only a compile does), and a name is never guessed from \
+                 the email"
             ),
         }
     }
@@ -206,6 +250,188 @@ pub(crate) async fn role_usernames(
         names.dedup();
     }
     Ok(out)
+}
+
+/// Take the one compile-mint lock on `conn`'s transaction: a
+/// transaction-scoped advisory lock every username mint a compile makes is
+/// taken under ([`mint_for_compile`]), released at commit or rollback.
+///
+/// **Why there is a lock as well as the ascending sweep.**
+/// [`premint_model_usernames`] mints everyone it can see in ascending id
+/// order, but it reads statement by statement under READ COMMITTED, and the
+/// passes after it read again: a person named, or left without a username, by
+/// a write that commits in between is minted by a pass AFTER rows the sweep
+/// already locked — out of order, and two compiles doing that over one pair of
+/// people deadlock. Under this lock no two compiles mint at once.
+///
+/// **The order every transaction takes it in: profile locks
+/// ([`crate::trigger::lock_services_in_tx`]), then this lock, then any row
+/// write or mint.** A mint `UPDATE`s `users.username`, a `citext UNIQUE`
+/// column, so it takes `FOR UPDATE` on the row, which waits on the `FOR KEY
+/// SHARE` that any insert of a row referencing that user holds (a
+/// `user_groups` membership, a `catalog_tag_assignments.assigned_by`, a
+/// `classification_policies.created_by`), and on a `DELETE FROM users`. A
+/// writer that took such a row lock first and only then reached its recompile
+/// would wait here on a compile that waits on its row: a deadlock, surfacing
+/// as a failed login or a refused write. So a writer that recompiles after
+/// touching a user-referencing row calls this right after its profile locks,
+/// BEFORE that write: the group-membership port
+/// (`PermGroupRecompiler::lock_affected_in_tx`, which every membership writer
+/// and `UserRepo::hard_delete` goes through), the catalog-tag write, the
+/// classification write and the tag delete (`egret-bi`; the delete because
+/// its row lock on the tag meets those writes' `tag_id` foreign keys). A writer whose own row writes take no
+/// lock on a `users` row (a grant, a rule, an `access_grants` row, which has
+/// no foreign key to `users`) may leave it to the compile.
+///
+/// It adds no cycle with the profile locks: it is always taken after them, and
+/// nothing asks for a profile lock while holding it, because every recompile
+/// locks its whole profile set first. `crate::view_tags::lock_view_tags_in_tx`
+/// and the group and member advisory locks (`egret_auth::groups`) come before
+/// the profile locks in any transaction that takes them. Re-taking it in the
+/// same transaction is free. A mint outside a compile — `ensure_username` on
+/// login or token issue, the People allocation route — touches one row in its
+/// own short transaction and does not take it.
+///
+/// **What it costs.** The lock is global and held until commit. Every writer
+/// that takes it early therefore serialises installation-wide behind every
+/// other one, and behind any recompile that has someone to mint: an OIDC login
+/// whose claims change a group the model names, an admin's group-member write,
+/// a user's hard delete, a catalog-tag write, a clearance `set_policy` and a
+/// tag delete. A recompile with nobody to mint never takes it. This is the
+/// price of ruling the deadlock out. Taking it per user instead would need
+/// every writer to know, before its write, which users the compile will mint.
+///
+/// **Known gap (not closed).** A writer that takes this lock early and then
+/// recompiles reads its profile set again: `retag_bump_and_recompile`'s
+/// `services_bound_to_warehouses`, `recompile_for_clearance_in_tx`'s
+/// `affected_services_for_classification`, and `lock_services_in_tx`'s
+/// tag-service expansion. If that set grew in between (a profile bound or
+/// attached concurrently), the new profile is locked while this lock is held,
+/// against the stated order, and can deadlock with a compile of that profile.
+/// Closing it means refusing with a retryable error when the set grows, or
+/// taking those late profile locks `NOWAIT`.
+pub async fn lock_compile_mints_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Mint `user_id`'s username for a compile, under
+/// [`lock_compile_mints_in_tx`]. Nothing is locked when nobody needs a
+/// username, the steady state.
+async fn mint_for_compile(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<String, CompileError> {
+    lock_compile_mints_in_tx(conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    ensure_username_via(conn, UserId(user_id))
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))
+}
+
+/// Mint, in ONE ascending sweep, the username of every person a compile of
+/// the current model would mint, and return how many were minted (Task 3
+/// review; every `crate::trigger` recompile entry calls it after the profile
+/// locks and before compiling).
+///
+/// **Why a sweep before the passes.** Each expansion mints on its own: the
+/// member pass in [`expand_enumerated_principals`], then its role pass, then
+/// the clearance's role pass, once per profile. Each is ascending, but the
+/// sequence is not: one recompile can lock user 3 and then user 2, while a
+/// concurrent recompile over other profiles locks 2 and then 3, and Postgres
+/// aborts one of them. Minting everyone first, ascending, means the passes
+/// find names already set and take no `users` row lock at all.
+///
+/// The set is a SUBSET of what the passes mint, never wider, because a mint is
+/// a write a compile must not make for someone it does not name. It is built
+/// from the SAME shared reads the passes and People use —
+/// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
+/// over the refs the whole model holds (grant principals, rule exemptions, a
+/// clearance's `required_roles`; `public` excluded; a workspace ref parsed as
+/// the member pass parses it), which is what every recompile reads. No
+/// membership predicate is restated here, so a change to one moves this sweep
+/// with it.
+pub(crate) async fn premint_model_usernames(
+    conn: &mut sqlx::PgConnection,
+) -> Result<usize, CompileError> {
+    // The model's refs, by kind. Who each one stands for is then asked of the
+    // shared membership reads below, never of a copy of their predicates, so
+    // this sweep cannot drift from what the passes (and People) read.
+    let refs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind::text, ref FROM perm.grant_principals \
+         UNION SELECT kind::text, ref FROM perm.rule_exemptions \
+         UNION SELECT 'role', unnest(required_roles) FROM classification_policies",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut roles: BTreeSet<String> = BTreeSet::new();
+    let mut groups: BTreeSet<String> = BTreeSet::new();
+    let mut workspaces: BTreeSet<Uuid> = BTreeSet::new();
+    for (kind, r) in refs {
+        match kind.as_str() {
+            "role" => {
+                roles.insert(r);
+            }
+            "group" if r != PUBLIC_GROUP => {
+                groups.insert(r);
+            }
+            // Parsed, as the member pass parses it, so a non-canonical
+            // spelling is swept too; a ref that is no uuid names nobody.
+            "workspace_members" => {
+                if let Ok(id) = Uuid::parse_str(&r) {
+                    workspaces.insert(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    let roles: Vec<String> = roles.into_iter().collect();
+    let groups: Vec<String> = groups.into_iter().collect();
+    let workspaces: Vec<Uuid> = workspaces.into_iter().collect();
+
+    // A `BTreeSet`: the mints below lock `users` rows in ascending id order.
+    let mut unnamed: BTreeSet<Uuid> = BTreeSet::new();
+    for h in role_holders_via(conn, &roles).await? {
+        if h.username.is_none() {
+            unnamed.insert(h.user_id);
+        }
+    }
+    for m in group_members_via(conn, &groups).await? {
+        if m.username.is_none() {
+            unnamed.insert(m.user_id);
+        }
+    }
+    for m in workspace_members_via(conn, &workspaces).await? {
+        if m.username.is_none() {
+            unnamed.insert(m.user_id);
+        }
+    }
+
+    for &user_id in &unnamed {
+        let minted = mint_for_compile(conn, user_id).await?;
+        tracing::info!(
+            %user_id,
+            username = %minted,
+            "minted a username for a person the model names, so the compiled policy can name them"
+        );
+    }
+    Ok(unnamed.len())
+}
+
+/// What [`role_usernames`] does with a holder who has no `users.username`
+/// yet (2026-10-18 design R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingUsername {
+    /// Mint one on the caller's connection with `ensure_username_via`, so the
+    /// compiled policy names the identity the engine will see. Every compile.
+    Mint,
+    /// Leave the holder out. A read that must not write: `owner_cleared`,
+    /// served on GET routes.
+    Omit,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,11 +449,12 @@ pub(crate) async fn role_usernames(
 
 /// One role-holding row: which role by NAME (the key a `role` principal
 /// stores; one name can exist at platform AND workspace scope, and both count)
-/// and the holding user.
+/// the holding user, and their username (NULL until minted).
 #[derive(sqlx::FromRow)]
 pub(crate) struct RoleHolderRow {
     pub(crate) role_name: String,
     pub(crate) user_id: Uuid,
+    pub(crate) username: Option<String>,
 }
 
 /// One workspace-membership row as read for expansion: who, and the username
@@ -253,8 +480,16 @@ pub(crate) struct GroupMemberRow {
 /// a role is not expanded — module doc, narrowing 1), `effect = 'allow'` only,
 /// not expired, at any scope ([`role_usernames`]' doc says why scope-free).
 /// One row per grant, so a user holding a role twice appears twice; callers
-/// deduplicate. A holder with no `users.username` is still a row here — it is
-/// [`role_usernames`] that leaves them unnamed, because naming needs one.
+/// deduplicate. A holder with no `users.username` is still a row here, with
+/// `username` NULL: [`role_usernames`] mints one at compile
+/// ([`MissingUsername::Mint`]) or leaves them out on a read
+/// ([`MissingUsername::Omit`]).
+///
+/// Joined to `users`, as [`workspace_members_via`] and [`group_members_via`]
+/// are (2026-10-18 design R5): a grant row whose user is gone names nobody and
+/// could not be minted for, so it is no holder — for the compiler and for
+/// People alike. `UserRepo::hard_delete` sweeps a user's `access_grants`, so
+/// this drops only rows written around it.
 pub(crate) async fn role_holders_via(
     conn: &mut sqlx::PgConnection,
     roles: &[String],
@@ -263,9 +498,11 @@ pub(crate) async fn role_holders_via(
         return Ok(Vec::new());
     }
     sqlx::query_as(
-        "SELECT r.name AS role_name, ag.principal_id AS user_id \
+        "SELECT r.name AS role_name, ag.principal_id AS user_id, \
+            u.username::text AS username \
            FROM access_grants ag \
            JOIN roles r ON r.id = ag.role_id \
+           JOIN users u ON u.id = ag.principal_id \
           WHERE ag.principal_type = 'user' \
             AND r.name = ANY($1) \
             AND ag.effect = 'allow' \
@@ -387,8 +624,8 @@ fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> Referenced {
 ///
 /// Runs ONE query for every workspace referenced by the whole model and ONE for
 /// every group (minting a username for any member that has none — module doc),
-/// and ONE for every role name ([`role_usernames`], which reads and never
-/// mints). After this returns, no `PrincipalKind::WorkspaceMembers`, no
+/// and ONE for every role name ([`role_usernames`], which mints the same way
+/// since the 2026-10-18 design R5). After this returns, no `PrincipalKind::WorkspaceMembers`, no
 /// `PrincipalKind::Role` and no group other than `public` survives anywhere in
 /// `grants`/`rules` — which is what lets
 /// `compile_grant`/`compile_rule` refuse the first two kinds outright as a
@@ -410,16 +647,18 @@ fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> Referenced {
 /// through [`role_usernames`] rather than through two copies of "who holds this
 /// role".
 ///
-/// **The ORDER of the expansions matters, and members go first.** Workspace
-/// and group membership MINT a missing username; a role expansion only READS
-/// one. A
+/// **The ORDER of the expansions: members first, then roles.** Every kind
+/// MINTS a missing username now (a role since the 2026-10-18 design R5), and a
 /// person named on one side of a subtract by their workspace and on the other
-/// by a role must therefore be resolved to the same name on both sides, or the
-/// `exclude` half would silently lose them and the compiled policy would grant
-/// more than the model states. Expanding members first means any mint has
-/// already happened — on this same connection, so the role read sees it — and
-/// the only names a role expansion can still omit belong to people who have no
-/// engine identity at all and so cannot be named by any `include` item either.
+/// by a role resolves to the same name on both sides either way: a mint is
+/// idempotent and runs on this same connection, so the role read sees a name
+/// the member pass just minted and mints nobody twice. Before R5 the role
+/// expansion only read, and this order was what kept such a person from
+/// silently dropping out of the `exclude` half; it is kept so the member pass
+/// mints in one ascending sweep and the role pass mints only the holders it
+/// did not reach. Under `crate::trigger::recompile_services_in_tx` neither
+/// pass mints anyone: [`premint_model_usernames`] already has, in one
+/// ascending sweep across every pass.
 ///
 /// **A ref that does not parse as a uuid expands to nothing**, rather than
 /// erroring. That is exactly what the evaluator does with it
@@ -473,9 +712,7 @@ pub(crate) async fn expand_enumerated_principals(
         }
     }
     for user_id in to_mint {
-        let minted = ensure_username_via(conn, UserId(user_id))
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+        let minted = mint_for_compile(conn, user_id).await?;
         tracing::info!(
             %user_id,
             username = %minted,
@@ -530,11 +767,10 @@ pub(crate) async fn expand_enumerated_principals(
         names.dedup();
     }
 
-    // AFTER the mints above, so a person reachable both as a workspace or group
-    // member and as a role holder resolves to the SAME name on both sides of a
-    // subtract (see this function's doc comment).
+    // AFTER the mints above, so the role pass mints only holders the member
+    // pass did not reach (see this function's doc comment).
     let roles: Vec<String> = wanted_roles.into_iter().collect();
-    let role_members = role_usernames(conn, &roles).await?;
+    let role_members = role_usernames(conn, &roles, MissingUsername::Mint).await?;
 
     let expansions = Expansions {
         workspaces: &members,
@@ -621,7 +857,7 @@ fn substitute_one(list: &mut Vec<Principal>, x: &Expansions<'_>) {
                     tracing::warn!(
                         role = %p.r#ref,
                         "a role principal expanded to no engine principal — no such role, or \
-                         nobody holds it with a live allow grant and a minted username. The \
+                         nobody holds it with a live allow grant. The \
                          Ranger `roles` bucket is NOT used as a fallback: D0 measured that it \
                          matches nobody, so naming the role there would be a control that does \
                          nothing (in an include) or one that denies everybody (in a \

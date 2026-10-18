@@ -46,8 +46,11 @@
 //! no group provider — `RangerDefaultPolicyItemEvaluator` needs only a non-null
 //! `userGroups`, and `setUserGroups` normalises `null` to an empty set), and
 //! `denyExceptions` carries the clearing roles' MEMBERS, enumerated at compile
-//! time as bare usernames read from `users.username`
-//! ([`crate::members::role_usernames`]). The Ranger `roles` bucket is not used
+//! time as bare usernames read from `users.username`, a missing one minted
+//! ([`crate::members::role_usernames`], 2026-10-18 design R5, R6: a holder
+//! with no username is excepted at once, as Cedar's `classification_forbid`
+//! clears them by role, instead of after some later recompile). The Ranger
+//! `roles` bucket is not used
 //! at all. Deny and exceptions ARE evaluated despite egret's service-defs
 //! carrying `"options": null` — the hidden
 //! `ranger.servicedef.enableDenyAndExceptionsInPolicies` default is `true`
@@ -254,7 +257,11 @@ pub(crate) async fn compile_clearance(
         }
         set.into_iter().collect()
     };
-    let members = crate::members::role_usernames(conn, &wanted).await?;
+    // `Mint`: a clearing-role holder with no username yet is excepted now,
+    // not after the recompile that follows their first query (design R6).
+    let members =
+        crate::members::role_usernames(conn, &wanted, crate::members::MissingUsername::Mint)
+            .await?;
 
     let accesses = withheld_accesses(engine)?;
 
@@ -301,7 +308,7 @@ pub(crate) async fn compile_clearance(
             tracing::info!(
                 tag_id = %g.tag_id,
                 roles = ?g.required_roles,
-                "a clearance's required roles have no holders with a username — the compiled \
+                "a clearance's required roles have no holders — the compiled \
                  deny withholds the tagged column from everybody, which is what 'nobody is \
                  cleared' means"
             );

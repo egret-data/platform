@@ -26,7 +26,9 @@
 //!
 //! The enumeration happens in two places — a clearance's `denyExceptions`
 //! ([`crate::clearance`]) and a `role` principal in a grant
-//! ([`crate::members`]) — and both read the same `role_usernames`. So there is
+//! ([`crate::members`]) — and both read the same `role_usernames`, which mints
+//! a holder's missing username (2026-10-18 design R5), so the recompile a
+//! grant triggers names a holder who never used an engine. So there is
 //! ONE affected-service function,
 //! [`crate::affected_services_for_role_membership`], which returns the UNION of
 //! both consumers' arms. Two triggers over one enumeration is two chances for
@@ -225,4 +227,62 @@ async fn apply(
         Op::Unassign => RoleRepo::unassign_in_tx(conn, ptype, pid, role_id).await,
     }
     .map_err(|e| CompileError::Db(e.to_string()))
+}
+
+/// Recompile every profile whose model names a role — a `role` principal in
+/// `perm.grant_principals`, or any `classification_policies.required_roles` —
+/// and return the ids recompiled, ascending (2026-10-18 design R7).
+///
+/// **Why a boot pass.** Until R5 a role holder with no `users.username` was
+/// left out of the compiled policy, and nothing recompiles when they get one:
+/// the first query mints it and recompiles nothing. A body stored by the old
+/// compiler can therefore still leave out a holder who now has a username,
+/// so a deny or exclude on the role misses them and a clearance refuses them.
+/// Running the normal recompile over those profiles makes the compiler mint
+/// and name them (R5).
+///
+/// One transaction, through the same calls a role-membership write takes:
+/// the union of [`affected_services_for_role_membership`] over every named
+/// role, its locks taken ascending ([`lock_services_in_tx`]), then
+/// [`recompile_services_in_tx`]. Idempotent: an unchanged body writes nothing
+/// and bumps no `policy_version`, which is why it runs on every boot with no
+/// record of having run. `egret-bin` spawns it off the boot path, and a
+/// failure is logged and never blocks boot.
+pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i64>, CompileError> {
+    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let mut tx = pool.begin().await.map_err(db)?;
+
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT ref FROM perm.grant_principals WHERE kind = 'role'::perm.principal_kind \
+         UNION \
+         SELECT unnest(required_roles) FROM classification_policies \
+         ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+
+    let mut services: Vec<i64> = Vec::new();
+    for role in &roles {
+        services.extend(affected_services_for_role_membership(&mut tx, role).await?);
+    }
+    services.sort_unstable();
+    services.dedup();
+    if services.is_empty() {
+        return Ok(services);
+    }
+
+    lock_services_in_tx(&mut tx, &services).await?;
+    let summaries = recompile_services_in_tx(&mut tx, &services).await?;
+    tx.commit().await.map_err(db)?;
+
+    let rewritten = summaries.iter().filter(|s| s.wrote_anything()).count();
+    tracing::info!(
+        roles = roles.len(),
+        profiles = services.len(),
+        rewritten,
+        "recompiled the profiles whose model names a role, so a holder an older compile left out \
+         is named"
+    );
+    Ok(services)
 }

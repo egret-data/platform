@@ -244,7 +244,7 @@ describe("People index: Groups and Roles", () => {
     expect(within(screen.getByRole("link", { name: "auditor" }).closest("tr")!).getByText("1 holder")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Holders are users. A holder is named on engines once they have a username; a group holding a role is not counted, as engines do not apply it.",
+        "Holders are users. A holder with no username gets one when a grant naming the role is compiled; a group holding a role is not counted, as engines do not apply it.",
       ),
     ).toBeInTheDocument();
   });

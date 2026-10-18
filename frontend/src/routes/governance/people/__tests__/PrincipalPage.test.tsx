@@ -387,7 +387,7 @@ describe("principal page: Overview", () => {
     open("/governance/people/roles/steward");
     const holders = await screen.findByRole("region", { name: "Holders" });
     const bo = within(holders).getByRole("link", { name: "Bo Chen" }).closest("tr")!;
-    expect(within(bo).getByText("Not named on engines until they have a username")).toBeInTheDocument();
+    expect(within(bo).getByText("No username yet: a grant naming this role allocates one at compile")).toBeInTheDocument();
     const groups = screen.getByRole("region", { name: "Groups holding this role" });
     const analysts = within(groups).getByRole("link", { name: "analysts" }).closest("tr")!;
     expect(within(analysts).getByText("egret only — not applied on engines")).toBeInTheDocument();

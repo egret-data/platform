@@ -487,3 +487,447 @@ async fn a_role_in_an_exclude_subtracts_its_holders() {
         "the include side is untouched — Ranger applies the exception, not egret: {body:#}"
     );
 }
+
+/// A grant with the given effect over the fixture's whole catalog.
+fn grant_with(effect: Effect, catalog_id: Uuid, principals: PrincipalSet) -> Grant {
+    Grant {
+        effect,
+        ..read_grant(catalog_id, principals)
+    }
+}
+
+fn public_principal() -> Principal {
+    Principal {
+        kind: PrincipalKind::Group,
+        r#ref: egret_perm::PUBLIC_GROUP.to_string(),
+    }
+}
+
+/// `users.username` for `user_id`, NULL as `None`.
+async fn stored_username(db: &Db, user_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read username")
+}
+
+/// **2026-10-18 design R5.** A role holder with no username yet used to be
+/// left out of the compiled policy ("absent is the right answer"), so *allow
+/// `{public}`, deny role R* reached a holder of R the moment they got a username
+/// — on their first query, which recompiles nothing. The deny must name them
+/// from the start: the compile mints their username, as group and workspace
+/// expansion already did.
+#[tokio::test]
+async fn a_role_in_a_deny_names_a_holder_who_had_no_username_yet() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let holder = new_user(&db, &format!("{}@egret.local", unique("rmint-deny")), None).await;
+    let role_name = unique("blocked");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, holder, role_id).await;
+
+    f.perm
+        .create_grant(&grant_with(
+            Effect::Allow,
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![public_principal()],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create allow-public grant");
+    let deny_id = f
+        .perm
+        .create_grant(&grant_with(
+            Effect::Deny,
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role deny");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let minted = stored_username(&db, holder)
+        .await
+        .expect("compiling a model that names the role must mint its holder's username");
+    let body = compiled_policy(&db, f.service_id, deny_id)
+        .await
+        .expect("a role deny with a holder compiles to a policy");
+    let deny = body["denyPolicyItems"].as_array().expect("denyPolicyItems");
+    assert_eq!(deny.len(), 1, "one deny item: {body:#}");
+    assert_eq!(
+        users_of(&deny[0]),
+        vec![minted],
+        "the deny names the holder by the username the compile minted — omitted, the allow on \
+         `public` reaches them once they get one: {body:#}"
+    );
+}
+
+/// R5, the exclude half: *allow `{public}` except role R* must subtract a
+/// holder of R who had no username yet.
+#[tokio::test]
+async fn a_role_in_an_exclude_subtracts_a_holder_who_had_no_username_yet() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let holder = new_user(&db, &format!("{}@egret.local", unique("rmint-exc")), None).await;
+    let role_name = unique("contractor");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, holder, role_id).await;
+
+    let grant_id = f
+        .perm
+        .create_grant(&grant_with(
+            Effect::Allow,
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![public_principal()],
+                exclude: vec![role_principal(&role_name)],
+            },
+        ))
+        .await
+        .expect("create grant");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let minted = stored_username(&db, holder)
+        .await
+        .expect("compiling the exclude must mint the holder's username");
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("policy");
+    let exceptions = body["allowExceptions"].as_array().expect("allowExceptions");
+    assert_eq!(exceptions.len(), 1, "one exception item: {body:#}");
+    assert_eq!(
+        users_of(&exceptions[0]),
+        vec![minted],
+        "the excluded role's holder is subtracted by their minted username: {body:#}"
+    );
+}
+
+/// The stable-allocation property R5 leans on: the name the compile mints is
+/// the one every later `ensure_username` — the first query, the engine token
+/// minter — hands out, so the policy names the identity the engine will see.
+#[tokio::test]
+async fn the_name_a_role_compile_mints_is_the_one_ensure_username_returns() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let holder = new_user(
+        &db,
+        &format!("{}@egret.local", unique("rmint-stable")),
+        None,
+    )
+    .await;
+    let role_name = unique("reader");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, holder, role_id).await;
+    let grant_id = f
+        .perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("a role grant with a holder compiles to a policy");
+    let named = users_of(only_item(&body));
+    let later = egret_auth::users::UserRepo::new(db.clone())
+        .ensure_username(egret_core::UserId(holder))
+        .await
+        .expect("ensure_username");
+    assert_eq!(
+        named,
+        vec![later],
+        "the compiled name and the one the engine later sees are the same: {body:#}"
+    );
+}
+
+async fn policy_version(db: &Db, service_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("policy_version")
+}
+
+/// **2026-10-18 design R7.** A body the old compiler wrote left out a role
+/// holder who had no username, and nothing recompiles it: the holder's first
+/// query mints a username without a recompile. The boot pass recompiles every
+/// profile whose model names a role, so the stored deny comes to name them —
+/// and, run again, writes nothing.
+#[tokio::test]
+async fn the_boot_repair_names_a_holder_the_old_compiler_left_out() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let kept = new_user(
+        &db,
+        &format!("{}@egret.local", unique("repair-kept")),
+        Some("repair-kept"),
+    )
+    .await;
+    let left_out = new_user(&db, &format!("{}@egret.local", unique("repair-out")), None).await;
+    let role_name = unique("repair-blocked");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, kept, role_id).await;
+    grant_role(&db, left_out, role_id).await;
+
+    f.perm
+        .create_grant(&grant_with(
+            Effect::Allow,
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![public_principal()],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create allow-public grant");
+    let deny_id = f
+        .perm
+        .create_grant(&grant_with(
+            Effect::Deny,
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role deny");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    // The old path: the deny names only the holder who had a username, and the
+    // other one still has none.
+    sqlx::query(
+        "UPDATE policy.authz_policies \
+            SET policy_jsonb = jsonb_set(policy_jsonb, '{denyPolicyItems,0,users}', \
+                                         '[\"repair-kept\"]'::jsonb) \
+          WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(format!("{COMPILER_GRANT_PREFIX}{deny_id}"))
+    .execute(&db.pool)
+    .await
+    .expect("write the old body");
+    sqlx::query("UPDATE users SET username = NULL WHERE id = $1")
+        .bind(left_out)
+        .execute(&db.pool)
+        .await
+        .expect("unmint");
+    let before = policy_version(&db, f.service_id).await;
+
+    let repaired =
+        egret_perm_compile::role_membership::recompile_role_referencing_profiles(&db.pool)
+            .await
+            .expect("boot repair");
+
+    assert!(
+        repaired.contains(&f.service_id),
+        "a profile whose model names a role is recompiled: {repaired:?}"
+    );
+    let minted = stored_username(&db, left_out)
+        .await
+        .expect("the repair mints the left-out holder's username");
+    let body = compiled_policy(&db, f.service_id, deny_id)
+        .await
+        .expect("policy");
+    let mut expected = vec!["repair-kept".to_string(), minted];
+    expected.sort();
+    assert_eq!(
+        users_of(&body["denyPolicyItems"][0]),
+        expected,
+        "the repaired deny names the holder the old compiler left out: {body:#}"
+    );
+    let after_first = policy_version(&db, f.service_id).await;
+    assert!(
+        after_first > before,
+        "rewriting the body bumps the profile's policy_version"
+    );
+
+    egret_perm_compile::role_membership::recompile_role_referencing_profiles(&db.pool)
+        .await
+        .expect("second boot repair");
+    assert_eq!(
+        policy_version(&db, f.service_id).await,
+        after_first,
+        "a second run changes nothing, so it writes nothing"
+    );
+}
+
+/// The ascending pre-mint sweep `recompile_services_in_tx` runs (Task 3
+/// review) mints only people the model names: a mint is a write, and a
+/// compile must not make it for a holder of a role nothing names.
+#[tokio::test]
+async fn the_pre_mint_sweep_mints_only_holders_of_a_role_the_model_names() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let named_holder = new_user(&db, &format!("{}@egret.local", unique("pm-named")), None).await;
+    let other_holder = new_user(&db, &format!("{}@egret.local", unique("pm-other")), None).await;
+    let named_role = unique("pm-named-role");
+    let other_role = unique("pm-unnamed-role");
+    let named_id = new_role(&db, &named_role).await;
+    let other_id = new_role(&db, &other_role).await;
+    grant_role(&db, named_holder, named_id).await;
+    grant_role(&db, other_holder, other_id).await;
+    f.perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&named_role)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+
+    let mut tx = db.pool.begin().await.expect("begin");
+    egret_perm_compile::recompile_services_in_tx(&mut tx, &[f.service_id])
+        .await
+        .expect("recompile");
+    tx.commit().await.expect("commit");
+
+    assert!(
+        stored_username(&db, named_holder).await.is_some(),
+        "a holder of a role the model names is minted"
+    );
+    assert_eq!(
+        stored_username(&db, other_holder).await,
+        None,
+        "a holder of a role nothing names is not minted"
+    );
+}
+
+/// Two concurrent recompiles of DIFFERENT profiles that must both mint the same
+/// two unnamed people do not deadlock (2026-10-18 design R5 rebase).
+///
+/// The shape that used to: a compile mints per pass — the member pass (here a
+/// group's member, the HIGHER id) before the role pass (a role's holder, the
+/// LOWER id) — while `recompile_services_in_tx`'s pre-mint sweep mints
+/// ascending, lower first. Opposite orders over one pair of `users` rows. A
+/// third transaction holds the lower row so both recompiles are mid-mint when
+/// it lets go; before `recompile_service_in_tx` pre-minted too, whichever of
+/// them then took the lower row waited on the higher one the other held, and
+/// Postgres aborted one about half the time per round. Now both sweep
+/// ascending first and simply queue.
+#[tokio::test]
+async fn concurrent_recompiles_minting_the_same_people_in_opposite_orders_both_succeed() {
+    let Some(db) = test_db().await else { return };
+    let a = seed(&db).await;
+    let b = seed(&db).await;
+
+    for round in 0..4 {
+        let (lo, hi) = {
+            let (x, y) = (Uuid::new_v4(), Uuid::new_v4());
+            if x < y {
+                (x, y)
+            } else {
+                (y, x)
+            }
+        };
+        for id in [lo, hi] {
+            sqlx::query("INSERT INTO users (id, provider, email, name) VALUES ($1,'local',$2,'T')")
+                .bind(id)
+                .bind(format!("{}@egret.local", unique("dl")))
+                .execute(&db.pool)
+                .await
+                .expect("insert user");
+        }
+        let group = unique("dl-group");
+        let gid: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+            .bind(&group)
+            .fetch_one(&db.pool)
+            .await
+            .expect("group");
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1,$2)")
+            .bind(hi)
+            .bind(gid)
+            .execute(&db.pool)
+            .await
+            .expect("member");
+        let role = unique("dl-role");
+        let rid = new_role(&db, &role).await;
+        grant_role(&db, lo, rid).await;
+        a.perm
+            .create_grant(&read_grant(
+                a.catalog_id,
+                PrincipalSet {
+                    include: vec![
+                        Principal {
+                            kind: PrincipalKind::Group,
+                            r#ref: group.clone(),
+                        },
+                        role_principal(&role),
+                    ],
+                    exclude: vec![],
+                },
+            ))
+            .await
+            .expect("create grant");
+
+        let mut holder = db.pool.begin().await.expect("holder tx");
+        sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+            .bind(lo)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the lower row");
+
+        let single = {
+            let (perm, policy, sid) = (a.perm.clone(), a.policy.clone(), a.service_id);
+            tokio::spawn(async move { recompile_service(&perm, &policy, sid).await })
+        };
+        let set = {
+            let (pool, sid) = (db.pool.clone(), b.service_id);
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.expect("begin");
+                egret_perm_compile::recompile_services_in_tx(&mut tx, &[sid]).await?;
+                tx.commit()
+                    .await
+                    .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+                Ok::<_, egret_perm::CompileError>(())
+            })
+        };
+        // Let both reach the held row before it is released.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        holder.rollback().await.expect("release");
+
+        let single = single.await.expect("join");
+        let set = set.await.expect("join");
+        assert!(
+            single.is_ok(),
+            "round {round}: recompile_service: {single:?}"
+        );
+        assert!(
+            set.is_ok(),
+            "round {round}: recompile_services_in_tx: {set:?}"
+        );
+        for id in [lo, hi] {
+            assert!(
+                stored_username(&db, id).await.is_some(),
+                "round {round}: {id} minted"
+            );
+        }
+    }
+}

@@ -37,8 +37,11 @@
 //!   (`egret_auth::oidc::provision_and_sync`, from the callback route), only
 //!   for the groups the login actually moved;
 //! - `GroupRepo::delete_local` — `user_groups.group_id` is `ON DELETE CASCADE`;
-//! - `GroupRepo::rename` — principals name a group by NAME, so a rename moves
-//!   every member from the old name to the new one;
+//!   since 2026-10-18 (R1) refused while anything names the group, so an
+//!   allowed delete reaches nothing;
+//! - `GroupRepo::rename` — principals name a group by NAME; since R1 refused
+//!   while anything names the old or the new name, so an allowed rename
+//!   reaches nothing either;
 //! - `UserRepo::hard_delete` — the control plane's user delete and the Data
 //!   API's service-account delete (`user_groups.user_id` cascades too).
 //!
@@ -62,7 +65,8 @@ use sqlx::{Postgres, Transaction};
 use egret_perm::CompileError;
 
 use crate::trigger::{
-    affected_services_for_group_membership, lock_services_in_tx, recompile_services_in_tx,
+    affected_services_for_group_membership, group_references_via, lock_services_in_tx,
+    recompile_services_in_tx,
 };
 
 /// The production [`egret_auth::groups::GroupMembershipRecompiler`]: the
@@ -102,6 +106,16 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         lock_services_in_tx(tx, &services)
             .await
             .map_err(|e| to_core(e, Some(group_names)))?;
+        // Before the membership write: its `user_groups` insert holds `FOR
+        // KEY SHARE` on the user, `hard_delete`'s DELETE holds the row itself,
+        // and the recompile below mints under this lock — taken later, a
+        // compile minting that user would wait on us while we waited on it
+        // (`crate::members::lock_compile_mints_in_tx`).
+        if !services.is_empty() {
+            crate::members::lock_compile_mints_in_tx(tx)
+                .await
+                .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        }
         Ok(services)
     }
 
@@ -122,5 +136,26 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
             }
         }
         Ok(())
+    }
+
+    async fn group_references_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
+        group_references_via(tx, names)
+            .await
+            .map_err(|e| to_core(e, Some(names)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `egret-auth` skips its reference check for `public` by its own copy of
+    /// the name (it does not depend on `egret-perm`); the two must not drift,
+    /// or the login would create an unchecked group the compiler expands.
+    #[test]
+    fn egret_auth_and_egret_perm_agree_on_the_public_group() {
+        assert_eq!(egret_auth::groups::PUBLIC_GROUP, egret_perm::PUBLIC_GROUP);
     }
 }

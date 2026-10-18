@@ -249,7 +249,10 @@ async fn platform_admin_user_ids_expands_group_granted_admins() {
         .insert_local(&format!("{}@test.local", uniq("gadmin")), "GAdmin", "x")
         .await
         .unwrap();
-    let group_id = groups.create_local(&uniq("admins-grp")).await.unwrap();
+    let group_id = groups
+        .create_local(&uniq("admins-grp"), &crate::recorder::Recorder::default())
+        .await
+        .unwrap();
     groups
         .add_member(group_id, user_id, &crate::recorder::Recorder::default())
         .await

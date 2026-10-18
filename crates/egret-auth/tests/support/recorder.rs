@@ -15,7 +15,7 @@
 
 use std::sync::Mutex;
 
-use egret_auth::groups::GroupMembershipRecompiler;
+use egret_auth::groups::{GroupMembershipRecompiler, GroupReference};
 use sqlx::{Postgres, Transaction};
 
 /// One call the port received, in order.
@@ -28,9 +28,20 @@ pub enum Call {
 #[derive(Default)]
 pub struct Recorder {
     calls: Mutex<Vec<Call>>,
+    /// What `group_references_in_tx` answers, filtered to the names asked
+    /// about. Empty by default: nothing in the model names any group.
+    references: Vec<GroupReference>,
 }
 
 impl Recorder {
+    /// A recorder whose model holds `references`.
+    pub fn with_references(references: Vec<GroupReference>) -> Self {
+        Self {
+            references,
+            ..Self::default()
+        }
+    }
+
     /// Every call so far, with the names of each `Lock` sorted.
     pub fn take(&self) -> Vec<Call> {
         std::mem::take(&mut *self.calls.lock().unwrap())
@@ -57,5 +68,18 @@ impl GroupMembershipRecompiler for Recorder {
     ) -> egret_core::Result<()> {
         self.calls.lock().unwrap().push(Call::Recompile);
         Ok(())
+    }
+
+    async fn group_references_in_tx(
+        &self,
+        _tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> egret_core::Result<Vec<GroupReference>> {
+        Ok(self
+            .references
+            .iter()
+            .filter(|r| names.contains(&r.group_name))
+            .cloned()
+            .collect())
     }
 }

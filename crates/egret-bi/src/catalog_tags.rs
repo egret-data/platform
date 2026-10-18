@@ -426,6 +426,22 @@ impl ViewReach {
         let services = egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &warehouses)
             .await
             .map_err(crate::error::BiError::from)?;
+        // Before the base write, whose `assigned_by` holds `FOR KEY SHARE` on
+        // the assigning user: the profile locks, then the compile-mint lock
+        // the recompile mints under. Taken after that write, a concurrent
+        // compile minting the same user would wait on this transaction while
+        // it waited on that compile (`egret_perm_compile::lock_compile_mints_in_tx`).
+        // The recompile's own set is a subset of `services` (its warehouses
+        // are, `retag_bump_and_recompile` refuses otherwise), so it re-takes
+        // only locks already held.
+        if !services.is_empty() {
+            egret_perm_compile::lock_services_in_tx(tx, &services)
+                .await
+                .map_err(crate::error::BiError::from)?;
+            egret_perm_compile::lock_compile_mints_in_tx(tx)
+                .await
+                .map_err(crate::error::BiError::from)?;
+        }
         Ok(Self {
             warehouse_id,
             views,

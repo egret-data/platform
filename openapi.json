@@ -6532,7 +6532,7 @@
             }
           },
           "409": {
-            "description": "Cannot delete an OIDC-synced group",
+            "description": "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6605,7 +6605,7 @@
             }
           },
           "409": {
-            "description": "Cannot rename an OIDC-synced group",
+            "description": "Cannot rename an OIDC-synced group; or another group already has the new name; or grants or rule exemptions still name the old or the new name (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)",
             "content": {
               "application/json": {
                 "schema": {
@@ -45666,7 +45666,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Group or role: how many of `memberCount` have no username yet. A role\nholder without one is not named on any engine. A group member without\none is named only once a grant naming the group is compiled (which\nallocates it). Null for a user."
+            "description": "Group or role: how many of `memberCount` have no username yet. Such a\nmember or holder is named on engines only once a grant naming the\ngroup or role is compiled (which allocates it). Null for a user."
           },
           "serviceAccount": {
             "type": "boolean",

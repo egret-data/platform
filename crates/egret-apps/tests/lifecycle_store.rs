@@ -1297,4 +1297,12 @@ impl egret_auth::groups::GroupMembershipRecompiler for NoGroupPolicies {
     ) -> egret_core::Result<()> {
         Ok(())
     }
+
+    async fn group_references_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _names: &[String],
+    ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
+        Ok(Vec::new())
+    }
 }
