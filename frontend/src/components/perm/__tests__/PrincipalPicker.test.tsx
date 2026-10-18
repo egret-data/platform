@@ -407,6 +407,31 @@ describe("PrincipalPicker", () => {
     expect(list).not.toHaveTextContent("Brand New");
   });
 
+  // Final review minor d: a service account's People row shows "service account", not its email.
+  test("a service account with no username is found by its label and allocated", async () => {
+    const user = userEvent.setup();
+    mockPrincipals([BRAND_NEW]);
+    mockPeople([
+      { ...personRow("u-other", "service account"), label: "Brand New Bot", serviceAccount: true },
+      { ...personRow("u-sa", "service account"), serviceAccount: true },
+    ]);
+    vi.mocked(permAllocateUsername).mockResolvedValue({
+      status: 200,
+      data: { username: "brand-new", allocated: true },
+      headers: new Headers(),
+    } as Awaited<ReturnType<typeof permAllocateUsername>>);
+    const { onChange } = renderPicker({}, { me: viewer(["policy:read", "policy:update"]) });
+
+    await user.type(screen.getByRole("combobox", { name: "Include user search" }), "brand");
+    await user.click(await screen.findByRole("button", { name: "Allocate username and add Brand New" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Allocate and add" }),
+    );
+
+    await waitFor(() => expect(permAllocateUsername).toHaveBeenCalledWith("u-sa"));
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith({ include: [{ kind: "user", ref: "brand-new" }], exclude: [] }));
+  });
+
   test("an allocation for a user People cannot find says so and adds nothing", async () => {
     const user = userEvent.setup();
     mockPrincipals([BRAND_NEW]);
@@ -419,7 +444,9 @@ describe("PrincipalPicker", () => {
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Allocate and add" }),
     );
 
-    expect(await screen.findByText(/Brand New could not be found among People/)).toBeInTheDocument();
+    expect(await screen.findByText(/Brand New could not be found among People/)).toHaveTextContent(
+      "A service account that cannot be found here gets its username at its first token.",
+    );
     expect(permAllocateUsername).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();
   });

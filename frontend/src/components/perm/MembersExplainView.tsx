@@ -16,6 +16,13 @@ export const NO_SINGLE_VERDICT =
  * Every access in every profile allowed; at least one profile answered. An
  * allow under an undecidable mask is provisional (StarRocks skips the check if
  * the mask is MASK_NULL), so it does not count.
+ *
+ * A StarRocks read of a MASK_NULL column (`masked_read_skips_access`, no
+ * access verdict) is not counted as allowed either (final review minor b):
+ * the full answer says the column reads as NULL and the query as a whole is
+ * still refused unless the member may read another column it selects, which
+ * explain does not know. It is counted under "read masked", and
+ * `MASK_NULL_NOT_ALLOWED` says so on the page.
  */
 function allowedEverywhere(r: ExplainResponse): boolean {
   if (r.outcome !== "per_profile" || r.profiles.length === 0) return false;
@@ -34,6 +41,10 @@ function anyDecision(r: ExplainResponse, kind: "denied" | "undecidable"): boolea
       p.accesses.some((a) => a.decision.kind === kind) || (kind === "undecidable" && p.mask?.decision.kind === "undecidable"),
   );
 }
+
+/** Under the counts when a member's StarRocks read was answered by a MASK_NULL mask alone. */
+export const MASK_NULL_NOT_ALLOWED =
+  "A StarRocks read of a MASK_NULL column is not access-checked: it returns NULL, and the query is still refused unless the member may read another column it selects. Such a member is counted as masked, not allowed.";
 
 /** The read transformed by a mask (anything but MASK_NONE) on at least one profile. */
 function anyMasked(r: ExplainResponse): boolean {
@@ -99,6 +110,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
   const refused = evaluated.filter((m) => anyDecision(m.result, "denied")).length;
   const undecidable = evaluated.filter((m) => anyDecision(m.result, "undecidable")).length;
   const masked = evaluated.filter((m) => anyMasked(m.result)).length;
+  const skipsAccess = evaluated.some((m) => m.result.profiles.some((p) => p.masked_read_skips_access));
   const shown = refusedOnly ? evaluated.filter((m) => anyDecision(m.result, "denied")) : evaluated;
 
   const toggle = (id: string) =>
@@ -126,6 +138,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
           </div>
         ))}
       </dl>
+      {skipsAccess ? <p className="text-sm text-muted-foreground">{MASK_NULL_NOT_ALLOWED}</p> : null}
       {truncated ? <p className="text-sm">{truncatedText(response)}</p> : null}
 
       {evaluated.length > 0 ? (

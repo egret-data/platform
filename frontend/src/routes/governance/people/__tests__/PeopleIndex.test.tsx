@@ -354,6 +354,20 @@ describe("ByNameRedirect", () => {
     expect([asked.get("kind"), asked.get("username")]).toEqual(["user", "ana"]);
   });
 
+  // Final review I2: the route matches citext; engines compare byte for byte, so `Ana` is not ana.
+  it("does not open a user whose username matches only case-insensitively, and says why", async () => {
+    serve((q) => page(q.get("username")?.toLowerCase() === "ana" ? [USERS[0]] : []));
+    open("/governance/people/users/by-name/Ana?tab=permissions");
+    expect(
+      await screen.findByText(
+        "“Ana” matches the user ana only case-insensitively; engines compare names byte for byte, so this name matches nobody.",
+      ),
+    ).toBeInTheDocument();
+    expect(where()).toBe("/governance/people/users/by-name/Ana?tab=permissions");
+    expect(screen.getByRole("link", { name: "Unmatched names" })).toHaveAttribute("href", "/governance/people?kind=unmatched");
+    expect(screen.getByRole("link", { name: "ana's page" })).toHaveAttribute("href", "/governance/people/users/u-ana");
+  });
+
   it("says when nobody has the username", async () => {
     serve(() => page([]));
     open("/governance/people/users/by-name/ana");

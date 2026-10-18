@@ -146,7 +146,7 @@ describe("a principal's Masks & filters tab", () => {
     open("/governance/people/users/u-ana?tab=masks");
 
     expect(await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Directly" })).toBeInTheDocument();
-    expect(sections()).toEqual(["Directly", "Through a group", "Through a workspace", "Excluded from the exemption", "egret only"]);
+    expect(sections()).toEqual(["Directly", "Through a group", "Through a workspace", "Excluded from the exemption", "Not applied anywhere"]);
 
     const [direct] = rowsOf("Directly");
     expect(within(direct).getByRole("link", { name: "salary mask" })).toHaveAttribute("href", "/governance/rules/r-direct");
@@ -165,8 +165,8 @@ describe("a principal's Masks & filters tab", () => {
     const [ws] = rowsOf("Through a workspace");
     expect(ws).toHaveTextContent("Through workspace Sales · applied on engines");
 
-    const [egretOnly] = rowsOf("egret only");
-    expect(egretOnly).toHaveTextContent("Through workspace Finance, held by group analysts · egret only — not applied on engines");
+    const [egretOnly] = rowsOf("Not applied anywhere");
+    expect(egretOnly).toHaveTextContent("Through workspace Finance, held by group analysts · not applied anywhere: held through a group");
     // egret itself applies no mask or filter, so an exemption engines skip exempts nobody.
     expect(within(tab()).getByText(/egret applies no mask or row filter itself/)).toBeInTheDocument();
 

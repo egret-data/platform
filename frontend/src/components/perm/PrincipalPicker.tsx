@@ -282,7 +282,10 @@ function staleRefsOf(e: unknown): StoredUserRef[] {
 /**
  * The user id of a `list_principals` user row, which carries only the email
  * (`name`): the People list's row whose email is exactly it. Emails are
- * unique; `q` is a substring match, so every other row is dropped.
+ * unique; `q` is a substring match (on name, email and username), so every
+ * other row is dropped. A service account's row shows `service account`
+ * instead of its email (final review minor d), so one is matched by its label
+ * among the service-account rows `q` found by that email.
  */
 async function findUserId(principal: Principal): Promise<string> {
   let res: Awaited<ReturnType<typeof permListPeople>>;
@@ -297,9 +300,13 @@ async function findUserId(principal: Principal): Promise<string> {
     throw e;
   }
   const email = principal.name.toLowerCase();
-  const matches = res.status === 200 ? res.data.items.filter((row) => row.detail?.toLowerCase() === email) : [];
+  const items = res.status === 200 ? res.data.items : [];
+  const byEmail = items.filter((row) => !row.serviceAccount && row.detail?.toLowerCase() === email);
+  const matches = byEmail.length > 0 ? byEmail : items.filter((row) => row.serviceAccount && row.label === principal.label);
   if (matches.length !== 1) {
-    throw new Error(`${principal.label} could not be found among People. Search again, then allocate.`);
+    throw new Error(
+      `${principal.label} could not be found among People. Search again, then allocate. A service account that cannot be found here gets its username at its first token.`,
+    );
   }
   return matches[0].key;
 }

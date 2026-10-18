@@ -16,7 +16,7 @@ import { GROUP_TITLE, NO_USERNAME_NOTE, reachText } from "@/routes/governance/pe
 const RULE_GROUP_TITLE: Record<ReachGroup, string> = { ...GROUP_TITLE, excluded: "Excluded from the exemption" };
 
 /**
- * Under the egret only group (an exemption held through a group, which the
+ * Under the "Not applied anywhere" group (an exemption held through a group, which the
  * compiler does not expand). Rules are compiled to engine masking and
  * row-filter policies only; nothing in egret reads them to mask or filter, so
  * such an exemption exempts nobody anywhere. Not said of an expired path,
@@ -150,7 +150,7 @@ function RuleTable({
               <TableCell className="whitespace-normal">
                 <ul role="list" className="space-y-0.5 text-sm">
                   {reach.map((r, i) => (
-                    <li key={i}>{reachText(r)}</li>
+                    <li key={i}>{reachText(r, "rule")}</li>
                   ))}
                 </ul>
               </TableCell>

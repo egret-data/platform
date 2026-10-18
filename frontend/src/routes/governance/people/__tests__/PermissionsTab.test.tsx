@@ -149,7 +149,7 @@ describe("a principal's Permissions tab", () => {
       "Through a workspace",
       "Everyone",
       "Excluded",
-      "egret only",
+      "Not applied anywhere",
     ]);
     expect(rowsOf("Directly")).toEqual([["user ana can read and write ice.sales.*", "Directly · applied on engines", "Allow"]]);
     expect(rowsOf("Through a group")).toEqual([
@@ -171,13 +171,19 @@ describe("a principal's Permissions tab", () => {
         "Allow",
       ],
     ]);
-    expect(rowsOf("egret only")).toEqual([
+    expect(rowsOf("Not applied anywhere")).toEqual([
       [
         "role reader can read ice.sales.*",
-        "Through role reader, held by group analysts · egret only — not applied on engines: held through a group",
+        "Through role reader, held by group analysts · not applied anywhere: held through a group",
         "Allow",
       ],
     ]);
+    // Final review I1: egret's own checks never read grants, so a group-held role reaches nowhere.
+    expect(
+      within(within(tab()).getByRole("region", { name: "Not applied anywhere" })).getByText(
+        "These reach this principal only through a role or workspace a group holds, which engines do not apply. egret's own checks do not read grants either, so a grant that reaches only this way applies to this principal nowhere.",
+      ),
+    ).toBeInTheDocument();
     // A grant naming someone else, or the username in another case, is not listed.
     expect(tab().textContent).not.toMatch(/bob|user Ana /);
   });
@@ -196,7 +202,7 @@ describe("a principal's Permissions tab", () => {
     expect(rowsOf("Through a group")).toEqual([
       [
         "group analysts cannot read ice.sales.* except role reader",
-        "Through group analysts · applied on enginesExcluded in egret only — not on engines: through role reader, held by group analysts",
+        "Through group analysts · applied on enginesExcludes nobody: through role reader, held by group analysts — engines do not apply it, and egret's own checks do not read grants",
         "Deny",
       ],
     ]);
@@ -218,7 +224,7 @@ describe("a principal's Permissions tab", () => {
       await within(panel).findByText("No engine knows this user until they have a username; nothing below applies on engines."),
     ).toBeInTheDocument();
     expect(within(panel).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
-      "egret only",
+      "Not applied anywhere",
       "Not applied on engines",
     ]);
     expect(rowsOf("Not applied on engines")).toEqual([
@@ -289,7 +295,7 @@ describe("a principal's Permissions tab", () => {
     expect(await within(tab()).findByText("No grant matches these filters.")).toBeInTheDocument();
     expect(where()).toBe("/governance/people/users/u-ana?tab=permissions&action=write&effect=deny");
     await userEvent.click(within(tab()).getByRole("button", { name: "Clear filters" }));
-    expect(await within(tab()).findByRole("table", { name: "egret only" })).toBeInTheDocument();
+    expect(await within(tab()).findByRole("table", { name: "Not applied anywhere" })).toBeInTheDocument();
     expect(where()).toBe("/governance/people/users/u-ana?tab=permissions");
   });
 

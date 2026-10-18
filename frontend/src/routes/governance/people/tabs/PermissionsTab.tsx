@@ -35,7 +35,9 @@ export const GROUP_TITLE: Record<ReachGroup, string> = {
   workspace: "Through a workspace",
   public: "Everyone",
   excluded: "Excluded",
-  egret_only: "egret only",
+  // Final review I1: a role or workspace held through a group is egret's only, but egret's own
+  // checks never read grants (or rules), so what reaches only that way applies nowhere.
+  egret_only: "Not applied anywhere",
   not_on_engines: "Not applied on engines",
 };
 
@@ -59,15 +61,39 @@ function howText(via: Via): string {
   }
 }
 
-/** `Through group g · applied on engines`, or the reason engines do not apply the path; an exclude says so first. */
-export function reachText(r: Reach): string {
+/**
+ * Under the "Not applied anywhere" group of grants (final review I1). Engines
+ * do not apply a role or workspace a group holds, and egret's own checks never
+ * read `perm.grants` (grants are compiled to engine policies only), so such a
+ * grant applies to the principal nowhere. The Masks tab says the same of rules
+ * (`EXEMPTION_NOT_ON_ENGINES`).
+ */
+export const GRANT_NOT_ON_ENGINES =
+  "egret's own checks do not read grants either, so a grant that reaches only this way applies to this principal nowhere.";
+
+/** What an exclude engines do not apply means: egret applies neither grants nor rules itself. */
+const EXCLUDE_NOT_ON_ENGINES: Record<"grant" | "rule", string> = {
+  grant: "engines do not apply it, and egret's own checks do not read grants",
+  rule: "engines do not apply it, and egret applies no mask or row filter itself",
+};
+
+/**
+ * `Through group g · applied on engines`, or the reason engines do not apply
+ * the path; an exclude says so first. A path held through a group applies
+ * nowhere, as neither engines nor egret apply it (`kind` names what is
+ * reached: a grant, or a rule's exemption), and an exclude engines do not
+ * apply excludes nobody.
+ */
+export function reachText(r: Reach, kind: "grant" | "rule" = "grant"): string {
   const how = howText(r.via);
   const lower = `${how.charAt(0).toLowerCase()}${how.slice(1)}`;
   if (r.position === "exclude") {
-    // An exclude engines do not apply leaves nobody out on engines (`reachGroup`).
-    return r.onEngines ? `Excluded: ${lower} · applied on engines` : `Excluded in egret only — not on engines: ${lower}`;
+    // An exclude engines do not apply leaves nobody out anywhere (`reachGroup`).
+    return r.onEngines ? `Excluded: ${lower} · applied on engines` : `Excludes nobody: ${lower} — ${EXCLUDE_NOT_ON_ENGINES[kind]}`;
   }
-  return `${how} · ${r.onEngines ? "applied on engines" : appliedText(r)}`;
+  if (r.onEngines) return `${how} · applied on engines`;
+  if (r.notOnEngines === "held_through_group") return `${how} · not applied anywhere: held through a group`;
+  return `${how} · ${appliedText(r)}`;
 }
 
 type Row = { grant: GrantView; reach: Reach[] };
@@ -201,6 +227,11 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
       ) : (
         REACH_GROUPS.filter((g) => byGroup.has(g)).map((g) => (
           <Section key={g} title={GROUP_TITLE[g]}>
+            {g === "egret_only" ? (
+              <p className="text-sm text-muted-foreground">
+                {`These reach this principal only through a role or workspace a group holds, which engines do not apply. ${GRANT_NOT_ON_ENGINES}`}
+              </p>
+            ) : null}
             <GrantTable
               label={GROUP_TITLE[g]}
               rows={byGroup.get(g) ?? []}

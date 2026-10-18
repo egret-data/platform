@@ -226,6 +226,7 @@ describe("Check access for a group or a role", () => {
       "Members undecidable on at least one": "1",
       "Members whose read is masked on at least one": "0",
     });
+    expect(within(view).queryByText(/MASK_NULL column is not access-checked/)).not.toBeInTheDocument();
 
     const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
@@ -327,6 +328,10 @@ describe("Check access for a group or a role", () => {
       "Members undecidable on at least one": "1",
       "Members whose read is masked on at least one": "1",
     });
+    // Final review minor b: why the MASK_NULL read is in no allowed bucket, said on the page.
+    expect(within(view).getByText(/A StarRocks read of a MASK_NULL column is not access-checked/)).toHaveTextContent(
+      "Such a member is counted as masked, not allowed.",
+    );
 
     // The same fields, in the full answer's words.
     await user.click(within(rows[0]).getByRole("button", { name: "Show the full answer for Ana Silva" }));
