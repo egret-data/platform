@@ -23,6 +23,7 @@
 - **D7.** A `Labels` map whose two keys render to the same text fails the run (`labels: two keys render to "<k>"`). Kestra throws an `IllegalStateException` there; a run failure with a message is the same outcome, stated.
 - **D8.** A whole-expression `variables:` that renders `null` fails the run (the existing `render_map` error). Kestra's `asMap` returns null and `SetVariables` then throws a `NullPointerException` in `deepMerge`'s caller; a named failure is the same outcome without the crash.
 - **D9 (2026-10-18, controller default decision during Task 4).** Updates are computed whenever `advance()` still drives the execution, that is `executor::drives_forward`: not terminal and not `KILLING`. So `PAUSED` and `RETRYING` executions compute updates, and a `SetVariables` beside a waiting `Pause` runs before the resume. This supersedes the wording "only while RUNNING" in the plan.
+- **D10 (2026-10-18, controller default decision after the final review).** A `Loop` iteration inherits its parent's `variables`, as it already inherits `inputs` and `labels`: the iteration INSERT (`worker/spawn.rs`) copies the parent row's column. Kestra's `Execution.loopExecution` builds the iteration with `this.variables` (`kestra/core/src/main/java/io/kestra/core/models/executions/Execution.java:438-460`). It is a copy at spawn time, as Kestra's is: a `SetVariables` inside an iteration changes only that iteration, and nothing flows back to the parent. A `Subflow` child still inherits nothing (§3.2).
 
 ## 1. Which mechanism each task needs, measured
 
@@ -96,12 +97,14 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 
 ### 3.1 Plan and states
 
-- **Plan:** a new `TaskKind::Update { op }` in `executor/plan.rs`, where `op` is one of `Set`, `Unset` or `Labels`. Each type is a `spec::registry` row with no handler and is listed in `EXECUTOR_LEVEL` (`spec/registry.rs:333`), so every deployment serves it, as with `Exit`.
-- **The update is computed at `CREATED`**, in the render pass (`worker/render.rs::render_expressions`), like a `Loop`'s `values:` (`renders_at`, `worker/render.rs:1345`). The pass renders the task's properties against the execution's current variables and labels and computes the new value.
-  - **On error,** it fails the run with the message. `advance()` then writes `CREATED FAILED`.
-  - **On success,** it records the new value in `RenderSide`. `advance()` then writes `CREATED RUNNING SUCCESS` in one round, with one attempt `RUNNING SUCCESS`. Settle writes the new `variables` or `labels` to the execution row, in the same transaction that holds the execution lock.
+- **Plan:** a new `TaskKind::Update { op, spec }` in `executor/plan.rs`, where `op` is one of `Set`, `Unset` or `Labels`. Each type is a `spec::registry` row with no handler and is listed in `EXECUTOR_LEVEL` (`spec/registry.rs:333`), so every deployment serves it, as with `Exit`.
+- **The update is computed at `CREATED`**, in a render pass of its own (`worker/render.rs::render_updates`, after `render_expressions`), like a `Loop`'s `values:` (`renders_at`, `worker/render.rs:1345`). The pass renders the task's properties against the execution's current variables and labels and computes the new value.
+  - **On error,** it fails the run with the message: `Command::FailUnstarted`, `CREATED FAILED` with one attempt `[FAILED]` (D6).
+  - **On success,** it records the new value in `RenderSide` and completes the run in the same pass: `CREATED RUNNING SUCCESS`, with one attempt `CREATED RUNNING SUCCESS`. Settle writes the new `variables` or `labels` to the execution row, in the same transaction that holds the execution lock.
 - **Runs that update in the same round** (two branches of a `Parallel`) are applied in run order. Each one sees the result of the one before it, so the outcome does not depend on timing.
 - **`runIf` falsy** gives `CREATED SKIPPED`, through the existing path, with nothing written.
+
+**(2026-10-18, final review)** The text above is corrected to the build. The pass is `render_updates`, separate from `render_expressions` because an update CHANGES the surface every later render of the settle reads; the plan kind is `Update { op, spec }`; the attempt is `CREATED RUNNING SUCCESS`, the golden's. And the completion moved from `advance()` into the pass (final review I1): when it was left to `advance()`, a computed update beside a failing one in the same `Parallel` or `Dag` was failed by `fail_the_rest` (`CREATED FAILED`, no attempt) while settle still wrote its change. Now the change and the `SUCCESS` land together, and only the failing update fails, as in Kestra. `flowable::open`'s `Update` arm is kept as the same completion, for a caller that sets `rendered` itself.
 
 ### 3.2 Execution variables (migration 0195)
 
@@ -117,8 +120,11 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
   - A missing last segment is a no-op, as in Kestra: `vars.remove(key)` on an absent key changes nothing (`UnsetVariables.java`, `removeVar`). So in Kestra `ignoreMissing` makes no difference to the leaf.
   - A missing or non-map parent segment fails the run with a message naming the key, unless `ignoreMissing` is set. Then it is a no-op. **This diverges from Kestra on purpose:** Kestra's recursion hands `null` down and throws a `NullPointerException` whatever `ignoreMissing` says. That is a crash, not a behaviour to copy.
 - **Copying `variables`:**
-  - A replay copies `variables` (D3).
-  - Subflow and loop children do not inherit it, and their `vars` are their own flow's, as in Kestra.
+  - A replay copies `variables` (D3), through both doors: the retry replay (`worker/replay.rs`) and the user's `POST .../executions/{id}/replay` (`routes.rs::replay_execution`, through `NewExecution::variables`).
+  - A `Loop` iteration inherits its parent's `variables` at spawn time (D10), as in Kestra's `Execution.loopExecution`.
+  - A `Subflow` child does not inherit it; its `vars` are its own flow's, as in Kestra.
+
+**(2026-10-18, final review)** This list said "Subflow and loop children do not inherit it … as in Kestra", which was false for a loop: Kestra's `loopExecution` passes `this.variables`. Corrected by D10. The user-facing replay route did not copy `variables` either (final review I3); it does now.
 
 ### 3.3 `Labels`
 
@@ -136,7 +142,7 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 **(2026-10-18, C2 built)** Where the build differs from §3:
 - **`Command::FailUnstarted` and the `[FAILED]` attempt (D6).** An update that fails at `CREATED` is written `CREATED FAILED` with one attempt `[FAILED]`, as the golden shows (`valids/set-variables-duplicate`, `labels-update-task-empty`). The existing `render::fail` pushes no attempt, so a new command does this.
 - **`taskrun.id`.** It is reserved for an update run created in the same settle, so `{{ taskrun.id }}` renders inside a `Labels` at `CREATED` (`valids/labels-update-task`, `npe-labels-update-task`). Every other kind still sees `taskrun.id` null in the settle that creates it. That is a known gap, unchanged.
-- **Updates under a kill (D9).** A `CREATED` update under a kill closes `CREATED` to `KILLING` to `KILLED` over two rounds, because `kill::is_leaf` does not count it, as `Exit` does.
+- **Updates under a kill (Task 3).** A `CREATED` update under a kill closes `CREATED` to `KILLING` to `KILLED` over two rounds, because `kill::is_leaf` does not count it, as `Exit` does.
 - **Key order.** `executions.variables` is `jsonb`, so the key order after a later settle is Postgres's (shortest key first), not insertion order. Kestra keeps insertion order.
 - **Registration.** `runtime::served_for` needs no key for `EXECUTOR_LEVEL` types, so the three publish on a deployment with no handlers (test `the_executor_level_types_publish_on_a_deployment_with_no_handlers`).
 - **Known divergences from Kestra's `Labels`** (no golden flow covers them):

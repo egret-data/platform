@@ -4,6 +4,8 @@
 
 **Trạng thái:** thứ tự đã được người dùng duyệt ngày 2026-10-18. Đo ngày 2026-10-18 trên `feat/workflow-kestra-executor-tasks` (main `a2850644` + nhóm C2 đang làm) so với bản checkout Kestra `data-portal/kestra` tại `96893b589` (2.0.0-SNAPSHOT, bản pin của chương trình). Cả hai phép đo chỉ đọc code và file oracle (không cargo, không docker); bằng chứng, kèm `file:line` cho từng dòng, nằm ở Phụ lục A (oracle corpus) và Phụ lục B (bề mặt tính năng) của bản tiếng Anh, tại [bản tiếng Anh](../../en/plans/2026-10-18-workflow-kestra-parity-roadmap.md).
 
+**Mốc thời điểm (2026-10-18, final review C2):** §1 và các phụ lục là phép đo ngày 2026-10-18 khi C2 còn đang làm; C2 đã được xây xong sau đó (73 baselined, LIVE 293) — xem §2 dòng 0.
+
 **Spec của chương trình:** `docs/en/specs/2026-09-01-workflow-programme-design.md`. Mọi gói W trong §9 của spec đó đã merge; lộ trình này sắp xếp những gì đến sau nhóm C (`docs/en/specs/2026-10-18-workflow-core-tasks-design.md`).
 
 ## 1. Hiện trạng của egret

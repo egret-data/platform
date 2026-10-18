@@ -62,7 +62,7 @@ Recorded in the spec by Task 6, under "Default decisions".
   - `"System labels can only be set by Kestra itself, offending label: <k>=<v>"`;
   - `"Label values cannot be empty, offending label: <k>"`.
 - **Egret's own messages** (no Kestra counterpart): an `UnsetVariables` key whose parent is missing or not a map: `` "`variables`: cannot unset `<key>`: `<prefix>` is not a map" `` (spec §3.2's deliberate divergence).
-- **`vars`** = `workflow.executions.variables` when NOT NULL, else the flow's `variables:`. Subflow and `Loop` children do not inherit the parent's column. A replay copies it (D3).
+- **`vars`** = `workflow.executions.variables` when NOT NULL, else the flow's `variables:`. A `Subflow` child does not inherit the parent's column; a `Loop` iteration DOES, copied at spawn as Kestra's `Execution.loopExecution` does (D10, corrected 2026-10-18 after the final review). A replay copies it (D3), through the retry replay and the user's replay route.
 - **Labels column**: `workflow.executions.labels` stores the full merged list after a `Labels` task (flow labels, then own, then the new ones, the later winning, empty key or value dropped); `crate::labels::execution_labels(flow, own)` keeps reading it correctly because `own` wins.
 - **Never write an update while the execution is not `RUNNING`** (a `KILLING` execution creates and starts nothing; an update computed then would still be written by `settle`).
 - **`oracle-exec/golden.json` is never edited.** The ratchet `cargo test -p egret-workflow --test executor` stays green after every task. Record before and after counts (mismatching / baselined / refused / LIVE) in each task report.

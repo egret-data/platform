@@ -2,6 +2,8 @@
 
 **Status:** order approved by the user on 2026-10-18. Measured 2026-10-18 on `feat/workflow-kestra-executor-tasks` (main `a2850644` + group C2 in progress) against the Kestra checkout `data-portal/kestra` at `96893b589` (2.0.0-SNAPSHOT, the programme's pin). Both measurements read code and oracle files only (no cargo, no docker); the evidence, with `file:line` for every row, is in Appendix A (oracle corpus) and Appendix B (feature surface).
 
+**As of (2026-10-18, C2 final review):** §1 and the appendices are the 2026-10-18 measurement taken while C2 was in progress; C2 has since been built (73 baselined, LIVE 293) — see §2 row 0.
+
 **Programme spec:** `docs/en/specs/2026-09-01-workflow-programme-design.md`. Every W-package in its §9 has merged; this roadmap orders what comes after group C (`docs/en/specs/2026-10-18-workflow-core-tasks-design.md`).
 
 ## 1. Where egret stands

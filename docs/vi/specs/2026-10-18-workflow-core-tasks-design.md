@@ -25,6 +25,8 @@
 - **D7.** Map của `Labels` có hai key render ra cùng một chuỗi thì run fail (`labels: two keys render to "<k>"`). Kestra ném `IllegalStateException` ở đó; run fail kèm message là cùng kết quả, được nói rõ.
 - **D8.** `variables:` là một biểu thức nguyên khối render ra `null` thì run fail (lỗi `render_map` sẵn có). `asMap` của Kestra trả null rồi `SetVariables` ném `NullPointerException` ở nơi gọi `deepMerge`; một lỗi có tên là cùng kết quả mà không crash.
 - **D9 (2026-10-18, quyết định mặc định của controller trong Task 4).** Update được tính bất cứ khi nào `advance()` còn điều khiển execution, tức `executor::drives_forward`: chưa terminal và không phải `KILLING`. Vì vậy execution `PAUSED` và `RETRYING` vẫn tính update, và một `SetVariables` cạnh một `Pause` đang chờ chạy trước khi resume. Điều này thay cho câu "chỉ khi RUNNING" trong plan.
+- **D10 (2026-10-18, quyết định mặc định của controller sau final review).** Một lần lặp của `Loop` kế thừa `variables` của execution cha, giống như đã kế thừa `inputs` và `labels`: câu INSERT lần lặp (`worker/spawn.rs`) chép cột này từ dòng cha. `Execution.loopExecution` của Kestra dựng lần lặp với `this.variables` (`kestra/core/src/main/java/io/kestra/core/models/executions/Execution.java:438-460`). Đây là bản chép tại thời điểm spawn, như của Kestra: một `SetVariables` bên trong lần lặp chỉ đổi lần lặp đó, không có gì chảy ngược về cha. Execution con của `Subflow` vẫn không kế thừa gì (§3.2).
+
 ## 1. Mỗi task cần cơ chế nào (đã đo)
 
 Kestra chạy `RunnableTask` trên worker, còn `ExecutionUpdatableTask` thì chạy trong executor (`executor/…/ExecutorService.java:1371`). Golden cho thấy sự khác biệt này ở mọi entry:
@@ -97,12 +99,14 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 
 ### 3.1 Plan và trạng thái
 
-- **Plan:** thêm `TaskKind::Update { op }` trong `executor/plan.rs`, với `op` là một trong `Set`, `Unset`, `Labels`. Mỗi type là một dòng `spec::registry` không có handler và được liệt kê trong `EXECUTOR_LEVEL` (`spec/registry.rs:333`), nên mọi deployment đều phục vụ được, giống `Exit`.
-- **Phần cập nhật được tính khi run còn ở `CREATED`**, trong pass render (`worker/render.rs::render_expressions`), giống `values:` của `Loop` (`renders_at`, `worker/render.rs:1345`). Pass này render các thuộc tính của task dựa trên variables và labels hiện tại của execution, rồi tính giá trị mới.
-  - **Lỗi:** run fail kèm message, rồi `advance()` ghi `CREATED FAILED`.
-  - **Thành công:** giá trị mới được ghi vào `RenderSide`. Sau đó `advance()` ghi `CREATED RUNNING SUCCESS` trong cùng một round, với một attempt `RUNNING SUCCESS`. Bước settle ghi `variables` hoặc `labels` mới vào dòng execution, trong cùng transaction đang giữ khoá execution.
+- **Plan:** thêm `TaskKind::Update { op, spec }` trong `executor/plan.rs`, với `op` là một trong `Set`, `Unset`, `Labels`. Mỗi type là một dòng `spec::registry` không có handler và được liệt kê trong `EXECUTOR_LEVEL` (`spec/registry.rs:333`), nên mọi deployment đều phục vụ được, giống `Exit`.
+- **Phần cập nhật được tính khi run còn ở `CREATED`**, trong một pass render riêng (`worker/render.rs::render_updates`, sau `render_expressions`), giống `values:` của `Loop` (`renders_at`, `worker/render.rs:1345`). Pass này render các thuộc tính của task dựa trên variables và labels hiện tại của execution, rồi tính giá trị mới.
+  - **Lỗi:** run fail kèm message: `Command::FailUnstarted`, `CREATED FAILED` với một attempt `[FAILED]` (D6).
+  - **Thành công:** giá trị mới được ghi vào `RenderSide` và run được hoàn tất ngay trong pass đó: `CREATED RUNNING SUCCESS`, với một attempt `CREATED RUNNING SUCCESS`. Bước settle ghi `variables` hoặc `labels` mới vào dòng execution, trong cùng transaction đang giữ khoá execution.
 - **Nhiều run cập nhật trong cùng một round** (hai nhánh của một `Parallel`) được áp dụng lần lượt theo thứ tự run. Run sau thấy kết quả của run trước, nên kết quả không phụ thuộc thời điểm.
 - **`runIf` falsy** cho ra `CREATED SKIPPED` qua đường sẵn có, không ghi gì.
+
+**(2026-10-18, final review)** Đoạn trên đã được sửa cho khớp với bản build. Pass là `render_updates`, tách khỏi `render_expressions` vì update LÀM ĐỔI surface mà mọi lần render sau trong settle đọc; kind trong plan là `Update { op, spec }`; attempt là `CREATED RUNNING SUCCESS`, đúng golden. Và việc hoàn tất run đã chuyển từ `advance()` vào pass (final review I1): khi còn để cho `advance()`, một update đã tính nằm cạnh một update lỗi trong cùng `Parallel` hoặc `Dag` bị `fail_the_rest` đánh fail (`CREATED FAILED`, không attempt) trong khi settle vẫn ghi thay đổi của nó. Giờ thay đổi và `SUCCESS` đi cùng nhau, và chỉ update lỗi bị fail, giống Kestra. Nhánh `Update` của `flowable::open` được giữ lại với cùng cách hoàn tất, cho caller tự đặt `rendered`.
 
 ### 3.2 Variables của execution (migration 0195)
 
@@ -118,8 +122,11 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
   - Thiếu đoạn cuối thì không làm gì, giống Kestra: `vars.remove(key)` với key không tồn tại thì không đổi gì (`UnsetVariables.java`, `removeVar`). Vì vậy trong Kestra, `ignoreMissing` không ảnh hưởng gì tới đoạn cuối.
   - Đoạn cha bị thiếu, hoặc không phải map, thì run fail với message nêu tên key, trừ khi bật `ignoreMissing` (khi đó không làm gì). **Đây là chỗ cố ý khác Kestra:** đệ quy của Kestra truyền `null` xuống và ném `NullPointerException`, dù `ignoreMissing` là gì. Đó là crash, không phải hành vi nên chép lại.
 - **Sao chép `variables`:**
-  - Replay chép `variables` (D3).
-  - Execution con của Subflow và của loop không kế thừa; `vars` của chúng là của flow riêng, giống Kestra.
+  - Replay chép `variables` (D3), qua cả hai cửa: replay khi retry (`worker/replay.rs`) và `POST .../executions/{id}/replay` của user (`routes.rs::replay_execution`, qua `NewExecution::variables`).
+  - Một lần lặp của `Loop` kế thừa `variables` của cha tại thời điểm spawn (D10), giống `Execution.loopExecution` của Kestra.
+  - Execution con của `Subflow` không kế thừa; `vars` của nó là của flow riêng, giống Kestra.
+
+**(2026-10-18, final review)** Danh sách này từng ghi "execution con của Subflow và của loop không kế thừa … giống Kestra", sai với loop: `loopExecution` của Kestra truyền `this.variables`. Đã sửa bằng D10. Route replay phía user cũng chưa chép `variables` (final review I3); giờ đã chép.
 
 ### 3.3 `Labels`
 
@@ -137,7 +144,7 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 **(2026-10-18, C2 đã xây)** Những chỗ bản xây khác §3:
 - **`Command::FailUnstarted` và attempt `[FAILED]` (D6).** Update lỗi ở `CREATED` được ghi `CREATED FAILED` với đúng một attempt `[FAILED]`, như golden (`valids/set-variables-duplicate`, `labels-update-task-empty`). `render::fail` sẵn có không đẩy attempt nào, nên một command mới làm việc này.
 - **`taskrun.id`.** Id được đặt trước cho run update tạo trong cùng một settle, nên `{{ taskrun.id }}` render được trong `Labels` ở `CREATED` (`valids/labels-update-task`, `npe-labels-update-task`). Mọi loại khác vẫn thấy `taskrun.id` null trong settle tạo ra nó. Đây là khoảng trống đã biết, không đổi.
-- **Update khi bị kill (D9).** Một update ở `CREATED` dưới lệnh kill đóng `CREATED` sang `KILLING` sang `KILLED` qua hai round, vì `kill::is_leaf` không đếm nó, giống `Exit`.
+- **Update khi bị kill (Task 3).** Một update ở `CREATED` dưới lệnh kill đóng `CREATED` sang `KILLING` sang `KILLED` qua hai round, vì `kill::is_leaf` không đếm nó, giống `Exit`.
 - **Thứ tự key.** `executions.variables` là `jsonb`, nên thứ tự key sau một lần settle sau đó là của Postgres (key ngắn đứng trước), không phải thứ tự chèn. Kestra giữ thứ tự chèn.
 - **Đăng ký.** `runtime::served_for` không cần key cho các type `EXECUTOR_LEVEL`, nên cả ba publish được trên deployment không có handler (test `the_executor_level_types_publish_on_a_deployment_with_no_handlers`).
 - **Các khác biệt đã biết so với `Labels` của Kestra** (không golden flow nào phủ):
