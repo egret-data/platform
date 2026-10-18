@@ -148,9 +148,10 @@ group, role), subject picker, action and `ScopePicker`: Explain access in a dial
   gate names only groups, so engines do not enforce it"; **egret objects** — cleared (through role R or group G) or
   not, noting that a workspace role clears only that workspace's objects.
 - **Check access.** Action + `ScopePicker`. User: `/perm/explain`, rendered with `ExplainResultView`. Group or role:
-  §4.3, a table of members with each profile's verdicts, three counts ("allowed by every profile", "refused by at
-  least one", "undecidable on at least one"), a filter for refused, and each member's full `ExplainResultView` on
-  expand. A user with no username: "No username yet, so no engine knows this user"; nothing is asked.
+  §4.3, a table of members with each profile's verdicts and mask (live check D3: a StarRocks read decided by a
+  MASK_NULL mask is summarised as the full answer states it), four counts ("allowed by every profile", "refused by
+  at least one", "undecidable on at least one", "read masked on at least one"), a filter for refused, and each
+  member's full `ExplainResultView` on expand. A user with no username: "No username yet, so no engine knows this user"; nothing is asked.
 
 **Single items.** `/governance/grants/:id` and `/governance/rules/:id`: the sentence, scope or selector, principals
 (each linked to its People page), Open in Data (or the tag for a tag rule), Edit and Delete with `policy:update`.

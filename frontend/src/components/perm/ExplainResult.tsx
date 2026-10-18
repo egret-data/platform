@@ -958,31 +958,25 @@ function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
   );
 }
 
+/**
+ * A mask verdict in words, the one wording every surface uses: the full
+ * answer's mask line (`MaskSentence`) and the member table's summary
+ * (`MembersExplainView`, live check D3).
+ */
+export function maskDecisionText(d: NonNullable<ExplainProfile["mask"]>["decision"]): string {
+  if (d.kind === "masked") {
+    if (d.result.mask_type === "MASK_NONE") return `not transformed (MASK_NONE, Ranger policy ${d.result.policy_name})`;
+    if (d.result.mask_type === "MASK_NULL") return `returns NULL (MASK_NULL, Ranger policy ${d.result.policy_name})`;
+    return `masked to ${d.result.mask_type} by Ranger policy ${d.result.policy_name}`;
+  }
+  if (d.kind === "no_mask") return "no mask applies";
+  return `undecidable (${d.why.map((c) => c.kind).join(", ")})`;
+}
+
 function MaskSentence({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
-  const d = mask.decision;
   return (
     <p data-testid="explain-mask" className="text-xs text-muted-foreground">
-      Mask on {mask.access_type}:{" "}
-      {d.kind === "masked" && d.result.mask_type === "MASK_NONE" ? (
-        <>
-          not transformed (<span className="font-mono">MASK_NONE</span>, Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>)
-        </>
-      ) : d.kind === "masked" && d.result.mask_type === "MASK_NULL" ? (
-        <>
-          returns NULL (<span className="font-mono">MASK_NULL</span>, Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>)
-        </>
-      ) : d.kind === "masked" ? (
-        <>
-          masked to <span className="font-mono">{d.result.mask_type}</span> by Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>
-        </>
-      ) : d.kind === "no_mask" ? (
-        "no mask applies"
-      ) : (
-        `undecidable (${d.why.map((c) => c.kind).join(", ")})`
-      )}
+      Mask on {mask.access_type}: {maskDecisionText(mask.decision)}
     </p>
   );
 }

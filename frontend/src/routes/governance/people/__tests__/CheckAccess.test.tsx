@@ -201,7 +201,7 @@ describe("Check access for a user", () => {
 });
 
 describe("Check access for a group or a role", () => {
-  it("answers each member on their own, with the three counts and no single verdict", async () => {
+  it("answers each member on their own, with the counts and no single verdict", async () => {
     const posts = serve({ principal: { "groups/analysts": ok(ANALYSTS) }, explainPrincipal: ok(MEMBERS) });
     open("/governance/people/groups/analysts?tab=check");
     const panel = await screen.findByRole("tabpanel");
@@ -224,6 +224,7 @@ describe("Check access for a group or a role", () => {
       "Members allowed by every profile": "1",
       "Members refused by at least one": "1",
       "Members undecidable on at least one": "1",
+      "Members whose read is masked on at least one": "0",
     });
 
     const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
@@ -240,6 +241,100 @@ describe("Check access for a group or a role", () => {
     const notAsked = within(view).getByRole("region", { name: "Not asked" });
     expect(notAsked).toHaveTextContent("Dee Noname: No username yet, so no engine knows this user.");
     expect(within(view).queryByText(/the others were not asked/)).not.toBeInTheDocument();
+  });
+
+  // Live check D3: StarRocks asks no access decision for a MASK_NULL column, so the
+  // mask is the answer; the member line said "no access asked" while the full answer
+  // and the engine said NULL.
+  it("summarises a read decided by a mask as the full answer does, never 'no access asked'", async () => {
+    const maskedRead: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          service_id: 11,
+          service_name: "vgtr",
+          engine: "trino",
+          tags: [],
+          tag_policies_in_download: 0,
+          accesses: [{ access_type: "select", decision: ALLOWED }],
+          mask: { access_type: "select", decision: { kind: "no_mask" } },
+        },
+        {
+          service_id: 12,
+          service_name: "vgsr",
+          engine: "starrocks",
+          tags: [],
+          tag_policies_in_download: 0,
+          accesses: [],
+          masked_read_skips_access: true,
+          mask: {
+            access_type: "select",
+            decision: { kind: "masked", result: { policy_id: 31, policy_name: "perm-rule-1", mask_type: "MASK_NULL" } },
+          },
+        },
+      ],
+    };
+    const undecidableMask: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          service_id: 12,
+          service_name: "vgsr",
+          engine: "starrocks",
+          tags: [],
+          tag_policies_in_download: 0,
+          accesses: [{ access_type: "select", decision: ALLOWED }],
+          mask: { access_type: "select", decision: { kind: "undecidable", why: [] } },
+        },
+      ],
+    };
+    serve({
+      principal: { "groups/analysts": ok(ANALYSTS) },
+      explainPrincipal: ok({
+        membersTotal: 2,
+        limit: 200,
+        truncated: false,
+        evaluated: [
+          { userId: "u-ana", label: "Ana Silva", username: "ana", result: maskedRead },
+          { userId: "u-cy", label: "Cy Lee", username: "cy", result: undecidableMask },
+        ],
+        notEvaluated: [],
+      } satisfies ExplainPrincipalResponse),
+    });
+    open("/governance/people/groups/analysts?tab=check");
+    const panel = await screen.findByRole("tabpanel");
+    await within(panel).findByRole("button", { name: "Explain" });
+    const user = await ask(panel);
+
+    const view = await within(panel).findByTestId("members-explain");
+    const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
+    const ana = within(rows[0]).getAllByRole("cell")[1];
+    expect(ana).not.toHaveTextContent("no access asked");
+    expect(ana).toHaveTextContent(
+      "vgsr: not access-checked: the mask is MASK_NULL, mask on select: returns NULL (MASK_NULL, Ranger policy perm-rule-1)",
+    );
+    expect(ana).toHaveTextContent("vgtr: select Allowed, mask on select: no mask applies");
+    expect(within(rows[1]).getAllByRole("cell")[1]).toHaveTextContent("vgsr: select Allowed, mask on select: undecidable ()");
+
+    const counts = Object.fromEntries(
+      within(view)
+        .getAllByRole("term")
+        .map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
+    );
+    expect(counts).toEqual({
+      "Members allowed by every profile": "0",
+      "Members refused by at least one": "0",
+      "Members undecidable on at least one": "1",
+      "Members whose read is masked on at least one": "1",
+    });
+
+    // The same fields, in the full answer's words.
+    await user.click(within(rows[0]).getByRole("button", { name: "Show the full answer for Ana Silva" }));
+    const full = within(view).getByTestId("explain-result");
+    expect(within(full).getAllByTestId("explain-mask")[1]).toHaveTextContent(
+      "Mask on select: returns NULL (MASK_NULL, Ranger policy perm-rule-1)",
+    );
+    expect(within(full).getByTestId("explain-access-not-checked")).toBeInTheDocument();
   });
 
   it("filters to refused members, and opens a member's full answer", async () => {

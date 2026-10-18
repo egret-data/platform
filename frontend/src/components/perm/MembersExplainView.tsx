@@ -1,8 +1,8 @@
 import { Fragment, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Users } from "lucide-react";
-import type { ExplainPrincipalResponse, ExplainResponse, MemberVerdict } from "@/api/generated/model";
+import type { ExplainPrincipalResponse, ExplainProfile, ExplainResponse, MemberVerdict } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
-import { decisionLabel, ExplainResultView } from "@/components/perm/ExplainResult";
+import { decisionLabel, ExplainResultView, maskDecisionText } from "@/components/perm/ExplainResult";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -12,14 +12,46 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 export const NO_SINGLE_VERDICT =
   "Each member's own answer, per policy profile. A group's or role's access is its members' access, and members can differ, so there is no single verdict.";
 
-/** Every access in every profile allowed; at least one profile answered. */
+/**
+ * Every access in every profile allowed; at least one profile answered. An
+ * allow under an undecidable mask is provisional (StarRocks skips the check if
+ * the mask is MASK_NULL), so it does not count.
+ */
 function allowedEverywhere(r: ExplainResponse): boolean {
   if (r.outcome !== "per_profile" || r.profiles.length === 0) return false;
-  return r.profiles.every((p) => p.accesses.length > 0 && p.accesses.every((a) => a.decision.kind === "allowed"));
+  return r.profiles.every(
+    (p) =>
+      p.accesses.length > 0 &&
+      p.accesses.every((a) => a.decision.kind === "allowed") &&
+      p.mask?.decision.kind !== "undecidable",
+  );
 }
 
+/** An access refused, or (for `undecidable`) an access or the mask undecidable, on at least one profile. */
 function anyDecision(r: ExplainResponse, kind: "denied" | "undecidable"): boolean {
-  return r.profiles.some((p) => p.accesses.some((a) => a.decision.kind === kind));
+  return r.profiles.some(
+    (p) =>
+      p.accesses.some((a) => a.decision.kind === kind) || (kind === "undecidable" && p.mask?.decision.kind === "undecidable"),
+  );
+}
+
+/** The read transformed by a mask (anything but MASK_NONE) on at least one profile. */
+function anyMasked(r: ExplainResponse): boolean {
+  return r.profiles.some((p) => p.mask?.decision.kind === "masked" && p.mask.decision.result.mask_type !== "MASK_NONE");
+}
+
+/**
+ * One profile's answer in a line, from the fields the full answer
+ * (`ExplainResultView`'s profile block) renders: each access verdict, the
+ * mask verdict, and StarRocks skipping the access check on a MASK_NULL column
+ * (`masked_read_skips_access`). Live check D3: built from `accesses` alone,
+ * a read decided by a mask read "no access asked".
+ */
+export function profileVerdictText(p: ExplainProfile): string {
+  const parts = p.accesses.map((a) => `${a.access_type} ${decisionLabel(a.decision)}`);
+  if (p.masked_read_skips_access) parts.push("not access-checked: the mask is MASK_NULL");
+  if (p.mask) parts.push(`mask on ${p.mask.access_type}: ${maskDecisionText(p.mask.decision)}`);
+  return parts.join(", ") || "no access type was evaluated";
 }
 
 /**
@@ -34,9 +66,10 @@ export function truncatedText(r: ExplainPrincipalResponse): string {
 
 /**
  * Explain for a group or a role (spec §4.3): each member's own answer, from
- * `POST /perm/explain/principal`. Three counts of members — allowed by every
- * profile, refused by at least one, undecidable on at least one — a row per evaluated
- * member with each profile's verdict per access, a "Refused only" filter, and
+ * `POST /perm/explain/principal`. Four counts of members — allowed by every
+ * profile, refused by at least one, undecidable on at least one, read masked
+ * on at least one — a row per evaluated
+ * member with each profile's verdicts and mask (`profileVerdictText`), a "Refused only" filter, and
  * the member's full `ExplainResultView` on expand. There is no overall verdict
  * and nothing here makes one up: one member allowed and another refused is
  * two answers, not a third. A member with no username is listed under "Not
@@ -65,6 +98,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
   const allowed = evaluated.filter((m) => allowedEverywhere(m.result)).length;
   const refused = evaluated.filter((m) => anyDecision(m.result, "denied")).length;
   const undecidable = evaluated.filter((m) => anyDecision(m.result, "undecidable")).length;
+  const masked = evaluated.filter((m) => anyMasked(m.result)).length;
   const shown = refusedOnly ? evaluated.filter((m) => anyDecision(m.result, "denied")) : evaluated;
 
   const toggle = (id: string) =>
@@ -84,6 +118,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
           ["Members allowed by every profile", allowed],
           ["Members refused by at least one", refused],
           ["Members undecidable on at least one", undecidable],
+          ["Members whose read is masked on at least one", masked],
         ].map(([label, n]) => (
           <div key={label} className="flex items-baseline gap-2">
             <dt className="text-muted-foreground">{label}</dt>
@@ -164,7 +199,7 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
                 <li key={p.service_id}>
                   <span className="font-medium">{p.service_name}</span>
                   {": "}
-                  {p.accesses.map((a) => `${a.access_type} ${decisionLabel(a.decision)}`).join(", ") || "no access asked"}
+                  {profileVerdictText(p)}
                 </li>
               ))}
             </ul>
