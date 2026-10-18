@@ -385,21 +385,32 @@ describe("Sidebar – Governance app", () => {
     expect(groupOf("Lineage")).toContainElement(lineage);
   });
 
-  test("Data comes first, then the existing items (spec Part 1)", () => {
+  // #2 P8: Data permissions, Mask & filter rules and Explain access are gone.
+  test("Data comes first, then People & groups, then the existing items (spec Part 1, #2 P2, P8)", () => {
     renderSidebar("/governance/data");
     const labels = within(screen.getByTestId("app-sidebar"))
       .getAllByRole("link")
       .map((a) => a.textContent);
     expect(labels).toEqual([
       "Data",
-      "Data permissions",
-      "Mask & filter rules",
-      "Explain access",
+      "People & groups",
       "Policies",
       "Classifications",
       "Data Lineage",
     ]);
     expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
+    expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
+  });
+
+  test("People & groups is gated policy:read: a tag:read steward does not see it", () => {
+    renderSidebar("/governance/data", { user_id: "7", email: "t@example.com", platform_roles: [], permissions: ["tag:read"] });
+    expect(screen.queryByRole("link", { name: "People & groups" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^People & groups$/i })).not.toBeInTheDocument();
+  });
+
+  test("People & groups shows for a user holding only policy:read", () => {
+    renderSidebar("/governance/data", { user_id: "8", email: "p@example.com", platform_roles: [], permissions: ["policy:read"] });
+    expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 
   test.each([["policy:read"], ["tag:read"]])("Data shows for a user holding only %s", (perm) => {

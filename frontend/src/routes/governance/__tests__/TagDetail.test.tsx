@@ -9,12 +9,18 @@ import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import { toast } from "sonner";
+import { ApiError } from "@/api/client";
 
 vi.mock("@/api/tags");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
 vi.mock("@/routes/governance/ViewExposureSection", () => ({
   default: ({ tagId }: { tagId: string }) => <div data-testid="view-exposure">{tagId}</div>,
+}));
+vi.mock("@/routes/governance/TagRulesSection", () => ({
+  default: ({ tag }: { tag: { key: string } }) => <div data-testid="tag-rules">{`rules for ${tag.key}`}</div>,
 }));
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
@@ -310,5 +316,45 @@ describe("TagDetail", () => {
       ).toBeInTheDocument();
       expect(screen.getByText(/has no usable .?tagService/i)).toBeInTheDocument();
     });
+  });
+
+  // DG redesign #2, P9: the rules that reach this tag, for a policy:read holder only.
+  test("lists the tag's mask and filter rules to a policy:read holder", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      me: { user_id: "2", email: "s@example.com", platform_roles: [], permissions: ["tag:read", "policy:read"] } as unknown as Me,
+      isLoading: false,
+    } as ReturnType<typeof useAuth>);
+    renderPage();
+    expect(await screen.findByTestId("tag-rules")).toHaveTextContent("rules for pii");
+  });
+
+  test("hides the rules from a tag:read steward without policy:read", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      me: { user_id: "3", email: "t@example.com", platform_roles: [], permissions: ["tag:read"] } as unknown as Me,
+      isLoading: false,
+    } as ReturnType<typeof useAuth>);
+    renderPage();
+    await screen.findByRole("heading", { name: "PII" });
+    expect(screen.queryByTestId("tag-rules")).not.toBeInTheDocument();
+  });
+
+  // Live check D4: the server refuses while a rule selects the tag (FK perm.rules.tag_key → tags(key)).
+  test("a refused delete keeps the server's sentence and points to the rules section on the page", async () => {
+    const user = userEvent.setup();
+    const sentence = "tag pii is still selected by a permission rule; delete or retarget that rule first";
+    vi.mocked(tagsApi.useDeleteTag).mockReturnValue({
+      mutate: vi.fn((_id: string, opts?: { onError?: (e: Error) => void }) => opts?.onError?.(new ApiError(409, sentence))),
+      isPending: false,
+    } as never);
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Delete/ }));
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+
+    expect(toast.error).toHaveBeenCalledWith(sentence, {
+      description: 'The "Mask and filter rules" section on this page lists the rules that select this tag.',
+      action: undefined,
+    });
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

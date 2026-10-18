@@ -192,6 +192,21 @@ describe("GrantDialog — initialScope (the object page's Grant access)", () => 
   });
 });
 
+describe("GrantDialog — initialPrincipals (a People page's Grant access)", () => {
+  const GROUP = { include: [{ kind: "group" as const, ref: "eu/analysts" }], exclude: [] };
+
+  test("a new grant starts with the principals it was opened for", () => {
+    renderDialog({ initialPrincipals: GROUP });
+    expect(screen.getByRole("heading", { name: "New grant" })).toBeInTheDocument();
+    expect(screen.getByTestId("principals-value")).toHaveTextContent(JSON.stringify(GROUP));
+  });
+
+  test("an existing grant keeps its own principals", () => {
+    renderDialog({ existing: EXISTING, initialPrincipals: GROUP });
+    expect(screen.getByTestId("principals-value")).toHaveTextContent(JSON.stringify(EXISTING.principals));
+  });
+});
+
 describe("GrantDialog — the preview result is shown before the write (D2)", () => {
   test("Save is disabled until a matching preview has run, then shows the affected profiles", async () => {
     const user = userEvent.setup();

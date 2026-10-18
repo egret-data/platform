@@ -495,7 +495,7 @@ describe("ProfileDetailPage — the overlap report for this profile", () => {
     );
     expect(screen.getByRole("link", { name: "rule mask emails" })).toHaveAttribute(
       "href",
-      "/governance/mask-filter-rules?rule=r-9",
+      "/governance/rules/r-9",
     );
   });
 

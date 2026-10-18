@@ -14,7 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
  *
  * A write refuses only the overlaps it creates, so a pair stored earlier
  * blocks nothing and would otherwise stay invisible: this is its report, shown
- * on Mask & filter rules (every profile) and on a profile's own page
+ * on the Policies landing (every profile) and on a profile's own page
  * (`serviceName`, so a hand-written pair on a manual profile is visible where
  * it is edited). Nothing is shown when there is none.
  *
@@ -198,7 +198,7 @@ function MemberLink({
 }) {
   const label = member.id ? `rule ${member.name}` : `policy ${member.name}`;
   const to = member.id
-    ? `/governance/mask-filter-rules?rule=${encodeURIComponent(member.id)}`
+    ? `/governance/rules/${encodeURIComponent(member.id)}`
     : member.policyId != null && editor
       ? editorPath(editor, kind, member.policyId)
       : null;

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { listGroups } from "@/api/access";
@@ -32,6 +33,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { toastTagDeleteFailure } from "@/routes/governance/tagDeleteFailure";
 
 const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 
@@ -71,10 +74,12 @@ export default function Classifications() {
   const isAdmin =
     (me?.platform_roles.includes("platform_admin") ?? false) ||
     (me?.permissions?.includes("tag:manage") ?? false);
+  const canReadRules = usePolicyPermissions()("policy:read");
 
   const tags = useTags();
   const rows = tags.data ?? [];
   const deleteTag = useDeleteTag();
+  const navigate = useNavigate();
 
   // Fetched here (not just inside the editor) so the table's Gated badge can
   // resolve `required_groups` UUIDs to names.
@@ -270,7 +275,19 @@ export default function Classifications() {
         description="This tag will be permanently removed from the catalog and from every object it's assigned to."
         confirmText="delete"
         onConfirm={() => {
-          if (deleteTarget) deleteTag.mutate(deleteTarget.id);
+          if (deleteTarget) {
+            const target = deleteTarget;
+            deleteTag.mutate(target.id, {
+              onSuccess: () => toast.success(`Tag "${target.name}" deleted.`),
+              // Live check D4: a 409 (a rule still selects the tag) used to close the dialog and say nothing.
+              onError: (e) =>
+                toastTagDeleteFailure(e, {
+                  where: "the tag's page",
+                  canReadRules,
+                  showRules: () => navigate(`/governance/classifications/${encodeURIComponent(target.id)}`),
+                }),
+            });
+          }
           setDeleteTarget(null);
         }}
       />

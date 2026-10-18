@@ -65,6 +65,8 @@ egret-ranger-eval.workspace = true
 # be free to drift, and the whole point of this route is that "what explain
 # evaluated" and "what the engine received" cannot.
 egret-policy-api.workspace = true
+# People & groups Task 3: a membership's `expiresAt` on the principal reads.
+chrono.workspace = true
 
 [features]
 # View governance Task 3: `harness_support`, the doc-hidden wrappers the

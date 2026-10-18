@@ -70,6 +70,11 @@
 //!   not a uuid, or names no workspace, to nobody. (No authoring path may write
 //!   one today — `validate_grant_shape` refuses the kind — but a ref that names
 //!   nothing is still named as such, so the two refusals stay distinguishable.)
+//!   An accepted ref is rewritten to the canonical `Uuid` spelling, so it equals
+//!   what a People page's `standsFor` names byte for byte. A non-canonical ref
+//!   already STORED is not rewritten (R5) and survives a patch unchanged (R6):
+//!   it still applies on engines, and a client matching `standsFor` must compare
+//!   a `workspace_members` ref as a parsed UUID to find it.
 //!
 //! # What this does NOT do
 //!
@@ -190,8 +195,9 @@ pub(crate) async fn resolve_principal_refs(
 /// stored-row report ([`unresolved_principals_via`]) apply.
 enum Lookup {
     /// It names someone egret knows. `canonical` is the spelling to store: the
-    /// ref itself for every kind but `user`, whose stored username can differ
-    /// from the ref in case.
+    /// ref itself for `group` and `role`; a `user`'s stored username, which can
+    /// differ from the ref in case; a `workspace_members` id in its canonical
+    /// (lowercase, hyphenated) form.
     Found { canonical: String },
     /// It names nobody; the reason, as a sentence an author can act on.
     Unknown(String),
@@ -253,9 +259,20 @@ async fn lookup(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHt
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(PermHttpError::db)?;
-            Ok(unknown_if(!found, p, || {
-                "no workspace has this id".to_string()
-            }))
+            // Canonical is `id.to_string()` — lowercase, hyphenated. `parse`
+            // accepts uppercase, unhyphenated, braced and `urn:uuid:` forms, and
+            // the compiler expands each of them, but a principal's People page
+            // (`crate::people`'s `standsFor`) names a workspace in the canonical
+            // form and a client matches refs byte for byte (spec P4). Stored
+            // verbatim, such a grant would apply on engines and be missing from
+            // the page.
+            if found {
+                Ok(Lookup::Found {
+                    canonical: id.to_string(),
+                })
+            } else {
+                Ok(Lookup::Unknown("no workspace has this id".to_string()))
+            }
         }
     }
 }
@@ -475,11 +492,17 @@ fn widens_access_when_empty(row: &ReportRow) -> bool {
 async fn classify_stored(conn: &mut PgConnection, p: &Principal) -> Result<Stored, PermHttpError> {
     match lookup(conn, p).await? {
         Lookup::Unknown(why) => Ok(Stored::Unresolved(why)),
-        Lookup::Found { canonical } if canonical != p.r#ref => Ok(Stored::Unresolved(format!(
+        // Users only: a username is named byte for byte, so a case variant
+        // names nobody. A non-canonical `workspace_members` spelling is not
+        // that — the compiler parses it into the same id
+        // (`crate::members::referenced_principals`) — so it resolves.
+        Lookup::Found { canonical } if p.kind == PrincipalKind::User && canonical != p.r#ref => {
+            Ok(Stored::Unresolved(format!(
             "this matches the username {canonical:?} only case-insensitively, and the compiled \
              policy names the ref byte-for-byte — an engine sees {canonical:?}, never this \
              spelling"
-        ))),
+            )))
+        }
         Lookup::Found { .. } if p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP => {
             // The join `crate::members::expand_enumerated_principals` expands
             // a group through.
@@ -543,9 +566,166 @@ fn dedup_keeping_first(list: &mut Vec<Principal>) {
     list.retain(|p| seen.insert((p.kind.as_str(), p.r#ref.clone())));
 }
 
+// ---------------------------------------------------------------------------
+// Stored `user` refs naming a username (People & groups Task 5, spec §4.4)
+// ---------------------------------------------------------------------------
+
+/// One stored grant principal or rule exemption that names a username as a
+/// `user` ref.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct StoredUserRef {
+    /// `"grant"` or `"rule"`.
+    pub source: String,
+    /// The grant's or the rule's id.
+    pub id: Uuid,
+    /// `"include"` or `"exclude"` (of the grant's `principals`, or of the
+    /// rule's `exempt`).
+    pub position: String,
+    /// The ref as stored, byte for byte.
+    pub r#ref: String,
+}
+
+/// **Every stored grant principal and rule exemption whose `user` ref names
+/// `username`, compared case-insensitively**, ordered by source, id, position
+/// and ref.
+///
+/// Case-insensitively because that is how egret resolves a user ref:
+/// `users.username` is `citext UNIQUE` and [`lookup_user`] matches a ref
+/// through it, so to egret a stored `Bob` names whoever holds `bob` — the next
+/// edit of the row that re-sends it in another position would be canonicalised
+/// to that person. That the compiled policy names the ref byte for byte (and so
+/// `Bob` reaches no engine today) makes it a stale ref, which is exactly what
+/// the caller is looking for.
+pub(crate) async fn stored_user_refs_naming_via(
+    conn: &mut PgConnection,
+    username: &str,
+) -> Result<Vec<StoredUserRef>, PermHttpError> {
+    let rows: Vec<(String, Uuid, String, String)> = sqlx::query_as(
+        "SELECT 'grant' AS source, grant_id AS id, mode::text AS position, ref \
+           FROM perm.grant_principals \
+          WHERE kind = 'user' AND ref::citext = $1::citext \
+         UNION ALL \
+         SELECT 'rule', rule_id, mode::text, ref \
+           FROM perm.rule_exemptions \
+          WHERE kind = 'user' AND ref::citext = $1::citext \
+         ORDER BY source, id, position, ref",
+    )
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|(source, id, position, r#ref)| StoredUserRef {
+            source,
+            id,
+            position,
+            r#ref,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// People & groups Task 3 review: a workspace ref in any form `Uuid`
+    /// parses is stored canonical, so it matches `standsFor` byte for byte.
+    #[tokio::test]
+    async fn a_workspace_ref_is_stored_in_its_canonical_form() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let slug = format!("canon-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let ws: Uuid =
+            sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, $1) RETURNING id")
+                .bind(&slug)
+                .fetch_one(&db.pool)
+                .await
+                .expect("workspace");
+        let mut conn = db.pool.acquire().await.expect("conn");
+        let forms = [
+            ws.to_string().to_uppercase(),
+            ws.simple().to_string(),
+            format!("{{{ws}}}"),
+            ws.urn().to_string(),
+            ws.to_string(),
+        ];
+        for form in forms {
+            let mut set = PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: form.clone(),
+                }],
+                exclude: Vec::new(),
+            };
+            resolve_principal_refs(&mut conn, "principals", &mut set, None)
+                .await
+                .unwrap_or_else(|e| panic!("{form}: {e}"));
+            assert_eq!(set.include[0].r#ref, ws.to_string(), "{form}");
+        }
+        // Two spellings of one workspace collapse to one entry.
+        let mut set = PrincipalSet {
+            include: vec![
+                Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: ws.simple().to_string(),
+                },
+                Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: ws.to_string(),
+                },
+            ],
+            exclude: Vec::new(),
+        };
+        resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            .await
+            .expect("resolve");
+        assert_eq!(set.include.len(), 1);
+
+        // A non-canonical spelling already STORED still names the workspace
+        // the compiler expands: it resolves, it is not "unmatched".
+        for form in [
+            ws.to_string().to_uppercase(),
+            format!("{{{ws}}}"),
+            ws.urn().to_string(),
+        ] {
+            let stored = classify_stored(
+                &mut conn,
+                &Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: form.clone(),
+                },
+            )
+            .await
+            .expect("classify");
+            assert!(matches!(stored, Stored::Resolves), "{form}");
+        }
+        // A user ref differing from the stored username in case still does not.
+        let username = format!("CanonUser{}", &slug[6..]);
+        sqlx::query(
+            "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, $1, $2)",
+        )
+        .bind(format!("{}@egret.local", username.to_lowercase()))
+        .bind(username.to_lowercase())
+        .execute(&db.pool)
+        .await
+        .expect("user");
+        let stored = classify_stored(
+            &mut conn,
+            &Principal {
+                kind: PrincipalKind::User,
+                r#ref: username.clone(),
+            },
+        )
+        .await
+        .expect("classify");
+        assert!(matches!(stored, Stored::Unresolved(_)), "{username}");
+    }
 
     fn user(r: &str) -> Principal {
         Principal {

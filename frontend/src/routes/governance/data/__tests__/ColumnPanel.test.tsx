@@ -472,6 +472,43 @@ describe("Who can read?", () => {
     expect(within(dialog).queryByText("The policy artifact could not be built.")).not.toBeInTheDocument();
   });
 
+  it("offers a user, a group or a role, and asks a role's members", async () => {
+    const members = {
+      membersTotal: 2,
+      limit: 200,
+      truncated: false,
+      evaluated: [{ userId: "u-a", label: "Alice", username: "alice", result: EXPLAIN }],
+      notEvaluated: [{ userId: "u-b", label: "Bea", reason: "no_username" }],
+    };
+    const { permCalls } = serveData(fixture({ explainPrincipal: ok(members) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders");
+    await user.click(await screen.findByRole("button", { name: "Who can read?" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who can read?" });
+    expect(dialog).toHaveTextContent("Whether a user, or each member of a group or role, can read this, per policy profile");
+
+    await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["User", "Group", "Role"]);
+    await user.click(screen.getByRole("option", { name: "Role" }));
+    expect(within(dialog).getByText("Explain needs a role.")).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("Role"), "reader");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    const view = await within(dialog).findByTestId("members-explain");
+    expect(within(view).getByRole("region", { name: "Not asked" })).toHaveTextContent("Bea");
+    expect(permCalls.find((c) => c.call === "POST /perm/explain/principal")?.body).toEqual({
+      principal: { kind: "role", ref: "reader" },
+      action: "read",
+      target: { catalog_id: "c-ice", schema: "sales", table: "orders" },
+    });
+    expect(permCalls.some((c) => c.call === "POST /perm/explain")).toBe(false);
+
+    // Another kind is another subject: the role's answer is gone.
+    await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
+    await user.click(await screen.findByRole("option", { name: "Group" }));
+    expect(within(dialog).queryByTestId("members-explain")).not.toBeInTheDocument();
+  });
+
   it("is not offered without policy:read", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=email", { ...STEWARD, permissions: ["catalog_registry:update"] });

@@ -26,7 +26,8 @@ import {
   type TagsResult,
 } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
+import { Section, TabError } from "@/routes/governance/tabParts";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 

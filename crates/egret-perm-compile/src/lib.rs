@@ -88,6 +88,11 @@ pub mod lineage;
 mod lineage_compile_tests;
 pub(crate) mod members;
 pub mod migrate;
+pub(crate) mod people;
+// People & groups Task 3: `standsFor` agrees with the compiler's expansion
+// (spec §4.1). In-crate because the expansion is crate-private.
+#[cfg(test)]
+mod people_agreement_tests;
 // SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource
 // boundary, named by rule, answered 409 — see that module's own doc comment.
 pub mod overlap;

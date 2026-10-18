@@ -39,6 +39,9 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import ViewExposureSection from "@/routes/governance/ViewExposureSection";
+import TagRulesSection from "@/routes/governance/TagRulesSection";
+import { toastTagDeleteFailure } from "@/routes/governance/tagDeleteFailure";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 const DEFAULT_COLOR = "#6366f1";
 
@@ -57,6 +60,7 @@ export default function TagDetail() {
   const isAdmin =
     (me?.platform_roles.includes("platform_admin") ?? false) ||
     (me?.permissions?.includes("tag:manage") ?? false);
+  const canReadRules = usePolicyPermissions()("policy:read");
 
   const tagsQ = useTags();
   const tag = tagsQ.data?.find((t) => t.id === id);
@@ -418,6 +422,9 @@ export default function TagDetail() {
 
       <ViewExposureSection tagId={id} engineGated={engineGated} />
 
+      {/* DG redesign #2, P9: the rules that reach this tag. Rules are read with policy:read. */}
+      {canReadRules && <TagRulesSection tag={tag} />}
+
       <ConfirmDeleteDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -430,7 +437,7 @@ export default function TagDetail() {
               toast.success("Tag deleted");
               navigate("/governance/classifications");
             },
-            onError: (e) => toast.error((e as Error).message ?? "Failed to delete tag."),
+            onError: (e) => toastTagDeleteFailure(e, { where: "this page", canReadRules }),
           });
           setDeleteOpen(false);
         }}

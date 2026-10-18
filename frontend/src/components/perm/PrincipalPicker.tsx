@@ -1,9 +1,33 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Users, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Link } from "react-router-dom";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, Loader2, Users, X } from "lucide-react";
 
+import { ApiError } from "@/api/client";
+import {
+  getPermListPeopleQueryKey,
+  getPermReadUserQueryKey,
+  permAllocateUsername,
+  permListPeople,
+} from "@/api/generated/perm/perm";
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
-import type { PermPrincipal, Principal, PrincipalSet } from "@/api/generated/model";
+import type {
+  PermPrincipal,
+  Principal,
+  PrincipalSet,
+  StaleUserRefsConflict,
+  StoredUserRef,
+} from "@/api/generated/model";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +39,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
+import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 /**
  * The kinds this picker ever offers. `PrincipalKind` (the generated TS union)
@@ -42,13 +68,14 @@ type OfferableKind = "user" | "group" | "role";
  * `users.username` directly — minted by `ensure_username`, which lowercases,
  * slugifies, AND appends `-2`/`-3`/… on collision. A client-side slugify of
  * the email can never reproduce the collision suffix, so this picker does
- * not attempt one: a `user` principal with no allocated username is not
- * offered at all (see `suggestions` below).
+ * not attempt one: a `user` principal with no allocated username is never
+ * offered as a pick; it is offered for allocation through the server
+ * (`PrincipalSearchField`, D9b), and added under the name the server returns.
  *
  * A group's Ranger identity is its plain name, so it has no `username` and
  * needs no translation.
  *
- * Exported because `ExplainAccess`'s subject field resolves the same `ref` from
+ * Exported because explain's subject field (`SubjectUserField`) resolves the same `ref` from
  * the same `list_principals` response (review M-2 — it had a hand-copy, correct
  * today and exactly the drift the task ordering existed to prevent: a page that
  * stored the email instead would silently answer `no_grant_matched`, a wrong
@@ -129,28 +156,11 @@ function PrincipalListEditor({
 }) {
   const [kind, setKind] = useState<OfferableKind>(kinds[0]);
   const effectiveKind = kinds.includes(kind) ? kind : kinds[0];
-  const [q, setQ] = useState("");
-  const [open, setOpen] = useState(false);
   const [roleRef, setRoleRef] = useState("");
-
-  const suggestions = useQuery({
-    queryKey: ["perm-principals", effectiveKind, q],
-    queryFn: async () => {
-      const res = await policyAdminListPrincipals({
-        q,
-        kind: effectiveKind === "role" ? undefined : effectiveKind,
-      });
-      return res.status === 200 ? res.data : [];
-    },
-    enabled: open && effectiveKind !== "role",
-    retry: false,
-  });
 
   function add(p: PermPrincipal) {
     if (principals.some((x) => x.kind === p.kind && x.ref === p.ref)) return;
     onChange([...principals, p]);
-    setQ("");
-    setOpen(false);
     setRoleRef("");
   }
 
@@ -223,60 +233,13 @@ function PrincipalListEditor({
                 </Button>
               </>
             ) : (
-              <div className="relative flex-1">
-                <Input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  onFocus={() => setOpen(true)}
-                  onBlur={() => setTimeout(() => setOpen(false), 150)}
-                  placeholder={effectiveKind === "user" ? "Search users…" : "Search groups…"}
-                  aria-label={`${label} ${effectiveKind} search`}
-                />
-                {open && (
-                  <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
-                    {(suggestions.data ?? []).map((principal) => {
-                      const ref = refFor(effectiveKind, principal);
-                      // A `user` principal with no allocated `username` (never
-                      // triggered `ensure_username`) has no `ref` the engine
-                      // can ever see — refuse to offer it rather than
-                      // inventing one. See `refFor` above.
-                      if (effectiveKind === "user" && !ref) {
-                        return (
-                          <div
-                            key={`${effectiveKind}-${principal.name}`}
-                            className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground"
-                          >
-                            <span>{principal.label}</span>
-                            <span className="shrink-0 text-xs italic">
-                              no allocated username yet
-                            </span>
-                          </div>
-                        );
-                      }
-                      return (
-                        <button
-                          key={`${effectiveKind}-${principal.name}`}
-                          type="button"
-                          className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
-                          // Fires before the input's onBlur closes the list.
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => add({ kind: effectiveKind, ref: ref as string })}
-                        >
-                          <span>{principal.label}</span>
-                          <span className="shrink-0 text-xs text-muted-foreground">
-                            stored as {ref}
-                          </span>
-                        </button>
-                      );
-                    })}
-                    {(suggestions.data ?? []).length === 0 && (
-                      <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                        {suggestions.isFetching ? "Searching…" : "No matches."}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              <PrincipalSearchField
+                key={effectiveKind}
+                kind={effectiveKind}
+                label={label}
+                principals={principals}
+                onAdd={add}
+              />
             )}
           </div>
 
@@ -300,6 +263,343 @@ function PrincipalListEditor({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** What the field says under itself after an allocation: the stored name, or the refusal (FE-FORM-4). */
+type AllocationNotice =
+  | { kind: "stored"; label: string; username: string }
+  | { kind: "refused"; message: string; refs: StoredUserRef[] };
+
+/** The stored grant principals or rule exemptions a 409 from the allocation route lists, if it is one. */
+function staleRefsOf(e: unknown): StoredUserRef[] {
+  if (!(e instanceof ApiError) || e.status !== 409) return [];
+  const refs = (e.body as Partial<StaleUserRefsConflict> | undefined)?.refs;
+  return Array.isArray(refs) ? refs : [];
+}
+
+/**
+ * The user id of a `list_principals` user row, which carries only the email
+ * (`name`): the People list's row whose email is exactly it. Emails are
+ * unique; `q` is a substring match (on name, email and username), so every
+ * other row is dropped. A service account's row shows `service account`
+ * instead of its email (final review minor d), so one is matched by its label
+ * among the service-account rows `q` found by that email.
+ */
+async function findUserId(principal: Principal): Promise<string> {
+  let res: Awaited<ReturnType<typeof permListPeople>>;
+  try {
+    // FE-DATA-2 exception: parameters computed at fetch time (the picked row's email, once allocation is confirmed).
+    res = await permListPeople({ kind: "user", q: principal.name, includeServiceAccounts: true, limit: 200 });
+  } catch (e) {
+    // The lookup is `GET /perm/people`, which needs policy:read; the allocation's own refusal names policy:update.
+    if (e instanceof ApiError && e.status === 403) {
+      throw new Error("This account cannot look the user up: it needs the policy:read permission.", { cause: e });
+    }
+    throw e;
+  }
+  const email = principal.name.toLowerCase();
+  const items = res.status === 200 ? res.data.items : [];
+  const byEmail = items.filter((row) => !row.serviceAccount && row.detail?.toLowerCase() === email);
+  const matches = byEmail.length > 0 ? byEmail : items.filter((row) => row.serviceAccount && row.label === principal.label);
+  if (matches.length !== 1) {
+    throw new Error(
+      `${principal.label} could not be found among People. Search again, then allocate. A service account that cannot be found here gets its username at its first token.`,
+    );
+  }
+  return matches[0].key;
+}
+
+/**
+ * A user or group search: a combobox (ARIA 1.2, `useSuggestionCombobox`, as
+ * every governance suggestion field) over `list_principals`.
+ *
+ * D9a (spec P12): the list stays open after a pick while the field has focus,
+ * so several principals are picked in a row; typing or a click reopens it,
+ * Escape closes it. Arrow keys move through the suggestions
+ * (`aria-activedescendant`, focus stays in the field) and Enter picks one.
+ *
+ * D9b (spec P13, Q1): a user with no username is listed apart, outside the
+ * listbox. A viewer holding `policy:update` (what every grant and rule write
+ * needs, and what the route checks) gets "Allocate username and add": after a
+ * confirmation, `POST /perm/people/users/{id}/username` allocates the name
+ * egret would allocate at the user's first query, and the user is added under
+ * the name the server returned. A 409 (a stored grant principal or rule
+ * exemption already names that username) is shown beside the field in the
+ * server's words with links to those rows, and nothing is added.
+ */
+function PrincipalSearchField({
+  kind,
+  label,
+  principals,
+  onAdd,
+}: {
+  kind: "user" | "group";
+  label: string;
+  principals: PermPrincipal[];
+  onAdd: (p: PermPrincipal) => void;
+}) {
+  const noticeId = `${useId()}-notice`;
+  const [q, setQ] = useState("");
+  const sent = useDebounced(q);
+  // Searched from the first focus on (as the list first opens), never on mount.
+  const [enabled, setEnabled] = useState(false);
+  const [confirming, setConfirming] = useState<Principal | null>(null);
+  const [notice, setNotice] = useState<AllocationNotice | null>(null);
+  const can = usePolicyPermissions();
+  const canAllocate = kind === "user" && can("policy:update");
+  const queryClient = useQueryClient();
+
+  const suggestions = useQuery({
+    queryKey: ["perm-principals", kind, sent],
+    queryFn: async () => {
+      const res = await policyAdminListPrincipals({ q: sent, kind });
+      return res.status === 200 ? res.data : [];
+    },
+    enabled,
+    retry: false,
+    // The previous search's rows stay while the next loads, so an option never vanishes under the pointer.
+    placeholderData: keepPreviousData,
+  });
+  const rows = suggestions.data ?? [];
+  // A `user` principal with no allocated `username` has no `ref` the engine
+  // can ever see: it is never offered as a pick (see `refFor`), only for allocation.
+  const pickable = rows.flatMap((principal) => {
+    const ref = refFor(kind, principal);
+    return ref ? [{ principal, ref }] : [];
+  });
+  const unallocated = rows.filter((principal) => !refFor(kind, principal));
+  const isAdded = (ref: string) => principals.some((p) => p.kind === kind && p.ref === ref);
+
+  // The shared keyboard and focus behaviour (Escape closes only the list, even
+  // in the grant and rule dialogs). Focus moving between the field and the
+  // popup (Tab to an allocation button) keeps it open, and so does a pick.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const combo = useSuggestionCombobox({
+    count: pickable.length,
+    closeOnPick: false,
+    boxRef,
+    inputRef,
+    onPick: (i) => {
+      onAdd({ kind, ref: pickable[i].ref });
+      setNotice(null);
+    },
+  });
+
+  // The latest `onAdd`: an allocation settles after the chips may have changed.
+  const onAddRef = useRef(onAdd);
+  useEffect(() => {
+    onAddRef.current = onAdd;
+  });
+
+  const allocate = useMutation({
+    mutationFn: async (principal: Principal) => {
+      const userId = await findUserId(principal);
+      // FE-DATA-2 exception: parameters computed at fetch time (the id `findUserId` just read).
+      const res = await permAllocateUsername(userId);
+      if (res.status !== 200) throw new Error("The username could not be allocated. Try again.");
+      return { userId, username: res.data.username, principal };
+    },
+    onSuccess: ({ userId, username, principal }) => {
+      onAddRef.current({ kind: "user", ref: username });
+      setNotice({ kind: "stored", label: principal.label, username });
+      // FE-ACTION-2: the form stays open, so a toast confirms it too; the line under the field keeps the name.
+      toast.success(`${principal.label} was allocated the username ${username} and added.`);
+      setConfirming(null);
+      void queryClient.invalidateQueries({ queryKey: ["perm-principals"] });
+      void queryClient.invalidateQueries({ queryKey: getPermListPeopleQueryKey() });
+      void queryClient.invalidateQueries({ queryKey: getPermReadUserQueryKey(userId) });
+    },
+    onError: (e) => {
+      setNotice({
+        kind: "refused",
+        message: refusalMessage(e, "policy:update", "The username could not be allocated. Try again."),
+        refs: staleRefsOf(e),
+      });
+      setConfirming(null);
+    },
+  });
+
+  return (
+    <div className="flex-1 space-y-1.5">
+      <div ref={boxRef} className="relative">
+        <Input
+          {...combo.inputProps}
+          ref={inputRef}
+          aria-label={`${label} ${kind} search`}
+          aria-describedby={notice ? noticeId : undefined}
+          onFocus={() => {
+            setEnabled(true);
+            combo.inputProps.onFocus();
+          }}
+          value={q}
+          onChange={(e) => {
+            setEnabled(true);
+            setQ(e.target.value);
+            combo.typed();
+          }}
+          placeholder={kind === "user" ? "Search users…" : "Search groups…"}
+        />
+        {combo.open ? (
+          <div
+            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            {...combo.popupProps}
+          >
+            <ul
+              id={combo.listId}
+              role="listbox"
+              aria-multiselectable="true"
+              aria-label={`${label} ${kind} suggestions`}
+            >
+              {pickable.map(({ principal, ref }, i) => {
+                const added = isAdded(ref);
+                return (
+                  <li
+                    key={principal.name}
+                    id={combo.optionId(i)}
+                    role="option"
+                    aria-selected={added}
+                    className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
+                      i === combo.activeRow ? "bg-accent" : ""
+                    }`}
+                    // Keeps focus in the field, so the list stays open for the next pick.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => combo.pick(i)}
+                    // Options never take focus (the field keeps it and handles the keys); this
+                    // only answers an assistive technology that sends Enter to the option itself.
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") combo.pick(i);
+                    }}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {added ? <Check aria-hidden className="h-3 w-3 shrink-0 text-primary" /> : null}
+                      {principal.label}
+                    </span>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {added ? `added, stored as ${ref}` : kind === "user" ? `stored as ${ref}` : null}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            {unallocated.length > 0 ? (
+              <ul role="list" aria-label="Users with no username yet" className={pickable.length > 0 ? "mt-1 border-t border-border pt-1" : ""}>
+                {unallocated.map((principal) => (
+                  <li
+                    key={principal.name}
+                    className="flex w-full flex-wrap items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground"
+                  >
+                    <span>{principal.label}</span>
+                    {canAllocate ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 shrink-0 text-xs"
+                        aria-label={`Allocate username and add ${principal.label}`}
+                        // Keeps focus in the field until the confirmation takes it.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setNotice(null);
+                          setConfirming(principal);
+                        }}
+                      >
+                        Allocate username and add
+                      </Button>
+                    ) : (
+                      <span className="flex flex-col items-end text-right">
+                        <span className="shrink-0 text-xs italic">no allocated username yet</span>
+                        <span className="text-xs">
+                          egret allocates one at their first query; an account with policy:update can allocate
+                          one here.
+                        </span>
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {rows.length === 0 ? (
+              <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                {suggestions.isFetching || q !== sent
+                  ? "Searching…"
+                  : suggestions.isError
+                    ? "The list could not be loaded. Search again."
+                    : "No matches."}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {notice?.kind === "stored" ? (
+        <p id={noticeId} role="status" className="text-xs text-muted-foreground">
+          {`${notice.label} was allocated a username and added, stored as ${notice.username}.`}
+        </p>
+      ) : null}
+      {notice?.kind === "refused" ? (
+        <div id={noticeId} role="alert" className="space-y-1 text-xs text-destructive">
+          <p>{notice.message}</p>
+          {notice.refs.length > 0 ? (
+            <ul role="list" className="space-y-0.5">
+              {notice.refs.map((r) => (
+                <li key={`${r.source}:${r.id}:${r.position}:${r.ref}`}>
+                  <Link
+                    to={`/governance/${r.source === "rule" ? "rules" : "grants"}/${encodeURIComponent(r.id)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-primary hover:underline"
+                  >
+                    {`${r.source === "rule" ? "rule" : "grant"} ${r.id}`}
+                    <span className="sr-only"> (opens in a new tab)</span>
+                  </Link>
+                  <span className="text-muted-foreground">{` · ${r.position} names ${r.ref}`}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      <AlertDialog
+        open={confirming !== null}
+        onOpenChange={(next) => {
+          if (!next && !allocate.isPending) setConfirming(null);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            // Back to the field, with the list closed so the outcome under it is readable.
+            e.preventDefault();
+            combo.skipNextFocusOpen();
+            inputRef.current?.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Allocate a username to ${confirming?.label ?? ""}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              egret gives this user the engine username it would allocate at their first query, and adds it
+              here. Engines then know them by that name. The username is kept even if you close this form
+              without saving.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={allocate.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              disabled={allocate.isPending}
+              onClick={() => {
+                if (confirming) allocate.mutate(confirming);
+              }}
+            >
+              {allocate.isPending ? <Loader2 aria-hidden className="animate-spin" /> : null}
+              Allocate and add
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

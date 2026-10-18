@@ -14,7 +14,8 @@ import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governan
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
+import { EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
 /**

@@ -9,10 +9,13 @@ import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import { toast } from "sonner";
+import { ApiError } from "@/api/client";
 
 vi.mock("@/api/tags");
 vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const ADMIN_ME: Me = {
   user_id: "1",
@@ -140,6 +143,7 @@ function mockTagsQuery(overrides: Partial<ReturnType<typeof tagsApi.useTags>> = 
 
 describe("Classifications", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mockUseAuth();
     mockTagsQuery();
     vi.mocked(tagsApi.useCreateTag).mockReturnValue({
@@ -265,7 +269,51 @@ describe("Classifications", () => {
     await user.type(screen.getByPlaceholderText("delete"), "delete");
     await user.click(screen.getByRole("button", { name: /^Delete$/i }));
 
-    await waitFor(() => expect(mutate).toHaveBeenCalledWith("t1"));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("t1", expect.anything()));
+  });
+
+  // Live check D4: perm.rules.tag_key references tags(key), so the server refuses with 409 while a
+  // rule selects the tag. The dialog used to close with nothing said and the tag still listed.
+  test("a refused delete shows the server's sentence and points to the tag's rule list", async () => {
+    const user = userEvent.setup();
+    const sentence = "tag pii is still selected by a permission rule; delete or retarget that rule first";
+    const mutate = vi.fn((_id: string, opts?: { onError?: (e: Error) => void }) =>
+      opts?.onError?.(new ApiError(409, sentence)),
+    );
+    vi.mocked(tagsApi.useDeleteTag).mockReturnValue({ mutate, isPending: false } as never);
+    mockUseAuth({ user_id: "3", email: "s@example.com", platform_roles: [], permissions: ["tag:manage", "policy:read"] });
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Actions for PII/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    const [message, opts] = vi.mocked(toast.error).mock.calls[0] as unknown as [string, { description: string; action: { label: string } }];
+    expect(message).toBe(sentence);
+    expect(opts.description).toBe(
+      'The "Mask and filter rules" section on the tag\'s page lists the rules that select this tag.',
+    );
+    expect(opts.action.label).toBe("Show the rules");
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByText("PII")).toBeInTheDocument();
+  });
+
+  test("a refused delete for any other reason shows the server's sentence alone", async () => {
+    const user = userEvent.setup();
+    const mutate = vi.fn((_id: string, opts?: { onError?: (e: Error) => void }) =>
+      opts?.onError?.(new ApiError(500, "database unavailable")),
+    );
+    vi.mocked(tagsApi.useDeleteTag).mockReturnValue({ mutate, isPending: false } as never);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Actions for PII/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("database unavailable"));
   });
 
   test("shows a 403 message when the viewer lacks tag:read", async () => {

@@ -1,10 +1,10 @@
 import type { Action, GrantView, PermPrincipal, Rule, RuleView, Scope } from "@/api/generated/model";
 
 /**
- * Shared formatting for the two steward-facing perm pages (`DataPermissions`
- * and `MaskFilterRules`) — D5's "the sentence is the primary column" applies
- * to both, and a scope/principal set is rendered identically wherever it
- * appears in either one.
+ * Shared formatting for the pages that show grants and rules (the Data and
+ * People areas, and one grant's and one rule's pages) — D5's "the sentence is
+ * the primary column" applies to each, and a scope/principal set is rendered
+ * identically wherever it appears.
  *
  * Nothing here duplicates the five pieces of hardcoded knowledge that live in
  * `PrincipalPicker`/`ScopePicker` (`grep -rn "Hardcoded fact" frontend/src/components/perm`):
@@ -61,6 +61,27 @@ export function isPattern(value: string): boolean {
   return /[*?]/.test(value);
 }
 
+export type PatternLevel = { level: "schema" | "table" | "column"; value: string };
+
+/** The levels of `scope` set to a pattern (`*`, `ord*`, `order?`): each names every value it matches. */
+export function patternLevels(scope: Scope): PatternLevel[] {
+  const levels: PatternLevel[] = [];
+  for (const level of ["schema", "table", "column"] as const) {
+    const value = scope[level];
+    if (value && isPattern(value)) levels.push({ level, value });
+  }
+  return levels;
+}
+
+/** A grant's delete confirmation text; a pattern grant says how far it reaches. */
+export function grantDeleteDescription(g: GrantView | null): string {
+  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const patterns = g ? patternLevels(g.scope) : [];
+  if (patterns.length === 0) return "This grant is permanently removed and every profile it reaches recompiles.";
+  const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
+  return `This grant covers ${reach}, not one object. ${removed}`;
+}
+
 /**
  * A named level as the sentence prints it. A pattern is quoted, so a grant
  * whose table is the value `*` (`wh.sales.“*”`) never reads the same as one
@@ -76,16 +97,6 @@ function level(value: string): string {
  * (`useWorkspaceNames` in `openInData.tsx`).
  */
 export type WorkspaceNames = (id: string) => string | undefined;
-
-/**
- * One principal. A `workspace_members` principal's ref is the workspace's id
- * (the assignment sync writes it), so it reads by the workspace's name when
- * `workspaceName` knows it, and by the id only when it does not.
- */
-function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
-  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
-  return `${p.kind} ${p.ref}`;
-}
 
 /** A `PermPrincipal[]` — a `PrincipalSet`'s `include` or `exclude` — joined
  * for reading inline. Empty reads as "nobody" rather than a blank. */
@@ -104,12 +115,30 @@ export function formatPrincipals(list: PermPrincipal[], workspaceName?: Workspac
  */
 export function grantSentence(g: GrantView, workspaceName?: WorkspaceNames): string {
   const who = formatPrincipals(g.principals.include, workspaceName);
-  const verb = g.effect === "allow" ? "can" : "cannot";
-  const actions = formatActions(g.actions);
-  const scope = formatScope(g.scope, g.catalog_name);
   const exclude =
     g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude, workspaceName)}` : "";
-  return `${who} ${verb} ${actions} ${scope}${exclude}`;
+  return `${who} ${grantPredicate(g)}${exclude}`;
+}
+
+/**
+ * The middle of {@link grantSentence}, between who and who is excepted:
+ * `can read ice.sales.*`. `GrantSentenceText` puts linked principal names
+ * around it and so reads exactly as `grantSentence` does.
+ */
+export function grantPredicate(g: GrantView): string {
+  const verb = g.effect === "allow" ? "can" : "cannot";
+  return `${verb} ${formatActions(g.actions)} ${formatScope(g.scope, g.catalog_name)}`;
+}
+
+/**
+ * One principal, as {@link formatPrincipals} words it. A `workspace_members`
+ * principal's ref is the workspace's id (the assignment sync writes it), so it
+ * reads by the workspace's name when `workspaceName` knows it, and by the id
+ * only when it does not.
+ */
+export function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
+  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
+  return `${p.kind} ${p.ref}`;
 }
 
 /**

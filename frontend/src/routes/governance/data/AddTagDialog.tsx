@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { refusalMessage } from "@/routes/governance/policyWrites";
 import { fullPath } from "@/routes/governance/data/objectData";
-import { failedText } from "@/routes/governance/data/tabs/TabStates";
+import { failedText } from "@/routes/governance/tabParts";
 
 /**
  * Why Add tag is disabled on an object outside egret's catalogs (F9: the tag

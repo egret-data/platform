@@ -41,12 +41,13 @@ export function pathToUrl(p: ObjectPath, tab?: string): string {
 const DOTS_ONLY = /^\.+$/;
 const ENCODED_DOTS_ONLY = /^(%2E)+$/i;
 
-function encodeSegment(name: string): string {
+/** One name as one path segment: encoded, and a dot-only name kept from collapsing (see the module doc). */
+export function encodeSegment(name: string): string {
   return DOTS_ONLY.test(name) ? name.replace(/\./g, "%252E") : encodeURIComponent(name);
 }
 
 /** A segment as the router hands it back, with a dot-only name restored. */
-function decodeSegment(param: string): string {
+export function decodeSegment(param: string): string {
   return ENCODED_DOTS_ONLY.test(param) ? ".".repeat(param.length / 3) : param;
 }
 

@@ -13,7 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { KIND_ICON } from "@/routes/governance/data/CatalogTree";
 import { capitalise, type CatalogState } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
+import { Section, TabError } from "@/routes/governance/tabParts";
 
 /** The empty reader list of a complete answer. Also this module's bundle marker (`scripts/assert-governance-data-lazy.mjs`). */
 export const NO_READERS = "No view or materialized view reads this table";

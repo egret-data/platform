@@ -1,0 +1,383 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { Me } from "@/api/hooks";
+import type { PersonRow, UnresolvedPrincipal } from "@/api/generated/model";
+import { AuthContext } from "@/auth/useAuth";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
+import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
+
+type Answer = { status: number; body: unknown } | "never";
+
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+/**
+ * Stubs `fetch` for the two reads the index makes, through the real generated
+ * client and `apiFetch`: `GET …/perm/people` (answered per call from its search
+ * params) and `GET …/perm/unresolved-principals`. Returns the params of each
+ * people call.
+ */
+function serve(people: (q: URLSearchParams) => Answer, unresolved: Answer = { status: 200, body: [] }) {
+  const peopleCalls: URLSearchParams[] = [];
+  let unresolvedCalls = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const reply = (a: Answer) => (a === "never" ? new Promise<Response>(() => {}) : Promise.resolve(json(a.status, a.body)));
+      if (url.pathname === "/api/control-plane/perm/people") {
+        peopleCalls.push(url.searchParams);
+        return reply(people(url.searchParams));
+      }
+      if (url.pathname === "/api/control-plane/perm/unresolved-principals") {
+        unresolvedCalls += 1;
+        return reply(unresolved);
+      }
+      return Promise.resolve(json(404, { error: "not found" }));
+    }),
+  );
+  return { peopleCalls, unresolvedCalls: () => unresolvedCalls };
+}
+
+const STEWARD: Me = { user_id: "s1", email: "s@example.com", platform_roles: [], permissions: ["policy:read"] };
+
+function Where() {
+  const loc = useLocation();
+  const type = useNavigationType();
+  return (
+    <output data-testid="where" data-nav={type}>
+      {loc.pathname + loc.search}
+    </output>
+  );
+}
+const where = () => screen.getByTestId("where").textContent;
+
+function open(url: string) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <AuthContext.Provider value={{ me: STEWARD, isLoading: false }}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={["/start", url]} initialIndex={1}>
+            <Routes>
+              <Route path="/governance/people/*" element={<PeopleRoutes />} />
+              <Route path="*" element={null} />
+            </Routes>
+            <Where />
+          </MemoryRouter>
+        </TooltipProvider>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
+  );
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+const user = (over: Partial<PersonRow> & { key: string; label: string }): PersonRow => ({
+  kind: "user",
+  detail: null,
+  username: null,
+  memberCount: null,
+  withoutUsername: null,
+  serviceAccount: false,
+  ...over,
+});
+
+const USERS: PersonRow[] = [
+  user({ key: "u-ana", label: "Ana Silva", detail: "ana@example.com", username: "ana" }),
+  user({ key: "u-bo", label: "Bo Chen", detail: "bo@example.com", username: null }),
+];
+
+const page = (items: PersonRow[], total = items.length): Answer => ({ status: 200, body: { items, total } });
+
+describe("People index: Users", () => {
+  it("lists users with their email and username, each linking to its page", async () => {
+    const calls = serve(() => page(USERS));
+    open("/governance/people");
+    expect(await screen.findByRole("heading", { level: 1, name: "People & groups" })).toBeInTheDocument();
+    const ana = await screen.findByRole("link", { name: "Ana Silva" });
+    expect(ana).toHaveAttribute("href", "/governance/people/users/u-ana");
+    const anaRow = ana.closest("tr")!;
+    expect(within(anaRow).getByText("ana@example.com")).toBeInTheDocument();
+    expect(within(anaRow).getByText("ana")).toBeInTheDocument();
+    const boRow = screen.getByRole("link", { name: "Bo Chen" }).closest("tr")!;
+    expect(within(boRow).getByText("No username yet")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Users", selected: true })).toBeInTheDocument();
+    expect(calls.peopleCalls[0].get("kind")).toBe("user");
+    expect(calls.peopleCalls[0].get("includeServiceAccounts")).not.toBe("true");
+  });
+
+  it("shows service accounts only when asked, and marks them", async () => {
+    const SA = user({ key: "u-sa", label: "etl-bot", detail: "service account", username: "etl_bot", serviceAccount: true });
+    const calls = serve((q) => page(q.get("includeServiceAccounts") === "true" ? [...USERS, SA] : USERS));
+    open("/governance/people");
+    await screen.findByRole("link", { name: "Ana Silva" });
+    expect(screen.queryByRole("link", { name: "etl-bot" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("switch", { name: "Show service accounts" }));
+    const sa = await screen.findByRole("link", { name: "etl-bot" });
+    expect(within(sa.closest("tr")!).getByText("Service account")).toBeInTheDocument();
+    expect(calls.peopleCalls.at(-1)!.get("includeServiceAccounts")).toBe("true");
+    expect(where()).toContain("serviceAccounts=1");
+  });
+
+  it("renders a skeleton while loading", async () => {
+    serve(() => "never");
+    open("/governance/people");
+    expect(await screen.findByTestId("list-skeleton")).toBeInTheDocument();
+  });
+
+  it("says when there are no users, never as an error", async () => {
+    serve(() => page([]));
+    open("/governance/people");
+    expect(await screen.findByText("No users.")).toBeInTheDocument();
+    expect(screen.getByText("Service accounts are hidden. Show service accounts lists them too.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
+  });
+
+  it("shows the error with a retry, never an empty list", async () => {
+    let fail = true;
+    serve(() => (fail ? { status: 500, body: { error: "boom" } } : page(USERS)));
+    open("/governance/people");
+    expect(await screen.findByText("The users could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(screen.queryByText("No users.")).not.toBeInTheDocument();
+    fail = false;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("link", { name: "Ana Silva" })).toBeInTheDocument();
+  });
+});
+
+describe("People index: search and paging", () => {
+  it("searches through ?q=, and a miss offers to clear it", async () => {
+    const calls = serve((q) => page(q.get("q") ? [] : USERS));
+    open("/governance/people?q=zz");
+    expect(await screen.findByText("No user matches “zz”.")).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Search" })).toHaveValue("zz");
+    expect(calls.peopleCalls[0].get("q")).toBe("zz");
+    await userEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(await screen.findByRole("link", { name: "Ana Silva" })).toBeInTheDocument();
+    expect(where()).toBe("/governance/people");
+  });
+
+  it("puts what is typed in ?q= and sends it", async () => {
+    const calls = serve(() => page(USERS));
+    open("/governance/people");
+    await screen.findByRole("link", { name: "Ana Silva" });
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search" }), "an");
+    await waitFor(() => expect(where()).toBe("/governance/people?q=an"));
+    await waitFor(() => expect(calls.peopleCalls.at(-1)!.get("q")).toBe("an"));
+  });
+
+  it("pages through ?page=, 50 at a time", async () => {
+    const many = Array.from({ length: 50 }, (_, i) => user({ key: `u-${i}`, label: `User ${i}` }));
+    const calls = serve((q) =>
+      page(q.get("offset") === "50" ? [user({ key: "u-last", label: "Last One" })] : many, 51),
+    );
+    open("/governance/people");
+    expect(await screen.findByText("1–50 of 51")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByRole("link", { name: "Last One" })).toBeInTheDocument();
+    expect(screen.getByText("51–51 of 51")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+    expect(where()).toBe("/governance/people?page=2");
+    const last = calls.peopleCalls.at(-1)!;
+    expect([last.get("limit"), last.get("offset")]).toEqual(["50", "50"]);
+  });
+
+  it("a new search starts again at the first page", async () => {
+    serve(() => page(USERS, 120));
+    open("/governance/people?page=3");
+    await screen.findByRole("link", { name: "Ana Silva" });
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search" }), "a");
+    await waitFor(() => expect(where()).toBe("/governance/people?q=a"));
+  });
+});
+
+describe("People index: Groups and Roles", () => {
+  const GROUPS: PersonRow[] = [
+    { kind: "group", key: "eu/fin", label: "eu/fin", detail: "oidc", username: null, memberCount: 3, withoutUsername: 1, serviceAccount: false },
+    { kind: "group", key: "solo", label: "solo", detail: "local", username: null, memberCount: 1, withoutUsername: 0, serviceAccount: false },
+  ];
+  const ROLES: PersonRow[] = [
+    { kind: "role", key: "steward", label: "steward", detail: "platform, workspace", username: null, memberCount: 3, withoutUsername: 1, serviceAccount: false },
+    { kind: "role", key: "auditor", label: "auditor", detail: "platform", username: null, memberCount: 1, withoutUsername: 0, serviceAccount: false },
+  ];
+
+  it("selects a tab through ?kind=, starting again at the first page", async () => {
+    const calls = serve((q) => page(q.get("kind") === "group" ? GROUPS : USERS));
+    open("/governance/people?page=2");
+    await screen.findByRole("tab", { name: "Users", selected: true });
+    await userEvent.click(screen.getByRole("tab", { name: "Groups" }));
+    expect(await screen.findByRole("link", { name: "eu/fin" })).toBeInTheDocument();
+    expect(where()).toBe("/governance/people?kind=group");
+    expect(calls.peopleCalls.at(-1)!.get("kind")).toBe("group");
+  });
+
+  it("lists groups with their source and members, and how many have no username", async () => {
+    serve(() => page(GROUPS));
+    open("/governance/people?kind=group");
+    const fin = await screen.findByRole("link", { name: "eu/fin" });
+    expect(fin).toHaveAttribute("href", "/governance/people/groups/eu%2Ffin");
+    const finRow = fin.closest("tr")!;
+    expect(within(finRow).getByText("OIDC")).toBeInTheDocument();
+    expect(within(finRow).getByText("3 members (1 with no username yet)")).toBeInTheDocument();
+    const soloRow = screen.getByRole("link", { name: "solo" }).closest("tr")!;
+    expect(within(soloRow).getByText("Local")).toBeInTheDocument();
+    expect(within(soloRow).getByText("1 member")).toBeInTheDocument();
+    expect(
+      screen.getByText("A member with no username gets one when a grant naming the group is compiled."),
+    ).toBeInTheDocument();
+  });
+
+  it("lists roles with their scopes and holders, and says who engines do not name", async () => {
+    serve(() => page(ROLES));
+    open("/governance/people?kind=role");
+    const steward = await screen.findByRole("link", { name: "steward" });
+    expect(steward).toHaveAttribute("href", "/governance/people/roles/steward");
+    const row = steward.closest("tr")!;
+    expect(within(row).getByText("platform, workspace")).toBeInTheDocument();
+    expect(within(row).getByText("3 holders (1 not on engines: no username)")).toBeInTheDocument();
+    expect(within(screen.getByRole("link", { name: "auditor" }).closest("tr")!).getByText("1 holder")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Holders are users. A holder is named on engines once they have a username; a group holding a role is not counted, as engines do not apply it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("a group search that matches nothing names the group", async () => {
+    serve(() => page([]));
+    open("/governance/people?kind=role&q=x");
+    expect(await screen.findByText("No role matches “x”.")).toBeInTheDocument();
+  });
+});
+
+describe("People index: Unmatched names", () => {
+  const row = (over: Partial<UnresolvedPrincipal> & { id: string; ref: string }): UnresolvedPrincipal => ({
+    source: "grant",
+    name: null,
+    kind: "user",
+    position: "include",
+    effect: "allow",
+    status: "unresolved",
+    reason: "No user has this username.",
+    failsOpen: false,
+    ...over,
+  });
+  // Fail-closed first on purpose: the page puts fail-open rows first.
+  const ROWS: UnresolvedPrincipal[] = [
+    row({ id: "g-closed", ref: "old_ana" }),
+    row({ id: "g-empty", ref: "nobody", kind: "group", status: "empty", reason: "The group nobody has no members." }),
+    row({
+      id: "r-open",
+      source: "rule",
+      name: "mask emails",
+      ref: "gone_role",
+      kind: "role",
+      position: "exclude",
+      effect: null,
+      reason: "No role is named gone_role.",
+      failsOpen: true,
+    }),
+    row({ id: "g-open", ref: "ex_user", effect: "deny", reason: "No user has this username.", failsOpen: true }),
+  ];
+
+  it("lists each stored name that matches nobody, fail-open first, with its reason and its grant or rule", async () => {
+    serve(() => page([]), { status: 200, body: ROWS });
+    open("/governance/people?kind=unmatched");
+    expect(await screen.findByRole("tab", { name: "Unmatched names", selected: true })).toBeInTheDocument();
+    const table = await screen.findByRole("table");
+    const names = within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell")[0].textContent);
+    expect(names).toEqual(["role gone_role", "user ex_user", "user old_ana", "group nobody"]);
+    expectStackedLabels(table);
+
+    const open1 = screen.getByText("gone_role").closest("tr")!;
+    expect(within(open1).getByText("Widens access")).toBeInTheDocument();
+    expect(within(open1).getByText("No role is named gone_role.")).toBeInTheDocument();
+    expect(within(open1).getByRole("link", { name: "Rule mask emails" })).toHaveAttribute(
+      "href",
+      "/governance/rules/r-open",
+    );
+    expect(within(open1).getByText("Exemption, exclude")).toBeInTheDocument();
+    const open2 = screen.getByText("ex_user").closest("tr")!;
+    expect(within(open2).getByRole("link", { name: "Grant" })).toHaveAttribute("href", "/governance/grants/g-open");
+    expect(within(open2).getByText("Deny, include")).toBeInTheDocument();
+    const closed = screen.getByText("old_ana").closest("tr")!;
+    expect(within(closed).getByText("Narrows access")).toBeInTheDocument();
+    const empty = screen.getByText("nobody").closest("tr")!;
+    expect(within(empty).getByText("Empty group")).toBeInTheDocument();
+    expect(within(empty).getByText("The group nobody has no members.")).toBeInTheDocument();
+  });
+
+  it("filters by ?q= on the stored name, and a miss offers to clear it", async () => {
+    serve(() => page([]), { status: 200, body: ROWS });
+    open("/governance/people?kind=unmatched&q=ana");
+    expect(await screen.findByText("old_ana")).toBeInTheDocument();
+    expect(screen.queryByText("ex_user")).not.toBeInTheDocument();
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Search" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search" }), "zz");
+    expect(await screen.findByText("No unmatched name matches “zz”.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(await screen.findByText("ex_user")).toBeInTheDocument();
+  });
+
+  it("says when every stored name matches someone", async () => {
+    serve(() => page([]), { status: 200, body: [] });
+    open("/governance/people?kind=unmatched");
+    expect(await screen.findByText("Every grant principal and rule exemption names someone egret knows.")).toBeInTheDocument();
+  });
+
+  it("shows the error with a retry", async () => {
+    serve(() => page([]), { status: 500, body: { error: "boom" } });
+    open("/governance/people?kind=unmatched");
+    expect(
+      await screen.findByText("The unmatched names could not be loaded. Retry, or reload the page."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});
+
+describe("ByNameRedirect", () => {
+  it("replaces /users/by-name/:username with the user's page, keeping the tab", async () => {
+    const calls = serve((q) => page(q.get("username") === "ana" ? [USERS[0]] : []));
+    open("/governance/people/users/by-name/ana?tab=permissions");
+    await waitFor(() => expect(where()).toBe("/governance/people/users/u-ana?tab=permissions"));
+    expect(screen.getByTestId("where")).toHaveAttribute("data-nav", "REPLACE");
+    const asked = calls.peopleCalls[0];
+    expect([asked.get("kind"), asked.get("username")]).toEqual(["user", "ana"]);
+  });
+
+  // Final review I2: the route matches citext; engines compare byte for byte, so `Ana` is not ana.
+  it("does not open a user whose username matches only case-insensitively, and says why", async () => {
+    serve((q) => page(q.get("username")?.toLowerCase() === "ana" ? [USERS[0]] : []));
+    open("/governance/people/users/by-name/Ana?tab=permissions");
+    expect(
+      await screen.findByText(
+        "“Ana” matches the user ana only case-insensitively; engines compare names byte for byte, so this name matches nobody.",
+      ),
+    ).toBeInTheDocument();
+    expect(where()).toBe("/governance/people/users/by-name/Ana?tab=permissions");
+    expect(screen.getByRole("link", { name: "Unmatched names" })).toHaveAttribute("href", "/governance/people?kind=unmatched");
+    expect(screen.getByRole("link", { name: "ana's page" })).toHaveAttribute("href", "/governance/people/users/u-ana");
+  });
+
+  it("says when nobody has the username", async () => {
+    serve(() => page([]));
+    open("/governance/people/users/by-name/ana");
+    expect(await screen.findByText("No user has the username ana.")).toBeInTheDocument();
+    expect(where()).toBe("/governance/people/users/by-name/ana");
+  });
+
+  it("shows the error with a retry", async () => {
+    serve(() => ({ status: 500, body: { error: "boom" } }));
+    open("/governance/people/users/by-name/ana");
+    expect(await screen.findByText("The user could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+  });
+});

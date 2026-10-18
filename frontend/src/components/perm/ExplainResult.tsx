@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Ban,
@@ -32,6 +32,7 @@ import type {
   WireUnmodelled,
 } from "@/api/generated/model";
 import { refFor } from "@/components/perm/PrincipalPicker";
+import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge, type badgeVariants } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -39,10 +40,11 @@ import { Label } from "@/components/ui/label";
 import type { VariantProps } from "class-variance-authority";
 
 /**
- * How an explain answer reads (`POST /perm/explain`), shared by Governance →
- * Explain access and the Data area's "Who can read?" dialog: the subject's
- * user field and the per-profile result. Moved here from `ExplainAccess`
- * unchanged; its tests (`ExplainAccess.test.tsx`) cover it through that page.
+ * How an explain answer reads (`POST /perm/explain`), shared by the People
+ * area's Check access and the Data area's "Who can read?" dialog: the
+ * subject's user field and the per-profile result. Moved here from the former
+ * Explain access page; its tests (`__tests__/ExplainResult.test.tsx`) render
+ * it directly.
  */
 
 type BadgeVariant = NonNullable<VariantProps<typeof badgeVariants>["variant"]>;
@@ -542,6 +544,11 @@ function decisionMeta(d: WireDecision): {
   };
 }
 
+/** A decision's short label, as an answer's badge reads it (`Allowed`, `Undecidable`, `Refused by a deny item`, …). */
+export function decisionLabel(d: WireDecision): string {
+  return decisionMeta(d).label;
+}
+
 /**
  * A deciding policy egret's compiler does not own — and it is reported, never
  * dropped. Four live categories reach here: the `egret-admin`/`all`
@@ -634,7 +641,7 @@ function DecidedBy({
     return (
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <Link
-          to={`/governance/data-permissions?grant=${encodeURIComponent(attribution.grant_id)}`}
+          to={`/governance/grants/${encodeURIComponent(attribution.grant_id)}`}
           className="text-primary hover:underline"
         >
           View grant {attribution.grant_id}
@@ -648,7 +655,7 @@ function DecidedBy({
     return (
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <Link
-          to={`/governance/mask-filter-rules?rule=${encodeURIComponent(attribution.rule_id)}`}
+          to={`/governance/rules/${encodeURIComponent(attribution.rule_id)}`}
           className="text-primary hover:underline"
         >
           View rule {attribution.rule_id}
@@ -951,31 +958,25 @@ function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
   );
 }
 
+/**
+ * A mask verdict in words, the one wording every surface uses: the full
+ * answer's mask line (`MaskSentence`) and the member table's summary
+ * (`MembersExplainView`, live check D3).
+ */
+export function maskDecisionText(d: NonNullable<ExplainProfile["mask"]>["decision"]): string {
+  if (d.kind === "masked") {
+    if (d.result.mask_type === "MASK_NONE") return `not transformed (MASK_NONE, Ranger policy ${d.result.policy_name})`;
+    if (d.result.mask_type === "MASK_NULL") return `returns NULL (MASK_NULL, Ranger policy ${d.result.policy_name})`;
+    return `masked to ${d.result.mask_type} by Ranger policy ${d.result.policy_name}`;
+  }
+  if (d.kind === "no_mask") return "no mask applies";
+  return `undecidable (${d.why.map((c) => c.kind).join(", ")})`;
+}
+
 function MaskSentence({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
-  const d = mask.decision;
   return (
     <p data-testid="explain-mask" className="text-xs text-muted-foreground">
-      Mask on {mask.access_type}:{" "}
-      {d.kind === "masked" && d.result.mask_type === "MASK_NONE" ? (
-        <>
-          not transformed (<span className="font-mono">MASK_NONE</span>, Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>)
-        </>
-      ) : d.kind === "masked" && d.result.mask_type === "MASK_NULL" ? (
-        <>
-          returns NULL (<span className="font-mono">MASK_NULL</span>, Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>)
-        </>
-      ) : d.kind === "masked" ? (
-        <>
-          masked to <span className="font-mono">{d.result.mask_type}</span> by Ranger policy{" "}
-          <span className="font-mono">{d.result.policy_name}</span>
-        </>
-      ) : d.kind === "no_mask" ? (
-        "no mask applies"
-      ) : (
-        `undecidable (${d.why.map((c) => c.kind).join(", ")})`
-      )}
+      Mask on {mask.access_type}: {maskDecisionText(mask.decision)}
     </p>
   );
 }
@@ -1069,80 +1070,121 @@ export function SubjectUserField({
   value: string;
   onChange: (username: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-
+  const sent = useDebounced(value);
+  // Searched from the first focus on (as the list first opens), never on mount.
+  const [enabled, setEnabled] = useState(false);
   const suggestions = useQuery({
-    queryKey: ["perm-principals", "user", value],
+    queryKey: ["perm-principals", "user", sent],
     queryFn: async () => {
-      const res = await policyAdminListPrincipals({ q: value, kind: "user" });
+      const res = await policyAdminListPrincipals({ q: sent, kind: "user" });
       return res.status === 200 ? res.data : [];
     },
-    enabled: open,
+    enabled,
     retry: false,
+    // The previous search's rows stay while the next loads, so an option never vanishes under the pointer.
+    placeholderData: keepPreviousData,
   });
+  const rows = suggestions.data ?? [];
+  // Fact 5/5's ONE implementation, imported rather than re-derived (review
+  // M-2): the engine sees the allocated bare `username`, never the email
+  // `list_principals` also returns. A user with none is listed apart, outside
+  // the listbox, and is not pickable.
+  const pickable = rows.flatMap((principal) => {
+    const ref = refFor("user", principal);
+    return ref ? [{ principal, ref }] : [];
+  });
+  const unallocated = rows.filter((principal) => !refFor("user", principal));
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const combo = useSuggestionCombobox({ count: pickable.length, onPick: (i) => onChange(pickable[i].ref), boxRef, inputRef });
 
   return (
-    <div className="relative space-y-1.5">
+    <div className="space-y-1.5">
       <Label htmlFor="explain-user">User</Label>
-      <Input
-        id="explain-user"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        placeholder="Search users…"
-        autoComplete="off"
-      />
-      {open && (
-        <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
-          {(suggestions.data ?? []).map((p) => {
-            // Fact 5/5's ONE implementation, imported rather than re-derived
-            // (review M-2): the engine sees the allocated bare `username`,
-            // never the email `list_principals` also returns.
-            const ref = refFor("user", p);
-            if (!ref) {
-              return (
-                <div
-                  key={p.name}
-                  className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground"
+      <div ref={boxRef} className="relative">
+        <Input
+          id="explain-user"
+          {...combo.inputProps}
+          ref={inputRef}
+          onFocus={() => {
+            setEnabled(true);
+            combo.inputProps.onFocus();
+          }}
+          value={value}
+          onChange={(e) => {
+            setEnabled(true);
+            onChange(e.target.value);
+            combo.typed();
+          }}
+          placeholder="Search users…"
+        />
+        {combo.open && (
+          <div
+            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            {...combo.popupProps}
+          >
+            <ul id={combo.listId} role="listbox" aria-label="User suggestions">
+              {pickable.map(({ principal, ref }, i) => (
+                <li
+                  key={principal.name}
+                  id={combo.optionId(i)}
+                  role="option"
+                  aria-selected={i === combo.activeRow}
+                  className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
+                    i === combo.activeRow ? "bg-accent" : ""
+                  }`}
+                  // Keeps focus in the field, so the list does not close before the click lands.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => combo.pick(i)}
+                  // Options never take focus (the field keeps it and handles the keys); this
+                  // only answers an assistive technology that sends Enter to the option itself.
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") combo.pick(i);
+                  }}
                 >
-                  <span>{p.label}</span>
-                  <span className="shrink-0 text-xs italic">no allocated username yet</span>
-                </div>
-              );
-            }
-            return (
-              <button
-                key={p.name}
-                type="button"
-                className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  onChange(ref);
-                  setOpen(false);
-                }}
+                  <span>{principal.label}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">stored as {ref}</span>
+                </li>
+              ))}
+            </ul>
+            {unallocated.length > 0 && (
+              <ul
+                role="list"
+                aria-label="Users with no username yet"
+                className={pickable.length > 0 ? "mt-1 border-t border-border pt-1" : ""}
               >
-                <span>{p.label}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">stored as {ref}</span>
-              </button>
-            );
-          })}
-          {(suggestions.data ?? []).length === 0 && (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">
-              {suggestions.isFetching ? "Searching…" : "No matches."}
-            </div>
-          )}
-        </div>
-      )}
+                {unallocated.map((principal) => (
+                  <li
+                    key={principal.name}
+                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground"
+                  >
+                    <span>{principal.label}</span>
+                    <span className="shrink-0 text-xs italic">no allocated username yet</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {rows.length === 0 && (
+              <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                {suggestions.isFetching || sent !== value
+                  ? "Searching…"
+                  : suggestions.isError
+                    ? "The list could not be loaded; type a username."
+                    : "No matches."}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 /**
  * One explain answer: a block per policy profile, or the "nothing is
- * enforcing" state, then the limits of what it says. Moved out of
- * `ExplainAccess` unchanged so the Data area's "Who can read?" dialog renders
- * the same answer the same way.
+ * enforcing" state, then the limits of what it says. Moved out of the former
+ * Explain access page unchanged so every surface that asks explain (Check
+ * access, "Who can read?") renders the same answer the same way.
  */
 export function ExplainResultView({ result }: { result: ExplainResponse }) {
   return (
