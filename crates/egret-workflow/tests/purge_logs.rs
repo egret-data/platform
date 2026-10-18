@@ -255,19 +255,26 @@ async fn flow_execution_and_levels_each_narrow_the_delete() {
     let f2 = seeded(p, ws, "a.b", "f2").await;
     let f1_child = seeded(p, ws, "a.b.c", "f1").await;
 
-    // flow_key: f1 in a.b and in a.b.c (the flow key is compared with the
-    // namespace scope, not instead of it).
+    // flow_key: f1 in a.b ONLY. With a flow key the namespace matches
+    // exactly, as Kestra's (`AbstractJdbcLogDataStore.java:405-413`):
+    // a.b.c's own f1 keeps its lines.
     let mut q = query(ws, &["a.b"]);
     q.flow_key = Some("f1".to_string());
-    assert_eq!(fx.purge(&q).await, 30);
+    assert_eq!(fx.purge(&q).await, 15);
     assert_eq!(
         (
             count(p, f1).await,
             count(p, f2).await,
             count(p, f1_child).await
         ),
-        (0, 15, 0)
+        (0, 15, 15),
+        "a.b.c/f1 is not reached by a.b's flowId f1"
     );
+    // The child's flow is reached by naming the child namespace itself.
+    let mut q = query(ws, &["a.b.c"]);
+    q.flow_key = Some("f1".to_string());
+    assert_eq!(fx.purge(&q).await, 15);
+    assert_eq!(count(p, f1_child).await, 0);
 
     // levels: INFO and ERROR only, on f2.
     let mut q = query(ws, &["a.b"]);
@@ -299,9 +306,11 @@ async fn flow_execution_and_levels_each_narrow_the_delete() {
     assert_eq!(count(p, z).await, 15);
 }
 
-/// `[start, end)`: a line at exactly `start` goes, one at exactly `end` stays.
+/// `[start, end]`, both inclusive as Kestra's (`greaterOrEqual`,
+/// `lessOrEqual`): a line at exactly `start` goes, and so does one at
+/// exactly `end`.
 #[tokio::test]
-async fn the_window_is_start_inclusive_and_end_exclusive() {
+async fn the_window_is_inclusive_at_both_ends() {
     let Some(fx) = fx().await else { return };
     let ws = fx.workspace().await;
     let p = fx.pool();
@@ -309,20 +318,18 @@ async fn the_window_is_start_inclusive_and_end_exclusive() {
     let mut q = query(ws, &["a.b"]);
     q.start = Some(base() + ChronoDuration::hours(1));
     q.end = base() + ChronoDuration::hours(2);
-    assert_eq!(fx.purge(&q).await, 5, "only the +1h lines");
-    let ts: Vec<DateTime<Utc>> = remaining(p, ws).await.into_iter().map(|r| r.2).collect();
-    assert_eq!(ts.len(), 10);
-    assert!(ts.contains(&base()), "before start: stays");
-    assert!(
-        ts.contains(&(base() + ChronoDuration::hours(2))),
-        "at exactly end: stays"
+    assert_eq!(
+        fx.purge(&q).await,
+        10,
+        "the +1h (start) and +2h (end) lines"
     );
-    assert!(!ts.contains(&(base() + ChronoDuration::hours(1))));
-    // No start: everything before end.
+    let ts: Vec<DateTime<Utc>> = remaining(p, ws).await.into_iter().map(|r| r.2).collect();
+    assert_eq!(ts, vec![base(); 5], "only the lines before start stay");
+    // No start: everything up to and including end.
     let mut q = query(ws, &["a.b"]);
-    q.end = base() + ChronoDuration::hours(2);
-    assert_eq!(fx.purge(&q).await, 5, "the base() lines");
-    assert_eq!(count(p, ex).await, 5);
+    q.end = base();
+    assert_eq!(fx.purge(&q).await, 5, "the base() lines, at exactly end");
+    assert_eq!(count(p, ex).await, 0);
 }
 
 /// `batch = Some(2)` deletes exactly what one statement deletes, and returns

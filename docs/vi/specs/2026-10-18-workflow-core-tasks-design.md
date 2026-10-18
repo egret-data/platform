@@ -67,8 +67,12 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
   - Có ghi `namespace` thì namespace đó phải qua được `storage::nsfiles::access::authorize` với `Access::Purge`, qua một resource mang tên log, để lời từ chối ghi "may not purge logs of namespace …". Không qua thì run `FAILED` với message đó và không xoá gì.
   - Namespace con nghĩa là khớp theo ranh giới dấu chấm: `a.b` với tới `a.b.c` nhưng không với tới `a.bc`.
 - **Lệnh xoá:**
-  - Xoá các dòng trong `workflow.task_logs` join với `workflow.executions` theo `execution_id`, lọc theo workspace và phạm vi namespace, cộng thêm `flow_id`, `execution_id`, `level IN (…)` và `ts` trong `[startDate, endDate)`. Mỗi bộ lọc chỉ áp khi thuộc tính tương ứng được ghi.
-  - Có `batchSize` thì xoá theo từng lô tối đa bấy nhiêu dòng, mỗi lô một câu lệnh, cho tới khi một lô xoá ít hơn. Không có `batchSize` thì xoá bằng một câu lệnh.
+  - Xoá các dòng trong `workflow.task_logs` join với `workflow.executions` theo `execution_id`, lọc theo workspace và phạm vi namespace, cộng thêm `flow_id`, `execution_id`, `level IN (…)` và `ts` trong `[startDate, endDate]`. Mỗi bộ lọc chỉ áp khi thuộc tính tương ứng được ghi.
+  - **(2026-10-18, C1 Task 4 review)** Ba chỗ sửa, chỗ nào cũng theo quy tắc của Kestra (`AbstractJdbcLogDataStore.buildDeleteCondition`):
+    - Khoảng thời gian là `[startDate, endDate]`: cả hai đầu đều tính (`ts <= endDate`, tức `lessOrEqual` của Kestra). Trước đây ghi là `[startDate, endDate)`.
+    - Có `flowId` thì namespace phải khớp đúng. Chỉ khi không có `flowId` mới với tới các namespace con.
+    - Namespace của flow được đọc từ dòng execution (`workflow.executions.namespace`, theo execution id và workspace), không đọc từ render scope, nên task chạy được cả trên deployment không có `[storage]`.
+  - Có `batchSize` thì xoá theo từng lô tối đa bấy nhiêu dòng, mỗi lô một câu lệnh, cho tới khi một lô xoá ít hơn. Không có `batchSize` thì xoá bằng một câu lệnh. Một `endDate` ở tương lai trên một namespace đang bận có thể giữ vòng lặp chạy tiếp trong lúc dòng mới vẫn tới; vòng lặp của Kestra cũng như vậy.
   - Không ghi audit record riêng; bản thân run và các dòng log của nó đã là bản ghi.
 - **Log ngoài execution:** `purgeNonExecutionLogs` không xoá gì (D2). Với `purgeExecutionLogs: false` thì không xoá gì cả.
 - **Output:** `{count, executionLogsCount, nonExecutionLogsCount}`, với `nonExecutionLogsCount = 0`.

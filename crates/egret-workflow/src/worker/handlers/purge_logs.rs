@@ -15,7 +15,12 @@
 //!   to an execution, so `purgeNonExecutionLogs` deletes nothing and
 //!   `nonExecutionLogsCount` is always 0.
 //! - **`batchSize`** applies on Postgres (Kestra: MySQL only).
-//! - **The window** is `[startDate, endDate)` (spec §2.3).
+//! - **The window** is `[startDate, endDate]`, both inclusive, as Kestra's
+//!   (spec §2.3, amended 2026-10-18). With `flowId` the namespace matches
+//!   exactly (Kestra's rule); its children are reached only without one.
+//! - **The flow's namespace is read from the execution row**
+//!   (`workflow.executions.namespace`, by id and workspace), never from the
+//!   render scope, so the task runs whether or not `[storage]` is configured.
 
 use egret_core::Result;
 use serde::Deserialize;
@@ -24,7 +29,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::super::{Handlers, Outcome, TaskHandler, TaskInput};
-use super::namespace::flow_namespace;
 use crate::logs::{LogLevel, LogRepo, PurgeQuery};
 use crate::models::Property;
 use crate::runners::RenderContext;
@@ -64,14 +68,33 @@ pub fn register(handlers: &mut Handlers, pool: PgPool) {
 
 #[derive(Debug)]
 pub struct PurgeLogs {
+    pool: PgPool,
     repo: LogRepo,
 }
 
 impl PurgeLogs {
     pub fn new(pool: PgPool) -> Self {
         Self {
-            repo: LogRepo::new(pool),
+            repo: LogRepo::new(pool.clone()),
+            pool,
         }
+    }
+
+    /// The running execution's namespace, from its row (by id AND
+    /// workspace); `None` when there is no such execution.
+    async fn own_namespace(&self, task: &TaskInput) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT namespace FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(task.execution_id)
+        .bind(task.workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            egret_core::Error::Internal(anyhow::anyhow!(
+                "{TYPE_ID}: the database is unavailable: {e}"
+            ))
+        })
     }
 }
 
@@ -189,7 +212,8 @@ impl TaskHandler for PurgeLogs {
             Ok(s) => s,
             Err(e) => return Ok(Outcome::failed_with(format!("{TYPE_ID}: {e}"))),
         };
-        let Some(own) = flow_namespace(task) else {
+        // A database failure is infrastructure (`Err`, re-claimed).
+        let Some(own) = self.own_namespace(task).await? else {
             return Ok(Outcome::failed_with(
                 "this run is not a task run of a flow's execution, so it has no namespace to \
                  purge logs from",
@@ -356,28 +380,23 @@ mod tests {
         }
     }
 
-    /// No flow namespace (no render scope): FAILED, naming why, before any
-    /// database work -- the pool is never connected.
+    /// The namespace comes from the execution row, so a database that cannot
+    /// be reached is infrastructure: `Err` (re-claimed), never a FAILED run
+    /// and never a delete. (The missing-row FAILED case is a DB test,
+    /// `tests/purge_logs.rs`.)
     #[tokio::test]
-    async fn a_run_outside_a_flow_fails() {
+    async fn an_unreachable_database_is_err_not_a_failed_run() {
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(1))
             .connect_lazy("postgres://nobody@127.0.0.1:1/none")
             .unwrap();
-        let out = PurgeLogs::new(pool)
+        let err = PurgeLogs::new(pool)
             .run(&super::super::testing::input(
                 TYPE_ID,
                 serde_json::json!({"endDate": END}),
             ))
             .await
-            .unwrap();
-        assert_eq!(out.state, crate::executor::RunState::Failed);
-        assert!(
-            out.message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("no namespace to purge logs from"),
-            "{:?}",
-            out.message
-        );
+            .unwrap_err();
+        assert!(err.to_string().contains("database is unavailable"), "{err}");
     }
 }

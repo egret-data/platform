@@ -65,8 +65,12 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
   - With a `namespace`, the namespace must pass `storage::nsfiles::access::authorize` with `Access::Purge`, through a resource that names logs, so the refusal reads "may not purge logs of namespace …". Otherwise the run is `FAILED` with that message, and nothing is deleted.
   - A child namespace means a match on a dot boundary: `a.b` reaches `a.b.c` but not `a.bc`.
 - **The delete:**
-  - It removes rows from `workflow.task_logs` joined to `workflow.executions` on `execution_id`, filtered by workspace and namespace scope, plus `flow_id`, `execution_id`, `level IN (…)` and `ts` in `[startDate, endDate)`, each filter only when the property is set.
-  - With `batchSize`, the work is batches of at most that many rows, each its own statement, until a batch deletes fewer. Without it, the delete is one statement.
+  - It removes rows from `workflow.task_logs` joined to `workflow.executions` on `execution_id`, filtered by workspace and namespace scope, plus `flow_id`, `execution_id`, `level IN (…)` and `ts` in `[startDate, endDate]`, each filter only when the property is set.
+  - **(2026-10-18, C1 Task 4 review)** Three corrections, each Kestra's rule (`AbstractJdbcLogDataStore.buildDeleteCondition`):
+    - The window is `[startDate, endDate]`: both ends are inclusive (`ts <= endDate`, Kestra's `lessOrEqual`). It used to read `[startDate, endDate)`.
+    - With `flowId`, the namespace matches exactly. The child namespaces are reached only without `flowId`.
+    - The flow's own namespace is read from the execution row (`workflow.executions.namespace`, by execution id and workspace), not from the render scope, so the task runs on a deployment with no `[storage]` too.
+  - With `batchSize`, the work is batches of at most that many rows, each its own statement, until a batch deletes fewer. Without it, the delete is one statement. A future `endDate` over a busy namespace can keep the loop going while new lines arrive; Kestra's loop has the same property.
   - It writes no audit record of its own. The run and its log lines are the record.
 - **Non-execution logs:** `purgeNonExecutionLogs` deletes nothing (D2). With `purgeExecutionLogs: false`, nothing is deleted.
 - **Outputs:** `{count, executionLogsCount, nonExecutionLogsCount}`, with `nonExecutionLogsCount = 0`.

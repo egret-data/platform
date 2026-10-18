@@ -103,7 +103,8 @@ pub struct PurgeQuery {
     pub workspace_id: Uuid,
     /// Each grant's namespace; a row matches when its execution's namespace is
     /// one of these or a dot-child of one (`ns = g OR ns LIKE g || '.%'` with
-    /// `g` escaped for LIKE: `_` and `%` and `\`). Empty matches nothing.
+    /// `g` escaped for LIKE: `_` and `%` and `\`). With `flow_key` set the
+    /// match is exact (`ns = g`), as Kestra's. Empty matches nothing.
     pub namespaces: Vec<String>,
     pub flow_key: Option<String>,
     pub execution_id: Option<Uuid>,
@@ -116,7 +117,10 @@ pub struct PurgeQuery {
 
 /// The lines [`LogRepo::purge`] matches, `l` joined to its execution `e`.
 /// One macro so the single statement and the batch's subquery cannot
-/// disagree; `concat!` keeps both `&'static str`. The LIKE pattern is
+/// disagree; `concat!` keeps both `&'static str`. With a flow key (`$3`) the
+/// namespace matches exactly, children only without one -- Kestra's rule
+/// (`AbstractJdbcLogDataStore.buildDeleteCondition`). The window is
+/// `[start, end]`, Kestra's `greaterOrEqual` / `lessOrEqual`. The LIKE pattern is
 /// escaped in SQL (`\` first, then `%` and `_`), so a grant's text is never
 /// a pattern: `a_b` does not reach `axb.c` (the `sql-like-underscore`
 /// lesson). Both `e.workspace_id` and `l.workspace_id` are bound to `$1`.
@@ -127,14 +131,14 @@ macro_rules! purge_predicate {
            AND l.workspace_id = $1 \
            AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS g(ns) \
                         WHERE e.namespace = g.ns \
-                           OR e.namespace LIKE \
+                           OR ($3::text IS NULL AND e.namespace LIKE \
                               replace(replace(replace(g.ns, '\\', '\\\\'), '%', '\\%'), '_', '\\_') \
-                              || '.%' ESCAPE '\\') \
+                              || '.%' ESCAPE '\\')) \
            AND ($3::text IS NULL OR e.flow_key = $3) \
            AND ($4::uuid IS NULL OR l.execution_id = $4) \
            AND ($5::int2[] IS NULL OR l.level = ANY($5::int2[])) \
            AND ($6::timestamptz IS NULL OR l.ts >= $6) \
-           AND l.ts < $7"
+           AND l.ts <= $7"
     };
 }
 
@@ -356,11 +360,15 @@ impl LogRepo {
 
     /// `PurgeLogs`' delete (group C spec §2.3): the lines of `q.workspace_id`'s
     /// executions in `q.namespaces`' scope, narrowed by every filter that is
-    /// set, with `ts` in `[start, end)`. Returns how many rows went.
+    /// set, with `ts` in `[start, end]` (Kestra's bounds, both inclusive).
+    /// With `q.flow_key` the namespace matches exactly; without it, children
+    /// too. Returns how many rows went.
     ///
     /// With `q.batch = Some(n)` the work is statements of at most `n` rows
     /// each, repeated until one deletes fewer than `n`; a failure part-way
-    /// keeps what the earlier batches deleted. `n < 1` is refused with
+    /// keeps what the earlier batches deleted. An `end` in the future over a
+    /// busy namespace can keep the loop going while new lines arrive, each
+    /// batch finding `n` more; Kestra's MySQL loop has the same property. `n < 1` is refused with
     /// [`Error::InvalidInput`] before anything is deleted (`LIMIT 0` would
     /// never end the loop).
     ///
