@@ -52,8 +52,14 @@ function Target({ e }: { e: ChangeEntry }) {
 export function RecentChanges() {
   const narrow = useIsNarrowViewport();
   const first = useControlPlaneGovernanceChanges({ limit: PAGE }, { query: { retry: false } });
-  const [older, setOlder] = useState<ChangeEntry[]>([]);
-  const [cursor, setCursor] = useState<string | null | undefined>(undefined);
+  // Pages appended by "Show older", tagged with the first page they follow.
+  // When the first page is fetched again (a refetch, a retry), they belong to
+  // a list that no longer exists and are dropped (review M8).
+  const [appended, setAppended] = useState<{ for: number; entries: ChangeEntry[]; cursor: string | null }>({
+    for: 0,
+    entries: [],
+    cursor: null,
+  });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderError, setOlderError] = useState<string | null>(null);
 
@@ -72,9 +78,12 @@ export function RecentChanges() {
   const page = first.data?.status === 200 ? first.data.data : undefined;
   if (first.isLoading || !page) return <ListSkeleton cols={3} rows={4} />;
 
+  const current = appended.for === first.dataUpdatedAt;
+  const older = current ? appended.entries : [];
   const seen = new Set<number>();
   const entries = [...page.entries, ...older].filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
-  const next = cursor === undefined ? page.nextCursor : cursor;
+  const next = current ? appended.cursor : page.nextCursor;
+  const forPage = first.dataUpdatedAt;
 
   async function showOlder() {
     if (!next) return;
@@ -84,8 +93,11 @@ export function RecentChanges() {
       // FE-DATA-2 exception: a keyset cursor across pages, appended in place.
       const r = await controlPlaneGovernanceChanges({ limit: PAGE, cursor: next });
       if (r.status === 200) {
-        setOlder((o) => [...o, ...r.data.entries]);
-        setCursor(r.data.nextCursor ?? null);
+        setAppended((a) => ({
+          for: forPage,
+          entries: [...(a.for === forPage ? a.entries : []), ...r.data.entries],
+          cursor: r.data.nextCursor ?? null,
+        }));
       }
     } catch (e) {
       setOlderError((e as Error).message || "Could not load older changes.");

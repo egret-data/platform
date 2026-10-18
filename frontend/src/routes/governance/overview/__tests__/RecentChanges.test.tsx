@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { focusManager } from "@tanstack/react-query";
 import type { AttentionResponse, ChangeEntry, ChangesPage } from "@/api/generated/model";
 import { timeAgo } from "@/lib/relativeTime";
 import { openOverview, serve } from "@/routes/governance/overview/__tests__/harness";
@@ -103,6 +104,42 @@ describe("Recent changes", () => {
     const link = within(await table()).getByRole("link", { name: "View" });
     expect(link.className).toContain("focus-visible:ring-2");
     expect(link.className).toContain("focus-visible:ring-ring");
+  });
+
+  it("keeps the loaded changes and says why when older ones fail to load (review M7)", async () => {
+    serve(attentionOk, (q) =>
+      q.get("cursor") === "c1"
+        ? { status: 500, body: { error: "older changes failed" } }
+        : { status: 200, body: page([entry(13)], "c1") },
+    );
+    openOverview();
+    await table();
+    await userEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("older changes failed")).toBeInTheDocument();
+    expect(screen.getByText("Ana created a grant #13")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show older" })).toBeEnabled();
+  });
+
+  it("drops appended pages when the first page is fetched again (review M8)", async () => {
+    let first = page(Array.from({ length: 2 }, (_, i) => entry(100 - i)), "c1");
+    serve(attentionOk, (q) =>
+      q.get("cursor") === "c1"
+        ? { status: 200, body: page([entry(50)], null) }
+        : { status: 200, body: first },
+    );
+    openOverview();
+    await table();
+    await userEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("Ana created a grant #50")).toBeInTheDocument();
+    // A new change lands; the first page is fetched again (window focus).
+    first = page([entry(101), entry(100), entry(99)], "c2");
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+    expect(await screen.findByText("Ana created a grant #101")).toBeInTheDocument();
+    // The appended page belonged to the old first page: it is gone, and Show
+    // older follows the new page's cursor.
+    expect(screen.queryByText("Ana created a grant #50")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show older" })).toBeInTheDocument();
   });
 
   it("offers no Show older when there is no cursor", async () => {
