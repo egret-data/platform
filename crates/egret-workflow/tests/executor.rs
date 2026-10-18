@@ -1466,10 +1466,16 @@ async fn egret_side() -> &'static Side {
              is dropped when the process exits. A shared database would not flake under a \
              concurrent run — it would lose rows that run had written."
         );
-        sqlx::query("TRUNCATE workflow.executions CASCADE")
+        // Debt D7 (2026-10-19): `flows` too. A `get_or_init` whose init panics
+        // stores nothing, so every later caller runs this again on the SAME clone;
+        // without emptying `flows` each one failed "workflow.flows must be empty,
+        // left 335" instead of the census assert that really failed (the flake of
+        // a7270435: 335 = one pass over the 345-flow corpus). `CASCADE` empties the
+        // tables that reference `flows`, executions included.
+        sqlx::query("TRUNCATE workflow.flows, workflow.executions CASCADE")
             .execute(&db.pool)
             .await
-            .expect("empty the execution tables");
+            .expect("empty the flow and execution tables");
         let (ws, user) = common::seed_workspace(&db).await;
         // W6 Task 1: the corpus goes into `workflow.flows` BEFORE any entry
         // runs, because ten corpus flows name a target that sorts later than
