@@ -172,28 +172,149 @@ pub(crate) async fn impersonation_target_ok(
             "the impersonation target {username:?} is reserved: egret runs as it on the engine"
         )));
     }
-    let is_admin: bool = sqlx::query_scalar(
-        "SELECT EXISTS ( \
-           SELECT 1 FROM policy.authz_policies p, \
-                  jsonb_array_elements(COALESCE(p.policy_jsonb->'policyItems', '[]'::jsonb)) i, \
-                  jsonb_array_elements_text(COALESCE(i->'users', '[]'::jsonb)) u \
-            WHERE p.service_id = $1 \
-              AND p.enabled \
-              AND p.name LIKE 'egret-admin - %' \
-              AND lower(u) = lower($2))",
-    )
-    .bind(service_id)
-    .bind(&username)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
-    if is_admin {
+    if let Some(held) = near_root_held_by(conn, service_id, target_user_id, &username).await? {
         return Ok(Err(format!(
-            "the impersonation target {username:?} is an engine admin of this profile \
-             (named in an `egret-admin - …` policy): impersonating them would hand out admin"
+            "the impersonation target {username:?} holds {held}: impersonating them would hand \
+             it to the grantee, making them an engine admin"
         )));
     }
     Ok(Ok(username))
+}
+
+/// Whether a resource-key value is a pattern that names more than one user:
+/// a Ranger wildcard. `{USER}` is not one — it is the requester themself.
+fn is_pattern(value: &str) -> bool {
+    value.contains('*') || value.contains('?')
+}
+
+/// The first not-grantable (near-root) key/access pair the user holds on
+/// profile `service_id` (security review I1), described as `` `key access`
+/// through policy "name" ``, or `None`.
+///
+/// **A scan of the profile's policies, not an evaluation.** Evaluating the
+/// target against the served artifact with `egret-ranger-eval` would be the
+/// sharper instrument, but every delegating Trino profile carries the
+/// self-impersonation baseline (`trinouser = {USER}`), which the evaluator
+/// refuses (spec C9): every Trino target would come back Undecidable and so be
+/// refused, which removes the capability. So this reads every ENABLED access
+/// policy of the profile that is not a compiled engine grant (`perm-engine-`;
+/// operator, infra and other compiler policies all count) and refuses when an
+/// allow item names the user — by username (any case), as `{USER}`, through a
+/// group they belong to, or through `public` — on a resource map holding a
+/// not-grantable key with that access (Trino's `all` counts as every access).
+/// For `trinouser`/`user` only a wildcard value counts: one named user is the
+/// grantable capability, and `{USER}` is the requester themself. Deny items and
+/// exceptions are ignored, so it errs toward refusing.
+pub(crate) async fn near_root_held_by(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    user_id: Uuid,
+    username: &str,
+) -> Result<Option<String>, CompileError> {
+    use crate::engine_capabilities::NOT_GRANTABLE;
+    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let service_type: Option<String> =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
+            .bind(service_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db)?;
+    let engine = match service_type.as_deref() {
+        Some("trino") => EngineType::Trino,
+        Some("starrocks") => EngineType::StarRocks,
+        _ => return Ok(None),
+    };
+    let mut groups: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+          WHERE ug.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    groups.push(egret_perm::PUBLIC_GROUP.to_string());
+    let policies: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies \
+          WHERE service_id = $1 AND enabled AND name NOT LIKE 'perm-engine-%' \
+          ORDER BY name, id",
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    let rows: Vec<(&str, Option<&str>)> = NOT_GRANTABLE
+        .iter()
+        .filter(|n| n.engine == engine && !n.everyone_holds)
+        .map(|n| match n.what.split_once(' ') {
+            Some((k, a)) => (k, Some(a)),
+            None => (n.what, None),
+        })
+        .collect();
+    let strs = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (name, body) in policies {
+        if body["policyType"].as_i64().unwrap_or(0) != 0 {
+            continue;
+        }
+        let mut maps: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();
+        if let Some(m) = body["resources"].as_object() {
+            maps.push(m);
+        }
+        for extra in body["additionalResources"].as_array().into_iter().flatten() {
+            if let Some(m) = extra.as_object() {
+                maps.push(m);
+            }
+        }
+        for item in body["policyItems"].as_array().into_iter().flatten() {
+            let names_user = strs(&item["users"])
+                .iter()
+                .any(|u| u.eq_ignore_ascii_case(username) || u == "{USER}");
+            let names_group = strs(&item["groups"]).iter().any(|g| groups.contains(g));
+            if !names_user && !names_group {
+                continue;
+            }
+            let accesses: Vec<String> = item["accesses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|a| a["isAllowed"].as_bool() != Some(false))
+                .filter_map(|a| a["type"].as_str().map(str::to_string))
+                .collect();
+            let every_access = engine == EngineType::Trino && accesses.iter().any(|a| a == "all");
+            for map in &maps {
+                for (key, access) in &rows {
+                    let Some(level) = map.get(*key) else {
+                        continue;
+                    };
+                    if matches!(*key, "trinouser" | "user") {
+                        let excludes = level["isExcludes"].as_bool() == Some(true);
+                        if !excludes && !strs(&level["values"]).iter().any(|v| is_pattern(v)) {
+                            continue;
+                        }
+                    }
+                    let held = match access {
+                        None => !accesses.is_empty(),
+                        Some(a) => every_access || accesses.iter().any(|x| x == a),
+                    };
+                    if held {
+                        let pair = match access {
+                            Some(a) => format!("{key} {a}"),
+                            None => (*key).to_string(),
+                        };
+                        return Ok(Some(format!("`{pair}` through policy {name:?}")));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

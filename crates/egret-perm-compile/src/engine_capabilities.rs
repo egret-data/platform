@@ -78,6 +78,10 @@ pub struct NotGrantable {
     /// A resource key, or `"<key> <access>"`.
     pub what: &'static str,
     pub why: &'static str,
+    /// Whether every user already holds it through a seeded baseline (Trino's
+    /// `queryid execute`, spec C1). A target holding any OTHER row cannot be
+    /// impersonated (security review I1): impersonating them would hand it out.
+    pub everyone_holds: bool,
 }
 
 use ValueKind::{Catalog, FunctionSignature, Identifier, Username};
@@ -180,62 +184,82 @@ pub const NOT_GRANTABLE: &[NotGrantable] = &[
         why: "with a wildcard or pattern (any user): not grantable, it would let the grantee \
               become anyone, admins included. Impersonating ONE named user is the grantable \
               `trino.impersonate_user` capability",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "role",
         why: "managing Trino roles is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "sysinfo write_sysinfo",
         why: "writing system information is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "queryid execute",
         why: "this is the right to run any query at all, which every user already has; \
               viewing and killing another user's queries is impersonating them",
+        everyone_holds: true,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "sysinfo read_sysinfo",
         why: NOT_REQUESTED,
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "schemafunction create",
         why: NOT_REQUESTED,
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "schemafunction drop",
         why: NOT_REQUESTED,
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::Trino,
         what: "schemafunction show",
         why: NOT_REQUESTED,
+        everyone_holds: false,
+    },
+    NotGrantable {
+        engine: EngineType::StarRocks,
+        what: "user impersonate",
+        why: "with a wildcard or pattern (any user): not grantable, it would let the grantee \
+              become anyone, root included. Impersonating ONE named user is the grantable \
+              `starrocks.impersonate_user` capability",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system node",
         why: "adding and removing nodes is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system plugin",
         why: "installing plugins runs code on the engine; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system file",
         why: "managing files on the engine is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system grant",
         why: "granting privileges is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
@@ -243,52 +267,62 @@ pub const NOT_GRANTABLE: &[NotGrantable] = &[
         why: "near-root: it gates engine configuration, running scripts on the frontend, \
               fail points, skipping committed transactions and killing other users' \
               connections",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system repository",
         why: "managing backup repositories is near-root; it stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system create resource",
         why: "creating engine-wide objects stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system create resource group",
         why: "creating engine-wide objects stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system create external catalog",
         why: "creating engine-wide objects stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system create global function",
         why: "creating engine-wide objects stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "system create storage volume",
         why: "creating engine-wide objects stays with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "storage_volume",
         why: "storage volumes are engine infrastructure; they stay with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "resource",
         why: "external resources are engine infrastructure; they stay with engine admins",
+        everyone_holds: false,
     },
     NotGrantable {
         engine: EngineType::StarRocks,
         what: "resource_group",
         why: "a resource group has no usage privilege: it is checked only to alter or drop \
               it, which stays with engine admins",
+        everyone_holds: false,
     },
 ];
 

@@ -964,3 +964,114 @@ async fn an_impersonation_write_takes_the_targets_user_lock_before_the_group_loc
     let (status, resp) = h.await.expect("join");
     assert_eq!(status, StatusCode::CREATED, "{resp}");
 }
+
+/// A hand-written policy, as an operator writes it in the editor.
+async fn hand_written(
+    pool: &PgPool,
+    profile: i64,
+    name: &str,
+    resources: Value,
+    users: Value,
+    groups: Value,
+    access: &str,
+) {
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) VALUES ($1, $2, $3)",
+    )
+    .bind(profile)
+    .bind(name)
+    .bind(json!({
+        "name": name, "policyType": 0, "isEnabled": true, "resources": resources,
+        "policyItems": [{"users": users, "groups": groups, "roles": [],
+                         "accesses": [{"type": access, "isAllowed": true}]}],
+    }))
+    .execute(pool)
+    .await
+    .expect("hand-written policy");
+}
+
+/// Security fix I1: a target who holds a not-grantable (near-root) permission
+/// on the profile through ANY policy that is not an engine grant's — an
+/// operator's hand-written one included, and through a group — cannot be
+/// impersonated: impersonating them would hand that permission out.
+#[tokio::test]
+async fn a_target_holding_a_near_root_permission_by_any_policy_is_refused() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let sr = bound(&e, "starrocks").await;
+    let trino = bound(&e, "trino").await;
+    let (_, grantee) = person(pool).await;
+    let (_, ops) = person(pool).await;
+    let (ops2_id, ops2) = person(pool).await;
+    let (_, plain) = person(pool).await;
+    let group = unique("egrt-ops-");
+    let gid: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group)
+            .fetch_one(pool)
+            .await
+            .expect("group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(ops2_id)
+        .bind(gid)
+        .execute(pool)
+        .await
+        .expect("member");
+    hand_written(
+        pool,
+        sr.profile,
+        "ops can operate",
+        json!({"system": {"values": ["*"]}}),
+        json!([ops]),
+        json!([]),
+        "operate",
+    )
+    .await;
+    hand_written(
+        pool,
+        trino.profile,
+        "ops group becomes anyone",
+        json!({"trinouser": {"values": ["*"]}}),
+        json!([]),
+        json!([group]),
+        "impersonate",
+    )
+    .await;
+    let user = json!([{"kind": "user", "ref": grantee}]);
+    let post = |eng: Uuid, cap: &str, target: &str| {
+        let app = e.app.clone();
+        let token = e.writer.clone();
+        let body = json!({"capability": cap, "values": [target], "principals": user});
+        async move {
+            call_app(
+                app,
+                "POST",
+                format!("/perm/engines/{eng}/grants"),
+                token,
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &ops).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "system operate holder: {body}"
+    );
+    assert!(
+        body.to_string().contains("ops can operate"),
+        "names the policy: {body}"
+    );
+    let (status, body) = post(trino.engine, "trino.impersonate_user", &ops2).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "trinouser * through a group: {body}"
+    );
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &plain).await;
+    assert_eq!(status, StatusCode::CREATED, "a plain user: {body}");
+    let (status, body) = post(trino.engine, "trino.impersonate_user", &plain).await;
+    assert_eq!(status, StatusCode::CREATED, "a plain user: {body}");
+}

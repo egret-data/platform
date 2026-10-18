@@ -588,3 +588,56 @@ async fn a_target_whose_username_is_root_is_skipped() {
     assert!(skip.reason.contains("reserved"), "{}", skip.reason);
     assert!(compiled(pool, f.sr_profile, id).await.is_none());
 }
+
+/// Security fix I1, the compile half: a target who LATER gains a near-root
+/// permission through an operator's hand-written policy is skipped.
+#[tokio::test]
+async fn a_target_who_gains_a_near_root_permission_is_skipped() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let pool = &f.db.pool;
+    let (_ua, ua) = person(pool, "ua").await;
+    let (uc_id, uc) = person(pool, "uc").await;
+    let id = create(
+        pool,
+        f.sr_engine,
+        "starrocks.impersonate_user",
+        &[],
+        Some(uc_id),
+        vec![p(PrincipalKind::User, &ua)],
+    )
+    .await;
+    recompile_service(&f.perm, &f.policy, f.sr_profile)
+        .await
+        .expect("recompile");
+    assert!(compiled(pool, f.sr_profile, id).await.is_some());
+
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) VALUES ($1, $2, $3)",
+    )
+    .bind(f.sr_profile)
+    .bind("uc may drop resource groups")
+    .bind(serde_json::json!({
+        "name": "uc may drop resource groups", "policyType": 0, "isEnabled": true,
+        "resources": {"resource_group": {"values": ["rg1"]}},
+        "policyItems": [{"users": [uc], "groups": [], "roles": [],
+                         "accesses": [{"type": "drop", "isAllowed": true}]}],
+    }))
+    .execute(pool)
+    .await
+    .expect("hand-written policy");
+    let summary = recompile_service(&f.perm, &f.policy, f.sr_profile)
+        .await
+        .expect("recompile");
+    let skip = summary
+        .skipped
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap_or_else(|| panic!("skipped: {summary:?}"));
+    assert!(
+        skip.reason.contains("uc may drop resource groups"),
+        "{}",
+        skip.reason
+    );
+    assert!(compiled(pool, f.sr_profile, id).await.is_none(), "reaped");
+}
