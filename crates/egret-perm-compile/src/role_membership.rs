@@ -26,7 +26,9 @@
 //!
 //! The enumeration happens in two places — a clearance's `denyExceptions`
 //! ([`crate::clearance`]) and a `role` principal in a grant
-//! ([`crate::members`]) — and both read the same `role_usernames`. So there is
+//! ([`crate::members`]) — and both read the same `role_usernames`, which mints
+//! a holder's missing username (2026-10-18 design R5), so the recompile a
+//! grant triggers names a holder who never used an engine. So there is
 //! ONE affected-service function,
 //! [`crate::affected_services_for_role_membership`], which returns the UNION of
 //! both consumers' arms. Two triggers over one enumeration is two chances for

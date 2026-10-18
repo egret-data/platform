@@ -3,8 +3,8 @@
 //! are exactly the usernames [`crate::members::expand_enumerated_principals`]
 //! emits for a grant naming it.
 //!
-//! The one place the two differ by design is a group or workspace member with
-//! no username: the compile MINTS one and names them, while `standsFor` says
+//! The one place the two differ by design is a group or workspace member, or
+//! (since the 2026-10-18 design R5) a role holder, with no username: the compile MINTS one and names them, while `standsFor` says
 //! `no_username` (nobody is named until that compile runs). The test pins
 //! that difference to exactly those people.
 //!

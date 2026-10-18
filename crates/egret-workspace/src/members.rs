@@ -172,7 +172,8 @@ impl MemberRepo {
     /// `roles` is `UNIQUE (scope, name)`, so a workspace role and a platform role
     /// may share a name — and `egret_perm_compile`'s `role_usernames`, which
     /// enumerates a role's holders for a clearance's `denyExceptions` and for a
-    /// `role` grant's users, matches on `r.name` with **no scope filter**,
+    /// `role` grant's users (minting a holder's missing username since the
+    /// 2026-10-18 design R5), matches on `r.name` with **no scope filter**,
     /// deliberately (an engine read carries no workspace context on any engine, so
     /// narrowing to platform scope would DENY people Cedar clears). So granting
     /// someone the workspace role `analyst` makes them a holder of `analyst` as

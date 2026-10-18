@@ -404,8 +404,9 @@ async fn a_role_is_listed_once_per_name_with_every_scope_and_its_live_allow_hold
             .expect("workspace");
     let user = |n: &str| format!("{n}_{t}@egret.local");
     let u1 = insert_user(&e.db.pool, &user("h1"), "H1", Some(&format!("h1_{t}"))).await;
-    // A holder with no username still holds the role; the compiler does not
-    // NAME them on engines (members.rs), but they are a holder.
+    // A holder with no username still holds the role; the compiler names
+    // them on engines only once a compile mints one (members.rs), but they
+    // are a holder either way.
     let u2 = insert_user(&e.db.pool, &user("h2"), "H2", None).await;
     let denied = insert_user(&e.db.pool, &user("h3"), "H3", None).await;
     let expired = insert_user(&e.db.pool, &user("h4"), "H4", None).await;

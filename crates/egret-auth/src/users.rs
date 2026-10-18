@@ -543,11 +543,15 @@ fn slugify_localpart(email: &str) -> String {
 /// lowercases the email local-part, slugifies it and resolves collisions with a
 /// `-2`, `-3`, … suffix, so two humans whose local parts slug to the same base
 /// differ only by a suffix nothing local can predict. A re-derived slug names
-/// the WRONG person while compiling, deploying and reporting success. SP4c's
-/// clearance compiler (`egret_perm_compile::clearance`) and its role-grant
-/// expansion (`egret_perm_compile::members::role_usernames`) both go through
-/// here, on the caller's own connection, so a compile inside an open
-/// transaction sees that transaction's own writes.
+/// the WRONG person while compiling, deploying and reporting success.
+///
+/// **The role expansion no longer comes through here (2026-10-18 design
+/// R5).** `egret_perm_compile::members::role_usernames` used to, for SP4c's
+/// clearance compiler and role-grant expansion, and so left out every holder
+/// with no username yet — a window in which a deny or exclude on the role, or
+/// a clearance exception, did not cover someone who got a username later. It
+/// now reads the username in its own join to `users` and mints a missing one
+/// with [`ensure_username_via`] when it compiles.
 pub async fn usernames_via(
     conn: &mut sqlx::PgConnection,
     ids: &[Uuid],

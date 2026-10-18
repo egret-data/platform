@@ -163,16 +163,13 @@ function WorkspacesTable({ rows, through }: { rows: Membership[]; through: boole
 
 /**
  * A group's members or a role's holders. One with no username carries the
- * kind's sentence (spec §2): a group member gets a username when a grant
- * naming the group compiles; a role holder is not named on engines until
- * they have one.
+ * kind's sentence (spec §2): a group member or role holder gets a username
+ * when a grant naming the group or role compiles (role holders since the
+ * 2026-10-18 design R5, `members::role_usernames`).
  */
 function MembersTable({ rows, of, empty }: { rows: MemberRef[]; of: "group" | "role"; empty: string }) {
   if (rows.length === 0) return <Empty>{empty}</Empty>;
-  const noUsername =
-    of === "group"
-      ? "No username yet: a grant naming this group allocates one at compile"
-      : "Not named on engines until they have a username";
+  const noUsername = `No username yet: a grant naming this ${of} allocates one at compile`;
   return (
     <Table className={STACKED_TABLE}>
       <TableHeader>

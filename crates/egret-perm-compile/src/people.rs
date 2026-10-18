@@ -9,11 +9,11 @@
 //! compiled policy NAMES, and the difference is people with no
 //! `users.username`, so it is reported beside the count as `without_username`:
 //!
-//! - a role holder with no username is read but never named:
-//!   `members::role_usernames` logs and skips them, and nothing mints one;
-//! - a group member with no username is named only once a grant naming the
-//!   group is compiled, which mints the username (`members.rs`, "A member with
-//!   no username yet is MINTED"). Until then, no policy names them.
+//! a group member or role holder with no username is named only once a grant
+//! naming the group or role is compiled, which mints the username
+//! (`members.rs`, "A member with no username yet is MINTED"; for a role holder
+//! since the 2026-10-18 design R5, `members::role_usernames`). Until then, no
+//! policy names them.
 //!
 //! What this module adds is only the list itself: which users, groups and
 //! roles exist, filtered and paged.
@@ -39,7 +39,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 
-use egret_auth::users::usernames_via;
 use egret_perm::CompileError;
 
 use crate::members::{group_members_via, role_holders_via};
@@ -230,29 +229,21 @@ pub async fn list_people_via(
             // Deduplicated by user: one person holding the role at two scopes,
             // or twice at one, is one holder.
             let mut holders: BTreeMap<String, BTreeSet<Uuid>> = BTreeMap::new();
+            let mut unnamed: BTreeMap<String, BTreeSet<Uuid>> = BTreeMap::new();
             for h in role_holders_via(conn, &names).await? {
+                if h.username.is_none() {
+                    unnamed
+                        .entry(h.role_name.clone())
+                        .or_default()
+                        .insert(h.user_id);
+                }
                 holders.entry(h.role_name).or_default().insert(h.user_id);
             }
-            // The username read `members::role_usernames` names holders with:
-            // a holder absent from it is not named on any engine.
-            let ids: Vec<Uuid> = holders
-                .values()
-                .flatten()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            let named = usernames_via(conn, &ids)
-                .await
-                .map_err(|e| CompileError::Db(e.to_string()))?;
             let roles = rows
                 .into_iter()
                 .map(|(name, scopes)| ListedRole {
                     holder_count: count(holders.get(&name)),
-                    without_username: holders.get(&name).map_or(0, |s| {
-                        i64::try_from(s.iter().filter(|id| !named.contains_key(id)).count())
-                            .unwrap_or(i64::MAX)
-                    }),
+                    without_username: count(unnamed.get(&name)),
                     name,
                     scopes,
                 })
@@ -285,10 +276,10 @@ fn count(set: Option<&BTreeSet<Uuid>>) -> i64 {
 //
 // **No username, no engine identity.** The bare username is the only name an
 // engine sees (`members.rs` module doc), so for a user with none every entry
-// is `no_username`. For a group or workspace membership that is "not YET": a
-// compile of a grant naming the group or workspace mints one (`members.rs`,
-// "A member with no username yet is MINTED"); a role holder is never minted
-// (`members.rs` `role_usernames`).
+// is `no_username`. For a group, workspace or role membership that is "not
+// YET": a compile of a grant naming the group, workspace or role mints one
+// (`members.rs`, "A member with no username yet is MINTED"; a role holder since
+// the 2026-10-18 design R5, `members.rs` `role_usernames`).
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;

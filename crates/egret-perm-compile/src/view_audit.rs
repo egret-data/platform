@@ -198,7 +198,11 @@ fn path_rule_selects(index: &RuleIndex, tables: &BTreeSet<LineageTable>) -> bool
 ///
 /// Cleared for one gate means holding at least one of its `required_roles`,
 /// read through [`crate::members::role_usernames`], the same membership the
-/// clearance compiles into its deny exceptions. An empty `tags` is
+/// clearance compiles into its deny exceptions — with
+/// [`MissingUsername::Omit`](crate::members::MissingUsername::Omit), because
+/// this is served on GET routes and must not write (2026-10-18 design R5). A
+/// holder with no username yet is left out, which is exact here: `owner` is a
+/// username, so such a holder can never be it. An empty `tags` is
 /// `Some(true)`: nothing reached needs a clearance.
 ///
 /// `None` when a reached gate names only `required_groups`: no engine egret
@@ -231,7 +235,9 @@ pub async fn owner_cleared(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let members = crate::members::role_usernames(conn, &wanted).await?;
+    let members =
+        crate::members::role_usernames(conn, &wanted, crate::members::MissingUsername::Omit)
+            .await?;
     Ok(Some(gates.iter().all(|(_, roles)| {
         roles.iter().any(|r| {
             members

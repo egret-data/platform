@@ -76,10 +76,9 @@ pub struct PersonRow {
     /// holding the role is not counted; engines do not apply it). Null for a
     /// user. The same reads the compiler expands these principals with.
     pub member_count: Option<i64>,
-    /// Group or role: how many of `memberCount` have no username yet. A role
-    /// holder without one is not named on any engine. A group member without
-    /// one is named only once a grant naming the group is compiled (which
-    /// allocates it). Null for a user.
+    /// Group or role: how many of `memberCount` have no username yet. Such a
+    /// member or holder is named on engines only once a grant naming the
+    /// group or role is compiled (which allocates it). Null for a user.
     pub without_username: Option<i64>,
     /// Whether the row is a Data API service account (users only; false
     /// otherwise). Engines enforce grants on it like on any user.

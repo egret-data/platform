@@ -752,3 +752,87 @@ async fn deleting_a_clearing_role_reaps_the_ex_holders_from_deny_exceptions() {
          for everyone is the correct compilation of 'nobody is cleared': {after:#}"
     );
 }
+
+/// `users.username` for `user_id`, NULL as `None`.
+async fn stored_username(db: &Db, user_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read username")
+}
+
+/// **2026-10-18 design R5, R6.** A clearing-role holder with no username yet
+/// was left out of `denyExceptions`, so the column was refused to someone
+/// Cedar clears (`classification_forbid` reads the role, not the username)
+/// until some later recompile. The compile now mints their username and
+/// excepts them at once.
+#[tokio::test]
+async fn a_clearing_role_holder_with_no_username_is_minted_into_deny_exceptions() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+
+    let role_name = unique("clearance-mint");
+    let role_id = new_role(&db, &role_name).await;
+    let holder = new_user(&db, &format!("{}@egret.local", unique("clr-mint")), None).await;
+    grant_role(&db, holder, role_id).await;
+
+    gate(&db, tag_id, &[&role_name], &[]).await;
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("recompile");
+
+    let minted = stored_username(&db, holder)
+        .await
+        .expect("compiling the clearance must mint the clearing role holder's username");
+    let body = clearance_policy(&db, f.tag_service_id, tag_id)
+        .await
+        .expect("policy");
+    let exceptions = body["denyExceptions"].as_array().expect("denyExceptions");
+    assert_eq!(exceptions.len(), 1, "one exception item: {body:#}");
+    assert_eq!(
+        users_of(&exceptions[0]),
+        vec![minted],
+        "the holder is excepted by the username the compile minted: {body:#}"
+    );
+}
+
+/// R5's other half: `view_audit::owner_cleared` is served on GET routes, so it
+/// reads and never mints. A holder still without a username stays NULL, and
+/// the answer is what it was before — a username nobody carries is not a
+/// holder, even the one the holder WOULD be minted.
+#[tokio::test]
+async fn owner_cleared_does_not_mint_a_holders_username() {
+    let Some(db) = test_db().await else { return };
+    let (tag_id, _) = new_tag(&db).await;
+
+    let role_name = unique("clearance-audit");
+    let role_id = new_role(&db, &role_name).await;
+    let local = unique("clr-audit");
+    let holder = new_user(&db, &format!("{local}@egret.local"), None).await;
+    grant_role(&db, holder, role_id).await;
+    gate(&db, tag_id, &[&role_name], &[]).await;
+
+    let mut conn = db.pool.acquire().await.expect("conn");
+    let answer = egret_perm_compile::view_audit::owner_cleared(
+        &mut conn,
+        &local,
+        &std::collections::BTreeSet::from([tag_id]),
+    )
+    .await
+    .expect("owner_cleared");
+    drop(conn);
+
+    assert_eq!(
+        stored_username(&db, holder).await,
+        None,
+        "a GET-served audit must not write `users.username`"
+    );
+    assert_eq!(
+        answer,
+        Some(false),
+        "with no username minted, no owner name matches the holder — minting here would have \
+         answered true for {local:?}"
+    );
+}

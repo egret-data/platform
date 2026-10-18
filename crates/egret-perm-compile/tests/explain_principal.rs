@@ -369,14 +369,7 @@ async fn a_roles_holders_are_each_answered_as_explain_answers_them() {
             .fetch_one(p)
             .await
             .unwrap();
-    let mut holders = Vec::new();
-    for (n, username) in [("ra", true), ("rb", true), ("rc", true), ("rz", false)] {
-        let u = insert_user(
-            p,
-            &format!("{n}_{t}@x.local"),
-            username.then(|| format!("{n}_{t}")).as_deref(),
-        )
-        .await;
+    let hold = |u: Uuid| {
         sqlx::query(
             "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
              VALUES ('user', $1, $2, 'platform')",
@@ -384,11 +377,19 @@ async fn a_roles_holders_are_each_answered_as_explain_answers_them() {
         .bind(u)
         .bind(rid)
         .execute(p)
-        .await
-        .unwrap();
+    };
+    let mut holders = Vec::new();
+    for n in ["ra", "rb", "rc"] {
+        let u = insert_user(p, &format!("{n}_{t}@x.local"), Some(&format!("{n}_{t}"))).await;
+        hold(u).await.unwrap();
         holders.push(u);
     }
     grant_to(&e, "allow", "role", &role).await;
+    // Added after the compile: a compile mints a role holder's missing
+    // username (2026-10-18 design R5), so only a holder it never saw has none.
+    let unnamed = insert_user(p, &format!("rz_{t}@x.local"), None).await;
+    hold(unnamed).await.unwrap();
+    holders.push(unnamed);
 
     let (status, body) = explain_principal(&e, &e.reader, "role", &role).await;
     assert_eq!(status, StatusCode::OK, "{body}");

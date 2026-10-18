@@ -37,10 +37,9 @@ export interface PersonRow {
      */
   memberCount?: number | null;
   /**
-     * Group or role: how many of `memberCount` have no username yet. A role
-     * holder without one is not named on any engine. A group member without
-     * one is named only once a grant naming the group is compiled (which
-     * allocates it). Null for a user.
+     * Group or role: how many of `memberCount` have no username yet. Such a
+     * member or holder is named on engines only once a grant naming the
+     * group or role is compiled (which allocates it). Null for a user.
      * @nullable
      */
   withoutUsername?: number | null;

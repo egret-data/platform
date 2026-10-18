@@ -61,7 +61,8 @@
 //! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
 //!   A role is NOT free text: it is expanded at compile time into its holders'
 //!   usernames by `crate::members::role_usernames`, which joins `roles` by name
-//!   with no scope filter (`crates/egret-perm-compile/src/members.rs:155-162`).
+//!   with no scope filter and mints a holder's missing username (2026-10-18
+//!   design R5).
 //!   A name with no `roles` row expands to nobody — on an exclude, the same fail
 //!   open. The picker's free-text role input (`PrincipalPicker.tsx`) is a UI
 //!   shortcut, not a statement that roles are external.

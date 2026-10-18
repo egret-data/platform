@@ -1514,7 +1514,9 @@ pub async fn affected_services_for_classification(
 /// the holders at compile time in **two** places — a clearance's
 /// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
 /// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
-/// same `role_usernames`. Two triggers over one enumeration is two chances for
+/// same `role_usernames`, which mints a holder's missing username (2026-10-18
+/// design R5), so a holder is named from the compile their grant triggers, not
+/// from a later one. Two triggers over one enumeration is two chances for
 /// one of them to be forgotten, which is the shape of the defect SP4a shipped
 /// four times; so this returns the UNION and each consumer contributes its own
 /// arm below.
