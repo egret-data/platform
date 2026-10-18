@@ -9090,3 +9090,439 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// F11 Task 9: engine capability policies on the real jars.
+// ---------------------------------------------------------------------------
+
+/// One engine-capability question: the policies served, the request, and what
+/// Java must answer (`true` = allowed), so an agreement in which both sides are
+/// wrong still fails.
+struct CapCase {
+    label: String,
+    policies: Vec<Value>,
+    user: &'static str,
+    access: &'static str,
+    resource: Vec<(&'static str, String)>,
+    want_allowed: bool,
+}
+
+/// The body `compile_engine_grant` produces for `capability` on `profile`,
+/// granted to `grantee`, with Ranger's numeric `id`. Never hand-built.
+fn engine_grant_body(
+    profile: &Profile,
+    id: i64,
+    capability: &str,
+    values: &[&str],
+    target: Option<&str>,
+    grantee: &str,
+) -> Value {
+    let engine = match profile.engine {
+        EngineType::Trino => PermEngine::Trino,
+        _ => PermEngine::StarRocks,
+    };
+    let g = egret_perm::EngineGrant {
+        id: Uuid::from_u128(id as u128),
+        engine_id: Uuid::nil(),
+        capability: capability.to_string(),
+        values: values.iter().map(|v| v.to_string()).collect(),
+        target_user_id: target.map(|_| Uuid::nil()),
+        principals: egret_perm::PrincipalSet {
+            include: vec![egret_perm::Principal {
+                kind: egret_perm::PrincipalKind::User,
+                r#ref: grantee.to_string(),
+            }],
+            exclude: vec![],
+        },
+    };
+    let input = egret_perm_compile::engine_grants::compile_engine_grant(
+        &g,
+        target,
+        profile.service_name,
+        engine,
+    )
+    .expect("the engine grant compiles");
+    let mut body = access_to_ranger_json(&input);
+    body["id"] = json!(id);
+    body
+}
+
+fn trino_capability_cases(p: &Profile) -> Vec<CapCase> {
+    let imp = engine_grant_body(p, 1, "trino.impersonate_user", &[], Some("bob"), "alice");
+    let mut execute_query =
+        egret_engine_mgmt::delegator_policy::execute_query_policy(p.service_name);
+    execute_query["id"] = json!(2);
+    let sys = engine_grant_body(
+        p,
+        3,
+        "trino.set_system_session_property",
+        &["query_max_memory"],
+        None,
+        "alice",
+    );
+    let cat_prop = engine_grant_body(
+        p,
+        4,
+        "trino.set_catalog_session_property",
+        &["ice", "max_splits"],
+        None,
+        "alice",
+    );
+    let proc_ = engine_grant_body(
+        p,
+        5,
+        "trino.execute_procedure",
+        &["ice", "system", "rollback_to_snapshot"],
+        None,
+        "alice",
+    );
+    let func = engine_grant_body(
+        p,
+        6,
+        "trino.execute_function",
+        &["ice", "fns", "my_fn"],
+        None,
+        "alice",
+    );
+    let s = |v: &str| v.to_string();
+    let case = |label: &str,
+                policies: &Value,
+                user: &'static str,
+                access: &'static str,
+                resource: Vec<(&'static str, String)>,
+                want: bool| CapCase {
+        label: label.to_string(),
+        policies: vec![policies.clone()],
+        user,
+        access,
+        resource,
+        want_allowed: want,
+    };
+    vec![
+        case(
+            "trinouser grantee",
+            &imp,
+            "alice",
+            "impersonate",
+            vec![("trinouser", s("bob"))],
+            true,
+        ),
+        case(
+            "trinouser case variant",
+            &imp,
+            "alice",
+            "impersonate",
+            vec![("trinouser", s("BOB"))],
+            true,
+        ),
+        case(
+            "trinouser other target",
+            &imp,
+            "alice",
+            "impersonate",
+            vec![("trinouser", s("carol"))],
+            false,
+        ),
+        case(
+            "trinouser non-grantee",
+            &imp,
+            "carol",
+            "impersonate",
+            vec![("trinouser", s("bob"))],
+            false,
+        ),
+        case(
+            "queryid baseline (C1)",
+            &execute_query,
+            "anyone",
+            "execute",
+            vec![("queryid", s("q1"))],
+            true,
+        ),
+        case(
+            "systemproperty grantee",
+            &sys,
+            "alice",
+            "alter",
+            vec![("systemproperty", s("query_max_memory"))],
+            true,
+        ),
+        case(
+            "systemproperty non-grantee",
+            &sys,
+            "bob",
+            "alter",
+            vec![("systemproperty", s("query_max_memory"))],
+            false,
+        ),
+        case(
+            "sessionproperty grantee",
+            &cat_prop,
+            "alice",
+            "alter",
+            vec![("catalog", s("ice")), ("sessionproperty", s("max_splits"))],
+            true,
+        ),
+        case(
+            "sessionproperty non-grantee",
+            &cat_prop,
+            "bob",
+            "alter",
+            vec![("catalog", s("ice")), ("sessionproperty", s("max_splits"))],
+            false,
+        ),
+        case(
+            "procedure grantee",
+            &proc_,
+            "alice",
+            "execute",
+            vec![
+                ("catalog", s("ice")),
+                ("schema", s("system")),
+                ("procedure", s("rollback_to_snapshot")),
+            ],
+            true,
+        ),
+        case(
+            "procedure non-grantee",
+            &proc_,
+            "bob",
+            "execute",
+            vec![
+                ("catalog", s("ice")),
+                ("schema", s("system")),
+                ("procedure", s("rollback_to_snapshot")),
+            ],
+            false,
+        ),
+        case(
+            "schemafunction execute grantee (C2)",
+            &func,
+            "alice",
+            "execute",
+            vec![
+                ("catalog", s("ice")),
+                ("schema", s("fns")),
+                ("schemafunction", s("my_fn")),
+            ],
+            true,
+        ),
+        case(
+            "schemafunction execute non-grantee",
+            &func,
+            "bob",
+            "execute",
+            vec![
+                ("catalog", s("ice")),
+                ("schema", s("fns")),
+                ("schemafunction", s("my_fn")),
+            ],
+            false,
+        ),
+    ]
+}
+
+fn starrocks_capability_cases(p: &Profile) -> Vec<CapCase> {
+    let imp = engine_grant_body(
+        p,
+        11,
+        "starrocks.impersonate_user",
+        &[],
+        Some("bob"),
+        "alice",
+    );
+    let udf = engine_grant_body(
+        p,
+        12,
+        "starrocks.use_global_function",
+        &["my_udf(INT)"],
+        None,
+        "alice",
+    );
+    let blacklist = engine_grant_body(p, 13, "starrocks.manage_blacklist", &[], None, "alice");
+    // Hand-built: no catalogue entry reaches `resource_group` (C3). Pins that
+    // the key evaluates.
+    let rg = json!({
+        "id": 14, "name": "rg-alter", "service": p.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {"resource_group": {"values": ["rg1"], "isExcludes": false, "isRecursive": false}},
+        "policyItems": [{"users": ["alice"], "groups": [], "roles": [],
+                         "accesses": [{"type": "alter", "isAllowed": true}], "delegateAdmin": false}],
+    });
+    let s = |v: &str| v.to_string();
+    let case = |label: &str,
+                policies: &Value,
+                user: &'static str,
+                access: &'static str,
+                resource: Vec<(&'static str, String)>,
+                want: bool| CapCase {
+        label: label.to_string(),
+        policies: vec![policies.clone()],
+        user,
+        access,
+        resource,
+        want_allowed: want,
+    };
+    vec![
+        case(
+            "user impersonate grantee",
+            &imp,
+            "alice",
+            "impersonate",
+            vec![("user", s("bob"))],
+            true,
+        ),
+        case(
+            "user impersonate non-grantee",
+            &imp,
+            "carol",
+            "impersonate",
+            vec![("user", s("bob"))],
+            false,
+        ),
+        case(
+            "global_function grantee",
+            &udf,
+            "alice",
+            "usage",
+            vec![("global_function", s("my_udf(INT)"))],
+            true,
+        ),
+        case(
+            "global_function non-grantee",
+            &udf,
+            "bob",
+            "usage",
+            vec![("global_function", s("my_udf(INT)"))],
+            false,
+        ),
+        case(
+            "system blacklist grantee",
+            &blacklist,
+            "alice",
+            "blacklist",
+            vec![("system", s("*"))],
+            true,
+        ),
+        case(
+            "system blacklist non-grantee",
+            &blacklist,
+            "bob",
+            "blacklist",
+            vec![("system", s("*"))],
+            false,
+        ),
+        case(
+            "system operate of a blacklist grant (control)",
+            &blacklist,
+            "alice",
+            "operate",
+            vec![("system", s("*"))],
+            false,
+        ),
+        case(
+            "resource_group alter grantee (C3)",
+            &rg,
+            "alice",
+            "alter",
+            vec![("resource_group", s("rg1"))],
+            true,
+        ),
+        case(
+            "resource_group alter non-grantee",
+            &rg,
+            "bob",
+            "alter",
+            vec![("resource_group", s("rg1"))],
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn engine_capability_policies_decide_identically_on_the_real_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the engine capability differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let mut asked = 0usize;
+
+    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
+        let service_type = profile.engine.service_def_name();
+        let (def_json, def, engine) = load_engine(&profile);
+        let cases = match profile.engine {
+            EngineType::Trino => trino_capability_cases(&profile),
+            _ => starrocks_capability_cases(&profile),
+        };
+        let built: Vec<Case> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut resource = RequestResource::new();
+                for (k, v) in &c.resource {
+                    resource.insert(*k, v.clone());
+                }
+                lv_case(
+                    format!("cap-{i}"),
+                    0,
+                    mig_envelope(&profile, &def_json, &tag_def_json, c.policies.clone(), None),
+                    AccessRequest {
+                        user: c.user.to_string(),
+                        groups: BTreeSet::new(),
+                        roles: BTreeSet::new(),
+                        access_type: c.access.to_string(),
+                        resource,
+                        owner: None,
+                        resolved_tags: None,
+                    },
+                )
+            })
+            .collect();
+        let verdicts = ask_ranger(
+            &built,
+            service_type,
+            profile.ranger_version,
+            &format!("caps-{service_type}"),
+        );
+        assert_eq!(verdicts.len(), built.len(), "every case answered");
+        for ((c, case), v) in cases.iter().zip(&built).zip(&verdicts) {
+            asked += 1;
+            let at = format!("[{service_type} @ {}] {}", profile.ranger_version, c.label);
+            if !v["error"].is_null() {
+                failures.push(format!("{at}: ranger threw {}", v["error"]));
+                continue;
+            }
+            let java = v["isAllowed"].as_bool().expect("isAllowed");
+            if java != c.want_allowed {
+                failures.push(format!(
+                    "{at}: java isAllowed={java}, expected {}",
+                    c.want_allowed
+                ));
+            }
+            let set: ServicePolicySet =
+                serde_json::from_value(case.service_policies.clone()).expect("parse set");
+            let mine = evaluate(&set, &case.request, &def, &engine);
+            let rust = match &mine {
+                Decision::Allowed { .. } => Some(true),
+                Decision::Denied { .. } => Some(false),
+                Decision::Undecidable { .. } => None,
+            };
+            if rust != Some(java) {
+                failures.push(format!(
+                    "{at}: the evaluator disagrees with Java: java isAllowed={java}, rust {mine:?}"
+                ));
+            }
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!("engine capability differential: {asked} cases in {elapsed:.2} s");
+    assert_eq!(asked, 2 * 13 + 2 * 9, "every case was asked");
+    assert!(
+        elapsed > 1.0,
+        "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

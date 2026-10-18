@@ -39,6 +39,10 @@ crosscheck-prepared = []
 # integration test links ONE build of this library, and the library itself
 # stays `serde` + `serde_json` only — the discipline above is about `src/`.
 [dev-dependencies]
+# F11 Task 9: the seeded per-user baselines (`delegator_policy`) the engine
+# capability differential asks alongside the compiled engine grants. A
+# dev-dependency cycle like `egret-perm-compile`'s above.
+egret-engine-mgmt.workspace = true
 egret-perm.workspace = true
 egret-perm-compile = { workspace = true, features = ["harness"] }
 egret-policy.workspace = true
