@@ -38,7 +38,7 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 
 | # | Gói | Phạm vi | Banks | Cỡ |
 |---|---|---|---|---|
-| 0 | **Nhóm C2** (đang làm) | `SetVariables`, `UnsetVariables`, `Labels`; migration 0195 | tối đa 12 | M |
+| 0 | **Nhóm C2** (đã xây 2026-10-18, PR chưa có: 11 trên 12 entry đã bank, 73 baselined, LIVE 293) | `SetVariables`, `UnsetVariables`, `Labels`; migration 0195 | 11 trên tối đa 12 | M |
 | 1 | **Không bỏ qua im lặng** | Biến mọi key được parse mà bị bỏ qua thành một lỗi từ chối hoặc cảnh báo có nêu tên: `finally:`/`afterExecution:` ở cấp flow và flowable (cho đến khi #2 chạy được chúng), `stopAfter` của trigger, `retry.warningOnRetry`, các key của Subflow mà egret không mô hình hoá (`revision`, `labels`, `inheritLabels`, `scheduleDate`, `restartBehavior`), các key của input mà egret không mô hình hoá. Sửa các con số "345" cũ trong comment của `driver.rs` | 0 (đúng đắn) | S |
 | 2 | **Hook kết thúc: `finally:` và `afterExecution:`** | `finally:` và `afterExecution:` cấp flow, và `finally:` trên mọi flowable (`AllowFailure` đã lập kế hoạch một cái nên mẫu đã có); `Loop errors:` nếu làm luôn được với chi phí thấp | ~20 cận trên, 14–15 chặt | M |
 | 3 | **Kiểm inputs khi start** | `required`, lỗi ép kiểu, `values`/`allowCustomValue` của SELECT/MULTISELECT, `validator` của STRING, min/max của INT/FLOAT, giới hạn ngày, items của ARRAY, khi start thủ công, qua API, webhook và flow-trigger; endpoint `validate inputs` | một vài invalid | M |

@@ -892,7 +892,8 @@ impl Served {
     }
 
     /// The type ids, sorted: the handler-backed set only. **An executor-level
-    /// type (`spec::registry::EXECUTOR_LEVEL`, i.e. `Exit`) is served by
+    /// type (`spec::registry::EXECUTOR_LEVEL`: `Exit`, `SetVariables`,
+    /// `UnsetVariables` and `Labels`) is served by
     /// [`Served::serves`] but is not listed here**, because no handler is
     /// registered for it.
     pub fn type_ids(&self) -> impl Iterator<Item = &str> {

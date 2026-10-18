@@ -1,6 +1,8 @@
 # Workflow follow-ups, group C: the remaining Kestra core tasks
 
-**Status:** designed 2026-10-18. **C1 built and verified 2026-10-18** on `feat/workflow-kestra-core-tasks`; C2 is not built yet. The oracle ratchet (`cargo test -p egret-workflow --test executor`, the `executor_matches_golden` printout) went from 100 mismatching / 100 baselined to **84 / 84**, 0 broken: 16 entries banked (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4) with the entries still baselined named, by cause, in `oracle-exec/README.md`. The census LIVE count went 254 to **281**, and the handler-surface ceiling (`python3 handler_surface.py`) 232 to **250** (population 228). Per task: 100 to 89, 89 to 88, 88 to 84.
+**Status:** designed 2026-10-18. **C1 built and verified 2026-10-18** on `feat/workflow-kestra-core-tasks`; **C2 built and verified 2026-10-18** on `feat/workflow-kestra-executor-tasks`. The oracle ratchet (`cargo test -p egret-workflow --test executor`, the `executor_matches_golden` printout) went from 100 mismatching / 100 baselined to **84 / 84**, 0 broken: 16 entries banked (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4) with the entries still baselined named, by cause, in `oracle-exec/README.md`. The census LIVE count went 254 to **281**, and the handler-surface ceiling (`python3 handler_surface.py`) 232 to **250** (population 228). Per task: 100 to 89, 89 to 88, 88 to 84.
+
+**C2 results** (Task 5 report, the `executor_matches_golden` printout and `python3 handler_surface.py`, over the 351-flow corpus): the ratchet went from 84 mismatching / 84 baselined to **73 / 73**, 0 broken. 11 of the 12 C2 entries are banked; `valids/task-runif-taskswithstate` is baselined because the flow-level `finally:` does not run (egret has no `write_execution_context` and no `skipped_when_failures_exist` run; `finally-flow*` is baselined for the same reason). The census LIVE count went 281 to **293**, `UNKNOWN_TYPE_REFUSED` 33 to 21, `VALIDATE_REFUSED` stays 27, the `PUBLISHED_BUT_REFUSED` table 18 rows to 6, and the handler-surface ceiling 250 to **261** (population 228).
 
 **Where the claims come from:** every claim about egret's code was checked in the worktree `egret-coretasks` at `15406ad9` (main, after #689). Code is cited `path:line` relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, and its paths are relative to that checkout.
 
@@ -16,6 +18,11 @@
 - **D2.** `PurgeLogs.purgeNonExecutionLogs` deletes nothing and counts 0. Every line in `workflow.task_logs` belongs to an execution (migration 0159), so egret has no non-execution logs.
 - **D3.** A replay copies the execution's `variables`, just as it already copies `labels` (`worker/replay.rs:275`). Kestra's `childExecution` copies the whole execution.
 - **D4.** `SetVariables`, `UnsetVariables` and `Labels` are refused inside a `WorkingDirectory` at validate, as `Exit` is (`spec/validate.rs:301`). Kestra admits only `RunnableTask` children there, and these three are `ExecutionUpdatableTask`s.
+- **D5.** `SetVariables` merges exactly as Kestra's `deepMerge` (`MapUtils.java:62-133`), including list concatenation without duplicates and "a null new value keeps the old one". Spec §3.2 said "any other value replaces", which is not Kestra's rule for lists or nulls; §3.2 is corrected.
+- **D6.** A failed update records one attempt `[FAILED]`, as the golden does, through a new `Command::FailUnstarted`. A `Loop`'s failure at `CREATED` keeps no attempt.
+- **D7.** A `Labels` map whose two keys render to the same text fails the run (`labels: two keys render to "<k>"`). Kestra throws an `IllegalStateException` there; a run failure with a message is the same outcome, stated.
+- **D8.** A whole-expression `variables:` that renders `null` fails the run (the existing `render_map` error). Kestra's `asMap` returns null and `SetVariables` then throws a `NullPointerException` in `deepMerge`'s caller; a named failure is the same outcome without the crash.
+- **D9 (2026-10-18, controller default decision during Task 4).** Updates are computed whenever `advance()` still drives the execution, that is `executor::drives_forward`: not terminal and not `KILLING`. So `PAUSED` and `RETRYING` executions compute updates, and a `SetVariables` beside a waiting `Pause` runs before the resume. This supersedes the wording "only while RUNNING" in the plan.
 
 ## 1. Which mechanism each task needs, measured
 
@@ -102,7 +109,7 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 - **Render:** `vars` is the execution's `variables` when set, and the flow's `variables:` otherwise (`worker/render.rs:183`). This is Kestra's `RunVariables` rule: execution variables first, the flow's as fallback (`core/…/runners/RunVariables.java:541-550`).
 - **`SetVariables`:**
   - `variables: Property<Map>` is required and rendered; `overwrite` defaults to `true`.
-  - The result is a deep merge into the current variables, where a nested map merges and any other value replaces.
+  - The result is a deep merge into the current variables, by D5's rule, Kestra's `deepMerge`: a null new value keeps the old one, two maps merge recursively, two lists concatenate (the new items not already in the old list are appended in order), and anything else is replaced.
   - With `overwrite: false`, when a top-level key already exists, the run fails with Kestra's message ``"`overwrite` is set to false and the following variables already exist: <k1>,<k2>"``.
 - **`UnsetVariables`:**
   - `variables: Property<List<String>>` is required; `ignoreMissing` defaults to `false`.
@@ -125,6 +132,16 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
   - A key starting with `system.` fails the run: ``"System labels can only be set by Kestra itself, offending label: <k>=<v>"``.
   - An empty value fails the run: ``"Label values cannot be empty, offending label: <k>"``.
 - **The result** goes to `executions.labels`, the execution's own labels (`crate::labels`). Starting from the execution's current labels (the flow's, then its own, the later one winning), the new keys override, and the column stores the merged list. Later `{{ labels.x }}` reads see the new value, through the existing `labels::execution_labels`.
+
+**(2026-10-18, C2 built)** Where the build differs from §3:
+- **`Command::FailUnstarted` and the `[FAILED]` attempt (D6).** An update that fails at `CREATED` is written `CREATED FAILED` with one attempt `[FAILED]`, as the golden shows (`valids/set-variables-duplicate`, `labels-update-task-empty`). The existing `render::fail` pushes no attempt, so a new command does this.
+- **`taskrun.id`.** It is reserved for an update run created in the same settle, so `{{ taskrun.id }}` renders inside a `Labels` at `CREATED` (`valids/labels-update-task`, `npe-labels-update-task`). Every other kind still sees `taskrun.id` null in the settle that creates it. That is a known gap, unchanged.
+- **Updates under a kill (D9).** A `CREATED` update under a kill closes `CREATED` to `KILLING` to `KILLED` over two rounds, because `kill::is_leaf` does not count it, as `Exit` does.
+- **Key order.** `executions.variables` is `jsonb`, so the key order after a later settle is Postgres's (shortest key first), not insertion order. Kestra keeps insertion order.
+- **Registration.** `runtime::served_for` needs no key for `EXECUTOR_LEVEL` types, so the three publish on a deployment with no handlers (test `the_executor_level_types_publish_on_a_deployment_with_no_handlers`).
+- **Known divergences from Kestra's `Labels`** (no golden flow covers them):
+  - A list or float label value renders as JSON text (`["a","b"]`, `1e20`), where Java's `toString` gives `[a, b]` and `1.0E20`.
+  - When several labels break a rule, egret names the first in source order; Kestra names the first in `HashMap` order.
 
 ## 4. Tests and acceptance
 

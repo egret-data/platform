@@ -2,7 +2,9 @@
 
 > Bản tham khảo tiếng Việt. Bản tiếng Anh `docs/en/specs/2026-10-18-workflow-core-tasks-design.md` là bản chuẩn; hai bản lệch nhau thì theo bản tiếng Anh.
 
-**Trạng thái:** thiết kế ngày 2026-10-18. **C1 đã xây và kiểm chứng ngày 2026-10-18** trên `feat/workflow-kestra-core-tasks`; C2 chưa xây. Ratchet của oracle (`cargo test -p egret-workflow --test executor`, bản in của `executor_matches_golden`) đi từ 100 mismatching / 100 baselined xuống **84 / 84**, 0 broken: 16 entry được bank (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4), các entry còn nằm trong baseline được nêu theo nguyên nhân trong `oracle-exec/README.md`. Số LIVE của census đi từ 254 lên **281**, trần handler-surface (`python3 handler_surface.py`) từ 232 lên **250** (quần thể 228). Theo từng task: 100 xuống 89, 89 xuống 88, 88 xuống 84.
+**Trạng thái:** thiết kế ngày 2026-10-18. **C1 đã xây và kiểm chứng ngày 2026-10-18** trên `feat/workflow-kestra-core-tasks`; **C2 đã xây và kiểm chứng ngày 2026-10-18** trên `feat/workflow-kestra-executor-tasks`. Ratchet của oracle (`cargo test -p egret-workflow --test executor`, bản in của `executor_matches_golden`) đi từ 100 mismatching / 100 baselined xuống **84 / 84**, 0 broken: 16 entry được bank (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4), các entry còn nằm trong baseline được nêu theo nguyên nhân trong `oracle-exec/README.md`. Số LIVE của census đi từ 254 lên **281**, trần handler-surface (`python3 handler_surface.py`) từ 232 lên **250** (quần thể 228). Theo từng task: 100 xuống 89, 89 xuống 88, 88 xuống 84.
+
+**Kết quả C2** (báo cáo Task 5, bản in của `executor_matches_golden` và `python3 handler_surface.py`, trên corpus 351 flow): ratchet đi từ 84 mismatching / 84 baselined xuống **73 / 73**, 0 broken. 11 trong 12 entry C2 đã được bank; `valids/task-runif-taskswithstate` nằm trong baseline vì `finally:` cấp flow không chạy (egret không có `write_execution_context` và không có run `skipped_when_failures_exist`; `finally-flow*` nằm trong baseline vì cùng lý do). Số LIVE của census đi từ 281 lên **293**, `UNKNOWN_TYPE_REFUSED` từ 33 xuống 21, `VALIDATE_REFUSED` giữ 27, bảng `PUBLISHED_BUT_REFUSED` từ 18 dòng xuống 6, trần handler-surface từ 250 lên **261** (quần thể 228).
 
 **Nguồn của các khẳng định:** mọi khẳng định về code egret đều đã kiểm tra ở worktree `egret-coretasks`, commit `15406ad9` (main sau #689). Đường dẫn code tính từ `crates/egret-workflow/src/`, trừ khi ghi gốc khác. Kestra là bản checkout tại `data-portal/kestra`.
 
@@ -18,7 +20,11 @@
 - **D2.** `PurgeLogs.purgeNonExecutionLogs` không xoá gì và đếm 0. Mọi dòng trong `workflow.task_logs` đều thuộc về một execution (migration 0159), nên egret không có log ngoài execution.
 - **D3.** Replay chép `variables` của execution, giống cách đã chép `labels` (`worker/replay.rs:275`). `childExecution` của Kestra chép toàn bộ execution.
 - **D4.** `SetVariables`, `UnsetVariables` và `Labels` bị từ chối ngay ở bước validate khi nằm trong `WorkingDirectory`, giống `Exit` (`spec/validate.rs:301`). Kestra chỉ nhận con là `RunnableTask` ở đó, còn ba task này là `ExecutionUpdatableTask`.
-
+- **D5.** `SetVariables` merge đúng như `deepMerge` của Kestra (`MapUtils.java:62-133`), gồm cả việc nối list không trùng và "giá trị mới là null thì giữ giá trị cũ". §3.2 trước đây ghi "giá trị khác thì thay", không phải quy tắc của Kestra cho list và null; §3.2 đã được sửa.
+- **D6.** Update lỗi ghi đúng một attempt `[FAILED]`, như golden, qua `Command::FailUnstarted` mới. `Loop` fail ở `CREATED` thì không giữ attempt nào.
+- **D7.** Map của `Labels` có hai key render ra cùng một chuỗi thì run fail (`labels: two keys render to "<k>"`). Kestra ném `IllegalStateException` ở đó; run fail kèm message là cùng kết quả, được nói rõ.
+- **D8.** `variables:` là một biểu thức nguyên khối render ra `null` thì run fail (lỗi `render_map` sẵn có). `asMap` của Kestra trả null rồi `SetVariables` ném `NullPointerException` ở nơi gọi `deepMerge`; một lỗi có tên là cùng kết quả mà không crash.
+- **D9 (2026-10-18, quyết định mặc định của controller trong Task 4).** Update được tính bất cứ khi nào `advance()` còn điều khiển execution, tức `executor::drives_forward`: chưa terminal và không phải `KILLING`. Vì vậy execution `PAUSED` và `RETRYING` vẫn tính update, và một `SetVariables` cạnh một `Pause` đang chờ chạy trước khi resume. Điều này thay cho câu "chỉ khi RUNNING" trong plan.
 ## 1. Mỗi task cần cơ chế nào (đã đo)
 
 Kestra chạy `RunnableTask` trên worker, còn `ExecutionUpdatableTask` thì chạy trong executor (`executor/…/ExecutorService.java:1371`). Golden cho thấy sự khác biệt này ở mọi entry:
@@ -104,7 +110,7 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 - **Render:** `vars` là `variables` của execution nếu đã có, nếu chưa thì là `variables:` của flow (`worker/render.rs:183`). Đây là quy tắc trong `RunVariables` của Kestra: biến của execution trước, biến của flow làm dự phòng (`core/…/runners/RunVariables.java:541-550`).
 - **`SetVariables`:**
   - `variables: Property<Map>` bắt buộc và được render; `overwrite` mặc định `true`.
-  - Kết quả được deep-merge vào biến hiện có: map lồng nhau thì merge, giá trị khác thì thay.
+  - Kết quả được deep-merge vào biến hiện có theo quy tắc D5, tức `deepMerge` của Kestra: giá trị mới là null thì giữ giá trị cũ, hai map merge đệ quy, hai list nối lại (các phần tử mới chưa có trong list cũ được thêm vào theo thứ tự), còn lại thì thay.
   - Với `overwrite: false`, nếu một key cấp trên cùng đã tồn tại thì run fail với đúng message của Kestra: ``"`overwrite` is set to false and the following variables already exist: <k1>,<k2>"``.
 - **`UnsetVariables`:**
   - `variables: Property<List<String>>` bắt buộc; `ignoreMissing` mặc định `false`.
@@ -127,6 +133,16 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
   - Key bắt đầu bằng `system.` làm run fail: ``"System labels can only be set by Kestra itself, offending label: <k>=<v>"``.
   - Giá trị rỗng làm run fail: ``"Label values cannot be empty, offending label: <k>"``.
 - **Kết quả** ghi vào `executions.labels`, tức label riêng của execution (`crate::labels`). Xuất phát từ label hiện tại của execution (label của flow, rồi label riêng; cái sau thắng), các key mới đè lên, và cột lưu danh sách đã gộp. Các lần đọc `{{ labels.x }}` về sau thấy giá trị mới, qua hàm sẵn có `labels::execution_labels`.
+
+**(2026-10-18, C2 đã xây)** Những chỗ bản xây khác §3:
+- **`Command::FailUnstarted` và attempt `[FAILED]` (D6).** Update lỗi ở `CREATED` được ghi `CREATED FAILED` với đúng một attempt `[FAILED]`, như golden (`valids/set-variables-duplicate`, `labels-update-task-empty`). `render::fail` sẵn có không đẩy attempt nào, nên một command mới làm việc này.
+- **`taskrun.id`.** Id được đặt trước cho run update tạo trong cùng một settle, nên `{{ taskrun.id }}` render được trong `Labels` ở `CREATED` (`valids/labels-update-task`, `npe-labels-update-task`). Mọi loại khác vẫn thấy `taskrun.id` null trong settle tạo ra nó. Đây là khoảng trống đã biết, không đổi.
+- **Update khi bị kill (D9).** Một update ở `CREATED` dưới lệnh kill đóng `CREATED` sang `KILLING` sang `KILLED` qua hai round, vì `kill::is_leaf` không đếm nó, giống `Exit`.
+- **Thứ tự key.** `executions.variables` là `jsonb`, nên thứ tự key sau một lần settle sau đó là của Postgres (key ngắn đứng trước), không phải thứ tự chèn. Kestra giữ thứ tự chèn.
+- **Đăng ký.** `runtime::served_for` không cần key cho các type `EXECUTOR_LEVEL`, nên cả ba publish được trên deployment không có handler (test `the_executor_level_types_publish_on_a_deployment_with_no_handlers`).
+- **Các khác biệt đã biết so với `Labels` của Kestra** (không golden flow nào phủ):
+  - Giá trị label là list hoặc số thực được render thành chuỗi JSON (`["a","b"]`, `1e20`), trong khi `toString` của Java cho `[a, b]` và `1.0E20`.
+  - Khi nhiều label vi phạm quy tắc, egret nêu cái đầu theo thứ tự nguồn; Kestra nêu cái đầu theo thứ tự `HashMap`.
 
 ## 4. Test và nghiệm thu
 
