@@ -12,7 +12,9 @@
 use serde_json::{json, Value};
 
 /// The Trino service user egret authenticates as for impersonate-mode delegation.
-pub const DELEGATOR_USERNAME: &str = "egret_delegator";
+/// Declared in `egret_core` so `egret-perm-compile` can refuse it as an
+/// impersonation target (engine grants spec, C6).
+pub use egret_core::engine_principals::DELEGATOR_PRINCIPAL as DELEGATOR_USERNAME;
 // Declared in `egret_policy_api::infra_names` so the guard, the backfill and this
 // producer read one list. Re-exported rather than moved outright: `engines.rs`
 // refers to them as `dp::IMPERSONATE_POLICY_NAME` / `dp::QUERY_TIMEOUT_POLICY_NAME`
@@ -127,6 +129,16 @@ pub fn query_timeout_policy(service: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F11 (spec C6): one name, declared in `egret_core::engine_principals`
+    /// so `egret-perm-compile` can refuse it as an impersonation target.
+    #[test]
+    fn the_delegator_username_is_the_core_principal() {
+        assert_eq!(
+            DELEGATOR_USERNAME,
+            egret_core::engine_principals::DELEGATOR_PRINCIPAL
+        );
+    }
 
     #[test]
     fn impersonate_policy_grants_delegator_impersonate_any_user() {

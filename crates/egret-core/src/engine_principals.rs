@@ -15,6 +15,15 @@
 /// sends nothing but `EXPLAIN` as it.
 pub const LINEAGE_PRINCIPAL: &str = "egret-lineage";
 
+/// The Trino service user egret authenticates as for impersonate-mode
+/// delegation (`egret_engine_mgmt::delegator_policy`, which re-exports it as
+/// `DELEGATOR_USERNAME`). Declared here so `egret-perm-compile`, which cannot
+/// depend on `egret-engine-mgmt`, can refuse it as an impersonation target.
+///
+/// **Not in [`RESERVED_ENGINE_USERNAMES`] yet**: a human can still be minted
+/// this username. That is a separate fix (engine grants spec, E21).
+pub const DELEGATOR_PRINCIPAL: &str = "egret_delegator";
+
 /// Usernames no human may hold (see the module doc).
 pub const RESERVED_ENGINE_USERNAMES: &[&str] = &[LINEAGE_PRINCIPAL];
 
@@ -27,6 +36,15 @@ pub fn is_reserved_engine_username(username: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F11 (spec C6): the delegator's name lives here so `egret-perm-compile`
+    /// can refuse it as an impersonation target. It is NOT a reserved username
+    /// yet (spec E21 records that as a separate fix).
+    #[test]
+    fn the_delegator_principal_is_named_here_and_not_yet_reserved() {
+        assert_eq!(DELEGATOR_PRINCIPAL, "egret_delegator");
+        assert!(!is_reserved_engine_username(DELEGATOR_PRINCIPAL));
+    }
 
     #[test]
     fn the_lineage_principal_is_reserved() {

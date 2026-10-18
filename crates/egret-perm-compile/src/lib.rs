@@ -66,6 +66,8 @@ pub mod harness_support;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;
+/// F11: the curated engine capability catalogue.
+pub mod engine_capabilities;
 // SP4d-3 Task 6: the equivalence gate — probes derived from a profile's
 // before/after downloads, compared per plugin version over every affected
 // profile. Pure; Task 7's migration transaction is its caller.
