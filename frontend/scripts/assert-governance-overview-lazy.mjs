@@ -12,8 +12,9 @@
  * survives minification and that nothing outside the area spells. Each must be
  * absent from the entry chunk and from the chunks the entry preloads, and
  * present in some other chunk (a marker found nowhere is stale and would let
- * this pass on any bundle). `refUrl.ts` has no literal of its own that nothing
- * else spells; the modules that import it carry it.
+ * this pass on any bundle). `refUrl.ts` and `AttentionRow.tsx` have no literal
+ * of their own that nothing else spells; `AttentionSection.tsx`, which imports
+ * both, carries them.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +25,10 @@ const ASSETS = join(DIST, "assets");
 const MARKERS = [
   // The page's description.
   ["src/routes/governance/overview/OverviewPage.tsx", "What needs attention in governance, and what changed recently."],
+  // The qualified empty state.
+  ["src/routes/governance/overview/AttentionSection.tsx", "Nothing needs attention among the checks you can run."],
+  // The strip's test id.
+  ["src/routes/governance/overview/CountsStrip.tsx", "overview-counts"],
 ];
 
 const entry = entryChunkName(DIST);
