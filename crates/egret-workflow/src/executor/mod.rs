@@ -176,15 +176,16 @@ use flowable::{sequential, Step};
 /// `CREATED` and [`apply`] clears both slots there, so a caller that answers
 /// once and caches is answering only for attempt 1. See `apply`'s rule 2.
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
-    if state.history.last().is_some_and(|s| s.is_terminal()) {
-        return Vec::new();
-    }
-
-    // A kill in progress (spec §5): nothing is created, started, retried or
-    // resumed, and nothing below -- `reopen_due`, the walk, `retry::scan`,
-    // `pause_mark` -- sees this state. See [`kill`].
-    if state.history.last() == Some(&RunState::Killing) {
-        return kill::advance_killing(plan, state);
+    if !drives_forward(state) {
+        // A kill in progress (spec §5): nothing is created, started, retried
+        // or resumed, and nothing below -- `reopen_due`, the walk,
+        // `retry::scan`, `pause_mark` -- sees this state. See [`kill`]. A
+        // terminal execution gets nothing at all.
+        return if state.history.last() == Some(&RunState::Killing) {
+            kill::advance_killing(plan, state)
+        } else {
+            Vec::new()
+        };
     }
 
     // The execution-delay loop, which in the artifact is a different loop from
@@ -313,6 +314,20 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         return cmds;
     }
     work
+}
+
+/// **Whether [`advance`] still drives this execution's runs forward**: it
+/// is neither terminal nor `KILLING`. Every other state -- `RUNNING`,
+/// `PAUSED`, `RETRYING`, `CREATED`, `RESTARTED` -- reaches the walk, which
+/// creates, starts and completes runs. `advance` branches on exactly this,
+/// and the worker's update pass (`worker::render::render_updates`, group C2
+/// ruling D9) gates on it, so the two cannot disagree about when a sibling
+/// may still move.
+pub fn drives_forward(state: &ExecutionState) -> bool {
+    !state
+        .history
+        .last()
+        .is_some_and(|s| s.is_terminal() || *s == RunState::Killing)
 }
 
 /// Which execution state, if any, this batch of commands owes — W8 Task 3.

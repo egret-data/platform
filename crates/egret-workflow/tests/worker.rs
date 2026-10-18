@@ -11227,15 +11227,13 @@ async fn set_variables_then_output_reads_the_new_value(pool: sqlx::PgPool) {
         run_outputs(&pool, ex, "output").await,
         Some(serde_json::json!({"values": {"message": "Hello Loïc"}}))
     );
-    let vars = execution_variables(&pool, ex).await.expect("written");
+    // jsonb equality: Postgres stores an object's keys in its own order
+    // (shortest first), so the column cannot show `deep_merge`'s key order --
+    // Task 2's unit tests pin that.
     assert_eq!(
-        vars,
-        serde_json::json!({"name": "Loïc", "message": "Hello"})
-    );
-    assert_eq!(
-        vars.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["name", "message"],
-        "key order as `deep_merge` produces it: the old keys, then the new"
+        execution_variables(&pool, ex).await,
+        Some(serde_json::json!({"name": "Loïc", "message": "Hello"})),
+        "the column holds the flow's `variables:` merged with the update's"
     );
     assert_eq!(
         run_history(&pool, ex, "set-vars").await,
@@ -11466,7 +11464,8 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
 }
 
 /// An execution being killed writes no update: `pre` is killed before it
-/// completes, and the `SetVariables` after it neither succeeds nor writes.
+/// completes, and the `SetVariables` after it is absent or `KILLED`, and
+/// nothing is written.
 /// (The gate itself -- `render_updates` computes nothing unless the execution
 /// is `RUNNING` -- is driven directly in `worker::render`'s unit tests, since
 /// `advance_killing` closes a `CREATED` update before any render pass sees it.)
@@ -11490,9 +11489,11 @@ async fn an_update_under_a_killing_execution_writes_nothing(pool: sqlx::PgPool) 
 
     // Assert
     assert_eq!(execution_variables(&pool, ex).await, None);
-    assert_ne!(
-        run_state(&pool, ex, "set").await.as_deref(),
-        Some("SUCCESS")
+    let set = run_state(&pool, ex, "set").await;
+    assert!(
+        matches!(set.as_deref(), None | Some("KILLED")),
+        "the `SetVariables` run is never created under KILLING, or is closed \
+         KILLED by `advance_killing` -- never computed: {set:?}"
     );
     assert_eq!(
         execution_history(&pool, ex)
@@ -11531,5 +11532,54 @@ async fn run_if_false_skips_the_update_and_writes_nothing(pool: sqlx::PgPool) {
             .as_array()
             .and_then(|h| h.last().cloned()),
         Some(serde_json::json!("SUCCESS"))
+    );
+}
+
+/// **Ruling D9: an update computes while the execution is `PAUSED`**, as
+/// `advance()` keeps driving a paused run's siblings. A `Parallel` of a
+/// `Pause` that waits for a resume and a `Sequential { Log, SetVariables }`:
+/// the update succeeds and its value is written while the `Pause` is still
+/// `PAUSED`, before any resume.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_update_beside_a_waiting_pause_computes_before_the_resume(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let (_db, ws) = seed(&pool).await;
+    let flow = format!(
+        "id: pause-update\nnamespace: t\ntasks:\n{PRE}\
+         \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+         \x20     - id: pause\n        type: io.kestra.plugin.core.flow.Pause\n\
+         \x20     - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n\
+         \x20         - id: l\n            type: io.kestra.plugin.core.log.Log\n            \
+         message: hi\n\
+         \x20         - id: set\n            type: io.kestra.plugin.core.execution.SetVariables\n            \
+         variables:\n              v: 1\n"
+    );
+    let ex = start_stored_updates(&pool, ws, &flow).await;
+
+    // Act
+    drain(&pool, &core_handlers()).await;
+
+    // Assert
+    assert_eq!(
+        run_state(&pool, ex, "pause").await.as_deref(),
+        Some("PAUSED"),
+        "control: no resume happened"
+    );
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("PAUSED")),
+        "control: the execution is PAUSED"
+    );
+    assert_eq!(
+        run_history(&pool, ex, "set").await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+    assert_eq!(
+        execution_variables(&pool, ex).await,
+        Some(serde_json::json!({"v": 1}))
     );
 }

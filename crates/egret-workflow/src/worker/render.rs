@@ -1169,22 +1169,21 @@ mod tests {
     const ONE_SET: &str = "id: u\nnamespace: t\ntasks:\n  - id: set\n    \
          type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n";
 
-    /// **An update is computed only while the execution is `RUNNING`** -- a
-    /// `KILLING` execution creates and starts nothing, and an update computed
-    /// then would still be written by `settle`. The `RUNNING` control is what
-    /// stops the `KILLING` half passing against a pass that computes nothing.
+    /// **An update is computed whenever `advance()` still drives the
+    /// execution** (ruling D9): `RUNNING`, `PAUSED` and `RETRYING` compute; a
+    /// `KILLING` execution creates and starts nothing, and a terminal one is
+    /// done, so neither computes -- an update computed then would still be
+    /// written by `settle`. The computing rows are the control that stops the
+    /// refusing ones passing against a pass that computes nothing.
     #[test]
-    fn render_updates_computes_nothing_unless_the_execution_is_running() {
+    fn render_updates_computes_while_advance_drives_the_execution() {
+        let ran = |last: RunState| vec![RunState::Created, RunState::Running, last];
         for (history, computes) in [
             (vec![RunState::Created, RunState::Running], true),
-            (
-                vec![RunState::Created, RunState::Running, RunState::Killing],
-                false,
-            ),
-            (
-                vec![RunState::Created, RunState::Running, RunState::Paused],
-                false,
-            ),
+            (ran(RunState::Paused), true),
+            (ran(RunState::Retrying), true),
+            (ran(RunState::Killing), false),
+            (ran(RunState::Failed), false),
         ] {
             // Arrange
             let (plan, mut state) = one_created_update(ONE_SET, history.clone());
@@ -1376,9 +1375,13 @@ impl RenderSide {
 /// The population: an `Update` run still `CREATED` with no `rendered`, whose
 /// `runIf:` (if any) has rendered truthy -- a falsy one is `advance()`'s
 /// `SkipRun`, and a pending one is [`render_run_if`]'s to decide first -- and
-/// **only while the execution is `RUNNING`**: a `KILLING` execution creates
-/// and starts nothing, and an update computed then would still be written by
-/// `settle`.
+/// **only while `advance()` itself still drives the execution**
+/// ([`crate::executor::drives_forward`], group C2 ruling D9): not once it is
+/// terminal, and not while it is `KILLING`, which creates and starts nothing
+/// (an update computed then would still be written by `settle`). A `PAUSED`
+/// or `RETRYING` execution DOES compute: `advance()` keeps driving a paused
+/// run's siblings and a retrying run's siblings, and an update there must not
+/// wait for the resume or the retry delay.
 ///
 /// In run order, against the CURRENT surface, so of two updates in one
 /// `Parallel` the later run applies on top of the earlier one.
@@ -1396,7 +1399,7 @@ pub(super) fn render_updates(
     now: Tick,
     side: &mut RenderSide,
 ) -> Pass {
-    if state.history.last() != Some(&RunState::Running) {
+    if !crate::executor::drives_forward(state) {
         return Pass::Nothing;
     }
     let pending: Vec<RunIx> = (0..state.runs.len())
