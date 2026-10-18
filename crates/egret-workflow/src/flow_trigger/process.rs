@@ -1019,6 +1019,7 @@ async fn start_fire(
             input_files: Vec::new(),
             labels: None,
             backfill_id: None,
+            variables: None,
         },
     )
     .await;

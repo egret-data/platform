@@ -2125,6 +2125,56 @@ async fn a_replay_copies_the_labels_and_not_the_backfill() {
     assert_eq!(backfill, None);
 }
 
+/// **A replay through the route copies the replayed execution's `variables`**
+/// (group C2 D3; final review I3), as the retry replay already does and as
+/// Kestra's `ExecutionService.replay` → `childExecution` does: what the
+/// original's `SetVariables` set is what the replay starts from. Control: a
+/// replay of an execution whose column is NULL keeps it NULL.
+#[tokio::test]
+async fn a_replay_copies_the_variables() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let src = runnable_source("replay-vars");
+    let flow = common::seed_flow(&db, ws, user, &src, "draft").await;
+    let set =
+        insert_execution_with(&db, ws, Some(flow), "SUCCESS", &src, serde_json::json!({})).await;
+    let unset =
+        insert_execution_with(&db, ws, Some(flow), "SUCCESS", &src, serde_json::json!({})).await;
+    let own = serde_json::json!({"x": 1, "nested": {"y": [1, 2]}});
+    sqlx::query("UPDATE workflow.executions SET variables = $2 WHERE id = $1")
+        .bind(set)
+        .bind(&own)
+        .execute(&db.pool)
+        .await
+        .expect("set the original's variables");
+
+    let app = common::app(&db).await;
+    let mut copied = Vec::new();
+    for original in [set, unset] {
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{original}/replay"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 201);
+        let replacement: Uuid = common::json(res).await["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let variables: Option<Value> =
+            sqlx::query_scalar("SELECT variables FROM workflow.executions WHERE id = $1")
+                .bind(replacement)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        copied.push(variables);
+    }
+    assert_eq!(copied, [Some(own), None]);
+}
+
 /// **The list carries an execution's OWN labels (`null` for none) and its
 /// `backfill_id`; the detail carries `effective_labels`**, the flow's merged
 /// with the execution's, the later value winning in the first key's position

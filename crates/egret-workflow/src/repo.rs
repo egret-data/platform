@@ -1092,7 +1092,8 @@ pub struct TaskRunRow {
 }
 
 /// [`ExecutionRow`] joined with the two things only a detail page needs: the
-/// frozen `source` and every task run, ordered by `run_ix`.
+/// frozen `source` and every task run, ordered by `run_ix` -- and, for the
+/// replay route, the execution's `variables` (group C2 D3).
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionDetail {
     pub execution: ExecutionRow,
@@ -1101,6 +1102,11 @@ pub struct ExecutionDetail {
     /// draw the topology from this string alone.
     pub source: String,
     pub runs: Vec<TaskRunRow>,
+    /// The execution's executor-level `variables` (migration 0195, group C2);
+    /// `None` is "the flow's `variables:`". Read for the replay route, which
+    /// copies it (D3); skipped by `Serialize`, so no response carries it.
+    #[serde(skip)]
+    pub variables: Option<serde_json::Value>,
 }
 
 /// The one statement that needs `source` beside the shared projection.
@@ -1110,6 +1116,7 @@ struct ExecutionWithSource {
     #[sqlx(flatten)]
     execution: ExecutionRow,
     source: String,
+    variables: Option<serde_json::Value>,
 }
 
 /// Filters for [`ExecutionRepo::list`]. Every field `None` lists the whole
@@ -1381,7 +1388,7 @@ impl ExecutionRepo {
         let row: Option<ExecutionWithSource> = sqlx::query_as(concat!(
             "SELECT ",
             execution_cols!(),
-            ", source FROM workflow.executions WHERE id = $1 AND workspace_id = $2"
+            ", source, variables FROM workflow.executions WHERE id = $1 AND workspace_id = $2"
         ))
         .bind(id)
         .bind(ws)
@@ -1397,6 +1404,7 @@ impl ExecutionRepo {
             execution: row.execution,
             source: row.source,
             runs,
+            variables: row.variables,
         })
     }
 

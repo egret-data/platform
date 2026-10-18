@@ -2675,6 +2675,7 @@ async fn read_parts_and_start(
                 input_files: files.clone(),
                 labels: None,
                 backfill_id: None,
+                variables: None,
             },
         )
         .await
@@ -2956,6 +2957,9 @@ async fn replay_execution(
                 // the original does not (W7f spec §3.3).
                 labels: source.execution.labels.clone(),
                 backfill_id: None,
+                // D3 (final review I3): the run's `variables` travel with it,
+                // as the retry replay's do and Kestra's `childExecution`'s.
+                variables: source.variables.clone(),
             },
         )
         .await

@@ -493,6 +493,7 @@ async fn start(
             input_files: Vec::new(),
             labels,
             backfill_id: backfill.map(|b| b.id),
+            variables: None,
         },
     )
     .await;

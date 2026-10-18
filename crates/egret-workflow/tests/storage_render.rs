@@ -345,6 +345,7 @@ async fn a_log_task_reads_its_trigger_executions_file() {
             input_files: Vec::new(),
             labels: None,
             backfill_id: None,
+            variables: None,
         },
     )
     .await
