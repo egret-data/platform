@@ -527,8 +527,16 @@ W3A_FLOWABLES = {
 # execution), so no worker claims it. Kept apart from `W3A_FLOWABLES` so that
 # set keeps meaning what its name says; every reader takes the union
 # (`EXECUTOR_DRIVEN`).
+#
+# Group C2 Task 5 (2026-10-18): `SetVariables`, `UnsetVariables` and `Labels`
+# are `ExecutionUpdatableTask`s too; `build_plan` gives each a
+# `TaskKind::Update` and the worker's render pass computes it, so no worker
+# claims them either (`spec::registry::EXECUTOR_LEVEL`).
 W3A_EXECUTOR_LEVEL = {
     "io.kestra.plugin.core.execution.Exit",
+    "io.kestra.plugin.core.execution.SetVariables",
+    "io.kestra.plugin.core.execution.UnsetVariables",
+    "io.kestra.plugin.core.execution.Labels",
 }
 
 EXECUTOR_DRIVEN = W3A_FLOWABLES | W3A_EXECUTOR_LEVEL
@@ -990,9 +998,12 @@ def check_inputs(flows, kinds, golden, baseline):
     # Task 2 banked the eleven entries `OutputValues` held (it has a handler);
     # 88 since group C1 Task 3 banked `valids/assert` (`Assert` has a handler);
     # 84 since group C1 Task 4 banked four `valids/purge_logs_*` (`PurgeLogs`
-    # has a handler; `purge_logs_full_arguments` stays, by the scope rule).
-    if len(baseline) != 84:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 84; the split "
+    # has a handler; `purge_logs_full_arguments` stays, by the scope rule);
+    # 73 since group C2 Task 5 banked eleven entries `SetVariables`,
+    # `UnsetVariables` and `Labels` held (executor-level now;
+    # `task-runif-taskswithstate` stays, on the flow-level `finally:`).
+    if len(baseline) != 73:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 73; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1642,8 +1653,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 84",
-         "not 84",
+    case("baseline.txt is no longer 73",
+         "not 73",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

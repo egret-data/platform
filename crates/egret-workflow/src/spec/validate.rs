@@ -2276,6 +2276,53 @@ mod tests {
         );
     }
 
+    /// Group C2 Task 5 (decision D4): `SetVariables`, `UnsetVariables` and
+    /// `Labels` are `ExecutionUpdatableTask`s in Kestra, as `Exit` is, so a
+    /// `WorkingDirectory` refuses each as a child. egret refuses them through
+    /// `EXECUTOR_LEVEL`; one assertion per FQCN, and the `Log` control.
+    #[test]
+    fn the_three_update_types_are_refused_inside_a_working_directory() {
+        // Arrange
+        let flow = |ty: &str, extra: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+                 tasks:\n      - id: child\n        type: {ty}\n{extra}"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"))
+        };
+        let refused = |f: &crate::models::Flow| {
+            validate(f)
+                .errors
+                .into_iter()
+                .find(|e| e.code == "working_directory_child_not_runnable")
+        };
+        let set = flow(
+            "io.kestra.plugin.core.execution.SetVariables",
+            "        variables:\n          a: 1\n",
+        );
+        let unset = flow(
+            "io.kestra.plugin.core.execution.UnsetVariables",
+            "        variables:\n          - a\n",
+        );
+        let labels = flow(
+            "io.kestra.plugin.core.execution.Labels",
+            "        labels:\n          k: v\n",
+        );
+        let log = flow("io.kestra.plugin.core.log.Log", "        message: hi\n");
+
+        // Act + Assert
+        let finding = refused(&set).expect("a SetVariables child is refused");
+        assert_eq!(finding.path, "tasks.wd.tasks.child", "{finding:?}");
+        let finding = refused(&unset).expect("an UnsetVariables child is refused");
+        assert_eq!(finding.path, "tasks.wd.tasks.child", "{finding:?}");
+        let finding = refused(&labels).expect("a Labels child is refused");
+        assert_eq!(finding.path, "tasks.wd.tasks.child", "{finding:?}");
+        assert!(
+            refused(&log).is_none(),
+            "the control: a Log child is runnable"
+        );
+    }
+
     /// The subtree a `Leaf`-typed `WaitFor` used to hide.
     ///
     /// `walk_task` recurses through `Task::children()`, and a `Leaf` has none

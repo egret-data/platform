@@ -140,6 +140,13 @@ fn leaf_handler_fields(t: &str) -> Option<Vec<&'static str>> {
         // Kill-and-exit Task 3: no handler -- the executor runs it -- and
         // `build_plan` reads its leaf spec through this struct.
         crate::executor::exit::TYPE_ID => fields_of::<crate::executor::exit::Spec>(),
+        // Group C2 Task 5: executor-level as `Exit` is; the worker's render
+        // pass reads each leaf spec through these structs (`executor::update`).
+        crate::executor::update::SET_VARIABLES => fields_of::<crate::executor::update::SetSpec>(),
+        crate::executor::update::UNSET_VARIABLES => {
+            fields_of::<crate::executor::update::UnsetSpec>()
+        }
+        crate::executor::update::LABELS => fields_of::<crate::executor::update::LabelsSpec>(),
         _ => return None,
     })
 }

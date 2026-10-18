@@ -134,6 +134,40 @@ finally:
         );
     }
 
+    /// Group C2 Task 5: the executor-level types need no handler, so a
+    /// deployment that wires NONE still publishes a flow of them -- the
+    /// `runtime::served_for` key the worker tasks need is not needed here
+    /// (`Served::serves` answers from `spec::registry::EXECUTOR_LEVEL`).
+    /// `validate_for_run` is the rest of publish's static gate; the `Log`
+    /// control shows the empty set does refuse a handler type.
+    #[test]
+    fn the_executor_level_types_publish_on_a_deployment_with_no_handlers() {
+        // Arrange
+        let bare = Served::from_type_ids(Vec::<String>::new());
+        let flow = parse(
+            "id: f\nnamespace: a.b\ntasks:\n\
+             \x20 - id: set\n    type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n\
+             \x20 - id: unset\n    type: io.kestra.plugin.core.execution.UnsetVariables\n    variables:\n      - a\n\
+             \x20 - id: labels\n    type: io.kestra.plugin.core.execution.Labels\n    labels:\n      k: v\n\
+             \x20 - id: exit\n    type: io.kestra.plugin.core.execution.Exit\n    state: SUCCESS\n",
+        )
+        .expect("parses");
+        let log = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n",
+        )
+        .expect("parses");
+
+        // Act
+        let validated = crate::spec::validate_for_run(&flow);
+        let fs = unrunnable(&flow, &bare);
+        let control = unrunnable(&log, &bare);
+
+        // Assert
+        assert!(validated.errors.is_empty(), "{:?}", validated.errors);
+        assert!(fs.is_empty(), "{fs:?}");
+        assert_eq!(paths(&control), vec![("task_type_not_served", "tasks.l")]);
+    }
+
     #[test]
     fn a_served_type_passes() {
         let fs = findings(

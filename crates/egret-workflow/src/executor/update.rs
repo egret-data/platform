@@ -540,18 +540,17 @@ mod tests {
 #[cfg(test)]
 mod advance_tests {
     use super::super::state::{apply, ExecutionState, RunIx};
-    use super::super::{advance, plan_stored, Command, Plan, TaskKind, Tick};
+    use super::super::{advance, build_plan, Command, Plan, TaskKind, Tick};
     use super::*;
 
     use crate::executor::RunState::{Created, Failed, Running, Skipped, Success};
 
     const T: Tick = Tick(0);
 
-    /// `build_plan`'s flattening without its `validate_for_run` gate, which
-    /// refuses the three types as `unknown_task_type` until Task 5 registers
-    /// them. The arm under test is the same one either way (`flatten_flow`).
+    /// `build_plan`, its `validate_for_run` gate included: since group C2
+    /// Task 5 the three types have `TASK_TYPES` rows, so it plans them.
     fn plan(src: &str) -> Plan {
-        plan_stored(src).expect("plans")
+        build_plan(src).expect("plans")
     }
 
     fn run_of(plan: &Plan, s: &ExecutionState, id: &str) -> RunIx {

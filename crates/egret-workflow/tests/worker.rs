@@ -11148,38 +11148,13 @@ async fn a_replay_copies_the_execution_variables(pool: sqlx::PgPool) {
 // the render pass and written by `settle`.
 // --------------------------------------------------------------------------
 
-/// The first task of every flow below: a `core.log.Log`, so the execution's
-/// start plans nothing but it.
-const PRE: &str = "  - id: pre\n    type: io.kestra.plugin.core.log.Log\n    message: pre\n";
-
-/// Start `stored` -- whose first task is [`PRE`] -- as an execution that
-/// started before the three update types were registered (group C2 Task 5
-/// registers them; until then `start_execution`'s `build_plan` refuses them
-/// as `unknown_task_type`). The served shape is `stored`'s id with [`PRE`]
-/// alone, so the start plans and creates only `pre`'s run (task 0 in both
-/// plans); the stored source is then swapped in, and the worker plans it
-/// with `plan_stored`, which does not re-validate (user ruling 2026-10-12).
-async fn start_stored_updates(pool: &sqlx::PgPool, ws: Uuid, stored: &str) -> Uuid {
-    let id = stored
-        .lines()
-        .next()
-        .and_then(|l| l.strip_prefix("id: "))
-        .expect("the flow's first line is its id");
-    assert!(
-        stored.contains(&format!("tasks:\n{PRE}")),
-        "control: `pre` is the stored flow's first task"
-    );
-    let served = format!("id: {id}\nnamespace: t\ntasks:\n{PRE}");
-    let ex = start_execution(pool, ws, None, &served, serde_json::json!({}))
+/// Start `source` as any flow is started. Since group C2 Task 5 the three
+/// update types are registered, so `start_execution`'s `build_plan` plans
+/// them and its first settle already runs the render pass.
+async fn start_updates(pool: &sqlx::PgPool, ws: Uuid, source: &str) -> Uuid {
+    start_execution(pool, ws, None, source, serde_json::json!({}))
         .await
-        .expect("start the served shape");
-    sqlx::query("UPDATE workflow.executions SET source = $2 WHERE id = $1")
-        .bind(ex)
-        .bind(stored)
-        .execute(pool)
-        .await
-        .expect("swap in the stored source");
-    ex
+        .expect("start")
 }
 
 async fn execution_variables(pool: &sqlx::PgPool, ex: Uuid) -> Option<serde_json::Value> {
@@ -11202,7 +11177,7 @@ fn core_handlers() -> Handlers {
     Handlers::with_core_tasks(egret_workflow::storage::current())
 }
 
-/// `valids/set-variables`, after [`PRE`]: the output reads the new value, the
+/// `valids/set-variables`: the output reads the new value, the
 /// column holds the merged object, and the update ran `CREATED RUNNING
 /// SUCCESS` (the golden's shape).
 #[sqlx::test(migrations = "../../migrations")]
@@ -11210,14 +11185,14 @@ async fn set_variables_then_output_reads_the_new_value(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: set-variables\nnamespace: t\nvariables:\n  name: World\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: set-variables\nnamespace: t\nvariables:\n  name: World\ntasks:\n\
          \x20 - id: set-vars\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
          variables:\n      message: Hello\n      name: Loïc\n\
          \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
-         values:\n      message: \"{{{{ vars.message }}}} {{{{ vars.name }}}}\"\n"
+         values:\n      message: \"{{ vars.message }} {{ vars.name }}\"\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11252,7 +11227,59 @@ async fn set_variables_then_output_reads_the_new_value(pool: sqlx::PgPool) {
     );
 }
 
-/// `valids/set-variables-duplicate`, after [`PRE`]: the run fails from
+/// An update that is the flow's FIRST task is computed in the very first
+/// round: `start_execution`'s own settle runs the render pass, so before any
+/// worker tick the run is `CREATED RUNNING SUCCESS` with its one attempt and
+/// the column is written. (Until group C2 Task 5 no flow could start with one:
+/// `build_plan` refused the type, and Task 4's tests started a served `Log`
+/// first.) `drain` then finishes the rest from the column.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_update_as_the_first_task_is_computed_by_the_start_settle(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let (_db, ws) = seed(&pool).await;
+    let flow = String::from(
+        "id: first-update\nnamespace: t\nvariables:\n  name: World\ntasks:\n\
+         \x20 - id: set-vars\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
+         variables:\n      name: Loïc\n\
+         \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
+         values:\n      name: \"{{ vars.name }}\"\n",
+    );
+
+    // Act
+    let ex = start_updates(&pool, ws, &flow).await;
+
+    // Assert: before any tick
+    assert_eq!(
+        run_history(&pool, ex, "set-vars").await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "the start's own settle computed the update"
+    );
+    assert_eq!(
+        attempt_histories(&pool, ex, "set-vars").await,
+        vec![serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])]
+    );
+    assert_eq!(
+        execution_variables(&pool, ex).await,
+        Some(serde_json::json!({"name": "Loïc"}))
+    );
+
+    // Act + Assert: the next task reads it
+    drain(&pool, &core_handlers()).await;
+    assert_eq!(
+        run_outputs(&pool, ex, "output").await,
+        Some(serde_json::json!({"values": {"name": "Loïc"}}))
+    );
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("SUCCESS"))
+    );
+}
+
+/// `valids/set-variables-duplicate`: the run fails from
 /// `CREATED` with ONE attempt `[FAILED]` -- the worker emits
 /// `Command::FailUnstarted` -- and that attempt's end is stamped like any
 /// other terminal attempt's; the message is Kestra's; nothing is written.
@@ -11263,14 +11290,14 @@ async fn set_variables_overwrite_false_fails_from_created_with_one_failed_attemp
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: set-variables-duplicate\nnamespace: t\nvariables:\n  name: World\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: set-variables-duplicate\nnamespace: t\nvariables:\n  name: World\ntasks:\n\
          \x20 - id: set-vars\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
          variables:\n      message: Hello\n      name: Loïc\n    overwrite: false\n\
          \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
-         values:\n      message: \"{{{{ vars.message }}}} {{{{ vars.name }}}}\"\n"
+         values:\n      message: \"{{ vars.message }} {{ vars.name }}\"\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11315,23 +11342,23 @@ async fn set_variables_overwrite_false_fails_from_created_with_one_failed_attemp
     );
 }
 
-/// `valids/unset-variables`, after [`PRE`]: the key set by one update and
+/// `valids/unset-variables`: the key set by one update and
 /// removed by the next is gone, so the default applies.
 #[sqlx::test(migrations = "../../migrations")]
 async fn unset_variables_then_the_default_applies(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: unset-variables\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: unset-variables\nnamespace: t\ntasks:\n\
          \x20 - id: set-vars\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
          variables:\n      message: Hello World\n\
          \x20 - id: unset-variables\n    type: io.kestra.plugin.core.execution.UnsetVariables\n    \
          variables:\n      - message\n\
          \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
-         values:\n      message: \"{{{{ vars.message ??? 'default' }}}}\"\n"
+         values:\n      message: \"{{ vars.message ??? 'default' }}\"\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11354,14 +11381,14 @@ async fn labels_then_a_later_render_reads_them(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: labels-read\nnamespace: t\nlabels:\n  flowLabelKey: f\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: labels-read\nnamespace: t\nlabels:\n  flowLabelKey: f\ntasks:\n\
          \x20 - id: labels\n    type: io.kestra.plugin.core.execution.Labels\n    \
-         labels:\n      k: \"{{{{ flow.id }}}}\"\n\
+         labels:\n      k: \"{{ flow.id }}\"\n\
          \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
-         values:\n      a: \"{{{{ labels.k }}}}\"\n      b: \"{{{{ labels.flowLabelKey }}}}\"\n"
+         values:\n      a: \"{{ labels.k }}\"\n      b: \"{{ labels.flowLabelKey }}\"\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11384,7 +11411,7 @@ async fn labels_then_a_later_render_reads_them(pool: sqlx::PgPool) {
     );
 }
 
-/// `valids/npe-labels-update-task`, after [`PRE`]: the `Labels` run renders
+/// `valids/npe-labels-update-task`: the `Labels` run renders
 /// `{{ taskrun.id }}` in the settle that creates its row, and the id it read
 /// is the one the row holds -- the reserved id was written.
 #[sqlx::test(migrations = "../../migrations")]
@@ -11392,12 +11419,12 @@ async fn labels_can_read_its_own_taskrun_id(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: npe-labels-update-task\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: npe-labels-update-task\nnamespace: t\ntasks:\n\
          \x20 - id: labels\n    type: io.kestra.plugin.core.execution.Labels\n    \
-         labels:\n      someLabel: \"{{{{ taskrun.id }}}}\"\n"
+         labels:\n      someLabel: \"{{ taskrun.id }}\"\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11430,19 +11457,19 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: par-updates\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: par-updates\nnamespace: t\ntasks:\n\
          \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
          \x20     - id: one\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
          variables:\n          x: 1\n\
          \x20     - id: two\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
-         variables:\n          x: 2\n          y: \"{{{{ vars.x }}}}\"\n\
+         variables:\n          x: 2\n          y: \"{{ vars.x }}\"\n\
          \x20 - id: output\n    type: io.kestra.plugin.core.output.OutputValues\n    \
-         values:\n      x: \"{{{{ vars.x }}}}\"\n"
+         values:\n      x: \"{{ vars.x }}\"\n",
     );
     let mut executions = Vec::new();
     for _ in 0..5 {
-        executions.push(start_stored_updates(&pool, ws, &flow).await);
+        executions.push(start_updates(&pool, ws, &flow).await);
     }
 
     // Act
@@ -11463,23 +11490,27 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
     }
 }
 
-/// An execution being killed writes no update: `pre` is killed before it
-/// completes, and the `SetVariables` after it is absent or `KILLED`, and
-/// nothing is written.
-/// (The gate itself -- `render_updates` computes nothing unless the execution
-/// is `RUNNING` -- is driven directly in `worker::render`'s unit tests, since
-/// `advance_killing` closes a `CREATED` update before any render pass sees it.)
+/// An execution being killed writes no update: the `Log` `l` is killed before
+/// it completes, and the `SetVariables` after it is absent or `KILLED`, and
+/// nothing is written. (`l` is first on purpose: an update that is the first
+/// task is computed by the start's own settle, before any kill could land.)
+/// (The gate itself -- `render_updates` computes nothing unless
+/// `executor::drives_forward` holds, i.e. the execution is neither terminal
+/// nor `KILLING` (ruling D9) -- is driven directly in `worker::render`'s unit
+/// tests, since `advance_killing` closes a `CREATED` update before any render
+/// pass sees it.)
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_update_under_a_killing_execution_writes_nothing(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: kill-update\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: kill-update\nnamespace: t\ntasks:\n\
+         \x20 - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
          \x20 - id: set\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
-         variables:\n      x: 1\n"
+         variables:\n      x: 1\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     egret_workflow::worker::kill_execution(&pool, ws, ex, false)
@@ -11510,12 +11541,12 @@ async fn run_if_false_skips_the_update_and_writes_nothing(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: runif-update\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: runif-update\nnamespace: t\ntasks:\n\
          \x20 - id: set\n    type: io.kestra.plugin.core.execution.SetVariables\n    \
-         runIf: \"false\"\n    variables:\n      x: 1\n"
+         runIf: \"false\"\n    variables:\n      x: 1\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
@@ -11545,17 +11576,17 @@ async fn an_update_beside_a_waiting_pause_computes_before_the_resume(pool: sqlx:
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
-    let flow = format!(
-        "id: pause-update\nnamespace: t\ntasks:\n{PRE}\
+    let flow = String::from(
+        "id: pause-update\nnamespace: t\ntasks:\n\
          \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
          \x20     - id: pause\n        type: io.kestra.plugin.core.flow.Pause\n\
          \x20     - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n\
          \x20         - id: l\n            type: io.kestra.plugin.core.log.Log\n            \
          message: hi\n\
          \x20         - id: set\n            type: io.kestra.plugin.core.execution.SetVariables\n            \
-         variables:\n              v: 1\n"
+         variables:\n              v: 1\n",
     );
-    let ex = start_stored_updates(&pool, ws, &flow).await;
+    let ex = start_updates(&pool, ws, &flow).await;
 
     // Act
     drain(&pool, &core_handlers()).await;
