@@ -449,8 +449,20 @@ async fn a_create_compiles_into_the_profile_and_reports_its_reach() {
         assert_eq!(listing["reach"]["sharedProfile"], true);
         assert_eq!(listing["profile"]["serviceId"], json!(b.profile));
         assert_eq!(listing["profile"]["name"], json!(b.profile_name));
+        // Security review M3: the listing of EITHER engine holds the grant,
+        // marked with the engine it was written on.
+        let g = &listing["grants"][0];
+        assert_eq!(listing["grants"].as_array().unwrap().len(), 1, "{listing}");
+        assert_eq!(g["id"], body["id"], "{listing}");
+        assert_eq!(g["engineId"], json!(b.engine));
+        let first_name: String =
+            sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+                .bind(b.engine)
+                .fetch_one(pool)
+                .await
+                .expect("name");
+        assert_eq!(g["engineName"], json!(first_name));
         if eng == b.engine {
-            let g = &listing["grants"][0];
             assert_eq!(g["id"], body["id"]);
             assert_eq!(g["values"], json!(["query_max_memory"]));
             assert_eq!(

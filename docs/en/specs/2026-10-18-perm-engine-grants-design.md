@@ -306,13 +306,13 @@ why }] }] }`, `Capability = { id, label, description, resources: [{ key, valueKi
   reach: { engines: [{ id, name, origin }], sharedProfile: bool },
   grants: [EngineGrantView],
   managed: [ManagedEntry] }
-EngineGrantView = { id, engineId, capability, values, principals: [PermPrincipal], policyName, reach }
+EngineGrantView = { id, engineId, engineName, capability, values, targetUserId, principals: [PermPrincipal], policyName, reach }
 ManagedEntry    = { policyId, policyName, kind: user_baseline | delegator | admin_all_access | default_all_access,
                     capability: string | null, resources: {key: [value]}, accesses: [string],
                     users: [string], groups: [string], enabled }
 ```
 
-`reach` lists every engine with `authz_service_id = profile` ordered by name (E9). `managed` lists every
+`reach` lists every engine with `authz_service_id = profile` ordered by name (E9). `grants` lists every engine grant that reaches the engine: on a legacy shared profile that includes those written on its other engines, each marked by `engineId`/`engineName` (security review M3). `managed` lists every
 `managed_by = 'infra'` policy of the profile; `capability` is the catalogue id whose resource key set equals the
 policy's, else `null` (data hierarchies and `queryid`); `kind` from the name (`infra_names.rs` constants). An engine
 with no profile answers `profile: null`, empty `grants`/`managed`, and 200. Unknown engine → 404.

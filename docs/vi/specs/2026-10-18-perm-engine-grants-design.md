@@ -307,13 +307,13 @@ why }] }] }`, `Capability = { id, label, description, resources: [{ key, valueKi
   reach: { engines: [{ id, name, origin }], sharedProfile: bool },
   grants: [EngineGrantView],
   managed: [ManagedEntry] }
-EngineGrantView = { id, engineId, capability, values, principals: [PermPrincipal], policyName, reach }
+EngineGrantView = { id, engineId, engineName, capability, values, targetUserId, principals: [PermPrincipal], policyName, reach }
 ManagedEntry    = { policyId, policyName, kind: user_baseline | delegator | admin_all_access | default_all_access,
                     capability: string | null, resources: {key: [value]}, accesses: [string],
                     users: [string], groups: [string], enabled }
 ```
 
-`reach` liệt kê mọi engine có `authz_service_id = profile`, sắp theo tên (E9). `managed` liệt kê mọi policy
+`reach` liệt kê mọi engine có `authz_service_id = profile`, sắp theo tên (E9). `grants` liệt kê mọi engine grant với tới engine: trên một profile dùng chung kiểu cũ, gồm cả các grant được viết trên engine khác của profile, mỗi grant được đánh dấu bằng `engineId`/`engineName` (security review M3). `managed` liệt kê mọi policy
 `managed_by = 'infra'` của profile; `capability` là id catalogue có tập khoá resource bằng tập khoá của
 policy, ngược lại là `null` (các cây dữ liệu và `queryid`); `kind` lấy từ tên (các hằng trong `infra_names.rs`). Engine
 không có profile trả về `profile: null`, `grants`/`managed` rỗng, và 200. Engine không tồn tại → 404.

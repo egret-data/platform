@@ -28,8 +28,8 @@ use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
 use egret_perm::{
     create_engine_grant_in_tx, delete_engine_grant_in_tx, get_engine_grant_via,
-    list_engine_grants_for_engine_via, list_engine_grants_via, update_engine_grant_in_tx,
-    EngineGrant, EngineType, Principal, PrincipalKind, PrincipalSet,
+    list_engine_grants_for_engine_via, list_engine_grants_for_profile_via, list_engine_grants_via,
+    update_engine_grant_in_tx, EngineGrant, EngineType, Principal, PrincipalKind, PrincipalSet,
 };
 use egret_policy::catalogs_for_service_via;
 use egret_policy_api::infra_names::{
@@ -140,7 +140,11 @@ pub struct ReachEngine {
 #[serde(rename_all = "camelCase")]
 pub struct EngineGrantView {
     pub id: Uuid,
+    /// The engine the grant was written on. On a legacy shared profile a
+    /// listing of another engine of the profile shows it too (it reaches that
+    /// engine), marked by this id and [`Self::engine_name`].
     pub engine_id: Uuid,
+    pub engine_name: String,
     pub capability: String,
     /// The values in the catalogue's key order, an impersonation target as the
     /// user's CURRENT username (it is stored by id). A target with no username
@@ -323,9 +327,16 @@ async fn grant_view(
     reach: Reach,
 ) -> Result<EngineGrantView, PermHttpError> {
     let values = view_values(conn, &g).await?;
+    let engine_name: String =
+        sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+            .bind(g.engine_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
     Ok(EngineGrantView {
         id: g.id,
         engine_id: g.engine_id,
+        engine_name,
         capability: g.capability,
         values,
         target_user_id: g.target_user_id,
@@ -538,7 +549,14 @@ pub(crate) async fn list_engine_grants(
         None => (None, Vec::new()),
     };
     let mut grants = Vec::new();
-    for g in list_engine_grants_for_engine_via(&mut conn, engine_id).await? {
+    // Every grant that reaches this engine: on a legacy shared profile that
+    // includes the grants written on the profile's other engines (security
+    // review M3), each marked with its own engine.
+    let reaching = match engine.authz_service_id {
+        Some(sid) => list_engine_grants_for_profile_via(&mut conn, sid).await?,
+        None => list_engine_grants_for_engine_via(&mut conn, engine_id).await?,
+    };
+    for g in reaching {
         grants.push(grant_view(&mut conn, g, reach.clone()).await?);
     }
     Ok(Json(EngineGrantsResponse {

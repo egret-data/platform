@@ -41986,6 +41986,7 @@
         "required": [
           "id",
           "engineId",
+          "engineName",
           "capability",
           "values",
           "principals",
@@ -41999,7 +42000,11 @@
           },
           "engineId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The engine the grant was written on. On a legacy shared profile a\nlisting of another engine of the profile shows it too (it reaches that\nengine), marked by this id and [`Self::engine_name`]."
+          },
+          "engineName": {
+            "type": "string"
           },
           "capability": {
             "type": "string"

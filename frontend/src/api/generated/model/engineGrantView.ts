@@ -13,7 +13,13 @@ import type { Reach } from './reach';
  */
 export interface EngineGrantView {
   id: string;
+  /**
+     * The engine the grant was written on. On a legacy shared profile a
+     * listing of another engine of the profile shows it too (it reaches that
+     * engine), marked by this id and [`Self::engine_name`].
+     */
   engineId: string;
+  engineName: string;
   capability: string;
   /**
      * The values in the catalogue's key order, an impersonation target as the
