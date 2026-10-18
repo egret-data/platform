@@ -162,6 +162,10 @@ pub fn perm_router() -> Router<PermState> {
         .route("/perm/people/roles/{name}", get(people::read_role))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
+        .route(
+            "/perm/explain/capability",
+            post(engine_grants::explain_capability),
+        )
         .route("/perm/explain/principal", post(people::explain_principal))
         .route("/perm/compile/{service_id}", post(compile))
         .route(
@@ -209,6 +213,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         engine_grants::create_engine_grant,
         engine_grants::patch_engine_grant,
         engine_grants::delete_engine_grant,
+        engine_grants::explain_capability,
         people::list_people,
         people::read_user,
         people::allocate_username,
@@ -239,6 +244,10 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         engine_grants::ManagedEntry,
         engine_grants::NewEngineGrant,
         engine_grants::EngineGrantWriteResponse,
+        engine_grants::ExplainCapabilityRequest,
+        engine_grants::ExplainCapabilityResponse,
+        engine_grants::CapabilityOutcome,
+        engine_grants::CapabilityTagResolution,
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
         crate::principal_refs::UnresolvedPrincipal,

@@ -1103,3 +1103,183 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// explain (spec §5.4, E13)
+// ---------------------------------------------------------------------------
+
+/// `POST /perm/explain/capability`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainCapabilityRequest {
+    /// A username; no groups or roles, as `/perm/explain`.
+    pub subject: super::ExplainSubject,
+    pub engine_id: Uuid,
+    pub capability: String,
+    /// In the catalogue's key order, an impersonation target as a username.
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// Whether the engine's profile could be asked at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityOutcome {
+    PerProfile,
+    NoProfile,
+}
+
+/// What egret did about tags for this question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityTagResolution {
+    /// Asked with no tags: the capability's resource has no `catalog` level
+    /// (no egret tag can attach to it), or the download's tag block holds no
+    /// policy (no tag policy can decide).
+    NotApplicable,
+    /// Asked with unresolved tags: a `catalog`-level capability while the tag
+    /// block holds a policy. The evaluator answers `TagsUnresolved`.
+    Declined,
+}
+
+/// The answer.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainCapabilityResponse {
+    pub engine: EngineRef,
+    pub profile: Option<ProfileRef>,
+    pub reach: Reach,
+    pub outcome: CapabilityOutcome,
+    pub decision: Option<crate::explain_wire::WireDecision>,
+    pub attribution: Option<super::ExplainAttribution>,
+    pub policy_name: Option<String>,
+    pub tag_resolution: CapabilityTagResolution,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/explain/capability",
+    tag = "perm",
+    request_body = ExplainCapabilityRequest,
+    description = "Evaluate one user and one engine capability on the artifact the engine's \
+                   profile serves. Undecidable is returned as such: on a delegating Trino \
+                   profile every impersonation question is Undecidable, because the \
+                   self-impersonation baseline names `{USER}`, which egret's evaluator does not \
+                   expand.",
+    responses(
+        (status = 200, description = "The decision, or `outcome: no_profile` with `decision: null` for an engine that downloads no profile", body = ExplainCapabilityResponse),
+        (status = 400, description = "Unknown capability, a capability of another engine type, or a value that breaks the catalogue's rules", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The profile's engines run a plugin version egret does not model", body = ErrorBody),
+    ),
+)]
+pub(crate) async fn explain_capability(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<ExplainCapabilityRequest>,
+) -> Result<Json<ExplainCapabilityResponse>, PermHttpError> {
+    use egret_ranger_eval::eval::{AccessRequest, EngineConfig, UnenrichedTags};
+    use egret_ranger_eval::resource::RequestResource;
+    use egret_ranger_eval::servicedef::ServiceDef;
+
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    let engine = read_engine(&mut conn, body.engine_id).await?;
+    let cap = capability(&body.capability).ok_or_else(|| {
+        PermHttpError::BadRequest(format!("unknown capability {:?}", body.capability))
+    })?;
+    let Some(engine_type) = engine_type_of(&engine).filter(|t| *t == cap.engine) else {
+        return Err(PermHttpError::BadRequest(format!(
+            "{} is not a capability of engine {} ({})",
+            cap.id, engine.name, engine.r#type
+        )));
+    };
+    let values = check_values(cap, &body.values).map_err(PermHttpError::BadRequest)?;
+    let reach = reach_of(&mut conn, engine.authz_service_id, &engine).await?;
+    let engine_ref = EngineRef {
+        id: engine.id,
+        name: engine.name.clone(),
+        r#type: engine.r#type.clone(),
+        origin: engine.origin.clone(),
+        status: engine.status.clone(),
+    };
+    let Some(service_id) = engine.authz_service_id else {
+        return Ok(Json(ExplainCapabilityResponse {
+            engine: engine_ref,
+            profile: None,
+            reach,
+            outcome: CapabilityOutcome::NoProfile,
+            decision: None,
+            attribution: None,
+            policy_name: None,
+            tag_resolution: CapabilityTagResolution::NotApplicable,
+        }));
+    };
+
+    let svc = egret_policy::get_service_by_id_via(&mut conn, service_id).await?;
+    let plugin_version = super::profile_plugin_version(&mut conn, service_id, engine_type).await?;
+    let artifact = super::served_artifact_via(&mut conn, &svc).await?;
+    let service_def = ServiceDef::parse(&artifact.service_def);
+    let config = EngineConfig {
+        engine: Some(super::ranger_engine(engine_type)),
+        plugin_version: Some(plugin_version),
+        ..EngineConfig::without_super_users()
+    };
+
+    let mut values_iter = values.iter();
+    let mut resource = RequestResource::new();
+    for (key, kind) in cap.resources {
+        let value = match kind {
+            Some(_) => values_iter.next().expect("checked count").clone(),
+            None => "*".to_string(),
+        };
+        resource = resource.with(*key, value);
+    }
+    // Tags (spec §5.4): egret's service tags only carry catalog/schema/table/
+    // column, so no tag attaches to a resource without a `catalog` level; with
+    // one, an empty tag block cannot decide either. Otherwise egret does not
+    // resolve tags here and says so.
+    let has_catalog = cap.resources.iter().any(|(k, _)| *k == "catalog");
+    let (resolved_tags, tag_resolution) = if has_catalog && !artifact.tag_policies.is_empty() {
+        (None, CapabilityTagResolution::Declined)
+    } else {
+        (
+            Some(UnenrichedTags::new(Vec::new())),
+            CapabilityTagResolution::NotApplicable,
+        )
+    };
+    let request = AccessRequest {
+        user: body.subject.user,
+        // Never groups or roles (`ExplainSubject`).
+        groups: Default::default(),
+        roles: Default::default(),
+        access_type: cap.access.to_string(),
+        resource,
+        owner: None,
+        resolved_tags,
+    };
+    let decision = egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
+    let attribution = super::attribution_for(&mut *conn, &decision).await?;
+    let policy_name = match &decision {
+        egret_ranger_eval::eval::Decision::Allowed { policy_name, .. }
+        | egret_ranger_eval::eval::Decision::Denied { policy_name, .. } => {
+            Some(policy_name.clone())
+        }
+        egret_ranger_eval::eval::Decision::Undecidable { .. } => None,
+    };
+    Ok(Json(ExplainCapabilityResponse {
+        engine: engine_ref,
+        profile: Some(ProfileRef {
+            service_id,
+            name: svc.name,
+        }),
+        reach,
+        outcome: CapabilityOutcome::PerProfile,
+        decision: Some(crate::explain_wire::WireDecision::from(&decision)),
+        attribution,
+        policy_name,
+        tag_resolution,
+    }))
+}
