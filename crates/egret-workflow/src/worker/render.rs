@@ -68,6 +68,7 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use super::claim::ExecutionCtx;
+use crate::executor::update::Change;
 use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
 use crate::runners::{FileScope, RenderContext};
@@ -104,6 +105,13 @@ pub(super) struct Surface {
     flow: Value,
     /// `labels`.
     labels: Value,
+    /// Group C2 Task 4: the merged labels `labels` is built from (flow, then
+    /// own, `labels::execution_labels`) -- what a `Labels` task merges into,
+    /// and what [`Surface::set_labels`] replaces.
+    labels_list: Vec<crate::models::Label>,
+    /// The `system` entry `load` puts into `labels`, kept so
+    /// [`Surface::set_labels`] can put it back unchanged.
+    system_label: Value,
     /// `execution`.
     execution: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
@@ -254,10 +262,7 @@ impl Surface {
         // replay's copy), the later value winning (W7f spec §3.3).
         let own = crate::labels::own_labels(row.get::<Option<Value>, _>("labels").as_ref());
         let flow_labels = flow.as_ref().map(|f| f.labels.as_slice()).unwrap_or(&[]);
-        let mut labels = serde_json::Map::new();
-        for label in crate::labels::execution_labels(flow_labels, &own) {
-            labels.insert(label.key, Value::String(label.value));
-        }
+        let labels_list = crate::labels::execution_labels(flow_labels, &own);
         let started_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
         let execution = json!({
             "id": ctx.id.to_string(),
@@ -509,10 +514,8 @@ impl Surface {
             }
             first
         });
-        labels.insert(
-            "system".to_string(),
-            json!({"correlationId": root.to_string()}),
-        );
+        let system_label = json!({"correlationId": root.to_string()});
+        let labels = labels_value(&labels_list, &system_label);
 
         let rows = sqlx::query(
             "SELECT run_ix, id, outputs, created_at FROM workflow.task_runs \
@@ -540,7 +543,9 @@ impl Surface {
             inputs,
             vars,
             flow: flow_value,
-            labels: Value::Object(labels),
+            labels,
+            labels_list,
+            system_label,
             execution,
             item,
             inherited,
@@ -640,6 +645,43 @@ impl Surface {
     /// Attach the file scope every later [`Surface::context`] carries.
     pub(super) fn attach_files(&mut self, files: FileScope) {
         self.files = Some(files);
+    }
+
+    /// The current merged labels, flow then own (`labels::execution_labels`),
+    /// as a `Labels` task merges into them.
+    pub(super) fn current_labels(&self) -> &[crate::models::Label] {
+        &self.labels_list
+    }
+
+    /// The current `vars` (`Value::Null` = none).
+    pub(super) fn vars(&self) -> &Value {
+        &self.vars
+    }
+
+    /// Group C2 Task 4: replace `vars` for every later render of this settle,
+    /// so a task after a `SetVariables` in the same settle reads the new value.
+    pub(super) fn set_vars(&mut self, vars: Value) {
+        self.vars = vars;
+    }
+
+    /// Group C2 Task 4: replace the merged labels and rebuild the `labels`
+    /// render value from them, keeping the `system` entry `load` built.
+    pub(super) fn set_labels(&mut self, labels: Vec<crate::models::Label>) {
+        self.labels = labels_value(&labels, &self.system_label);
+        self.labels_list = labels;
+    }
+
+    /// `taskrun.id` for `run`, reserving a fresh id if the run has no row yet
+    /// (a run created in this settle: `persist` inserts it with the column
+    /// default, which `load` could not have read). `true` = newly reserved,
+    /// which `settle` must then write onto the row.
+    pub(super) fn reserve_id(&mut self, run: RunIx) -> (Uuid, bool) {
+        if let Some(id) = self.ids.get(&run) {
+            return (*id, false);
+        }
+        let id = Uuid::new_v4();
+        self.ids.insert(run, id);
+        (id, true)
     }
 
     /// The flow this execution runs, as `load` parsed it.
@@ -828,6 +870,18 @@ impl Surface {
             None => cx,
         }
     }
+}
+
+/// The `labels` render value: each label by key, then the `system` entry --
+/// inserted last, so it shadows a declared `system.*` label as it always has
+/// (see the `labels` comment in [`Surface::load`]).
+fn labels_value(labels: &[crate::models::Label], system: &Value) -> Value {
+    let mut map = Map::new();
+    for label in labels {
+        map.insert(label.key.clone(), Value::String(label.value.clone()));
+    }
+    map.insert("system".to_string(), system.clone());
+    Value::Object(map)
 }
 
 /// The execution's inputs as an expression sees them: the posted values coerced
@@ -1032,6 +1086,8 @@ mod tests {
             vars: Value::Null,
             flow: Value::Null,
             labels: json!({}),
+            labels_list: Vec::new(),
+            system_label: Value::Null,
             execution: json!({}),
             item: None,
             inherited: Map::new(),
@@ -1062,6 +1118,123 @@ mod tests {
             read("outputs"),
             read("tasks")
         );
+    }
+
+    /// A surface with nothing in it, for the `render_updates` tests.
+    fn bare_surface() -> Surface {
+        Surface {
+            parsed: None,
+            inputs: json!({}),
+            vars: Value::Null,
+            flow: Value::Null,
+            labels: json!({}),
+            labels_list: Vec::new(),
+            system_label: json!({"correlationId": "root"}),
+            execution: json!({}),
+            item: None,
+            inherited: Map::new(),
+            own: std::collections::BTreeMap::new(),
+            started: std::collections::BTreeMap::new(),
+            ids: std::collections::BTreeMap::new(),
+            files: None,
+        }
+    }
+
+    /// One `CREATED` run of the flow's only task, under an execution whose
+    /// history is `history`.
+    fn one_created_update(source: &str, history: Vec<RunState>) -> (Plan, ExecutionState) {
+        use crate::executor::{plan_stored, ExecutionState, TaskRun};
+        // `plan_stored`: `build_plan` refuses the three types until group C2
+        // Task 5 registers them; the planning arm is the same.
+        let plan = plan_stored(source).expect("the probe flow plans");
+        let state = ExecutionState {
+            runs: vec![TaskRun {
+                task: 0,
+                parent: None,
+                value: None,
+                rendered: None,
+                rendered_run_if: None,
+                history: vec![RunState::Created],
+                attempts: Vec::new(),
+                not_before: None,
+                resume_with: None,
+                working_dir: None,
+            }],
+            history,
+            metadata: crate::executor::ExecutionMeta::default(),
+        };
+        (plan, state)
+    }
+
+    const ONE_SET: &str = "id: u\nnamespace: t\ntasks:\n  - id: set\n    \
+         type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n";
+
+    /// **An update is computed only while the execution is `RUNNING`** -- a
+    /// `KILLING` execution creates and starts nothing, and an update computed
+    /// then would still be written by `settle`. The `RUNNING` control is what
+    /// stops the `KILLING` half passing against a pass that computes nothing.
+    #[test]
+    fn render_updates_computes_nothing_unless_the_execution_is_running() {
+        for (history, computes) in [
+            (vec![RunState::Created, RunState::Running], true),
+            (
+                vec![RunState::Created, RunState::Running, RunState::Killing],
+                false,
+            ),
+            (
+                vec![RunState::Created, RunState::Running, RunState::Paused],
+                false,
+            ),
+        ] {
+            // Arrange
+            let (plan, mut state) = one_created_update(ONE_SET, history.clone());
+            let mut surface = bare_surface();
+            let mut side = RenderSide::default();
+
+            // Act
+            let pass = render_updates(&mut surface, &plan, &mut state, Tick(0), &mut side);
+
+            // Assert
+            if computes {
+                assert_eq!(pass, Pass::Rendered, "{history:?}");
+                assert_eq!(state.runs[0].rendered.as_deref(), Some(""));
+                assert_eq!(side.variables, Some(json!({"a": 1})));
+                assert_eq!(surface.vars(), &json!({"a": 1}), "the surface moved");
+                assert_eq!(side.run_ids.len(), 1, "a fresh id was reserved");
+            } else {
+                assert_eq!(pass, Pass::Nothing, "{history:?}");
+                assert_eq!(state.runs[0].rendered, None);
+                assert!(side.is_empty(), "{history:?}: {side:?}");
+                assert_eq!(surface.vars(), &Value::Null);
+            }
+        }
+    }
+
+    /// `set_labels` rebuilds the `labels` render value and keeps the `system`
+    /// entry `load` built; `reserve_id` answers a known id unchanged.
+    #[test]
+    fn set_labels_keeps_the_system_entry_and_reserve_id_keeps_a_known_id() {
+        // Arrange
+        let mut surface = bare_surface();
+        let known = Uuid::new_v4();
+        surface.ids.insert(3, known);
+
+        // Act
+        surface.set_labels(vec![crate::models::Label {
+            key: "k".into(),
+            value: "v".into(),
+        }]);
+
+        // Assert
+        assert_eq!(
+            surface.labels,
+            json!({"k": "v", "system": {"correlationId": "root"}})
+        );
+        assert_eq!(surface.current_labels().len(), 1);
+        assert_eq!(surface.reserve_id(3), (known, false));
+        let (fresh, new) = surface.reserve_id(4);
+        assert!(new);
+        assert_eq!(surface.reserve_id(4), (fresh, false));
     }
 
     /// A flow with no `inputs:` gets what it was posted, unchanged — the
@@ -1168,6 +1341,128 @@ pub(super) struct RenderSide {
     /// in file order: written to `workflow.loop_file_values`, not to the
     /// run's `rendered` (fix round 1; see `executor::rendered_from_file`).
     pub(super) file_values: Vec<(RunIx, Vec<String>)>,
+    /// Group C2 Task 4: the execution's whole new `variables` object, after
+    /// the last `SetVariables`/`UnsetVariables` this settle computed.
+    pub(super) variables: Option<Value>,
+    /// Group C2 Task 4: the execution's whole new label list, after the last
+    /// `Labels` this settle computed (`[{"key", "value"}]`, as
+    /// `labels::own_labels` reads it back).
+    pub(super) labels: Option<Vec<crate::models::Label>>,
+    /// Group C2 Task 4: the `taskrun.id` each update run rendered with, for a
+    /// run whose row this settle creates (see [`Surface::reserve_id`]).
+    pub(super) run_ids: Vec<(RunIx, Uuid)>,
+}
+
+impl RenderSide {
+    /// Nothing for `settle` to write.
+    pub(super) fn is_empty(&self) -> bool {
+        self.failures.is_empty()
+            && self.file_values.is_empty()
+            && self.variables.is_none()
+            && self.labels.is_none()
+            && self.run_ids.is_empty()
+    }
+}
+
+/// **Tier C -- group C2's executor updates: `SetVariables`, `UnsetVariables`
+/// and `Labels`** (spec §3.1-§3.3).
+///
+/// A pass of its own rather than an arm of [`render_expressions`]: that pass's
+/// population is "one expression per task" and it reads a fixed surface,
+/// while an update renders a whole spec and CHANGES the surface -- every later
+/// render of this settle (the next task's `{{ vars.x }}`, the next update)
+/// must see the new value, as Kestra's next task reads the updated execution.
+///
+/// The population: an `Update` run still `CREATED` with no `rendered`, whose
+/// `runIf:` (if any) has rendered truthy -- a falsy one is `advance()`'s
+/// `SkipRun`, and a pending one is [`render_run_if`]'s to decide first -- and
+/// **only while the execution is `RUNNING`**: a `KILLING` execution creates
+/// and starts nothing, and an update computed then would still be written by
+/// `settle`.
+///
+/// In run order, against the CURRENT surface, so of two updates in one
+/// `Parallel` the later run applies on top of the earlier one.
+///
+/// A computed update sets `rendered` to `""` (the signal `advance()` completes
+/// it on, `CREATED RUNNING SUCCESS` in one round) and records the new value in
+/// `side`. Both live and die with this settle's transaction: a settle that
+/// rolls back loses the `rendered` and the column write together, so no other
+/// bookkeeping is needed. A failed one is `Command::FailUnstarted` -- one
+/// attempt `[FAILED]`, the golden's shape -- with its message.
+pub(super) fn render_updates(
+    surface: &mut Surface,
+    plan: &Plan,
+    state: &mut ExecutionState,
+    now: Tick,
+    side: &mut RenderSide,
+) -> Pass {
+    if state.history.last() != Some(&RunState::Running) {
+        return Pass::Nothing;
+    }
+    let pending: Vec<RunIx> = (0..state.runs.len())
+        .filter(|&ix| {
+            let run = &state.runs[ix];
+            let Some(task) = plan.tasks.get(run.task) else {
+                return false;
+            };
+            matches!(task.kind, TaskKind::Update { .. })
+                && run.history.last() == Some(&RunState::Created)
+                && run.rendered.is_none()
+                && (task.run_if.is_none()
+                    || run
+                        .rendered_run_if
+                        .as_deref()
+                        .is_some_and(crate::executor::is_truthy))
+        })
+        .collect();
+    if pending.is_empty() {
+        return Pass::Nothing;
+    }
+    for ix in pending {
+        // Group C2 (spec §3.1): computed at CREATED against the CURRENT
+        // surface, so an update earlier in this pass is seen by this one (two
+        // branches of a Parallel apply in run order).
+        let (id, fresh) = surface.reserve_id(ix);
+        if fresh {
+            side.run_ids.push((ix, id));
+        }
+        let cx = surface.context(plan, state, Some(ix));
+        let TaskKind::Update { op, spec } = &plan.tasks[state.runs[ix].task].kind else {
+            unreachable!("filtered on TaskKind::Update above")
+        };
+        let change = crate::executor::update::compute(
+            *op,
+            spec,
+            &cx,
+            surface.vars(),
+            surface.current_labels(),
+        );
+        let limit = surface.take_limit_failure();
+        match change {
+            Ok(Change::Variables(v)) => {
+                let v = Value::Object(v);
+                surface.set_vars(v.clone());
+                side.variables = Some(v);
+                state.runs[ix].rendered = Some(String::new());
+            }
+            Ok(Change::Labels(l)) => {
+                surface.set_labels(l.clone());
+                side.labels = Some(l);
+                state.runs[ix].rendered = Some(String::new());
+            }
+            Err(why) => {
+                crate::executor::apply(
+                    state,
+                    &crate::executor::Command::FailUnstarted { run: ix, at: now },
+                );
+                // A per-call read limit's message wins, as in the other
+                // passes: it is egret's own bound, which the author cannot
+                // see any other way.
+                side.failures.push((ix, limit.unwrap_or(why)));
+            }
+        }
+    }
+    Pass::Rendered
 }
 
 /// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a

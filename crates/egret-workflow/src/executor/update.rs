@@ -50,9 +50,6 @@ impl UpdateOp {
 }
 
 /// Read sets for `spec::schema::measure` (serde field names = Kestra's).
-// Deserialized by `compute` (Task 4's caller) and read by Task 5's
-// `spec::schema::measure`; nothing constructs these with a literal.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SetSpec {
     pub variables: Option<Value>,
@@ -60,7 +57,6 @@ pub struct SetSpec {
     pub overwrite: Option<Property<bool>>,
 }
 
-#[allow(dead_code)] // as `SetSpec`
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsetSpec {
@@ -69,7 +65,6 @@ pub struct UnsetSpec {
     pub ignore_missing: Option<Property<bool>>,
 }
 
-#[allow(dead_code)] // as `SetSpec`
 #[derive(Debug, Deserialize)]
 pub struct LabelsSpec {
     pub labels: Option<Value>,
@@ -87,8 +82,6 @@ pub enum Change {
 /// Compute one update. `spec` is the task's leaf spec as JSON text (from the
 /// plan), `vars` the current `vars` object (`Value::Null` = none), `labels` the
 /// current merged label list (flow then own).
-// Called from the worker's render pass from group C2 Task 4 on.
-#[allow(dead_code)]
 pub fn compute(
     op: UpdateOp,
     spec: &str,
