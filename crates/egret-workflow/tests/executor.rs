@@ -797,7 +797,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // mismatch is now attributed rather than reported; 104 + 197 = 301.
         // 104 -> 100 baselined, 197 -> 201 matching at kill-and-exit Task 3:
         // the four `valids/exit*` entries bank; 100 + 201 = 301.
-        (301, 201, 100),
+        // 100 -> 89 baselined, 201 -> 212 matching at group C1 Task 2: the
+        // eleven entries `OutputValues` held bank; 89 + 212 = 301.
+        // 89 -> 88 baselined, 212 -> 213 matching at group C1 Task 3:
+        // `valids/assert` banks; 88 + 213 = 301.
+        // 88 -> 84 baselined, 213 -> 217 matching at group C1 Task 4: four
+        // `valids/purge_logs_*` bank; 84 + 217 = 301.
+        (301, 217, 84),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -894,8 +900,15 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         )
         .cloned()
         .collect();
+    // **Fifteen since group C1 Task 2 (2026-10-18)**: `valids/task-runif`
+    // declares a `Subflow` that its falsy `runIf:` skips, and it banks now that
+    // its `OutputValues` has a handler. Nothing about `Subflow` changed either.
+    let fifteen: BTreeSet<String> = fourteen
+        .union(&["valids/task-runif".to_string()].into())
+        .cloned()
+        .collect();
     assert_eq!(
-        sub_runs_matching, fourteen,
+        sub_runs_matching, fifteen,
         "the `Subflow` banks, DERIVED: every golden entry that declares a \
          `Subflow`, that Kestra ran, and that egret now reproduces. If this set \
          grows, the coverage statement's 16 is stale and must be re-derived -- \
@@ -919,11 +932,12 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
             sub_refused_matching.len(),
             sub_baselined.len()
         ),
-        (23, 14, 1, 8),
-        "23 `Subflow`-declaring golden entries = 14 reproduced + 1 refusal that \
-         always matched + 8 still baselined. It read `12 + 1 + 10` until W8 \
+        (23, 15, 1, 7),
+        "23 `Subflow`-declaring golden entries = 15 reproduced + 1 refusal that \
+         always matched + 7 still baselined. It read `12 + 1 + 10` until W8 \
          Task 5 moved both `valids/task-allow-{{failure,warning}}-executable-flow` \
-         across on their `allow*` flags. The design spec's 22 was the BASELINED count before \
+         across on their `allow*` flags, and `14 + 1 + 8` until group C1 Task 2 \
+         banked `valids/task-runif`. The design spec's 22 was the BASELINED count before \
          this package (22 = 12 + 10), which is a different population from this \
          one"
     );
@@ -1036,10 +1050,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
             trigger_matching.len(),
             trigger_baselined.len()
         ),
-        (38, 31, 28, 3),
+        // (38, 31, 28, 3) -> (38, 31, 30, 1) at group C1 Task 2 (2026-10-18):
+        // `valids/webhook-outputs` and `valids/webhook-wait` bank, held by
+        // their `OutputValues` and not by the webhook trigger.
+        (38, 31, 30, 1),
         "corpus flows declaring one of the three (38 = 7 + 17 + 15 with \
          `invalids/duplicate` declaring two kinds), how many the oracle compares \
-         at all, and the split. **28 MATCHING entries declare a trigger this \
+         at all, and the split. **30 MATCHING entries declare a trigger this \
          package built, and their matching is evidence the trigger was not \
          evaluated on either side** -- which is the inversion this statement \
          exists to prevent a reader making"
@@ -1058,17 +1075,14 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     );
     assert_eq!(
         trigger_baselined,
-        [
-            "valids/webhook-outputs",
-            "valids/webhook-plaintext",
-            "valids/webhook-wait"
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<BTreeSet<_>>(),
-        "the three baselined trigger-declaring entries, all webhook, all \
-         baselined for reasons that are not the trigger (the design spec's §1 \
-         webhook row: 3, unchanged by this package)"
+        ["valids/webhook-plaintext"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        "the baselined trigger-declaring entries, all webhook, all baselined for \
+         reasons that are not the trigger (the design spec's §1 webhook row: 3, \
+         unchanged by this package; 1 since group C1 Task 2 banked \
+         `webhook-outputs` and `webhook-wait`, held by `OutputValues`)"
     );
 
     // Not one trigger-fired execution anywhere in the golden.
@@ -2317,7 +2331,9 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
 // 38 -> 40 at WorkingDirectory Task 8: `valids/working-directory-taskrun` and
 // `-nested`, the two entries whose one `Loop` body is a WorkingDirectory, which
 // egret now plans and runs (measured by the census, not by hand).
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
+// 40 -> 41 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`
+// plans and runs its `Loop` now.
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -2346,8 +2362,16 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
 /// planned and run, and carry nine top-level pairs between them (one each in
 /// `exit`, `exit-cancelled` and `exit-killed`, six in `exit-nested`), every
 /// one of which matches the golden's.
-const EGRET_TOP_LEVEL_PAIRS: usize = 727;
-const EGRET_NESTED_PAIRS: usize = 125;
+/// **753 since group C1 Task 2 (2026-10-18)**: the 20 entries whose only
+/// unported type was `OutputValues` now run past it, banked or not, and carry
+/// 26 more top-level pairs (measured: the test prints `egret produces 753`).
+/// The nested figure does not move.
+/// **755 and 130 since group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel` are planned and run (`Assert` has a handler);
+/// `if-in-parallel`'s three iterations carry the five nested pairs (measured:
+/// the test prints `egret produces 755 + 130`).
+const EGRET_TOP_LEVEL_PAIRS: usize = 755;
+const EGRET_NESTED_PAIRS: usize = 130;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2435,7 +2459,11 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // which now live on matching entries.
         // + the 9 top-level pairs of the four `valids/exit*` entries (1 + 1 + 1
         // + 6) at kill-and-exit Task 3.
-        (403, 103, 506),
+        // + the 22 top-level pairs of the eleven entries group C1 Task 2 banked
+        // (`OutputValues` has a handler); measured.
+        // + the 1 top-level pair of `valids/assert` (`before` before `fail`),
+        // banked at group C1 Task 3; measured.
+        (426, 103, 529),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2452,7 +2480,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // `the_golden_has_no_relation_for_exactly_these_pairs`).
         // 619 -> 610 at kill-and-exit Task 3: the nine top-level pairs of the
         // four banked `valids/exit*` entries moved to the matching side.
-        (486, 124, 610),
+        // 610 -> 588 at group C1 Task 2: the 22 top-level pairs of the eleven
+        // entries it banked moved to the matching side.
+        // 588 -> 587 at group C1 Task 3: `valids/assert`'s one pair.
+        (463, 124, 587),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2870,7 +2901,12 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// run terminal, `fail`, after three attempts).
 /// **356 since kill-and-exit Task 3 banked the four `valids/exit*` entries**
 /// (two run terminals each in three, four in `valids/exit-nested`).
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 356;
+/// **331 since group C1 Task 2 (2026-10-18)**: 25 run terminals on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler).
+// 331 -> 329 at group C1 Task 3 (2026-10-18, measured): `valids/assert`'s two
+// runs moved to the banked side.
+// 329 -> 325 at group C1 Task 4 (2026-10-18, measured): the four banked
+// `valids/purge_logs_*` entries' one run each.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 325;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2893,7 +2929,13 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // sub-executions, baselined at WorkingDirectory Task 9.
 // 139 -> 135 at kill-and-exit Task 3: the four `valids/exit*` entries, one
 // top-level execution each and no sub-execution, are banked.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 135;
+// 135 -> 124 at group C1 Task 2: the eleven entries group C1 Task 2 banked (`OutputValues` has a handler),
+// one top-level execution each and no sub-execution.
+// 124 -> 123 at group C1 Task 3: `valids/assert` (one top-level execution, no
+// sub-execution) is banked.
+// 123 -> 119 at group C1 Task 4: the four banked `valids/purge_logs_*` (one
+// top-level execution each, no sub-execution).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 119;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2909,7 +2951,13 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 135;
 /// run (`CREATED SUBMITTED RUNNING FAILED RETRYING`, three times, then `FAILED`).
 /// **1388 since kill-and-exit Task 3**: 31 on the four `valids/exit*` entries
 /// (6 + 6 + 6 + 13: `was_true` is the one run with a `SUBMITTED`).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1388;
+/// **1281 since group C1 Task 2 (2026-10-18)**: 107 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
+/// **1273 since group C1 Task 3 (2026-10-18)**: 8 on `valids/assert`'s two
+/// runs (`CREATED SUBMITTED RUNNING <state>` each; measured).
+/// **1257 since group C1 Task 4 (2026-10-18)**: 16 on the four banked
+/// `valids/purge_logs_*` entries' one run each (`CREATED SUBMITTED RUNNING
+/// SUCCESS`; measured).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1257;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2928,7 +2976,12 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1388;
 /// one execution.
 /// **488 since kill-and-exit Task 3**: three on each of the four `valids/exit*`
 /// executions (`CREATED RUNNING <state>`).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 488;
+/// **437 since group C1 Task 2 (2026-10-18)**: 51 on the eleven entries group C1 Task 2 banked (`OutputValues` has a handler) (measured).
+/// **434 since group C1 Task 3 (2026-10-18)**: three on `valids/assert`'s
+/// one execution (`CREATED RUNNING FAILED`).
+/// **422 since group C1 Task 4 (2026-10-18)**: three on each of the four
+/// banked `valids/purge_logs_*` executions (`CREATED RUNNING SUCCESS`).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 422;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3065,7 +3118,12 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 // are egret's own (measured: the restriction test prints `egret produced 935`).
 // 935 -> 944 at kill-and-exit Task 3: the nine pairs `EGRET_TOP_LEVEL_PAIRS`
 // gained, counted before the restriction (which removes none of them).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 944;
+// 944 -> 970 at group C1 Task 2: the 26 pairs `EGRET_TOP_LEVEL_PAIRS` gained,
+// none of which the restriction removes (`RESTRICTION_REMOVES` is unchanged).
+// 970 -> 977 at group C1 Task 3 (2026-10-18, measured): the pairs egret
+// produces for `valids/assert` and `valids/if-in-parallel`, which used to be
+// refused at start.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 977;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4071,6 +4129,8 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "egret.container",
             "egret.script.python",
             "io.kestra.plugin.core.debug.Return",
+            // Group C1 Task 3.
+            "io.kestra.plugin.core.execution.Assert",
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
             "io.kestra.plugin.core.kv.Delete",
@@ -4080,10 +4140,14 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.kv.Put",
             "io.kestra.plugin.core.kv.Set",
             "io.kestra.plugin.core.log.Log",
+            // Group C1 Task 4.
+            "io.kestra.plugin.core.log.PurgeLogs",
             "io.kestra.plugin.core.namespace.DeleteFiles",
             "io.kestra.plugin.core.namespace.DownloadFiles",
             "io.kestra.plugin.core.namespace.PurgeFiles",
             "io.kestra.plugin.core.namespace.UploadFiles",
+            // Group C1 Task 2.
+            "io.kestra.plugin.core.output.OutputValues",
             "io.kestra.plugin.core.storage.Concat",
             "io.kestra.plugin.core.storage.DeduplicateItems",
             "io.kestra.plugin.core.storage.Delete",
@@ -4098,10 +4162,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ],
-        "the twenty-nine handlers the driver runs (the four core storage tasks since \
+        "the thirty-one handlers the driver runs (the four core storage tasks since \
          W9a Task 11, the five whole-file ones since Task 12, the four namespace-file \
-         tasks since W9b Tasks 6 and 7, the six KV tasks since W9c Task 5, and the six \
-         script kinds since WorkingDirectory Task 8). If this list ever grew to cover \
+         tasks since W9b Tasks 6 and 7, the six KV tasks since W9c Task 5, the six \
+         script kinds since WorkingDirectory Task 8, `OutputValues` since group \
+         C1 Task 2, and `Assert` since group C1 Task 3). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );
@@ -4251,7 +4316,17 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // 26 -> 29 at WorkingDirectory Task 8, measured by this census over the 301-entry
 // golden (the harvested `retry-failed-task-duration` is one of the entries that
 // differ on the execution: egret makes 4 attempts where Kestra made 3).
-const MISMATCH_ON_EXECUTION: usize = 29;
+// 29 -> 30 at group C1 Task 2 (measured): `valids/waitfor-child-task-warning`
+// runs past its `OutputValues` and its execution history has one more
+// `PAUSED RUNNING` than the golden's.
+// 30 -> 31 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`
+// runs, and its `assert` FAILS on the `Loop`'s own `outputs:`, so the execution
+// FAILS where Kestra's SUCCEEDED.
+// 31 -> 32 at group C1 Task 4 (2026-10-18, measured): `valids/purge_logs_full_arguments`
+// runs, and its `purge_logs` FAILS on the decided scope rule (namespace
+// `purge.namespace` from a flow of `io.kestra.tests`), so the execution FAILS
+// where Kestra's SUCCEEDED. Permanent (spec §2.3).
+const MISMATCH_ON_EXECUTION: usize = 32;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4266,7 +4341,14 @@ const MISMATCH_ON_EXECUTION: usize = 29;
 /// **41 since no-silent-stall Task 1**: the 49 it added, every one of which
 /// differed on `runs`.
 // 41 -> 45 at WorkingDirectory Task 8 (measured; see `MISMATCH_ON_EXECUTION`).
-const MISMATCH_ON_RUNS: usize = 45;
+// 45 -> 52 at group C1 Task 2 (measured by this census): the seven entries
+// that run past `OutputValues` and still mismatch now differ on `runs` as
+// traces, not as refusals.
+// 52 -> 53 at group C1 Task 3 (2026-10-18, measured): the same entry's `assert`
+// run (FAILED, not SUCCESS).
+// 53 -> 54 at group C1 Task 4 (2026-10-18, measured): the same entry's
+// `purge_logs` run (FAILED, not SUCCESS).
+const MISMATCH_ON_RUNS: usize = 54;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4286,7 +4368,9 @@ const MISMATCH_ON_RUNS: usize = 45;
 ///
 /// **19 since no-silent-stall Task 1**: 34 of the 49 entries it added.
 // 19 -> 20 at WorkingDirectory Task 8 (measured).
-const MISMATCH_ON_ORDER: usize = 20;
+// 20 -> 26 at group C1 Task 2 (measured): six of those seven also differ on
+// `order` (their missing `afterExecution:` run, or the extra iteration).
+const MISMATCH_ON_ORDER: usize = 26;
 /// The `runs` entries egret refuses on purpose, in golden order: each is a
 /// flow Kestra ran holding a task egret cannot run, which before its refusal
 /// was an opaque runnable that stalled the execution for ever.
@@ -4300,53 +4384,36 @@ const MISMATCH_ON_ORDER: usize = 20;
 ///   `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`,
 ///   `PurgeLogs`). `executor`'s `PUBLISHED_BUT_REFUSED` holds each with its
 ///   cause; it has three more rows, flows with no golden entry. (`Exit` left
-///   at kill-and-exit Task 3, and its four entries with it.)
+///   at kill-and-exit Task 3, and its four entries with it; `OutputValues` at
+///   group C1 Task 2, and its eighteen; `Assert` at Task 3, and its two;
+///   `PurgeLogs` at Task 4, and its five.)
 // 49 -> 45 at WorkingDirectory Task 3 (not Task 8): its four `WorkingDirectory`
 // valids are planned now, so `unsupported_working_directory` refuses none of them.
 // 45 -> 41 at kill-and-exit Task 3: `Exit` is registered, so the four
 // `valids/exit*` entries plan and are run (and match).
-const RUNS_REFUSED: [&str; 41] = [
-    "valids/after-execution",
-    "valids/after-execution-error",
-    "valids/after-execution-finally",
-    "valids/assert",
-    "valids/flow-concurrency-queue-after-execution",
-    "valids/flow-concurrency-queue-killed-after-execution",
-    "valids/flow-with-array-outputs",
-    "valids/if-in-parallel",
+// 41 -> 23 at group C1 Task 2: `OutputValues` is registered, so the eighteen
+// entries whose only unregistered type it was plan and are run (eleven match).
+// 23 -> 21 at group C1 Task 3: `Assert` is registered, so `valids/assert` and
+// `valids/if-in-parallel` plan and are run (`assert` matches).
+// 21 -> 16 at group C1 Task 4: `PurgeLogs` is registered, so the five
+// `valids/purge_logs_*` plan and are run.
+const RUNS_REFUSED: [&str; 16] = [
     "valids/labels-update-nested-value-list",
     "valids/labels-update-nested-value-map",
     "valids/labels-update-task",
     "valids/labels-update-task-deduplicate",
     "valids/labels-update-task-empty",
     "valids/npe-labels-update-task",
-    "valids/output-values",
     "valids/pause-behavior",
     "valids/pause-errors-finally-after-execution",
     "valids/pause_on_pause",
     "valids/primitive-labels-flow",
-    "valids/purge_logs_execution_only",
-    "valids/purge_logs_full_arguments",
-    "valids/purge_logs_no_arguments",
-    "valids/purge_logs_trigger_only",
-    "valids/purge_logs_with_batch_size",
-    "valids/replay",
     "valids/retry-with-flowable-errors",
     "valids/set-variables",
     "valids/set-variables-duplicate",
-    "valids/sleep-long",
-    "valids/task-runif",
     "valids/task-runif-executionupdating",
     "valids/task-runif-taskswithstate",
     "valids/unset-variables",
-    "valids/waitfor",
-    "valids/waitfor-child-task-warning",
-    "valids/waitfor-max-iterations",
-    "valids/waitfor-multiple-tasks",
-    "valids/waitfor-multiple-tasks-failed",
-    "valids/waitfor-no-success",
-    "valids/webhook-outputs",
-    "valids/webhook-wait",
 ];
 /// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
 /// [`RUNS_REFUSED`] carried a sub-execution.
@@ -4364,7 +4431,13 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 /// **103 since W9a Task 11** (`valids/loop-values-from-uri`).
 /// **100 since the AllowFailure flowable**: its three targets match.
 /// **96 since kill-and-exit Task 3**: the four `valids/exit*` entries match.
-const MISMATCHING_RUNS_ENTRIES: usize = 96;
+/// **85 since group C1 Task 2**: the eleven entries `OutputValues` held match.
+// 85 -> 84 at group C1 Task 3 (2026-10-18, measured): `valids/assert` banked;
+// `valids/if-in-parallel` moved from `refused` to a traced mismatch.
+// 84 -> 80 at group C1 Task 4 (2026-10-18, measured): four `valids/purge_logs_*`
+// banked; `valids/purge_logs_full_arguments` moved from `refused` to a traced
+// mismatch (the decided scope rule, spec §2.3).
+const MISMATCHING_RUNS_ENTRIES: usize = 80;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4778,7 +4851,10 @@ async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 
     assert_eq!(
         (entries_with_a_body, loop_bodies),
-        (38, 82),
+        // (38, 82) -> (39, 85) at group C1 Task 3: `valids/if-in-parallel`
+        // plans again (`Assert` is registered), and its `for_each` body holds
+        // `return`, `if` and `after_if`. Measured.
+        (39, 85),
         "the population: 36 comparable entries hold a `Loop` that egret plans, \
          with 75 tasks inside a loop body between them. Both are derived; if \
          they move, the `Loop` slice of the corpus has changed. It was (39, 81) \
@@ -4849,7 +4925,8 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
         (
             TOP_LEVEL_SPAWN_KEYS_IDENTICAL,
             TOP_LEVEL_SPAWN_KEYS_DIFFER,
-            40
+            // 40 -> 41 at group C1 Task 3: `valids/if-in-parallel` runs.
+            41
         ),
         "the totals asserted beside the parts. Both figures are what W3b Task 4 \
          built the spawner for and could not measure, because the oracle still \
@@ -5126,7 +5203,9 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // no-silent-stall Task 1: -3 identical, three entries whose keys matched and
 // that are refused at start now (`RUNS_REFUSED`), so egret produces no key
 // list for them at all.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 33;
+// 33 -> 34 at group C1 Task 3 (2026-10-18, measured): `valids/if-in-parallel`'s
+// three iterations match.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 34;
 const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 7;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
@@ -5213,10 +5292,12 @@ fn the_default_concurrency_limit_is_one_and_the_corpus_can_tell() {
          times"
     );
     assert_eq!(
-        defaulted, 23,
-        "the population: top-level `Loop`s in the comparable corpus that write no \
-         `concurrencyLimit` and resolve at least one value, in a flow egret plans \
-         (24 until no-silent-stall Task 1 refused one such flow at start)"
+        defaulted, 24,
+        "the population: top-level `Loop`s in the comparable corpus whose \
+         `concurrencyLimit` is 1 (unwritten, or written as 1) and resolve at least \
+         one value, in a flow egret plans (24 until no-silent-stall Task 1 refused \
+         `valids/if-in-parallel` at start for its `Assert`, 23 until group C1 Task 3 \
+         registered `Assert` and it plans again; it writes `concurrencyLimit: 1`)"
     );
 }
 
@@ -6751,9 +6832,15 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // and one by `checkFrequency.maxDuration`, whose golden iteration count
         // carries the artifact's delay-poller latency. This table attributes by
         // DECLARATION, so all eight still count here.
+        //
+        // **3 since group C1 Task 2 (2026-10-18)**: five of the six
+        // `OutputValues` ones bank now that it has a handler; the sixth,
+        // `waitfor-child-task-warning`, runs one more iteration than the golden
+        // under `maxDuration: PT3S` -- the poller-latency cause
+        // `loop-until-restart` is held by.
         (
             "LoopUntil / WaitFor",
-            8,
+            3,
             &[
                 "io.kestra.plugin.core.flow.LoopUntil",
                 "io.kestra.plugin.core.flow.WaitFor",
@@ -6942,10 +7029,8 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             "valids/subflow-secret-output-parent",
             "the flow-level `outputs:` block, which nothing in egret evaluates;              on the artifact the PARENT fails while extracting the child's              SECRET output",
         ),
-        (
-            "valids/task-runif",
-            "`io.kestra.plugin.core.output.OutputValues`, which has no handler.              Its `Subflow` is the corpus's only unresolvable target and a falsy              `runIf:` SKIPS it, so `Subflow` was never what held this entry",
-        ),
+        // `valids/task-runif` was here, held by `OutputValues` having no
+        // handler; group C1 Task 2 (2026-10-18) gave it one and it banked.
         (
             "valids/flow-with-outputs-failed",
             "flow-level `outputs:`, which nothing in W3a evaluates",
@@ -6991,17 +7076,23 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // which is what the shipping worker does. W3a's harness fed these
         // runs a terminal state out of the golden, which is the whole of why
         // they used to match; W3b Task 1 measured all eleven in advance.
-        ("valids/assert", "no handler: OutputValues, Assert"),
-        ("valids/flow-with-array-outputs", "no handler: OutputValues"),
-        ("valids/output-values", "no handler: OutputValues"),
-        ("valids/replay", "no handler: OutputValues"),
-        ("valids/webhook-outputs", "no handler: OutputValues"),
-        ("valids/webhook-wait", "no handler: OutputValues"),
-        ("valids/purge_logs_execution_only", "no handler: PurgeLogs"),
-        ("valids/purge_logs_full_arguments", "no handler: PurgeLogs"),
-        ("valids/purge_logs_no_arguments", "no handler: PurgeLogs"),
-        ("valids/purge_logs_trigger_only", "no handler: PurgeLogs"),
-        ("valids/purge_logs_with_batch_size", "no handler: PurgeLogs"),
+        //
+        // Group C1 Task 2 (2026-10-18): `OutputValues` has a handler, and the
+        // five entries it alone held here banked (`flow-with-array-outputs`,
+        // `output-values`, `replay`, `webhook-outputs`, `webhook-wait`).
+        //
+        // Group C1 Task 3 (2026-10-18): `Assert` has a handler, and
+        // `valids/assert`, which it alone held here, banked.
+        //
+        // Group C1 Task 4 (2026-10-18): `PurgeLogs` has a handler; four of
+        // the five entries it held here banked, and
+        // `valids/purge_logs_full_arguments` is held by the decided scope
+        // rule (spec §2.3), named below.
+        (
+            "valids/purge_logs_full_arguments",
+            "PurgeLogs scope: a flow purges logs only of its own namespace and its \
+             children (the user's ruling 2026-10-18); `purge.namespace` is refused",
+        ),
         // The five the feed hid that Task 1's derivation could not see: a fed
         // terminal hides everything the task would have DONE.
         (
@@ -7404,9 +7495,14 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // and declares no `timeout:` anywhere, so only the denominator and `without` move.
     // (2, 102, 104) -> (2, 98, 100) at kill-and-exit Task 3: the four banked
     // `valids/exit*` entries declare no `timeout:` either.
+    // (2, 98, 100) -> (2, 87, 89) at group C1 Task 2: nor do the eleven
+    // entries it banked.
+    // (2, 87, 89) -> (2, 86, 88) at group C1 Task 3: nor does `valids/assert`.
+    // (2, 86, 88) -> (2, 82, 84) at group C1 Task 4: nor do the four
+    // `valids/purge_logs_*` it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 98, 100),
+        (2, 82, 84),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

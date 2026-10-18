@@ -1,4 +1,5 @@
-//! `workflow.task_logs`: batch insert, the cursor page, batch prune.
+//! `workflow.task_logs`: batch insert, the cursor page, batch prune, and
+//! `PurgeLogs`' scoped purge.
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
@@ -92,6 +93,53 @@ pub struct StoredLine {
     pub level: LogLevel,
     pub ts: DateTime<Utc>,
     pub message: String,
+}
+
+/// What [`LogRepo::purge`] deletes: `PurgeLogs`' scope (group C spec §2.3).
+/// Every filter that is `None` is not applied; the workspace, the namespace
+/// scope and `end` always are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PurgeQuery {
+    pub workspace_id: Uuid,
+    /// Each grant's namespace; a row matches when its execution's namespace is
+    /// one of these or a dot-child of one (`ns = g OR ns LIKE g || '.%'` with
+    /// `g` escaped for LIKE: `_` and `%` and `\`). With `flow_key` set the
+    /// match is exact (`ns = g`), as Kestra's. Empty matches nothing.
+    pub namespaces: Vec<String>,
+    pub flow_key: Option<String>,
+    pub execution_id: Option<Uuid>,
+    pub levels: Option<Vec<LogLevel>>,
+    pub start: Option<DateTime<Utc>>,
+    pub end: DateTime<Utc>,
+    /// `None`: one statement. `Some(n)`: repeat `LIMIT n` batches until one deletes fewer than n.
+    pub batch: Option<i64>,
+}
+
+/// The lines [`LogRepo::purge`] matches, `l` joined to its execution `e`.
+/// One macro so the single statement and the batch's subquery cannot
+/// disagree; `concat!` keeps both `&'static str`. With a flow key (`$3`) the
+/// namespace matches exactly, children only without one -- Kestra's rule
+/// (`AbstractJdbcLogDataStore.buildDeleteCondition`). The window is
+/// `[start, end]`, Kestra's `greaterOrEqual` / `lessOrEqual`. The LIKE pattern is
+/// escaped in SQL (`\` first, then `%` and `_`), so a grant's text is never
+/// a pattern: `a_b` does not reach `axb.c` (the `sql-like-underscore`
+/// lesson). Both `e.workspace_id` and `l.workspace_id` are bound to `$1`.
+macro_rules! purge_predicate {
+    () => {
+        "l.execution_id = e.id \
+           AND e.workspace_id = $1 \
+           AND l.workspace_id = $1 \
+           AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS g(ns) \
+                        WHERE e.namespace = g.ns \
+                           OR ($3::text IS NULL AND e.namespace LIKE \
+                              replace(replace(replace(g.ns, '\\', '\\\\'), '%', '\\%'), '_', '\\_') \
+                              || '.%' ESCAPE '\\')) \
+           AND ($3::text IS NULL OR e.flow_key = $3) \
+           AND ($4::uuid IS NULL OR l.execution_id = $4) \
+           AND ($5::int2[] IS NULL OR l.level = ANY($5::int2[])) \
+           AND ($6::timestamptz IS NULL OR l.ts >= $6) \
+           AND l.ts <= $7"
+    };
 }
 
 #[derive(Clone, Debug)]
@@ -308,6 +356,76 @@ impl LogRepo {
         .await
         .map_err(db_err)?;
         Ok(done.rows_affected())
+    }
+
+    /// `PurgeLogs`' delete (group C spec §2.3): the lines of `q.workspace_id`'s
+    /// executions in `q.namespaces`' scope, narrowed by every filter that is
+    /// set, with `ts` in `[start, end]` (Kestra's bounds, both inclusive).
+    /// With `q.flow_key` the namespace matches exactly; without it, children
+    /// too. Returns how many rows went.
+    ///
+    /// With `q.batch = Some(n)` the work is statements of at most `n` rows
+    /// each, repeated until one deletes fewer than `n`; a failure part-way
+    /// keeps what the earlier batches deleted. An `end` in the future over a
+    /// busy namespace can keep the loop going while new lines arrive, each
+    /// batch finding `n` more; Kestra's MySQL loop has the same property. `n < 1` is refused with
+    /// [`Error::InvalidInput`] before anything is deleted (`LIMIT 0` would
+    /// never end the loop).
+    ///
+    /// The caller decides the scope (`nsfiles::access::authorize` with
+    /// `Resource::Logs`); this only applies it. Every value is bound.
+    pub async fn purge(&self, q: &PurgeQuery) -> Result<u64> {
+        let levels: Option<Vec<i16>> = q
+            .levels
+            .as_ref()
+            .map(|ls| ls.iter().map(|l| l.as_i16()).collect());
+        let Some(batch) = q.batch else {
+            let done = sqlx::query(concat!(
+                "DELETE FROM workflow.task_logs l USING workflow.executions e WHERE ",
+                purge_predicate!()
+            ))
+            .bind(q.workspace_id)
+            .bind(&q.namespaces)
+            .bind(q.flow_key.as_deref())
+            .bind(q.execution_id)
+            .bind(levels.as_ref())
+            .bind(q.start)
+            .bind(q.end)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+            return Ok(done.rows_affected());
+        };
+        if batch < 1 {
+            return Err(Error::InvalidInput(format!(
+                "purge: batch must be 1 or more, got {batch}"
+            )));
+        }
+        let mut total = 0u64;
+        loop {
+            let done = sqlx::query(concat!(
+                "DELETE FROM workflow.task_logs WHERE id IN ( \
+                   SELECT l.id FROM workflow.task_logs l, workflow.executions e WHERE ",
+                purge_predicate!(),
+                " LIMIT $8)"
+            ))
+            .bind(q.workspace_id)
+            .bind(&q.namespaces)
+            .bind(q.flow_key.as_deref())
+            .bind(q.execution_id)
+            .bind(levels.as_ref())
+            .bind(q.start)
+            .bind(q.end)
+            .bind(batch)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+            let n = done.rows_affected();
+            total += n;
+            if n < batch as u64 {
+                return Ok(total);
+            }
+        }
     }
 }
 

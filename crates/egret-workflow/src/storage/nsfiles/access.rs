@@ -40,28 +40,33 @@ pub enum Access {
     Purge,
 }
 
-/// What a grant reaches: W9b's namespace files or W9c's KV store (W9c spec
-/// §4.7). The access rule is the same for both.
+/// What a grant reaches: W9b's namespace files, W9c's KV store (W9c spec
+/// §4.7) or, for `PurgeLogs` (group C spec §2.3), the execution logs. The
+/// access rule is the same for all three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resource {
     NamespaceFiles,
     Kv,
+    Logs,
 }
 
 impl Resource {
-    /// "namespace files" / "the KV store": the refusal's noun.
+    /// "namespace files" / "the KV store" / "logs": the refusal's noun.
     pub fn noun(self) -> &'static str {
         match self {
             Resource::NamespaceFiles => "namespace files",
             Resource::Kv => "the KV store",
+            Resource::Logs => "logs",
         }
     }
 
-    /// "files" / "KV store": "a flow writes only its own namespace's {own_noun}".
+    /// "files" / "KV store" / "logs": "a flow writes only its own
+    /// namespace's {own_noun}".
     fn own_noun(self) -> &'static str {
         match self {
             Resource::NamespaceFiles => "files",
             Resource::Kv => "KV store",
+            Resource::Logs => "logs",
         }
     }
 }
@@ -359,6 +364,29 @@ mod tests {
             .unwrap_err();
             assert!(
                 err.contains(&format!("'{target}'")) && err.contains("purges only"),
+                "{target}: {err}"
+            );
+        }
+    }
+
+    /// Group C1 Task 4 (spec §2.3): `PurgeLogs` is held to the Purge rule,
+    /// on the same dot boundary, and its refusal names logs.
+    #[test]
+    fn a_flow_purges_logs_of_its_own_and_child_namespaces_on_a_dot_boundary() {
+        let ws = Uuid::new_v4();
+        for target in ["a.b", "a.b.c", "a.b.c.d"] {
+            let g = authorize(ws, flow("a.b"), target, Resource::Logs, Access::Purge)
+                .unwrap_or_else(|e| panic!("{target}: {e}"));
+            assert_eq!(
+                (g.namespace(), g.resource(), g.access()),
+                (target, Resource::Logs, Access::Purge)
+            );
+        }
+        for target in ["a.bc", "a", "b"] {
+            let err =
+                authorize(ws, flow("a.b"), target, Resource::Logs, Access::Purge).unwrap_err();
+            assert!(
+                err.contains(&format!("may not purge logs of namespace '{target}'")),
                 "{target}: {err}"
             );
         }

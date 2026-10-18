@@ -4829,7 +4829,12 @@ mod tests {
         },
         Refused {
             code: "unknown_task_type",
-            spellings: &["egret.sqll", "io.kestra.plugin.core.output.OutputValues"],
+            // A Kestra-shipped type egret does not port; `core.output.OutputValues`
+            // was the example until group C1 Task 2 registered it.
+            spellings: &[
+                "egret.sqll",
+                "io.kestra.plugin.notifications.slack.SlackIncomingWebhook",
+            ],
             body: leaf_body,
             suffix: "",
             hints: &["check for a typo"],

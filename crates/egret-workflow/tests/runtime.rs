@@ -2664,6 +2664,8 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             .iter()
             .map(|c| c.0.to_string()),
     );
+    // Group C1 Task 4: `PurgeLogs`, registered beside them.
+    want.push(egret_workflow::worker::handlers::purge_logs::TYPE_ID.to_string());
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
@@ -2722,6 +2724,8 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.core.kv.PurgeKV",
             "io.kestra.plugin.core.kv.Put",
             "io.kestra.plugin.core.kv.Set",
+            // Group C1 Task 4.
+            "io.kestra.plugin.core.log.PurgeLogs",
             "io.kestra.plugin.core.namespace.DeleteFiles",
             "io.kestra.plugin.core.namespace.DownloadFiles",
             "io.kestra.plugin.core.namespace.PurgeFiles",
@@ -2734,7 +2738,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),

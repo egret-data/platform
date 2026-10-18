@@ -16,9 +16,9 @@ where each comes from and how to reproduce it.
 |---|---|
 | Kestra version | `2.0.0-rc13` (`GET /api/v1/configs` → `version`; OSS, commit `fde6740`, 2026-09-01) — the programme's pinned artifact |
 | Image | `kestra/kestra`, untagged, ID `sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd` (created 2026-09-01) |
-| Exported | 2026-10-17 (first 2026-10-10; re-exported from the same image when kill-and-exit Task 3 added `io.kestra.plugin.core.execution.Exit` to `KESTRA_TYPES`) |
-| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `6e5392cdd3beeed6cfd7dd1cde054e29ac8583d287ed9640357024ff651f6fc3` |
-| Committed after `trim.py` | about 720 KB, 109 definitions |
+| Exported | 2026-10-18 (first 2026-10-10; re-exported from the same image on 2026-10-17 when kill-and-exit Task 3 added `io.kestra.plugin.core.execution.Exit` to `KESTRA_TYPES`, and on 2026-10-18 when group C1 Task 1 added the six group-C types) |
+| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `68018b24b699e1ee1e9fe68848195c4aadb913cfed9b9c57a35316c97333556c` |
+| Committed after `trim.py` | about 778 KB, 115 definitions |
 
 **The raw export is not byte-stable across runs of the same image.** The
 2026-10-10 export had the same size and definition count and the sha256
@@ -26,7 +26,7 @@ where each comes from and how to reproduce it.
 2026-10-17 one hashes differently. Trimmed, the new export differs from the
 committed 2026-10-10 file only by the added `Exit` definition and
 `x-kestra-export`'s `kept_definitions` and `raw_sha256` (compared
-definition by definition, 2026-10-17), so the difference is in what
+definition by definition, 2026-10-17; the 2026-10-18 export hashes differently again and differs from the 2026-10-17 file only by the six group-C definitions `OutputValues`, `Assert`, `PurgeLogs`, `SetVariables`, `UnsetVariables` and `Labels`, plus the same two `x-kestra-export` fields), so the difference is in what
 `trim.py` drops, not in any definition it kept.
 
 The raw export is over 5 MB, so it is not committed; `trim.py` reproduces
@@ -54,7 +54,7 @@ done
 docker rm -f w7a-kestra-t1
 
 python3 trim.py raw-flow-schema.json plugin-docs kestra-flow-schema.json \
-  2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-17
+  2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-18
 ```
 
 What `trim.py` does is in its docstring: task and trigger unions become

@@ -167,6 +167,14 @@ pub fn registry(pool: &PgPool) -> Handlers {
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::storage::Size,
     ));
+    // Group C1 Task 2: renders `values:`, reaches nothing.
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::output_values::OutputValues,
+    ));
+    // Group C1 Task 3: renders `conditions:`, reaches nothing.
+    r.add(std::sync::Arc::new(
+        egret_workflow::worker::handlers::assert::Assert,
+    ));
     // W9a Task 12: the five whole-file storage tasks, over the same store.
     {
         use egret_workflow::worker::handlers::storage as st;
@@ -196,6 +204,8 @@ pub fn registry(pool: &PgPool) -> Handlers {
     );
     // W9c Task 5: the six KV tasks over the same store.
     egret_workflow::worker::handlers::kv::register(&mut r, pool.clone(), Some(files));
+    // Group C1 Task 4: `PurgeLogs`, over the same pool.
+    egret_workflow::worker::handlers::purge_logs::register(&mut r, pool.clone());
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::log::Log::new(),
     ));
@@ -544,7 +554,13 @@ const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 45;
 /// [`SUBFLOW_LOOKUPS_ON_PUBLISHED`], which is where the flows that stopped
 /// being refused went, and why this one falling by one while that one rose by
 /// 28 is not a contradiction.
-const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 2;
+///
+/// **2 -> 3 at group C1 Task 2 (2026-10-18)**, and nothing left the published
+/// side: `valids/task-runif` used to be refused at its `OutputValues` before
+/// publish resolved anything, and now reaches its `notexecutedflowable`
+/// `Subflow` (`dummy_namespace/dummy_flow`, which no corpus flow defines) and
+/// is refused there. A lookup that had never been made, as at W10 Task 6.
+const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 3;
 
 /// Count and assert the reference lookups, so the claim about how big this
 /// task's genuinely-new surface is has a running program behind it rather than
@@ -898,7 +914,32 @@ const CREATE_REFUSED: usize = 4;
 /// `io.kestra.plugin.core.execution.Exit` has a `TASK_TYPES` row and every
 /// deployment serves it (`spec::registry::EXECUTOR_LEVEL`). They leave
 /// [`UNKNOWN_TYPE_REFUSED`].
-const LIVE: usize = 254;
+///
+/// **254 -> 274 at group C1 Task 2 (2026-10-18)**: 20 of the 21 corpus flows
+/// whose only unported type was `io.kestra.plugin.core.output.OutputValues`
+/// publish live, because it has a `TASK_TYPES` row, a worker handler
+/// (`worker::handlers::output_values`, in [`registry`] and
+/// `Handlers::with_core_tasks`) and a `runtime::served_for` key. All 21 leave
+/// [`UNKNOWN_TYPE_REFUSED`]; the 21st, `valids/task-runif`, now reaches its
+/// `Subflow` to `dummy_namespace/dummy_flow`, which no corpus flow defines, and
+/// is refused there (`not found: referenced object`), so it moves to
+/// [`VALIDATE_REFUSED`] -- the W10 Task 6 shape, one flow between the buckets.
+///
+/// **274 -> 276 at group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel`, the two corpus flows that declare
+/// `io.kestra.plugin.core.execution.Assert` and no other unported type, publish
+/// live now that it has a `TASK_TYPES` row, a worker handler
+/// (`worker::handlers::assert`, in [`registry`] and `Handlers::with_core_tasks`)
+/// and a `runtime::served_for` key. Both leave [`UNKNOWN_TYPE_REFUSED`].
+///
+/// **276 -> 281 at group C1 Task 4 (2026-10-18)**: the five
+/// `valids/purge_logs_*`, the corpus flows that declare
+/// `io.kestra.plugin.core.log.PurgeLogs` and no other unported type, publish
+/// live now that it has a `TASK_TYPES` row, a worker handler
+/// (`worker::handlers::purge_logs`, registered by its own `register` in
+/// [`registry`] and `runtime::handlers_for`) and a `runtime::served_for` key.
+/// All five leave [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 281;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -962,7 +1003,17 @@ const LIVE: usize = 254;
 ///
 /// **65 -> 61 at kill-and-exit Task 3**: the four `valids/exit*` flows, whose
 /// only unported type was `Exit` (see [`LIVE`]).
-const UNKNOWN_TYPE_REFUSED: usize = 61;
+///
+/// **61 -> 40 at group C1 Task 2 (2026-10-18)**: the 21 flows whose only
+/// unported type was `OutputValues` (see [`LIVE`]). The five that also declare
+/// `Assert`, `SetVariables` or `UnsetVariables` stay here.
+///
+/// **40 -> 38 at group C1 Task 3 (2026-10-18)**: `valids/assert` and
+/// `valids/if-in-parallel` (see [`LIVE`]).
+///
+/// **38 -> 33 at group C1 Task 4 (2026-10-18)**: the five
+/// `valids/purge_logs_*` (see [`LIVE`]).
+const UNKNOWN_TYPE_REFUSED: usize = 33;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -996,7 +1047,11 @@ const UNKNOWN_TYPE_REFUSED: usize = 61;
 /// which uses the closed script gate. `publish_corpus` now calls
 /// `publish_gated` with the workspace's `workflow_containers` ON and the Docker
 /// runner allowed, so they are live and not refused.
-const VALIDATE_REFUSED: usize = 26;
+///
+/// **26 -> 27 at group C1 Task 2 (2026-10-18)**: `valids/task-runif`, which
+/// used to stop at its `OutputValues`, is now refused at its `Subflow`'s
+/// reference (see [`LIVE`] and `SUBFLOW_LOOKUPS_ON_REFUSED`).
+const VALIDATE_REFUSED: usize = 27;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
@@ -1056,7 +1111,8 @@ fn census(filed: &BTreeMap<String, Filed>) {
 
     // 345 -> 351 with the six `working-directory-real-*` corpus flows added at
     // WorkingDirectory Task 8 (`corpus/valids/`; see `corpus.json`). The live
-    // count, 244 -> 250 (254 since kill-and-exit Task 3), is asserted through
+    // count, 244 -> 250 (254 since kill-and-exit Task 3, 274 since group C1
+    // Task 2, 276 since Task 3, 281 since Task 4), is asserted through
     // `LIVE` above.
     assert_eq!(filed.len(), 351, "every corpus flow is accounted for");
     assert_eq!(live.len(), LIVE, "live versions: {live:?}");
