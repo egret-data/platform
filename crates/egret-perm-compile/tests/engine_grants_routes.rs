@@ -1087,3 +1087,211 @@ async fn a_target_holding_a_near_root_permission_by_any_policy_is_refused() {
     let (status, body) = post(trino.engine, "trino.impersonate_user", &plain).await;
     assert_eq!(status, StatusCode::CREATED, "a plain user: {body}");
 }
+
+/// Security re-review I-a: impersonation chains. A target who can impersonate
+/// (through any policy of the profile: hand-written, infra or a compiled engine
+/// grant) someone near-root or reserved is as dangerous as that someone.
+#[tokio::test]
+async fn an_impersonation_chain_to_a_near_root_user_is_refused() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let sr = bound(&e, "starrocks").await;
+    let trino = bound(&e, "trino").await;
+    let (_, alice) = person(pool).await;
+    let (_, bob) = person(pool).await;
+    let (_, carol) = person(pool).await;
+    let (_, dave) = person(pool).await;
+    let (_, bob2) = person(pool).await;
+    let (_, bob3) = person(pool).await;
+    let (_, erin) = person(pool).await;
+    let (_, bob4) = person(pool).await;
+    let none = json!([]);
+    let post = |eng: Uuid, cap: &str, target: &str, grantee: &str| {
+        let app = e.app.clone();
+        let token = e.writer.clone();
+        let body = json!({"capability": cap, "values": [target],
+                          "principals": [{"kind": "user", "ref": grantee}]});
+        async move {
+            call_app(
+                app,
+                "POST",
+                format!("/perm/engines/{eng}/grants"),
+                token,
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    // StarRocks: bob may become carol (hand-written), carol may operate.
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("bob-to-carol-"),
+        json!({"user": {"values": [carol]}}),
+        json!([bob]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("carol-operates-"),
+        json!({"system": {"values": ["*"]}}),
+        json!([carol]),
+        none.clone(),
+        "operate",
+    )
+    .await;
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &bob, &alice).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bob -> carol -> operate: {body}"
+    );
+
+    // Trino: bob2 may become carol (hand-written), carol may become anyone.
+    hand_written(
+        pool,
+        trino.profile,
+        &unique("bob2-to-carol-"),
+        json!({"trinouser": {"values": [carol]}}),
+        json!([bob2]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    hand_written(
+        pool,
+        trino.profile,
+        &unique("carol-anyone-"),
+        json!({"trinouser": {"values": ["*"]}}),
+        json!([carol]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    let (status, body) = post(trino.engine, "trino.impersonate_user", &bob2, &alice).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bob2 -> carol -> anyone: {body}"
+    );
+
+    // Two hops through a compiled engine grant: bob3 -(engine grant)-> dave
+    // -(hand-written)-> carol, who operates.
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &dave, &bob3).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "dave is harmless so far: {body}"
+    );
+    // The hop must come from the MODEL, not only from what has been compiled:
+    // drop the compiled policy, as if the grant were not compiled yet.
+    sqlx::query("DELETE FROM policy.authz_policies WHERE name = $1")
+        .bind(format!("perm-engine-{}", body["id"].as_str().unwrap()))
+        .execute(pool)
+        .await
+        .expect("drop the compiled hop");
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("dave-to-carol-"),
+        json!({"user": {"values": [carol]}}),
+        json!([dave]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &bob3, &alice).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bob3 -> dave -> carol -> operate: {body}"
+    );
+
+    // A chain to `root` is a chain to the engine superuser.
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("bob4-to-root-"),
+        json!({"user": {"values": ["root"]}}),
+        json!([bob4]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &bob4, &alice).await;
+    assert_eq!(status, StatusCode::CONFLICT, "bob4 -> root: {body}");
+
+    // A harmless chain: erin -> dave2 who holds nothing, and a {USER} self hop.
+    let (_, dave2) = person(pool).await;
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("erin-to-dave2-"),
+        json!({"user": {"values": [dave2]}}),
+        json!([erin]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    hand_written(
+        pool,
+        sr.profile,
+        &unique("self-"),
+        json!({"user": {"values": ["{USER}"]}}),
+        json!(["{USER}"]),
+        none.clone(),
+        "impersonate",
+    )
+    .await;
+    let (status, body) = post(sr.engine, "starrocks.impersonate_user", &erin, &alice).await;
+    assert_eq!(status, StatusCode::CREATED, "a harmless chain: {body}");
+}
+
+/// Security re-review M-c: Ranger matches group names ignoring case.
+#[tokio::test]
+async fn the_near_root_scan_matches_groups_ignoring_case() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let sr = bound(&e, "starrocks").await;
+    let (_, alice) = person(pool).await;
+    let (ops_id, ops) = person(pool).await;
+    let group = format!("OpsTeam{}", Uuid::new_v4().simple());
+    let gid: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group)
+            .fetch_one(pool)
+            .await
+            .expect("group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(ops_id)
+        .bind(gid)
+        .execute(pool)
+        .await
+        .expect("member");
+    hand_written(
+        pool,
+        sr.profile,
+        "ops team operates",
+        json!({"system": {"values": ["*"]}}),
+        json!([]),
+        json!([group.to_uppercase()]),
+        "operate",
+    )
+    .await;
+    let (status, body) = call(
+        &e,
+        "POST",
+        &format!("/perm/engines/{}/grants", sr.engine),
+        &e.writer,
+        Some(
+            json!({"capability": "starrocks.impersonate_user", "values": [ops],
+                    "principals": [{"kind": "user", "ref": alice}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+}
