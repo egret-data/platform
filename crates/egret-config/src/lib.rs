@@ -744,6 +744,20 @@ pub struct WorkflowConfig {
     #[serde(default = "default_storage_retention_days")]
     pub storage_retention_days: u32,
 
+    /// **How long a kept task container or pod outlives its run, in days
+    /// (workflow debt D3); `0` keeps them for ever.**
+    ///
+    /// A task with `taskRunner: {delete: false}` keeps its container (Docker)
+    /// or pod (Kubernetes) when its run ends, whatever the end state: success,
+    /// failure, kill or timeout. The reaper's orphan sweep removes it once the
+    /// run has been terminal longer than this, counted from the run's
+    /// `ended_at`. Kestra keeps them for ever; egret bounds them because the
+    /// Docker runner has no disk bound. Not a chart value, like the other
+    /// workflow tuning keys.
+    /// `EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS=7`.
+    #[serde(default = "default_kept_container_retention_days")]
+    pub kept_container_retention_days: u32,
+
     /// `[workflow.storage]` -- where execution files live in the `[storage]`
     /// bucket and how large they may be (W9a spec §3, §4.5).
     /// `EGRET_WORKFLOW__STORAGE__MAX_FILE_BYTES=1073741824`.
@@ -1004,6 +1018,11 @@ fn default_max_namespace_files() -> u64 {
 /// `30` -- see [`WorkflowConfig::storage_retention_days`].
 fn default_storage_retention_days() -> u32 {
     30
+}
+
+/// `7` -- see [`WorkflowConfig::kept_container_retention_days`].
+fn default_kept_container_retention_days() -> u32 {
+    7
 }
 
 /// `[workflow.plugin_host]`: how egret runs the Kestra plugin host image (W5b
@@ -1478,6 +1497,7 @@ fn default_workflow() -> WorkflowConfig {
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),
         storage_retention_days: default_storage_retention_days(),
+        kept_container_retention_days: default_kept_container_retention_days(),
         storage: WorkflowStorageConfig::default(),
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
@@ -2097,6 +2117,31 @@ values = { allowed-images = [] }
                 }
             );
             assert_eq!(cfg.workflow.storage_retention_days, 0);
+            Ok(())
+        });
+    }
+
+    /// Debt D3: `kept_container_retention_days` defaults to 7 on BOTH paths
+    /// (the figment defaults layer and the serde fallback), and the
+    /// environment sets it, `0` included.
+    #[test]
+    fn workflow_kept_container_retention_default_and_env() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.kept_container_retention_days, 7);
+            assert_eq!(default_workflow().kept_container_retention_days, 7);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS", "0");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.kept_container_retention_days, 0);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS", "3");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.kept_container_retention_days, 3);
             Ok(())
         });
     }

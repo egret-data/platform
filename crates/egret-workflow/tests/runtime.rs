@@ -2590,6 +2590,32 @@ fn the_config_default_kill_poll_equals_the_workers_own() {
     );
 }
 
+/// Debt D3: `workflow.kept_container_retention_days` defaults to a week.
+#[test]
+fn the_kept_container_retention_defaults_to_seven_days() {
+    assert_eq!(
+        egret_config::Config::default()
+            .workflow
+            .kept_container_retention_days,
+        7
+    );
+}
+
+/// Debt D3: the setting reaches the runners as `0` → `None` (kept for ever),
+/// otherwise that many days.
+#[test]
+fn the_kept_container_retention_maps_zero_to_for_ever() {
+    assert_eq!(egret_workflow::runtime::kept_retention(0), None);
+    assert_eq!(
+        egret_workflow::runtime::kept_retention(7),
+        Some(Duration::from_secs(7 * 86_400))
+    );
+    assert_eq!(
+        egret_workflow::runtime::kept_retention(1),
+        Some(Duration::from_secs(86_400))
+    );
+}
+
 // ── W5a Task 5: the deployment's registry, and the orphan sweep's call site ──
 
 /// W5b: a `SecretSource` for registries these tests build but never run a

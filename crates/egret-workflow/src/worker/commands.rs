@@ -1247,6 +1247,15 @@ pub struct DockerRunner {
     /// and output files into (Task 6). `None`: either fails the task naming
     /// `[storage]`.
     files: Option<std::sync::Arc<crate::storage::FileStore>>,
+    /// How long a kept (`delete: false`) container outlives its run before the
+    /// orphan sweep removes it (workflow debt D3). `None`: kept for ever,
+    /// which is what a runner nobody configured does; production passes
+    /// `workflow.kept_container_retention_days` (`runtime::handlers_for`).
+    kept_retention: Option<std::time::Duration>,
+    /// One more `label=` filter on the orphan sweep's listing, ANDed with
+    /// [`TASKRUN_LABEL`]'s. `None` in production: the sweep sees every egret
+    /// task container on the daemon. See [`DockerRunner::with_sweep_label`].
+    sweep_label: Option<String>,
 }
 
 impl Default for DockerRunner {
@@ -1265,7 +1274,28 @@ impl DockerRunner {
             max_diff_bytes: MAX_DIFF_BYTES,
             logs: None,
             files: None,
+            kept_retention: None,
+            sweep_label: None,
         }
+    }
+
+    /// The same runner, whose orphan sweep lists only containers that ALSO
+    /// carry `label` (`key=value`, e.g. `egret.io/workspace-id=<ws>`).
+    ///
+    /// For a live test on a shared daemon: the sweep removes containers, so a
+    /// test that drives it must not be able to reach a container it did not
+    /// create (another suite's, or the dev stack's). Production never sets it.
+    pub fn with_sweep_label(mut self, label: impl Into<String>) -> Self {
+        self.sweep_label = Some(label.into());
+        self
+    }
+
+    /// The same runner, whose orphan sweep removes a kept (`delete: false`)
+    /// container once its run has been terminal longer than `retention`
+    /// ([`sweep_decision`]). `None` keeps them for ever (the setting `0`).
+    pub fn with_kept_retention(mut self, retention: Option<std::time::Duration>) -> Self {
+        self.kept_retention = retention;
+        self
     }
 
     /// The same runner, streaming stored inputs from `files` -- what
@@ -2483,8 +2513,13 @@ pub trait OrphanSweep: Send + Sync {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64>;
 }
 
-/// Of `ids`, which `task_runs` rows are terminal, and which have no row at
-/// all — the one question both halves of [`OrphanSweep`] ask the database.
+/// Of `ids`, which `task_runs` rows are terminal (and since when), and which
+/// have no row at all — the one question both halves of [`OrphanSweep`] ask
+/// the database.
+///
+/// A terminal run's end is `COALESCE(ended_at, updated_at)`: a row written
+/// before migration 0183, or by a writer that left `ended_at` NULL, has only
+/// `updated_at`, which is no earlier than its end.
 ///
 /// Terminal is [`RunState::is_terminal`](crate::executor::RunState::is_terminal),
 /// Kestra's `isTerminated()`, spelled here by the enum rather than a copied
@@ -2495,23 +2530,26 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
         .filter(|s| s.is_terminal())
         .map(|s| s.wire())
         .collect();
-    let rows: Vec<(uuid::Uuid, bool)> =
-        sqlx::query_as("SELECT id, state = ANY($2) FROM workflow.task_runs WHERE id = ANY($1)")
-            .bind(ids)
-            .bind(&terminal)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| {
-                Error::Internal(anyhow::anyhow!(
-                    "reading run states for the orphan sweep: {e}"
-                ))
-            })?;
+    let rows: Vec<(uuid::Uuid, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, state = ANY($2), COALESCE(ended_at, updated_at) \
+         FROM workflow.task_runs WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(&terminal)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "reading run states for the orphan sweep: {e}"
+        ))
+    })?;
     let mut out = RunLiveness::default();
     let mut seen = std::collections::HashSet::new();
-    for (id, is_terminal) in rows {
+    for (id, is_terminal, ended) in rows {
         seen.insert(id);
         if is_terminal {
             out.terminal.insert(id);
+            out.ended.insert(id, ended);
         }
     }
     for id in ids {
@@ -2527,15 +2565,54 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
 pub(crate) struct RunLiveness {
     /// A row exists and its state is terminal.
     pub terminal: std::collections::HashSet<uuid::Uuid>,
+    /// When each [`terminal`](Self::terminal) run ended:
+    /// `COALESCE(ended_at, updated_at)`.
+    pub ended: std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>,
     /// No row at all (the execution was deleted, cascading its runs — or the
     /// work belongs to ANOTHER egret sharing the backend).
     pub missing: std::collections::HashSet<uuid::Uuid>,
 }
 
+/// **Whether the orphan sweep removes one container or pod** (workflow debt
+/// D3) -- the one rule both halves of [`OrphanSweep`] apply, and nothing else
+/// decides:
+///
+/// * the run is not terminal (live, or no row here at all): keep. A run this
+///   database has no row for is never ours to remove (see the two sweeps'
+///   docs);
+/// * terminal and not kept: remove (the sweep's rule since W5a);
+/// * terminal and kept (`delete: false`): remove once the run ended more than
+///   `retention` before `now`; `None` (the setting `0`) keeps it for ever.
+///   This holds whatever the end state, kill and timeout included.
+pub(crate) fn sweep_decision(
+    live: &RunLiveness,
+    id: uuid::Uuid,
+    keep: bool,
+    retention: Option<std::time::Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !live.terminal.contains(&id) {
+        return false;
+    }
+    if !keep {
+        return true;
+    }
+    let (Some(retention), Some(ended)) = (retention, live.ended.get(&id)) else {
+        return false;
+    };
+    // A retention too large for chrono is "for ever" in practice.
+    let Ok(retention) = chrono::Duration::from_std(retention) else {
+        return false;
+    };
+    now - *ended > retention
+}
+
 /// **The Docker half of the sweep.**
 ///
 /// Lists every container carrying [`TASKRUN_LABEL`] whose name starts with
-/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal**.
+/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal** --
+/// a kept (`delete: false`) one only after its deadline ([`sweep_decision`],
+/// [`DockerRunner::with_kept_retention`]).
 ///
 /// # A container whose run has NO row is left alone, unlike a pod
 ///
@@ -2553,16 +2630,13 @@ impl OrphanSweep for DockerRunner {
         let format = format!(
             "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}"
         );
-        let out = self
-            .cli(&[
-                "ps",
-                "--all",
-                "--filter",
-                &label_filter,
-                "--format",
-                &format,
-            ])
-            .await?;
+        let mut args = vec!["ps", "--all", "--filter", &label_filter];
+        let scope = self.sweep_label.as_ref().map(|l| format!("label={l}"));
+        if let Some(scope) = &scope {
+            args.extend(["--filter", scope.as_str()]);
+        }
+        args.extend(["--format", &format]);
+        let out = self.cli(&args).await?;
         if !out.status.success() {
             return Err(self
                 .classify("ps", &String::from_utf8_lossy(&out.stderr))
@@ -2572,11 +2646,12 @@ impl OrphanSweep for DockerRunner {
         if listed.is_empty() {
             return Ok(0);
         }
-        let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id)| *id).collect();
+        let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id, _)| *id).collect();
         let live = run_liveness(pool, &ids).await?;
+        let now = chrono::Utc::now();
         let mut removed = 0u64;
-        for (name, id) in &listed {
-            if !live.terminal.contains(id) {
+        for (name, id, keep) in &listed {
+            if !sweep_decision(&live, *id, *keep, self.kept_retention, now) {
                 continue;
             }
             match self.cli(&["rm", "--force", name]).await {
@@ -2595,9 +2670,9 @@ impl OrphanSweep for DockerRunner {
 
 /// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}'`,
 /// parsed: the egret task containers only (name prefix AND a label that is a
-/// UUID), **minus those the author asked to keep** (`delete: false`, the
-/// [`DELETE_LABEL`] -- the pod sweep's rule, W5a Task 5).
-fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
+/// UUID), each with whether the author asked to keep it (`delete: false`, the
+/// [`DELETE_LABEL`]). Whether a kept one goes is [`sweep_decision`]'s (debt D3).
+fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid, bool)> {
     stdout
         .lines()
         .filter_map(|l| {
@@ -2605,10 +2680,14 @@ fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
             let name = cols.next()?;
             let id = cols.next()?;
             let keep = cols.next().is_some_and(|d| d.trim() == "false");
-            if !name.starts_with(RUN_NAME_PREFIX) || keep {
+            if !name.starts_with(RUN_NAME_PREFIX) {
                 return None;
             }
-            Some((name.to_string(), uuid::Uuid::parse_str(id.trim()).ok()?))
+            Some((
+                name.to_string(),
+                uuid::Uuid::parse_str(id.trim()).ok()?,
+                keep,
+            ))
         })
         .collect()
 }
@@ -3182,10 +3261,10 @@ mod tests {
         );
     }
 
-    /// The sweep's parser keeps only egret task containers and drops the ones
-    /// the author asked to keep.
+    /// The parser keeps every egret task container and REPORTS the keep flag;
+    /// the decision is `sweep_decision`'s (debt D3).
     #[test]
-    fn the_docker_sweep_parses_names_and_leaves_delete_false_alone() {
+    fn the_docker_sweep_parses_names_and_the_keep_flag() {
         let a = uuid::Uuid::from_u128(1);
         let b = uuid::Uuid::from_u128(2);
         let out = format!(
@@ -3193,7 +3272,56 @@ mod tests {
         );
         assert_eq!(
             parse_docker_ps(&out),
-            vec![("egret-run-x-1".to_string(), a)]
+            vec![
+                ("egret-run-x-1".to_string(), a, false),
+                ("egret-run-y-1".to_string(), b, true),
+            ]
+        );
+    }
+
+    /// **One decision for both sweeps** (debt D3): a live run's work is never
+    /// touched; an ended run's is removed at once unless kept; a kept one goes
+    /// once its run ended more than `retention` ago, never with `None`; an
+    /// unknown run is left alone.
+    #[test]
+    fn sweep_decision_removes_kept_work_only_after_the_deadline() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let (live, done_old, done_new, unknown) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+            uuid::Uuid::from_u128(4),
+        );
+        let mut l = RunLiveness::default();
+        l.terminal.extend([done_old, done_new]);
+        l.ended.insert(done_old, now - D::days(8));
+        l.ended.insert(done_new, now - D::days(6));
+        l.missing.insert(unknown);
+        let week = Some(std::time::Duration::from_secs(7 * 86_400));
+        assert!(
+            !sweep_decision(&l, live, false, week, now),
+            "a live run's work stays"
+        );
+        assert!(
+            sweep_decision(&l, done_new, false, week, now),
+            "not kept: removed at once"
+        );
+        assert!(
+            !sweep_decision(&l, done_new, true, week, now),
+            "kept, 6 days: stays"
+        );
+        assert!(
+            sweep_decision(&l, done_old, true, week, now),
+            "kept, 8 days: removed"
+        );
+        assert!(
+            !sweep_decision(&l, done_old, true, None, now),
+            "retention 0: kept for ever"
+        );
+        assert!(
+            !sweep_decision(&l, unknown, false, week, now),
+            "no row here: never ours to remove"
         );
     }
 

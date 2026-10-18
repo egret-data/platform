@@ -1563,7 +1563,7 @@ async fn the_orphan_sweep_deletes_pods_of_terminal_runs_only() {
         .count();
     assert_eq!(standing, 4, "the namespace holds only this case's pods");
 
-    let n = sweep_orphans(&runner_client().await, &cfg, &pool)
+    let n = sweep_orphans(&runner_client().await, &cfg, &pool, None)
         .await
         .expect("sweep");
     assert_eq!(n, 1, "only the terminal run's pod");

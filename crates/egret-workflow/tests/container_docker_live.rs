@@ -83,7 +83,7 @@ use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
 use egret_workflow::scripts::{RunnerKind, RunnerSpec};
 use egret_workflow::storage::FileStore;
 use egret_workflow::worker::commands::{
-    container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
+    container_name, DockerRunner, NoObserver, OrphanSweep, TaskCommands, TaskRunner,
 };
 use egret_workflow::worker::handlers::script::{FixedFeatureState, Script, ScriptRuntime};
 use egret_workflow::worker::handlers::{container, python, LogSink};
@@ -2514,19 +2514,118 @@ async fn a_killed_delete_false_container_is_stopped_and_kept() {
     );
     let killed = kill_a_running_sleeper(&w, "kill-kept", Some(&runner)).await;
     let name = &killed.name;
+    // Capture, remove, THEN assert: the case removes what it kept before any
+    // assert can fail, so a red run leaves no `sleep 600` behind. `KillWorld`'s
+    // `Drop` (every container labelled with its workspace) is the second net.
+    let (running, exists) = (container_running(name), container_exists(name));
+    force_remove(name);
+    assert!(!running, "{name} is still running after its run was KILLED");
     assert!(
-        !container_running(name),
-        "{name} is still running after its run was KILLED"
-    );
-    assert!(
-        container_exists(name),
+        exists,
         "{name} was removed: `delete: false` keeps a killed container (debt D1)"
     );
     killed.assert_the_worker_cancelled_once();
-    // The case removes what it kept, so the daemon is left as it was found.
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "--force", name])
-        .status();
+}
+
+/// Backdate run `run`'s end to `ago` before now, as if it had been terminal
+/// that long. `started_at` moves with it, for the `ended_at >= started_at`
+/// CHECK (migration 0183).
+async fn backdate_the_end(w: &KillWorld, run: Uuid, ago: &'static str) {
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+         SET started_at = CASE WHEN started_at IS NULL THEN NULL \
+                               ELSE now() - $2::interval - interval '1 minute' END, \
+             ended_at = now() - $2::interval \
+         WHERE id = $1",
+    )
+    .bind(run)
+    .bind(ago)
+    .execute(&w.pool)
+    .await
+    .expect("backdate the run's end");
+}
+
+/// The Docker orphan sweep as production builds it, with `retention`, but
+/// scoped to `w`'s workspace label so it can never reach a container this
+/// case did not create (the daemon is shared).
+async fn sweep_this_world(w: &KillWorld, retention: Option<std::time::Duration>) -> u64 {
+    DockerRunner::new()
+        .with_kept_retention(retention)
+        .with_sweep_label(format!("egret.io/workspace-id={}", w.ws))
+        .sweep_orphans(&w.pool)
+        .await
+        .expect("sweep")
+}
+
+/// **A kept container is swept after its deadline** (debt D3, decided
+/// 2026-10-19: every kept container whose run is terminal, whatever the end
+/// state). A killed `delete: false` sleeper is kept (Task 1.1):
+///
+/// * the sweep with a one-hour retention leaves it while its run ended just
+///   now, and removes it once its end is backdated two hours;
+/// * with `None` (the setting `0`) a second one, a day past its end, is kept
+///   -- and the one-hour sweep then removes it, so the backdate is shown to
+///   have made it eligible (the `None` pass is not vacuous).
+///
+/// Every observation is captured before the case's own cleanup; `KillWorld`'s
+/// `Drop` removes whatever is left, by its workspace label.
+async fn a_kept_container_is_swept_after_its_deadline() {
+    let w = KillWorld::new().await;
+    let runner = format!(
+        "      type: {}\n      delete: false\n",
+        egret_workflow::scripts::DOCKER_RUNNER
+    );
+    let hour = Some(std::time::Duration::from_secs(3600));
+
+    let first = kill_a_running_sleeper(&w, "kept-deadline", Some(&runner)).await;
+    let kept_after_kill = container_exists(&first.name);
+    let n_fresh = sweep_this_world(&w, hour).await;
+    let kept_while_fresh = container_exists(&first.name);
+    backdate_the_end(&w, first.run, "2 hours").await;
+    let n_late = sweep_this_world(&w, hour).await;
+    let kept_when_late = container_exists(&first.name);
+    // Gone before the second sleeper starts: its wait asserts the workspace
+    // holds one container.
+    force_remove(&first.name);
+
+    let second = kill_a_running_sleeper(&w, "kept-for-ever", Some(&runner)).await;
+    backdate_the_end(&w, second.run, "1 day").await;
+    let n_for_ever = sweep_this_world(&w, None).await;
+    let kept_for_ever = container_exists(&second.name);
+    let n_control = sweep_this_world(&w, hour).await;
+    let kept_after_control = container_exists(&second.name);
+    force_remove(&second.name);
+
+    assert!(
+        kept_after_kill,
+        "{}: the kill keeps a `delete: false` container",
+        first.name
+    );
+    assert_eq!(
+        n_fresh, 0,
+        "a run that ended just now is inside a one-hour deadline"
+    );
+    assert!(
+        kept_while_fresh,
+        "{} was swept before its deadline",
+        first.name
+    );
+    assert_eq!(n_late, 1, "two hours past a one-hour deadline: swept");
+    assert!(!kept_when_late, "{} outlived its deadline", first.name);
+    assert_eq!(
+        n_for_ever, 0,
+        "retention `None` (the setting 0) removes nothing"
+    );
+    assert!(kept_for_ever, "{} was swept with retention 0", second.name);
+    assert_eq!(
+        n_control, 1,
+        "the control: a day past its end IS past a one-hour deadline"
+    );
+    assert!(
+        !kept_after_control,
+        "{} survived the control sweep",
+        second.name
+    );
 }
 
 /// **Spec §8 and §4.3 (live): a kill survives the worker dying.** The first
@@ -2673,6 +2772,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(namespace_files_are_staged_into_the_container_as_the_artifact_does),
         case!(kill_stops_a_running_container),
         case!(a_killed_delete_false_container_is_stopped_and_kept),
+        case!(a_kept_container_is_swept_after_its_deadline),
         case!(a_kill_survives_the_worker_dying),
     ]
 }

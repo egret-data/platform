@@ -744,12 +744,15 @@ pub async fn handlers_for(
     // Group C1 Task 4: `PurgeLogs`, which needs the pool too (it deletes
     // `workflow.task_logs` rows, scoped to the flow's namespace).
     crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
+    let kept_retention = kept_retention(cfg.kept_container_retention_days);
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
         .container_runner
     {
         egret_config::ContainerRunner::None => return Ok((handlers, None)),
         egret_config::ContainerRunner::Docker => {
-            let mut r = DockerRunner::new().with_logs(LogRepo::new(pool.clone()));
+            let mut r = DockerRunner::new()
+                .with_logs(LogRepo::new(pool.clone()))
+                .with_kept_retention(kept_retention);
             // W9a Task 5: stored inputs stream from the installed store.
             if let Some(files) = crate::storage::current() {
                 r = r.with_files(files);
@@ -768,7 +771,8 @@ pub async fn handlers_for(
                 ))
             })?;
             let mut r =
-                crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool.clone()));
+                crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool.clone()))
+                    .with_kept_retention(kept_retention);
             if let Some(files) = crate::storage::current() {
                 r = r.with_files(files);
             }
@@ -778,6 +782,13 @@ pub async fn handlers_for(
     };
     register_runner_tasks(&mut handlers, cfg, kind, runner, pool, secrets);
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))
+}
+
+/// `workflow.kept_container_retention_days` as the runners take it (debt D3):
+/// `0` keeps kept containers and pods for ever (`None`), any other value is
+/// that many days.
+pub fn kept_retention(days: u32) -> Option<Duration> {
+    (days != 0).then(|| Duration::from_secs(u64::from(days) * 86_400))
 }
 
 /// The handlers a container runner adds, whichever runner it is: the four
