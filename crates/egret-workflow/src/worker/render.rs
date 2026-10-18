@@ -1552,7 +1552,10 @@ pub(super) fn render_updates(
 /// so a reader of the run sees it was computed.
 fn complete(state: &mut ExecutionState, ix: RunIx, now: Tick) {
     state.runs[ix].rendered = Some(String::new());
-    crate::executor::apply(state, &crate::executor::Command::StartRun { run: ix, at: now });
+    crate::executor::apply(
+        state,
+        &crate::executor::Command::StartRun { run: ix, at: now },
+    );
     crate::executor::apply(
         state,
         &crate::executor::Command::SetRunState {
