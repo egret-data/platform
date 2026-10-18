@@ -31,8 +31,17 @@
 //!      terminal.
 //!
 //!    An unleased running run gets no cancel: nothing can build its handler
-//!    (the fix round 1 rule, `claim::finish_claimed_kill`). The orphan sweep
-//!    owns its container, now including a kept one (§2.1).
+//!    (the fix round 1 rule, `claim::finish_claimed_kill`). Its container is
+//!    the orphan sweep's (§2.1), which reads the run as terminal from the next
+//!    reaper tick on:
+//!    - Docker, `delete: true`: removed at once;
+//!    - Docker, `delete: false`: still running, it is stopped (`docker stop
+//!      -t 0`, kept), which is D1's stop; removed after the retention
+//!      (`commands::docker_sweep_action`, final review I3);
+//!    - Kubernetes, `delete: true`: the pod is deleted at once;
+//!    - Kubernetes, `delete: false`: a pod cannot be stopped, only deleted
+//!      (D2), and the pod sweep deletes it only after the retention. Until
+//!      then it may still run. A follow-up (debt spec §2.2 rule 3 note).
 //! 4. The execution becomes `KILLED`, with `ended_at`, when no run is left
 //!    `KILLING`. Otherwise it becomes `KILLING`.
 //! 5. A `KILLED` execution reports to its parent through the same calls

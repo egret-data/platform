@@ -3267,11 +3267,21 @@ async fn parent_is_terminal(conn: &mut PgConnection, execution: Uuid) -> Result<
     Ok(terminal == Some(true))
 }
 
-/// A report's answer, for a [`Settled`] of an execution closed by force: a
-/// row-content fault met while loading the PARENT means the parent cannot be
-/// loaded either, so it hears nothing -- its own kill closes it by force --
-/// and the warning says so. Every other error is returned, as from any
-/// report: only what retrying cannot change is dropped.
+/// A report's answer, for a [`Settled`] of an execution closed by force:
+/// **any** row-content fault the report raises is dropped, wherever in the
+/// report it was met -- loading the parent, or anything the report loads
+/// after it (a grandparent the parent's own settle reports to, say). The
+/// usual cause is the parent: it cannot be loaded either, so it hears
+/// nothing -- its own kill closes it by force -- and the warning says so.
+/// Every other error is returned, as from any report: only what retrying
+/// cannot change is dropped.
+///
+/// **What dropping does not undo.** The report runs inside the kill's
+/// transaction, and a row-content fault is egret's own error, not a
+/// Postgres one, so the transaction is not aborted: writes the report made
+/// before the fault (a parent's settle, say) commit with the kill, while
+/// what came after it never runs (the grandparent is never told). That is
+/// accepted: what could not be loaded is closed by its own kill.
 fn forced_report(s: &Settled, told: Result<Option<Job>>) -> Result<Option<Job>> {
     match told {
         Err(e) if s.forced && row_content_fault(&e) => {

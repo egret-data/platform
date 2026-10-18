@@ -220,7 +220,8 @@ impl egret_workflow::worker::Registry for CancelRecorder {
 }
 
 /// One worker tick whose only work is the kill-only claims of `KILLING`
-/// leaves: it cancels each and runs no handler.
+/// leaves. It asserts only that no handler ran; what the claims cancelled
+/// and committed is the caller's to assert.
 async fn finish_kills(pool: &sqlx::PgPool) {
     let reg = CancelRecorder::default();
     egret_workflow::worker::tick(pool, 10, &reg)
