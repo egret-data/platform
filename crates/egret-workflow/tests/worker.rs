@@ -11051,3 +11051,94 @@ async fn a_killing_run_whose_task_is_not_a_leaf_is_killed_without_a_cancel(pool:
         Some(serde_json::json!("KILLED"))
     );
 }
+
+// --------------------------------------------------------------------------
+// Group C2 Task 1: `workflow.executions.variables` (migration 0195).
+// --------------------------------------------------------------------------
+
+const VARS_FLOW: &str =
+    "id: vars\nnamespace: t\nvariables:\n  name: World\ntasks:\n  - id: o\n    \
+     type: io.kestra.plugin.core.output.OutputValues\n    values:\n      m: \"{{ vars.name }}\"\n";
+
+/// **`vars` reads the execution's own column before the flow's `variables:`.**
+/// Kestra's `RunVariables` rule (`RunVariables.java:541-550`); a NULL column
+/// is the flow's value, which is Kestra's starting value. The control
+/// execution (column NULL) is what stops the first assertion passing for the
+/// wrong reason.
+#[sqlx::test(migrations = "../../migrations")]
+async fn vars_reads_the_execution_column_before_the_flows_variables(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let own = start_execution(&pool, ws, None, VARS_FLOW, serde_json::json!({}))
+        .await
+        .expect("start");
+    let control = start_execution(&pool, ws, None, VARS_FLOW, serde_json::json!({}))
+        .await
+        .expect("start the control");
+    sqlx::query("UPDATE workflow.executions SET variables = '{\"name\":\"Loïc\"}' WHERE id = $1")
+        .bind(own)
+        .execute(&pool)
+        .await
+        .expect("set the column");
+
+    drain(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        run_outputs(&pool, own, "o").await,
+        Some(serde_json::json!({"values": {"m": "Loïc"}}))
+    );
+    assert_eq!(
+        run_outputs(&pool, control, "o").await,
+        Some(serde_json::json!({"values": {"m": "World"}}))
+    );
+}
+
+/// **A `CREATE_NEW_EXECUTION` replay copies `variables`** (D3:
+/// `Execution.childExecution` copies the variables like everything else).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_copies_the_execution_variables(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: vars-replay\nnamespace: t\ntasks:\n  - id: f\n    \
+         type: io.kestra.plugin.core.execution.Fail\n    condition: \"true\"\n    retry:\n      \
+         type: constant\n      behavior: CREATE_NEW_EXECUTION\n      maxAttempts: 2\n      \
+         interval: PT0S\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    let own = serde_json::json!({"a": {"b": [1]}});
+    sqlx::query("UPDATE workflow.executions SET variables = $2 WHERE id = $1")
+        .bind(root)
+        .bind(&own)
+        .execute(&pool)
+        .await
+        .expect("set the column");
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let replay = loop {
+        egret_workflow::worker::tick(&pool, 8, &reg)
+            .await
+            .expect("tick");
+        if let Some(r) = replay_of(&pool, root).await {
+            break r;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no replay was created"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    let copied: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT variables FROM workflow.executions WHERE id = $1")
+            .bind(replay)
+            .fetch_one(&pool)
+            .await
+            .expect("read the replay's variables");
+    assert_eq!(copied, Some(own));
+}

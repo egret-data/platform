@@ -169,7 +169,7 @@ impl Surface {
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix, trigger_execution_id, labels \
+                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -180,10 +180,15 @@ impl Surface {
         let flow = crate::spec::parse(&ctx.source).ok();
         let posted: Value = row.get("inputs");
         let inputs = with_declared_defaults(posted, flow.as_ref());
-        let vars = flow
-            .as_ref()
-            .and_then(|f| serde_json::to_value(&f.variables).ok())
-            .unwrap_or(Value::Null);
+        // Group C2 (spec §3.2): the execution's own variables first, the flow's as
+        // the fallback -- Kestra's `RunVariables` rule (`RunVariables.java:541-550`).
+        let vars = match row.get::<Option<Value>, _>("variables") {
+            Some(own) => own,
+            None => flow
+                .as_ref()
+                .and_then(|f| serde_json::to_value(&f.variables).ok())
+                .unwrap_or(Value::Null),
+        };
         let flow_value = flow
             .as_ref()
             .map(|f| json!({"id": f.id, "namespace": f.namespace}))

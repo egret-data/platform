@@ -179,7 +179,7 @@ pub(super) async fn spawn_due(
 
     let row = sqlx::query(
         "SELECT flow_id, namespace, flow_key, inputs, parent_run_ix, \
-                attempt_number, origin_offset_ms, execution_depth, labels \
+                attempt_number, origin_offset_ms, execution_depth, labels, variables \
            FROM workflow.executions WHERE id = $1",
     )
     .bind(ctx.id)
@@ -243,9 +243,9 @@ pub(super) async fn spawn_due(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 parent_execution_id, attempt_number, origin_offset_ms, inputs, \
-                execution_depth, labels, ",
+                execution_depth, labels, variables, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10,$11, ",
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10,$11,$12, ",
         super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
         ") RETURNING id",
     ))
@@ -275,6 +275,8 @@ pub(super) async fn spawn_due(
     // `Execution.childExecution` copies the labels like everything else; read
     // from the row for `inputs`' reason (W7f spec §3.3).
     .bind(row.get::<Option<Value>, _>("labels"))
+    // D3: `Execution.childExecution` copies the variables like everything else.
+    .bind(row.get::<Option<Value>, _>("variables"))
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
