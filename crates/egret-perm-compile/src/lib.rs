@@ -122,8 +122,9 @@ pub use trigger::{
     affected_services_for_classification, affected_services_for_grant,
     affected_services_for_group_membership, affected_services_for_role_membership,
     affected_services_for_rule, affected_services_for_tag_rename,
-    affected_services_for_workspace_members, lock_services_in_tx, merge_service_ids,
-    recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,
-    PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+    affected_services_for_workspace_members, group_references_via, lock_services_in_tx,
+    merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
+    CompileSummary, PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING,
+    PROFILE_EXPANSION_CEILING,
 };
 pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};

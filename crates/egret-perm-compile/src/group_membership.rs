@@ -62,7 +62,8 @@ use sqlx::{Postgres, Transaction};
 use egret_perm::CompileError;
 
 use crate::trigger::{
-    affected_services_for_group_membership, lock_services_in_tx, recompile_services_in_tx,
+    affected_services_for_group_membership, group_references_via, lock_services_in_tx,
+    recompile_services_in_tx,
 };
 
 /// The production [`egret_auth::groups::GroupMembershipRecompiler`]: the
@@ -122,5 +123,26 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
             }
         }
         Ok(())
+    }
+
+    async fn group_references_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
+        group_references_via(tx, names)
+            .await
+            .map_err(|e| to_core(e, Some(names)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `egret-auth` skips its reference check for `public` by its own copy of
+    /// the name (it does not depend on `egret-perm`); the two must not drift,
+    /// or the login would create an unchecked group the compiler expands.
+    #[test]
+    fn egret_auth_and_egret_perm_agree_on_the_public_group() {
+        assert_eq!(egret_auth::groups::PUBLIC_GROUP, egret_perm::PUBLIC_GROUP);
     }
 }

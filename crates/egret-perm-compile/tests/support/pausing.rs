@@ -94,4 +94,12 @@ impl GroupMembershipRecompiler for Pausing {
         self.park(Stage::BeforeRecompile).await;
         PermGroupRecompiler.recompile_in_tx(tx, service_ids).await
     }
+
+    async fn group_references_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
+        PermGroupRecompiler.group_references_in_tx(tx, names).await
+    }
 }

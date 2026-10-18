@@ -620,6 +620,14 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        async fn group_references_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+            _names: &[String],
+        ) -> Result<Vec<crate::groups::GroupReference>> {
+            Ok(Vec::new())
+        }
     }
 
     /// `hard_delete` removes the user row plus every dependent it's supposed to

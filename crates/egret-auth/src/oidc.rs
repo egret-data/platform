@@ -46,12 +46,27 @@ pub async fn provision_and_sync(
         }
     };
     users.touch_last_login(user_id).await?;
-    for g in &claims.groups {
-        groups.upsert_oidc_group(g).await?;
+    // 2026-10-18 design R2: a claimed name with no `groups` row that a grant
+    // or rule exemption still names (its group was deleted or renamed) is NOT
+    // created, so the IdP cannot take over the grants written for the old
+    // group. The sync below ignores it, because it has no OIDC row. The login
+    // goes ahead; each refused name is logged.
+    for name in groups
+        .upsert_claimed_oidc_groups(&claims.groups, recompiler)
+        .await?
+    {
+        tracing::warn!(
+            user_id = %user_id.0,
+            // Debug, not Display: the name comes from the IdP claim.
+            group = ?name,
+            "OIDC groups claim names a group that no longer exists but that grants or rule \
+             exemptions still name; the group is not created and the user is not joined; \
+             review the references in GET /api/control-plane/perm/unresolved-principals"
+        );
     }
-    // Design R2: a claimed name that names a LOCAL group is ignored by the
-    // sync (R1) — `upsert_oidc_group` returned the local id above and left its
-    // source alone. Say so, once per name: before R1 such a claim joined the
+    // Design R2 (2026-10-17): a claimed name that names a LOCAL group is
+    // ignored by the sync (R1) — the upsert above left it as it was. Say so,
+    // once per name: before R1 such a claim joined the
     // user to the local group, and any row it added is still there,
     // indistinguishable from one an admin added (`already_member`). The login
     // is not refused — not even when this read fails: it only feeds a log

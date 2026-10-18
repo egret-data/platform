@@ -29,7 +29,8 @@
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test group_grants
 
-use egret_auth::groups::GroupRepo;
+use egret_auth::groups::{GroupMembershipRecompiler, GroupReference, GroupRepo};
+use egret_auth::oidc::{provision_and_sync, OidcClaims};
 use egret_auth::users::UserRepo;
 use egret_core::UserId;
 use egret_metastore::Db;
@@ -756,4 +757,266 @@ async fn a_membership_change_nothing_references_changes_no_policy_version() {
         .await
         .expect("add");
     assert_eq!(version(db.clone(), f.service_id).await, before);
+}
+
+// ── 2026-10-18 design R2/R8: the IdP cannot take over a dangling group name ──
+
+/// An OIDC login (`provision_and_sync`, the callback's whole write path) by a
+/// fresh subject claiming `groups`, with the real port. Returns the new user.
+async fn login(db: &Db, groups: &[&str]) -> Uuid {
+    let tag = unique("idp").replace('_', "-");
+    let claims = OidcClaims {
+        subject: format!("sub-{tag}"),
+        email: format!("{tag}@idp.local"),
+        name: "IdP User".into(),
+        groups: groups.iter().map(|g| g.to_string()).collect(),
+    };
+    provision_and_sync(
+        &UserRepo::new(db.clone()),
+        &GroupRepo::new(db.clone()),
+        &claims,
+        &PermGroupRecompiler,
+    )
+    .await
+    .expect("login")
+    .0
+}
+
+async fn group_rows(db: &Db, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM groups WHERE name = $1")
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("groups count")
+}
+
+async fn group_names_of(db: &Db, user_id: Uuid) -> Vec<String> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+         WHERE ug.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("memberships");
+    sorted(names)
+}
+
+async fn username_of(db: &Db, user_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("username")
+}
+
+/// A mask on the fixture's `sales.orders.email` exempting `exempt`.
+fn exempting_rule(f: &Fixture, exempt: PrincipalSet) -> Rule {
+    Rule {
+        id: Uuid::nil(),
+        name: unique("dangling-exempt"),
+        kind: RuleKind::Mask {
+            mask_type: "MASK".to_string(),
+            value_expr: None,
+        },
+        selector: Selector::Path(Scope {
+            catalog_id: f.catalog_id,
+            schema: Some("sales".into()),
+            table: Some("orders".into()),
+            column: Some("email".into()),
+        }),
+        exempt,
+    }
+}
+
+/// **The headline (R2).** A grant still names `G` after `G`'s row is gone, and
+/// a rule exemption names `R` likewise. A login whose IdP claims both must
+/// not create either group: before R2 it created `G` as an OIDC group, joined
+/// the user, and recompiled the grant to name them — the grant written for
+/// the deleted group now granted whoever the IdP put in a group of that name.
+#[tokio::test]
+async fn a_login_does_not_create_a_group_a_grant_still_names() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (_, bystander) = person(&db, "dangling-by").await;
+    let g = unique("deleted-grp");
+    let r = unique("deleted-exempt");
+    // `G` existed when the grant was written, then went away. Deleted behind
+    // every writer's back, so this test is about the login, not the delete.
+    let gid = new_group(&db, &g).await;
+    let grant_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&g), user(&bystander)], vec![]),
+    )
+    .await;
+    f.perm
+        .create_rule(&exempting_rule(
+            &f,
+            PrincipalSet {
+                include: vec![group(&r)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create rule");
+    sqlx::query("DELETE FROM groups WHERE id = $1")
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .expect("delete group");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+    let before = grant_body(&f, grant_id).await.expect("grant body");
+    assert_eq!(only_item_users(&before, "policyItems"), vec![bystander]);
+
+    let uid = login(&db, &[&g, &r]).await;
+
+    assert_eq!(group_rows(&db, &g).await, 0, "no `groups` row for {g:?}");
+    assert_eq!(group_rows(&db, &r).await, 0, "no `groups` row for {r:?}");
+    assert_eq!(group_names_of(&db, uid).await, Vec::<String>::new());
+    assert_eq!(
+        grant_body(&f, grant_id).await,
+        Some(before),
+        "the grant written for the deleted group must not reach the IdP's user"
+    );
+}
+
+/// The same login when nothing names the claimed name: the group is created
+/// and joined, as before R2.
+#[tokio::test]
+async fn a_login_creates_and_joins_a_group_nothing_names() {
+    let Some(db) = test_db().await else { return };
+    let _f = seed(&db).await;
+
+    let g = unique("idp-new");
+    let uid = login(&db, &[&g]).await;
+
+    let source: String = sqlx::query_scalar("SELECT source FROM groups WHERE name = $1")
+        .bind(&g)
+        .fetch_one(&db.pool)
+        .await
+        .expect("the group is created");
+    assert_eq!(source, "oidc");
+    assert_eq!(group_names_of(&db, uid).await, vec![g]);
+}
+
+/// A claim naming an EXISTING OIDC group that a grant names is joined, and the
+/// grant recompiled to name the user, as before R2. A reference to a name that
+/// has a row is a reference to that group, so it never blocks.
+#[tokio::test]
+async fn a_login_joins_an_existing_referenced_oidc_group_and_recompiles() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let g = unique("idp-existing");
+    f.groups.upsert_oidc_group(&g).await.expect("group");
+    let grant_id = create_and_compile(&f, &grant(&f, Effect::Allow, vec![group(&g)], vec![])).await;
+    assert_eq!(grant_body(&f, grant_id).await, None, "no member yet");
+
+    let uid = login(&db, &[&g]).await;
+
+    assert_eq!(group_names_of(&db, uid).await, vec![g]);
+    let name = username_of(&db, uid).await.expect("minted by the compile");
+    assert_eq!(
+        only_item_users(&grant_body(&f, grant_id).await.expect("p"), "policyItems"),
+        vec![name]
+    );
+}
+
+/// A claim of `public` with an allow on `public` stored: the row is created as
+/// before. A reference to `public` does not depend on a row (every engine
+/// resolves it), so it is not counted.
+#[tokio::test]
+async fn a_login_claiming_public_is_not_refused_by_a_public_allow() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    create_and_compile(&f, &grant(&f, Effect::Allow, vec![group("public")], vec![])).await;
+    // No other test in this binary writes a `public` row; start without one so
+    // the assertion below sees THIS login's insert.
+    sqlx::query("DELETE FROM groups WHERE name = 'public'")
+        .execute(&db.pool)
+        .await
+        .expect("clear public");
+
+    let uid = login(&db, &["public"]).await;
+
+    assert_eq!(group_rows(&db, "public").await, 1);
+    assert_eq!(group_names_of(&db, uid).await, vec!["public".to_string()]);
+}
+
+/// R8: the port reports every grant principal and rule exemption naming one of
+/// the given groups, with the grant's effect, the rule's name and the
+/// position — and never `public`, nor a group it was not asked about.
+#[tokio::test]
+async fn the_port_reports_grant_and_rule_references_to_a_group() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (_, someone) = person(&db, "refs-u").await;
+    let g = unique("refs-grp");
+    let other = unique("refs-other");
+    let allow_id = f
+        .perm
+        .create_grant(&grant(
+            &f,
+            Effect::Allow,
+            vec![group(&g), group("public"), group(&other)],
+            vec![],
+        ))
+        .await
+        .expect("allow");
+    let deny_id = f
+        .perm
+        .create_grant(&grant(
+            &f,
+            Effect::Deny,
+            vec![user(&someone)],
+            vec![group(&g)],
+        ))
+        .await
+        .expect("deny");
+    let rule = exempting_rule(
+        &f,
+        PrincipalSet {
+            include: vec![group(&g)],
+            exclude: vec![],
+        },
+    );
+    let rule_id = f.perm.create_rule(&rule).await.expect("rule");
+
+    let mut tx = db.pool.begin().await.expect("begin");
+    let got = PermGroupRecompiler
+        .group_references_in_tx(&mut tx, &[g.clone(), "public".to_string()])
+        .await
+        .expect("references");
+    tx.rollback().await.expect("rollback");
+
+    let reference =
+        |source: &str, id: Uuid, rule_name: Option<&str>, effect: Option<&str>, position: &str| {
+            GroupReference {
+                group_name: g.clone(),
+                source: source.into(),
+                id,
+                rule_name: rule_name.map(str::to_string),
+                effect: effect.map(str::to_string),
+                position: position.into(),
+            }
+        };
+    let mut grants = vec![
+        reference("grant", allow_id, None, Some("allow"), "include"),
+        reference("grant", deny_id, None, Some("deny"), "exclude"),
+    ];
+    grants.sort_by_key(|r| r.id);
+    let mut expected = grants;
+    expected.push(reference(
+        "rule",
+        rule_id,
+        Some(&rule.name),
+        None,
+        "include",
+    ));
+    assert_eq!(got, expected);
 }

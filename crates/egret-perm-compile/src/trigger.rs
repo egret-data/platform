@@ -1739,6 +1739,42 @@ pub async fn affected_services_for_group_membership(
     Ok(ids)
 }
 
+/// Every stored reference to a group in `group_names` by NAME: the grant
+/// principals and rule exemptions [`affected_services_for_group_membership`]
+/// reads, one row each, ordered by name, source, id and position. The body of
+/// `egret_auth::groups::GroupMembershipRecompiler::group_references_in_tx`
+/// (2026-10-18 design R8), which the OIDC login asks before creating a group
+/// for a claimed name with no row.
+///
+/// The SAME two tables as the affected set, and every rule regardless of its
+/// selector, because a reference this misses is one a group created under
+/// that name would inherit. `public` is filtered out, as it is there: it is
+/// never expanded, so a `groups` row with that name takes nothing over.
+pub async fn group_references_via(
+    conn: &mut sqlx::PgConnection,
+    group_names: &[String],
+) -> Result<Vec<egret_auth::groups::GroupReference>, CompileError> {
+    if group_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT p.ref AS group_name, 'grant' AS source, g.id, \
+                NULL::text AS rule_name, g.effect::text AS effect, p.mode::text AS position \
+           FROM perm.grant_principals p JOIN perm.grants g ON g.id = p.grant_id \
+          WHERE p.kind = 'group'::perm.principal_kind AND p.ref = ANY($1) AND p.ref <> $2 \
+         UNION ALL \
+         SELECT e.ref, 'rule', r.id, r.name, NULL::text, e.mode::text \
+           FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) AND e.ref <> $2 \
+         ORDER BY group_name, source, id, position",
+    )
+    .bind(group_names)
+    .bind(crate::rules::PUBLIC_GROUP)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
 /// Take the row locks a recompile of `service_ids` will need, in ascending id
 /// order, **before** the model write they accompany.
 ///

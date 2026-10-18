@@ -140,6 +140,48 @@ pub trait GroupMembershipRecompiler: Send + Sync {
         tx: &mut Transaction<'static, Postgres>,
         service_ids: &[i64],
     ) -> Result<()>;
+
+    /// Every grant principal and rule exemption that names a group in `names`
+    /// by NAME, read on `tx` — the stored references a group of that name
+    /// would inherit. `public` is never returned: a reference to it does not
+    /// depend on a `groups` row (every engine resolves it), so no row of that
+    /// name can take anything over.
+    ///
+    /// **Why the login asks (2026-10-18 design R2, R8).** A reference has no
+    /// FK to `groups`, so a group's delete or rename leaves every reference
+    /// to the old name behind, and the compiler expands a name into the
+    /// members of whichever group carries it NOW. Before R2 an IdP claim of
+    /// such a name created an OIDC group, and that group inherited every
+    /// allow, exclude and exemption written for the one that was gone.
+    /// [`GroupRepo::upsert_claimed_oidc_groups`] calls this, under the
+    /// per-group locks, for the claimed names that have no row, and refuses
+    /// to create any that come back. It is required, with no default body,
+    /// for the reason the module doc gives: a default that answered "nothing
+    /// references it" would be the takeover.
+    async fn group_references_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        names: &[String],
+    ) -> Result<Vec<GroupReference>>;
+}
+
+/// One stored reference to a group by NAME
+/// ([`GroupMembershipRecompiler::group_references_in_tx`]). Defined here so
+/// this crate can act on references without learning the `perm` schema.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
+pub struct GroupReference {
+    /// The group name the reference stores.
+    pub group_name: String,
+    /// `"grant"` (a grant principal) or `"rule"` (a rule exemption).
+    pub source: String,
+    /// The grant's id, or the rule's.
+    pub id: Uuid,
+    /// The rule's name; `None` for a grant.
+    pub rule_name: Option<String>,
+    /// The grant's effect (`"allow"` / `"deny"`); `None` for a rule.
+    pub effect: Option<String>,
+    /// `"include"` or `"exclude"`.
+    pub position: String,
 }
 
 /// The names of every group `user_id` directly belongs to, on `conn`.
@@ -231,6 +273,12 @@ impl HeldGroupLocks {
     }
 }
 
+/// The one group name every engine resolves for every user (Ranger's
+/// built-in), so a reference to it never depends on a `groups` row. The same
+/// literal as `egret_perm::PUBLIC_GROUP` (this crate does not depend on
+/// `egret-perm`; `egret_perm_compile::group_membership` pins the two equal).
+pub const PUBLIC_GROUP: &str = "public";
+
 /// How many lock-and-re-read passes a writer makes before giving up. Each pass
 /// that locks something new is caused by a concurrent rename or membership
 /// change landing between a read and its lock; two in a row is already rare.
@@ -285,6 +333,14 @@ impl GroupRepo {
     }
 
     /// Insert (source='oidc') or return the existing group id by name.
+    ///
+    /// **The login must not use this** — it uses
+    /// [`upsert_claimed_oidc_groups`](Self::upsert_claimed_oidc_groups). This
+    /// takes no lock and checks no reference, so a name the model still names
+    /// after its group was deleted or renamed would be created here and
+    /// inherit every grant written for the old group. It stays for callers
+    /// that provision a named group ON PURPOSE: the operator command in
+    /// `egret-bin` and tests.
     pub async fn upsert_oidc_group(&self, name: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO groups (name, source) VALUES ($1, 'oidc') \
@@ -295,6 +351,95 @@ impl GroupRepo {
         .await
         .map_err(db_err)?;
         Ok(id)
+    }
+
+    /// Create an OIDC group for each name in an IdP `groups` claim that has no
+    /// `groups` row yet — UNLESS the model still names it. Returns the names
+    /// it refused, sorted; the login logs each one and carries on
+    /// ([`crate::oidc::provision_and_sync`]).
+    ///
+    /// **The IdP cannot create a group whose name the model still names
+    /// (2026-10-18 design R2).** Grants and rule exemptions store a group by
+    /// NAME, with no FK to `groups`, and deleting or renaming a group leaves
+    /// them behind, expanding to nobody. Before R2 the login created an OIDC
+    /// group for any claimed name, and the next login synced its members into
+    /// it: every allow, every exclude from a deny and every mask exemption
+    /// written for the old group then reached whoever the IdP put in a group
+    /// of that name. So a claimed name with no row is created only if
+    /// [`GroupMembershipRecompiler::group_references_in_tx`] finds nothing
+    /// naming it. A refused name has no OIDC row, so
+    /// [`sync_user_oidc_groups`](Self::sync_user_oidc_groups) does not join it
+    /// either. The login itself is not refused.
+    ///
+    /// **A name that already has a row is never blocked**, local or OIDC, and
+    /// behaves as it did before: the references to it are references to THAT
+    /// group, written while it existed (the authoring boundary refuses a group
+    /// name with no row). `public` is created as before without a check —
+    /// every engine resolves it, so a row of that name takes nothing over.
+    ///
+    /// **Locks.** One transaction takes the per-group lock for every claimed
+    /// non-`public` name, sorted, before it reads which have a row: the group
+    /// step of the module doc's order, with no user and no profile lock. Every
+    /// grant and rule write takes the same lock for each group it names, so a
+    /// write that newly names a claimed name and this check cannot interleave.
+    /// The INSERT is `ON CONFLICT (name) DO NOTHING`, so a row created
+    /// concurrently by a writer that does not take the lock (`create_local`)
+    /// is left as that writer made it.
+    pub async fn upsert_claimed_oidc_groups(
+        &self,
+        names: &[String],
+        port: &dyn GroupMembershipRecompiler,
+    ) -> Result<Vec<String>> {
+        let mut claimed: Vec<String> = names.to_vec();
+        claimed.sort();
+        claimed.dedup();
+        if claimed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let checked: Vec<String> = claimed
+            .iter()
+            .filter(|n| n.as_str() != PUBLIC_GROUP)
+            .cloned()
+            .collect();
+
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        lock_group_names_via(&mut tx, &checked)
+            .await
+            .map_err(db_err)?;
+        let existing: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
+                .bind(&checked)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        let missing: Vec<String> = checked
+            .iter()
+            .filter(|n| !existing.contains(n))
+            .cloned()
+            .collect();
+        let refused: std::collections::BTreeSet<String> = if missing.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            port.group_references_in_tx(&mut tx, &missing)
+                .await?
+                .into_iter()
+                .map(|r| r.group_name)
+                .filter(|n| missing.contains(n))
+                .collect()
+        };
+
+        for name in claimed.iter().filter(|n| !refused.contains(*n)) {
+            sqlx::query(
+                "INSERT INTO groups (name, source) VALUES ($1, 'oidc') \
+                 ON CONFLICT (name) DO NOTHING",
+            )
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(refused.into_iter().collect())
     }
 
     /// Which of `names` name a LOCAL (admin-managed) group, each paired with
