@@ -2628,6 +2628,89 @@ async fn a_kept_container_is_swept_after_its_deadline() {
     );
 }
 
+/// **A kept container a force-close left running is stopped by the sweep,
+/// and kept** (final review I3). The worker running a `delete: false`
+/// sleeper dies after the kill is written; once its lease is reaped the
+/// execution's source is corrupted, so the next worker's kill-only claim
+/// cannot build a handler and commits `KILLED` without a `cancel` (debt D4,
+/// spec §2.2 rule 3). The container is still running then. One sweep with a
+/// one-hour retention stops it, removes nothing, and the container is still
+/// there, exited, for the author -- what D1's `cancel` would have left.
+async fn a_force_closed_kept_container_is_stopped_by_the_sweep() {
+    let w = KillWorld::new().await;
+    let runner = format!(
+        "      type: {}\n      delete: false\n",
+        egret_workflow::scripts::DOCKER_RUNNER
+    );
+    let ex = w.start_sleeper("kept-forced", Some(&runner)).await;
+    let first = KillSpy::new();
+    let worker = spawn_worker(
+        &w.pool,
+        first.clone(),
+        live_timing(std::time::Duration::from_secs(3600)),
+    );
+    let (run, _attempt, name) = w.wait_for_running_container(ex).await;
+    egret_workflow::worker::kill_execution(&w.pool, w.ws, ex, true)
+        .await
+        .expect("kill");
+    worker.abort();
+    let _ = worker.await;
+    let reap_after = std::time::Duration::from_secs(2);
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let reaped = loop {
+        let n = egret_workflow::worker::reap(&w.pool, reap_after)
+            .await
+            .expect("reap");
+        if n != 0 || std::time::Instant::now() >= reap_deadline {
+            break n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    sqlx::query("UPDATE workflow.executions SET source = 'tasks: [' WHERE id = $1")
+        .bind(ex)
+        .execute(&w.pool)
+        .await
+        .expect("corrupt the source");
+    let second = KillSpy::new();
+    egret_workflow::worker::tick_with(&w.pool, 8, &*second, live_timing(KILL_POLL))
+        .await
+        .expect("the second worker's tick");
+    let run_after_close = w.run_state(run).await;
+    let execution_after_close = w.execution_state(ex).await;
+    let running_after_close = container_running(&name);
+    let hour = Some(std::time::Duration::from_secs(3600));
+    let removed = sweep_this_world(&w, hour).await;
+    let (running_after_sweep, exists_after_sweep) =
+        (container_running(&name), container_exists(&name));
+    // Capture, remove, THEN assert (see `a_killed_delete_false_container_is_stopped_and_kept`).
+    force_remove(&name);
+
+    assert_eq!(reaped, 1, "the dead worker's KILLING lease is reaped");
+    assert_eq!(run_after_close, ("KILLED".to_string(), None));
+    assert_eq!(execution_after_close, "KILLED");
+    assert!(
+        second.cancels().is_empty(),
+        "the premise: no handler could be built, so nothing was cancelled: {:?}",
+        second.cancels()
+    );
+    assert!(
+        running_after_close,
+        "the premise: {name} still runs after its run was closed by force"
+    );
+    assert_eq!(
+        removed, 0,
+        "inside its retention a kept container is not removed"
+    );
+    assert!(
+        !running_after_sweep,
+        "{name} still runs after the sweep: a kept container of a terminal run is stopped"
+    );
+    assert!(
+        exists_after_sweep,
+        "{name} was removed: the sweep's stop keeps it until its retention"
+    );
+}
+
 /// **Spec §8 and §4.3 (live): a kill survives the worker dying.** The first
 /// worker runs the container and is aborted right after the kill is written,
 /// before its kill poll (set to an hour) or its next renewal (20 s) can see
@@ -2773,6 +2856,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(kill_stops_a_running_container),
         case!(a_killed_delete_false_container_is_stopped_and_kept),
         case!(a_kept_container_is_swept_after_its_deadline),
+        case!(a_force_closed_kept_container_is_stopped_by_the_sweep),
         case!(a_kill_survives_the_worker_dying),
     ]
 }
