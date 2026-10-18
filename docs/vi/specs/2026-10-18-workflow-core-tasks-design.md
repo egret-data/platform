@@ -73,6 +73,8 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
     - Có `flowId` thì namespace phải khớp đúng. Chỉ khi không có `flowId` mới với tới các namespace con.
     - Namespace của flow được đọc từ dòng execution (`workflow.executions.namespace`, theo execution id và workspace), không đọc từ render scope, nên task chạy được cả trên deployment không có `[storage]`.
   - Có `batchSize` thì xoá theo từng lô tối đa bấy nhiêu dòng, mỗi lô một câu lệnh, cho tới khi một lô xoá ít hơn. Không có `batchSize` thì xoá bằng một câu lệnh. Một `endDate` ở tương lai trên một namespace đang bận có thể giữ vòng lặp chạy tiếp trong lúc dòng mới vẫn tới; vòng lặp của Kestra cũng như vậy.
+  - **(2026-10-18, review cuối)** Một `endDate` ở tương lai như thường dùng còn xoá cả các dòng trước đó của chính execution đang purge, và các dòng của những execution khác trong phạm vi còn đang chạy. Dòng log được lưu bất đồng bộ (log writer gom theo lô), nên `count` phụ thuộc thời điểm. Kestra cũng như vậy.
+  - **(2026-10-18, review cuối) Một khác biệt có chủ ý:** `executionId` render ra không phải UUID thì run FAILED, nêu tên `executionId`. Kestra đem nó so với không dòng nào và SUCCESS với count 0. Execution id của egret là UUID, nên một giá trị không phải UUID chỉ có thể là lỗi của người viết flow.
   - Không ghi audit record riêng; bản thân run và các dòng log của nó đã là bản ghi.
 - **Log ngoài execution:** `purgeNonExecutionLogs` không xoá gì (D2). Với `purgeExecutionLogs: false` thì không xoá gì cả.
 - **Output:** `{count, executionLogsCount, nonExecutionLogsCount}`, với `nonExecutionLogsCount = 0`.
@@ -81,8 +83,8 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 
 **(2026-10-18, C1 đã xây)** Những chỗ bản xây khác §2.1-§2.3:
 - **Đăng ký.** Cả ba còn có một key trong `runtime::served_for`, bản sao thứ hai của các key `with_core_tasks` mà kiểm tra "deployment này không có handler" của publish đọc. Các mục trên không nêu nó. `PurgeLogs` được đăng ký bằng `worker::handlers::purge_logs::register(&mut handlers, pool)` riêng trong `runtime::handlers_for`, cạnh `kv::register`, chứ không qua `handlers::storage::register` như §2.3 ghi.
-- **`Assert`.** Thiếu `conditions` thì run FAILED với `conditions: must not be null` (Kestra khai báo `@NotNull`). `is_truthy` được dùng qua `crate::executor::is_truthy`, vì `executor::flowable` là private với `worker`.
-- **`OutputValues`.** `models::property::render_map` là hàm render map đệ quy dùng chung. Hai key render ra cùng một chuỗi thì key đầu thắng; mảng, số, boolean hay null ở cấp cao nhất là lỗi. Có hai mép đã biết và hoãn: va chạm key giữ giá trị đầu kể cả khi nó là null (`putIfAbsent` của Java sẽ thay một null), và `values` là một biểu thức nguyên khối render ra `null` thì lỗi, trong khi `asMap` của Kestra trả null.
+- **`Assert`.** Thiếu `conditions` thì run FAILED với `conditions: must not be null` (Kestra khai báo `@NotNull`). **(review cuối)** Phần tử boolean hay số được đọc thành chuỗi của nó (`true`, `1`, `1.5`), như Jackson ép một scalar sang `String`; phần tử null, list hay map thì run FAILED, nêu tên `conditions[i]`. `is_truthy` được dùng qua `crate::executor::is_truthy`, vì `executor::flowable` là private với `worker`.
+- **`OutputValues`.** `models::property::render_map` là hàm render map đệ quy dùng chung. Hai key render ra cùng một chuỗi thì key đầu thắng; mảng, số, boolean hay null ở cấp cao nhất là lỗi. Va chạm key thay giá trị đầu nếu nó là null, như `putIfAbsent` của Java (đã sửa ở review cuối). Còn một mép đã biết và hoãn: `values` là một biểu thức nguyên khối render ra `null` thì lỗi, trong khi `asMap` của Kestra trả null.
 - **Một entry oracle bị giữ bởi construct chưa port, không phải bởi C1.** `valids/if-in-parallel` chạy và `assert` của nó FAILED trong khi Kestra SUCCEEDED, vì điều kiện đọc `outputs:` của chính `Loop`, thứ egret chưa sinh ra. Cùng nguyên nhân giữ `loop-outputs*`.
 
 ## 3. C2: ba task chạy trong executor

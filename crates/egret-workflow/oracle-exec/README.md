@@ -6279,17 +6279,22 @@ found.
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
-| 3 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked |
+| 3 | `LoopUntil` / `WaitFor` | W8 — **and not one of the three is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
 | **29** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an
-`io.kestra.plugin.core.output.OutputValues` child and `driver.rs`'s registry
+`io.kestra.plugin.core.output.OutputValues` child and ~~`driver.rs`'s registry
 ships four handlers, none of them that one — so their bodies cannot run at all,
 which is the strict/upper-bound separator for this row rather than a failure of
-it. (One of the six, `valids/waitfor-child-task-warning`, was held twice: its
+it.~~ **(Group C1 Task 2, 2026-10-18: no longer true.** `driver.rs`'s registry
+ships `OutputValues` now, and five of the six banked. The row is **3**:
+`waitfor-child-task-warning` (one more `WaitFor` iteration than the golden
+under `maxDuration: PT3S`, poller latency), `loopuntil-failed-flowable` and
+`loop-until-restart`, each described below, and still none of them is held by
+the loop.) (One of the six, `valids/waitfor-child-task-warning`, was held twice: its
 other child is an `allowFailure: true` `Fail` whose run is `WARNING`, which was
 the `AllowFailure` row's. **W8 Task 5 closed that half and the entry is still
 baselined**, which is the measurement that turns *held twice* from a claim into
@@ -13402,7 +13407,7 @@ split (2, 86, 88) → (2, 82, 84), baselined terminals 329 → 325, executions
 434 → 422. No ordered-pair, spawn or loop-body figure moved: each of the five
 flows is one top-level task.
 
-## Group C1 in total: sixteen entries bank, two causes stay open
+## Group C1 in total: sixteen entries bank, three gaps stay open and one entry is held by decision
 
 Group C1 (`OutputValues`, `Assert`, `PurgeLogs`) took the ratchet from 100
 mismatching / 100 baselined to 84 / 84 with 0 broken, in three steps
@@ -13422,6 +13427,35 @@ What stays baselined among the entries C1 touched, and why:
 | `if-in-parallel` | its `assert` reads the `Loop`'s own `outputs:`, which egret does not produce (as `loop-outputs*`) | gap |
 | `purge_logs_full_arguments` | purges `purge.namespace` from `io.kestra.tests`; egret FAILS it by the user's namespace-scope ruling of 2026-10-18 | permanent, by decision |
 
+Three of those rows are gaps (`afterExecution:`, the `WaitFor` poller
+latency, the `Loop`'s own `outputs:`) and one is permanent by decision.
+
 The `valids/task-runif` line from the C1 Task 2 section is a bank, not a
-baseline entry: it publishes now and is refused at its `Subflow` to a flow no
-corpus entry defines (`SUBFLOW_LOOKUPS_ON_REFUSED` 2 → 3).
+baseline entry: the executor oracle banks it (it runs the flow through
+`build_plan` and the worker, and does not go through publish), but publish
+refuses it, at its `Subflow` to a flow no corpus entry defines
+(`VALIDATE_REFUSED` 26 → 27, `SUBFLOW_LOOKUPS_ON_REFUSED` 2 → 3). See *Known
+over-refusals at publish* below.
+
+**The `PurgeLogs` banks prove the state sequence, not the delete.**
+`driver.rs`'s registry installs no log sink, so no oracle run stores a log
+line, and the oracle database is this process's own clone of the migrated
+template, with `workflow.executions` `TRUNCATE`d (`CASCADE`) before the run
+(`tests/executor.rs`, *The `TRUNCATE`*). An oracle run of `PurgeLogs`
+therefore deletes 0 rows: the four banked entries prove `CREATED → RUNNING →
+SUCCESS`, not which rows were deleted or how many. Deletion and `count` are
+proved by `tests/purge_logs.rs`.
+
+### Known over-refusals at publish
+
+No tracked list exists for this layer. `PUBLISHED_BUT_REFUSED`
+(`src/executor/mod.rs`) tracks the flows Kestra published with 200 that
+`build_plan` refuses, and its sweep asserts each row is still refused by
+`build_plan`; a flow that plans but that publish's reference resolution
+refuses cannot be a row there. The census (`driver.rs`, `VALIDATE_REFUSED`)
+counts publish's refusals and prints each by name, but names none of them as
+an over-refusal. So the entry is recorded here:
+
+| flow | where egret refuses it | why it is an over-refusal |
+|---|---|---|
+| `valids/task-runif` | publish, resolving the `Subflow` `notexecutedflowable` to `dummy_namespace/dummy_flow`, which does not exist (since group C1 Task 2, when its `OutputValues` stopped refusing it first) | that task has `runIf: "false"`, so it never runs; this Kestra published the flow with 200 (`corpus.json`) and ran it, and the executor oracle banks egret's run of it |
