@@ -66,6 +66,25 @@ pub enum Command {
         run: RunIx,
         at: Tick,
     },
+    /// Fail a `CREATED` run that never started, with the one attempt Kestra
+    /// records for it -- group C2 Task 3 (spec D6).
+    ///
+    /// **It is not a [`Command::SetRunState`], for [`Command::SkipRun`]'s
+    /// reason**: an update task (`SetVariables`, `UnsetVariables`, `Labels`)
+    /// whose change cannot be computed reads run `CREATED FAILED` with
+    /// attempts **`[["FAILED"]]`** in the golden
+    /// (`valids/set-variables-duplicate`, `valids/labels-update-task-empty`),
+    /// while a `SetRunState(FAILED)` on a run with no attempt leaves
+    /// `attempts: []` -- the shape a `Loop` failing at `CREATED` has
+    /// (`valids/loop-null`), and the wrong one here. Unlike `SkipRun`'s, the
+    /// attempt's history has no `CREATED`: Kestra builds it from the failed
+    /// state alone.
+    ///
+    /// It carries `at` for the same reason `SkipRun` does.
+    FailUnstarted {
+        run: RunIx,
+        at: Tick,
+    },
     /// The plan's draft spells `not_before` as an `Instant`; it is a [`Tick`]
     /// for the reason [`Tick`] gives.
     ScheduleRetry {

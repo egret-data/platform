@@ -754,6 +754,13 @@ mod tests {
                     TaskKind::Exit { .. } => {
                         panic!("{corpus_id}: no flow in this fixture declares an `Exit`")
                     }
+                    // Group C2 Task 3. No flow in the list declares one, and
+                    // this fixture never sets `rendered` on one, so it would
+                    // wait at `CREATED`; the update tests below assert its
+                    // `CREATED RUNNING SUCCESS` directly.
+                    TaskKind::Update { .. } => {
+                        panic!("{corpus_id}: no flow in this fixture declares an update task")
+                    }
                     TaskKind::Executable { .. } => {
                         executables += 1;
                         assert_eq!(
@@ -3525,8 +3532,9 @@ mod tests {
             /// A typed kind; `build_plan` descended and flattened its children.
             Descends,
             /// A typed kind the executor drives ITSELF and whose children are
-            /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], and since
-            /// kill-and-exit Task 3 [`TaskKind::Exit`].
+            /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], since
+            /// kill-and-exit Task 3 [`TaskKind::Exit`], and since group C2
+            /// Task 3 [`TaskKind::Update`].
             ///
             /// **A fourth tier, for the reason `Subflow` needed a third.** A
             /// `Pause` is not `Opaque` (no worker ever sees it and no `Pause`
@@ -3573,6 +3581,10 @@ mod tests {
                 // Kill-and-exit Task 3: an `Exit` is a `Leaf` to the model and
                 // a kind the executor drives itself in the plan.
                 K::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => PlannedAs::Waits,
+                // Group C2 Task 3: the three update types, likewise.
+                K::Leaf { .. } if crate::executor::update::UpdateOp::of(&task.r#type).is_some() => {
+                    PlannedAs::Waits
+                }
                 // W8 Task 4: `LoopUntil` moved out of the opaque tier. Like
                 // `Pause`, its tier depends on the task's CONTENT -- a bound
                 // this pure builder cannot read plans it opaque instead
@@ -3608,7 +3620,9 @@ mod tests {
                 | TaskKind::LoopUntil { .. }
                 | TaskKind::AllowFailure { .. }
                 | TaskKind::WorkingDirectory { .. } => PlannedAs::Descends,
-                TaskKind::Pause { .. } | TaskKind::Exit { .. } => PlannedAs::Waits,
+                TaskKind::Pause { .. } | TaskKind::Exit { .. } | TaskKind::Update { .. } => {
+                    PlannedAs::Waits
+                }
             }
         }
 

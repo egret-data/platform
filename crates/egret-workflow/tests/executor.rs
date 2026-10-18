@@ -5352,6 +5352,14 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // `SUBMITTED`. It is `TaskKind::Exit` now, so its runs are `flowable`.
     // Derived and added back below, for `is_a_subflow`'s reason.
     let mut is_an_exit = 0usize;
+    // **Group C2 Task 3 moved the three update types the same way.**
+    // `SetVariables`, `UnsetVariables` and `Labels` are still unregistered
+    // (Task 5 registers them), so `build_plan` refuses them and this test
+    // reads them from `plan_stored`, which plans them `TaskKind::Update` now
+    // instead of an opaque `Runnable`: `flowable` rather than `fed` and
+    // over-fed (no update run in the golden carries `SUBMITTED`). Derived and
+    // added back below, per type, for `is_a_subflow`'s reason.
+    let mut is_an_update: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -5460,6 +5468,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             entry.id, run.task
                         );
                     }
+                    Some(TaskKind::Update { op, .. }) => {
+                        flowable += 1;
+                        *is_an_update.entry(op.type_id().to_string()).or_default() += 1;
+                        assert!(
+                            !submitted,
+                            "{}: update run {} carries SUBMITTED in the GOLDEN, which would \
+                             refute planning it executor-level",
+                            entry.id, run.task
+                        );
+                    }
                     Some(_) => flowable += 1,
                 }
             }
@@ -5498,11 +5516,38 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `valids/exit-killed` and `valids/exit-nested` (`nested_was_false`)"
     );
     assert_eq!(
+        is_an_update,
+        BTreeMap::from([
+            (
+                "io.kestra.plugin.core.execution.Labels".to_string(),
+                11usize
+            ),
+            (
+                "io.kestra.plugin.core.execution.SetVariables".to_string(),
+                5
+            ),
+            (
+                "io.kestra.plugin.core.execution.UnsetVariables".to_string(),
+                3
+            ),
+        ]),
+        "every update run in the comparable golden: 19 in all, each of them `fed` \
+         and over-fed while `plan_stored` planned the type an opaque `Runnable`, \
+         and exactly the (fed, flowable, over-feed) = (-19, +19, -19) movement \
+         group C2 Task 3 measured on the sum below"
+    );
+    let update_types: Vec<String> = is_an_update.keys().cloned().collect();
+    let is_an_update: usize = is_an_update.values().sum();
+    assert_eq!(
         (
-            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit,
-            flowable - is_a_subflow - is_an_exit,
+            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit + is_an_update,
+            flowable - is_a_subflow - is_an_exit - is_an_update,
             unplanned + in_an_errors_list - refused_pause_runs,
-            over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs + is_an_exit
+            over_fed.values().sum::<usize>()
+                + is_a_subflow
+                + refused_pause_runs
+                + is_an_exit
+                + is_an_update
         ),
         (438, 109, 311, 104),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -5566,10 +5611,24 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `TaskKind::Exit`; it contributed {:?}",
         over_fed.get(egret_workflow::executor::exit::TYPE_ID)
     );
+    // Group C2 Task 3 took the three update types out as TYPES, `Exit`'s way
+    // (none is a `core.flow.` type, so `flow_then` does not move either).
+    for t in &update_types {
+        assert!(
+            !over_fed.contains_key(t),
+            "`{t}` must contribute NO over-submitted run since it is planned \
+             `TaskKind::Update`; it contributed {:?}",
+            over_fed.get(t)
+        );
+    }
     assert_eq!(
         (
             flow_then + is_a_subflow + refused_pause_runs,
-            over_fed.len() + 1 + usize::from(refused_pause_runs > 0) + usize::from(is_an_exit > 0)
+            over_fed.len()
+                + 1
+                + usize::from(refused_pause_runs > 0)
+                + usize::from(is_an_exit > 0)
+                + update_types.len()
         ),
         // AllowFailure left the over-feed: its four block runs are flowables now
         // (the three targets, and `valids/retry-with-flowable-errors`), and its

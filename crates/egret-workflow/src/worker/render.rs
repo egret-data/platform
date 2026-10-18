@@ -792,6 +792,8 @@ impl Surface {
                                 TaskKind::Exit { .. } => {
                                     Some(crate::executor::exit::TYPE_ID.to_string())
                                 }
+                                // Group C2 Task 3: one FQCN per op.
+                                TaskKind::Update { op, .. } => Some(op.type_id().to_string()),
                                 _ => None,
                             },
                         }),
