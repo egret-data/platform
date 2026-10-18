@@ -113,7 +113,7 @@ use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
     tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
-    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -1016,7 +1016,8 @@ async fn apply_diff_in_tx(
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
          WHERE service_id = ANY($1) \
-           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')",
+           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%' \
+                OR name LIKE $5 || '%')",
     )
     .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
@@ -1026,6 +1027,9 @@ async fn apply_diff_in_tx(
     // would be enforced forever (SP4a Task 7 fix round 1's Critical, one
     // source over).
     .bind(COMPILER_CLEARANCE_PREFIX)
+    // F11: an engine grant's policy is reaped when the grant (or its engine,
+    // or its target user) is deleted, for the same reason.
+    .bind(COMPILER_ENGINE_GRANT_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;

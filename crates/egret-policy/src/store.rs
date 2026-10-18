@@ -110,16 +110,26 @@ pub const COMPILER_RULE_PREFIX: &str = "perm-rule-";
 /// on these prefixes, and a clearance filed under `perm-grant-` would be
 /// indistinguishable from a grant whose row no longer exists.
 pub const COMPILER_CLEARANCE_PREFIX: &str = "perm-clearance-";
+/// Name prefix every ENGINE GRANT policy the compiler
+/// (`egret-perm-compile::engine_grants::compile_engine_grant`) produces —
+/// `format!("{COMPILER_ENGINE_GRANT_PREFIX}{engine_grant_id}")`, one per
+/// `perm.engine_grants` row (F11, spec E7). Its own prefix for the reason the
+/// clearance has one: its name is keyed by a `perm.engine_grants` id, and a
+/// row filed under `perm-grant-` would read as a grant whose row is gone.
+/// Migration 0195 renamed every hand-written policy that carried it before the
+/// reservation (spec E19).
+pub const COMPILER_ENGINE_GRANT_PREFIX: &str = "perm-engine-";
 
 /// Whether `name` identifies a policy the SP4a permission-model compiler
 /// owns (produced by `compile_grant`/`compile_rule`/`compile_clearance` and
 /// reachable by `apply_diff_in_tx`'s existing-state sweep) — see
 /// [`COMPILER_GRANT_PREFIX`] / [`COMPILER_RULE_PREFIX`] /
-/// [`COMPILER_CLEARANCE_PREFIX`].
+/// [`COMPILER_CLEARANCE_PREFIX`] / [`COMPILER_ENGINE_GRANT_PREFIX`].
 pub fn is_compiler_owned_policy_name(name: &str) -> bool {
     name.starts_with(COMPILER_GRANT_PREFIX)
         || name.starts_with(COMPILER_RULE_PREFIX)
         || name.starts_with(COMPILER_CLEARANCE_PREFIX)
+        || name.starts_with(COMPILER_ENGINE_GRANT_PREFIX)
 }
 
 /// SP4a Task 8 fix round 3: refuse a human write that would put (or leave) a
@@ -147,8 +157,8 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
         return Err(PolicyStoreError::CompilerOwned(format!(
             "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
              ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
-             {COMPILER_CLEARANCE_PREFIX:?}) — only its compiler writes \
-             policies there; rename this policy instead of retrying"
+             {COMPILER_CLEARANCE_PREFIX:?} / {COMPILER_ENGINE_GRANT_PREFIX:?}) — only its \
+             compiler writes policies there; rename this policy instead of retrying"
         )));
     }
     Ok(())
@@ -648,22 +658,24 @@ async fn refuse_if_compiler_owned_policies_remain(
     let count: i64 = sqlx::query_scalar::<_, i64>(
         r#"SELECT count(*) FROM policy.authz_policies
            WHERE service_id = $1
-             AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')"#,
+             AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%'
+                  OR name LIKE $5 || '%')"#,
     )
     .bind(service_id)
     .bind(COMPILER_GRANT_PREFIX)
     .bind(COMPILER_RULE_PREFIX)
     .bind(COMPILER_CLEARANCE_PREFIX)
+    .bind(COMPILER_ENGINE_GRANT_PREFIX)
     .fetch_one(&mut *conn)
     .await?;
     if count > 0 {
         let noun = if count == 1 { "policy" } else { "policies" };
         return Err(PolicyStoreError::CompilerOwned(format!(
             "profile {service_id} still holds {count} {noun} compiled by the SP4a permission \
-             model (named with the perm-grant-/perm-rule-/perm-clearance- prefix) — delete the \
-             grants/rules that produce them, or the classification clearance behind them, \
-             first, or wait for the next recompile to reap them, before deleting the profile \
-             itself"
+             model (named with the perm-grant-/perm-rule-/perm-clearance-/perm-engine- prefix) — \
+             delete the grants/rules/engine grants that produce them, or the classification \
+             clearance behind them, first, or wait for the next recompile to reap them, \
+             before deleting the profile itself"
         )));
     }
     Ok(())
@@ -2820,6 +2832,26 @@ mod tests {
         ] {
             refuse_unnameable_tag_service(&config)
                 .unwrap_or_else(|e| panic!("{config} carries no tagService, but was refused: {e}"));
+        }
+    }
+
+    /// F11 (spec E7): compiled engine grants are `perm-engine-{uuid}`. The
+    /// prefix is reserved like the other three, and only with its dash: a
+    /// policy an operator calls `perm-engines` or `perm-engine` is theirs.
+    #[test]
+    fn the_engine_grant_prefix_is_compiler_owned_and_reserved() {
+        assert_eq!(COMPILER_ENGINE_GRANT_PREFIX, "perm-engine-");
+        assert!(is_compiler_owned_policy_name(
+            "perm-engine-0f0e0d0c-0b0a-0908-0706-050403020100"
+        ));
+        assert!(!is_compiler_owned_policy_name("perm-engines"));
+        assert!(!is_compiler_owned_policy_name("perm-engine"));
+        match refuse_reserved_name("perm-engine-x") {
+            Err(PolicyStoreError::CompilerOwned(msg)) => assert!(
+                msg.contains("\"perm-engine-\""),
+                "the refusal must name the reserved prefix: {msg}"
+            ),
+            other => panic!("expected CompilerOwned, got {other:?}"),
         }
     }
 }

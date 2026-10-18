@@ -553,6 +553,8 @@ pub enum ExplainAttribution {
     /// users cleared for EVERY classification with a column on the profile,
     /// so it names no single tag.
     MaterializedViewDeny,
+    /// `perm-engine-{uuid}`: one engine grant (F11, `perm.engine_grants`).
+    EngineGrant { engine_grant_id: Uuid },
 }
 
 /// One Ranger ACCESS TYPE's verdict inside one profile.
@@ -3026,6 +3028,9 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
         Some(PolicyAttribution::MaterializedViewDeny) => {
             Some(ExplainAttribution::MaterializedViewDeny)
         }
+        Some(PolicyAttribution::EngineGrant(engine_grant_id)) => {
+            Some(ExplainAttribution::EngineGrant { engine_grant_id })
+        }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
@@ -4288,6 +4293,29 @@ mod wiring_tests {
             assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
             assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
         }
+    }
+
+    /// F11 (spec §4.3 item 5): a deciding `perm-engine-{uuid}` attributes to
+    /// the engine grant, on the wire as `{"kind":"engine_grant",
+    /// "engine_grant_id":…}`, with no clearance lookup.
+    #[tokio::test]
+    async fn an_engine_grant_attributes_by_its_id_and_asks_no_clearance_lookup() {
+        let id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
+        let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
+        let got = attribution_for(&mut lookups, &denied(&format!("perm-engine-{id}")))
+            .await
+            .expect("ok");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::EngineGrant {
+                engine_grant_id: id
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(got.unwrap()).unwrap(),
+            serde_json::json!({"kind": "engine_grant", "engine_grant_id": id.to_string()})
+        );
+        assert!(lookups.tags_asked.is_empty() && lookups.gates_asked.is_empty());
     }
 }
 
