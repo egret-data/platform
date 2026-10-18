@@ -697,3 +697,62 @@ async fn retention_is_reported_as_configured() {
     assert_eq!(body["retentionDays"], Value::Null, "{body}");
     assert_eq!(body["entries"], json!([]));
 }
+
+/// Review M3: a summary over 16 KiB is stored as `{"truncated": true, …}`;
+/// its sentence says what happened and that the details were not kept,
+/// never a sentence with empty slots.
+#[tokio::test]
+async fn a_truncated_event_reads_as_an_honest_generic_sentence() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let ana = user(&f, "Ana").await;
+    let p = principal(ana, None);
+    let huge = json!({"before": null, "after": {"blob": "x".repeat(20 * 1024)}});
+    let gid = Uuid::new_v4().to_string();
+    record(
+        &f,
+        &p,
+        action::GRANT_CREATE,
+        "perm_grant",
+        &gid,
+        huge.clone(),
+    )
+    .await;
+    record(
+        &f,
+        &p,
+        action::RANGER_POLICY_UPDATE,
+        "ranger_policy",
+        "42",
+        huge.clone(),
+    )
+    .await;
+    record(
+        &f,
+        &p,
+        action::MIGRATION_APPLY,
+        "policy_profile",
+        "987654321",
+        huge,
+    )
+    .await;
+    let token = session(&f, &["policy:read"]).await;
+    let st = state(&f, Some(90)).await;
+    let (status, body) = changes(&st, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sentences: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["sentence"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sentences,
+        [
+            "Ana migrated policies of a profile; the change was too large to record its details.",
+            "Ana changed a hand-written policy; the change was too large to record its details.",
+            "Ana created a grant; the change was too large to record its details.",
+        ]
+    );
+    assert_eq!(body["entries"][2]["detail"]["truncated"], true);
+}

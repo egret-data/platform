@@ -247,6 +247,30 @@ fn names(list: &[String]) -> String {
     }
 }
 
+/// What an action did, with no detail: for an event whose summary was too
+/// large to keep.
+fn truncated_phrase(action: &str) -> &'static str {
+    match action {
+        action::GRANT_CREATE => "created a grant",
+        action::GRANT_UPDATE => "changed a grant",
+        action::GRANT_DELETE => "deleted a grant",
+        action::RULE_CREATE => "created a rule",
+        action::RULE_UPDATE => "changed a rule",
+        action::RULE_DELETE => "deleted a rule",
+        action::CLEARANCE_SET => "set a clearance",
+        action::CLEARANCE_CLEAR => "removed a clearance",
+        action::RANGER_POLICY_CREATE => "created a hand-written policy",
+        action::RANGER_POLICY_UPDATE => "changed a hand-written policy",
+        action::RANGER_POLICY_DELETE => "deleted a hand-written policy",
+        action::RANGER_POLICY_ENABLE => "enabled a hand-written policy",
+        action::RANGER_POLICY_DISABLE => "disabled a hand-written policy",
+        action::MIGRATION_APPLY => "migrated policies of a profile",
+        action::MIGRATION_UNDO => "undid a migration of a profile",
+        action::PROFILE_COMPILE => "compiled a profile",
+        _ => "made a change",
+    }
+}
+
 async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx::Error> {
     let actor = party(c, row.actor_user_id).await?;
     let impersonator = party(c, row.impersonator).await?;
@@ -458,6 +482,17 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
             (sentence, target, live)
         }
         other => (format!("{a} made a change: {other}"), None, false),
+    };
+    // Review M3: a summary over 16 KiB was stored as its size only. Say what
+    // happened and that its details were not kept, never a sentence built
+    // from empty slots.
+    let sentence = if d.get("truncated").and_then(Value::as_bool) == Some(true) {
+        format!(
+            "{a} {}; the change was too large to record its details.",
+            truncated_phrase(&row.action)
+        )
+    } else {
+        sentence
     };
     Ok(ChangeEntry {
         id: row.id,
