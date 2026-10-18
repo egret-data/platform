@@ -1468,8 +1468,11 @@ pub struct ExecutionListItemDto {
     pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// The labels this execution was started with beyond its flow's own
-    /// `labels:` (a backfill's, a replay's copy); `null` for none. Not the flow's.
+    /// The execution's own label column; `null` for none. At start it holds
+    /// the labels beyond the flow's own `labels:` (a backfill's, a replay's
+    /// copy); once a `Labels` task has run it holds the full merged list, the
+    /// flow's labels included. The detail's `effective_labels` is the list to
+    /// display.
     pub labels: Option<Vec<LabelDto>>,
     /// The backfill that fired this execution (W7f), `null` otherwise.
     pub backfill_id: Option<Uuid>,
