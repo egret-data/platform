@@ -1,6 +1,6 @@
 # Workflow follow-ups, group C: the remaining Kestra core tasks
 
-**Status:** designed 2026-10-18. Not built yet.
+**Status:** designed 2026-10-18. **C1 built and verified 2026-10-18** on `feat/workflow-kestra-core-tasks`; C2 is not built yet. The oracle ratchet (`cargo test -p egret-workflow --test executor`, the `executor_matches_golden` printout) went from 100 mismatching / 100 baselined to **84 / 84**, 0 broken: 16 entries banked (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4) with the entries still baselined named, by cause, in `oracle-exec/README.md`. The census LIVE count went 254 to **281**, and the handler-surface ceiling (`python3 handler_surface.py`) 232 to **250** (population 228). Per task: 100 to 89, 89 to 88, 88 to 84.
 
 **Where the claims come from:** every claim about egret's code was checked in the worktree `egret-coretasks` at `15406ad9` (main, after #689). Code is cited `path:line` relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, and its paths are relative to that checkout.
 
@@ -76,6 +76,12 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 - **Outputs:** `{count, executionLogsCount, nonExecutionLogsCount}`, with `nonExecutionLogsCount = 0`.
 - **The handler needs a pool.** It is registered the way `Delete` is (`handlers::storage::register`, `worker/handlers/storage.rs:336`), not in `with_core_tasks`.
 - **One known divergence:** `valids/purge_logs_full_arguments` runs in `io.kestra.tests` with `namespace: purge.namespace`. Kestra answers SUCCESS. Egret answers FAILED, by the decided rule. The entry moves from the refused list to `baseline.txt`, with a comment that gives the decided reason. It is a permanent line there, not a gap that waits for work.
+
+**(2026-10-18, C1 built)** Where the build differs from §2.1-§2.3:
+- **Registration.** Each of the three also has a key in `runtime::served_for`, the second copy of the `with_core_tasks` keys that publish's "this deployment has no handler" check reads. The sections above do not name it. `PurgeLogs` is registered by its own `worker::handlers::purge_logs::register(&mut handlers, pool)` in `runtime::handlers_for`, beside `kv::register`, not by `handlers::storage::register` as §2.3 says.
+- **`Assert`.** A missing `conditions` fails the run with `conditions: must not be null` (Kestra declares it `@NotNull`). `is_truthy` is reached as `crate::executor::is_truthy`, because `executor::flowable` is private to `worker`.
+- **`OutputValues`.** `models::property::render_map` is the shared recursive map render. When two keys render to the same text the first one wins, and a top-level array, number, boolean or null is an error. Two edges are known and deferred: a collision keeps the first value even when it is null (Java's `putIfAbsent` would replace a null), and a whole-expression `values` that renders `null` errors where Kestra's `asMap` returns null.
+- **One oracle entry is held by an unported construct, not by C1.** `valids/if-in-parallel` runs and its `assert` FAILS where Kestra's SUCCEEDED, because its conditions read the `Loop`'s own `outputs:`, which egret does not produce. The same cause holds `loop-outputs*`.
 
 ## 3. C2: three executor tasks
 

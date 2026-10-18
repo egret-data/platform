@@ -13401,3 +13401,27 @@ split (2, 86, 88) → (2, 82, 84), baselined terminals 329 → 325, executions
 123 → 119, run-history tokens 1273 → 1257 and execution-history tokens
 434 → 422. No ordered-pair, spawn or loop-body figure moved: each of the five
 flows is one top-level task.
+
+## Group C1 in total: sixteen entries bank, two causes stay open
+
+Group C1 (`OutputValues`, `Assert`, `PurgeLogs`) took the ratchet from 100
+mismatching / 100 baselined to 84 / 84 with 0 broken, in three steps
+(100 → 89 → 88 → 84; the printout of `executor_matches_golden` in each task's
+report). Sixteen entries banked: eleven by `OutputValues`, one by `Assert`, four
+by `PurgeLogs`. The census LIVE count went 254 → 281 and the handler-surface
+ceiling 232 → 250 (`python3 handler_surface.py`, population 228, run at the end
+of the group). The three per-task sections above carry the derivation of every
+other figure that moved.
+
+What stays baselined among the entries C1 touched, and why:
+
+| Entries | Cause | Kind |
+|---|---|---|
+| `after-execution`, `after-execution-error`, `after-execution-finally`, `flow-concurrency-queue-after-execution`, `flow-concurrency-queue-killed-after-execution`, `sleep-long` | `afterExecution:` is not run by egret | gap |
+| `waitfor-child-task-warning` | one more `WaitFor` iteration than the golden under `maxDuration: PT3S` (poller latency, as `loop-until-restart`) | gap |
+| `if-in-parallel` | its `assert` reads the `Loop`'s own `outputs:`, which egret does not produce (as `loop-outputs*`) | gap |
+| `purge_logs_full_arguments` | purges `purge.namespace` from `io.kestra.tests`; egret FAILS it by the user's namespace-scope ruling of 2026-10-18 | permanent, by decision |
+
+The `valids/task-runif` line from the C1 Task 2 section is a bank, not a
+baseline entry: it publishes now and is refused at its `Subflow` to a flow no
+corpus entry defines (`SUBFLOW_LOOKUPS_ON_REFUSED` 2 → 3).

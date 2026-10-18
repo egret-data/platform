@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản tiếng Anh `docs/en/specs/2026-10-18-workflow-core-tasks-design.md` là bản chuẩn; hai bản lệch nhau thì theo bản tiếng Anh.
 
-**Trạng thái:** thiết kế ngày 2026-10-18, chưa xây.
+**Trạng thái:** thiết kế ngày 2026-10-18. **C1 đã xây và kiểm chứng ngày 2026-10-18** trên `feat/workflow-kestra-core-tasks`; C2 chưa xây. Ratchet của oracle (`cargo test -p egret-workflow --test executor`, bản in của `executor_matches_golden`) đi từ 100 mismatching / 100 baselined xuống **84 / 84**, 0 broken: 16 entry được bank (`OutputValues` 11, `Assert` 1, `PurgeLogs` 4), các entry còn nằm trong baseline được nêu theo nguyên nhân trong `oracle-exec/README.md`. Số LIVE của census đi từ 254 lên **281**, trần handler-surface (`python3 handler_surface.py`) từ 232 lên **250** (quần thể 228). Theo từng task: 100 xuống 89, 89 xuống 88, 88 xuống 84.
 
 **Nguồn của các khẳng định:** mọi khẳng định về code egret đều đã kiểm tra ở worktree `egret-coretasks`, commit `15406ad9` (main sau #689). Đường dẫn code tính từ `crates/egret-workflow/src/`, trừ khi ghi gốc khác. Kestra là bản checkout tại `data-portal/kestra`.
 
@@ -78,6 +78,12 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 - **Output:** `{count, executionLogsCount, nonExecutionLogsCount}`, với `nonExecutionLogsCount = 0`.
 - **Handler cần pool**, nên được đăng ký giống `Delete` (`handlers::storage::register`, `worker/handlers/storage.rs:336`), không nằm trong `with_core_tasks`.
 - **Một divergence đã biết:** `valids/purge_logs_full_arguments` chạy trong `io.kestra.tests` với `namespace: purge.namespace`. Kestra trả SUCCESS; egret trả FAILED theo quy tắc đã chốt. Entry này chuyển từ danh sách bị từ chối sang `baseline.txt`, kèm comment ghi lý do đã chốt. Đó là dòng vĩnh viễn, không phải chỗ trống chờ làm.
+
+**(2026-10-18, C1 đã xây)** Những chỗ bản xây khác §2.1-§2.3:
+- **Đăng ký.** Cả ba còn có một key trong `runtime::served_for`, bản sao thứ hai của các key `with_core_tasks` mà kiểm tra "deployment này không có handler" của publish đọc. Các mục trên không nêu nó. `PurgeLogs` được đăng ký bằng `worker::handlers::purge_logs::register(&mut handlers, pool)` riêng trong `runtime::handlers_for`, cạnh `kv::register`, chứ không qua `handlers::storage::register` như §2.3 ghi.
+- **`Assert`.** Thiếu `conditions` thì run FAILED với `conditions: must not be null` (Kestra khai báo `@NotNull`). `is_truthy` được dùng qua `crate::executor::is_truthy`, vì `executor::flowable` là private với `worker`.
+- **`OutputValues`.** `models::property::render_map` là hàm render map đệ quy dùng chung. Hai key render ra cùng một chuỗi thì key đầu thắng; mảng, số, boolean hay null ở cấp cao nhất là lỗi. Có hai mép đã biết và hoãn: va chạm key giữ giá trị đầu kể cả khi nó là null (`putIfAbsent` của Java sẽ thay một null), và `values` là một biểu thức nguyên khối render ra `null` thì lỗi, trong khi `asMap` của Kestra trả null.
+- **Một entry oracle bị giữ bởi construct chưa port, không phải bởi C1.** `valids/if-in-parallel` chạy và `assert` của nó FAILED trong khi Kestra SUCCEEDED, vì điều kiện đọc `outputs:` của chính `Loop`, thứ egret chưa sinh ra. Cùng nguyên nhân giữ `loop-outputs*`.
 
 ## 3. C2: ba task chạy trong executor
 
