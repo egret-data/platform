@@ -300,7 +300,9 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
               aria-expanded={!groupCollapsed}
               className="flex w-full items-center justify-between rounded-md px-3 py-1 text-xs font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
             >
-              <span>{heading}</span>
+              {/* `text-left`: a heading that wraps ("Governance overview" in the
+                  w-56 rail) stays aligned with its items instead of centring. */}
+              <span className="text-left">{heading}</span>
               {groupCollapsed ? (
                 <ChevronRight className="h-3.5 w-3.5 shrink-0" />
               ) : (

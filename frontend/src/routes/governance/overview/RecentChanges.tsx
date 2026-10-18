@@ -13,6 +13,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
+import { LINK } from "@/routes/governance/overview/AttentionRow";
 import { refUrl } from "@/routes/governance/overview/refUrl";
 
 const PAGE = 25;
@@ -37,7 +38,7 @@ function Target({ e }: { e: ChangeEntry }) {
   if (!e.targetExists) return <span className="text-muted-foreground">(deleted)</span>;
   const url = refUrl(e.target);
   return url ? (
-    <Link to={url} className="text-primary hover:underline">
+    <Link to={url} className={LINK}>
       View
     </Link>
   ) : null;
@@ -103,8 +104,10 @@ export function RecentChanges() {
     );
   }
 
-  const oldest = entries[entries.length - 1];
-  const since = next ? "this version" : fullTimestamp(oldest.at).slice(0, 10);
+  // Live check D13: a reader sees only the families they may read, and pruning
+  // removes the oldest, so the oldest entry shown is not when recording began.
+  // Once every page is loaded, say what is known: the oldest change shown.
+  const oldest = next ? null : entries[entries.length - 1];
   return (
     <div className="flex flex-col gap-3">
       {narrow ? (
@@ -162,7 +165,7 @@ export function RecentChanges() {
       ) : null}
       <div className="flex flex-col gap-1 text-xs text-muted-foreground">
         <p>
-          Recorded since {since}.{" "}
+          {oldest ? `The oldest change you can see is from ${fullTimestamp(oldest.at).slice(0, 10)}. ` : null}
           {page.retentionDays === null || page.retentionDays === undefined
             ? "Changes are never pruned."
             : `Changes older than ${page.retentionDays} days are pruned.`}

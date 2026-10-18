@@ -419,6 +419,20 @@ async fn the_drift_rules_follow_the_measured_ledger() {
     );
     assert_eq!(quiet["ref"], json!({"type": "profile", "name": "d_quiet"}));
     assert_eq!(quiet["sample"][0]["ref"]["type"], "engine");
+    // Live check D12: one profile's sentence is the finding's; its sample does
+    // not repeat it.
+    assert_eq!(quiet["sample"][0]["detail"], Value::Null);
+    let behind_details: Vec<&str> = finding(&body, "plugin_behind").unwrap()["sample"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            s["detail"]
+                .as_str()
+                .expect("several profiles: each says its own")
+        })
+        .collect();
+    assert_eq!(behind_details.len(), 3);
     assert_eq!(quiet["sample"][0]["ref"]["name"], "d_quiet-eng");
     let tags_stale = finding(&body, "plugin_behind").unwrap()["sample"]
         .as_array()
@@ -562,6 +576,11 @@ async fn compile_failures_lineage_attachments_tags_and_catalogs_each_have_a_find
     assert!(detail.contains("last success none recorded"), "{detail}");
 
     assert_eq!(labels(&body, "lineage_failed"), ["ice.s.v_bad"]);
+    // Live check D3: singular agreement.
+    assert_eq!(
+        finding(&body, "lineage_failed").unwrap()["sentence"],
+        "egret could not compute the lineage of 1 view, so the tables it reads are not known."
+    );
     assert_eq!(
         finding(&body, "lineage_failed").unwrap()["ref"],
         json!({"type": "object", "catalog": "ice", "schema": "s", "object": "v_bad"})
@@ -569,6 +588,11 @@ async fn compile_failures_lineage_attachments_tags_and_catalogs_each_have_a_find
     let a = finding(&body, "catalog_apply_failed").expect("catalog_apply_failed");
     assert_eq!(a["sample"][0]["label"], "k_ext on k_eng");
     assert_eq!(a["sample"][0]["detail"], "connection refused");
+    // Live check D2.
+    assert_eq!(
+        a["sentence"],
+        "1 catalog attachment could not be applied to its engine."
+    );
     assert_eq!(labels(&body, "catalogs_without_engine"), ["k_lonely"]);
     assert_eq!(
         labels(&body, "tags_without_clearance"),
@@ -696,8 +720,18 @@ async fn policy_warnings_overlaps_and_unmatched_principals_are_reported() {
     let o = finding(&body, "rule_overlaps").expect("rule_overlaps");
     assert_eq!(o["count"], 1, "{body}");
     assert_eq!(o["sample"][0]["label"], "o_a and o_b");
+    // Live check D4: the coordinate as a path, not Ranger's resource map.
+    assert_eq!(
+        o["sample"][0]["detail"],
+        "ice.s.t.email, in profile o_masks"
+    );
     let u = finding(&body, "unresolved_principals_fail_open").expect("unresolved");
     assert_eq!(u["count"], 1, "only the deny fails open: {body}");
+    // Live check D1: singular agreement.
+    assert_eq!(
+        u["sentence"],
+        "1 stored principal reference matches nobody, so the compiled policy allows more than the model states."
+    );
     assert_eq!(
         u["sample"][0]["ref"],
         json!({"type": "grant", "id": grants[0]})
@@ -1004,4 +1038,38 @@ async fn an_engine_on_a_plugin_egret_does_not_model_is_reported_with_its_note() 
     );
     assert_eq!(floating["ref"]["type"], "engine");
     assert_eq!(fnd["ref"], json!({"type": "engines"}));
+}
+
+/// Live check D14: a compile error is one long line (an overlap refusal is
+/// ~600 characters); the sample shows its start, not all of it.
+#[tokio::test]
+async fn a_long_compile_error_is_shortened_in_its_sample() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let sid = profile(&f, "k_long", "trino").await;
+    let long = format!(
+        "recompiling profile \"k_long\" would emit {}",
+        "x".repeat(600)
+    );
+    sqlx::query(
+        "INSERT INTO perm.compile_runs (service_id, outcome, attempted_at, error) \
+         VALUES ($1, 'error', now(), $2)",
+    )
+    .bind(sid)
+    .bind(&long)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let token = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+    let (_, body) = attention(&st, &token).await;
+    let detail = finding(&body, "compile_failed").unwrap()["sample"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (head, tail) = detail.split_once(" (failed ").expect("the times follow");
+    assert!(head.ends_with('…'), "{head}");
+    assert_eq!(head.chars().count(), 201, "{head}");
+    assert!(head.starts_with("recompiling profile \"k_long\" would emit xxx"));
+    assert!(tail.contains("last success none recorded"), "{tail}");
 }

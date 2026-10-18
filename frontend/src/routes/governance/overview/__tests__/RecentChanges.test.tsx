@@ -90,6 +90,21 @@ describe("Recent changes", () => {
     expect(screen.queryByRole("button", { name: "Show older" })).not.toBeInTheDocument();
   });
 
+  it("names no oldest date while older changes remain to load", async () => {
+    serve(attentionOk, () => ({ status: 200, body: page([entry(11)], "c9") }));
+    openOverview();
+    await table();
+    expect(screen.queryByText(/oldest change/)).not.toBeInTheDocument();
+  });
+
+  it("gives every link the shared focus ring (live check D17)", async () => {
+    serve(attentionOk, () => ({ status: 200, body: page([entry(12)]) }));
+    openOverview();
+    const link = within(await table()).getByRole("link", { name: "View" });
+    expect(link.className).toContain("focus-visible:ring-2");
+    expect(link.className).toContain("focus-visible:ring-ring");
+  });
+
   it("offers no Show older when there is no cursor", async () => {
     serve(attentionOk, () => ({ status: 200, body: page([entry(5)], null) }));
     openOverview();
@@ -101,6 +116,10 @@ describe("Recent changes", () => {
     serve(attentionOk, () => ({ status: 200, body: page([entry(6)], null, 90) }));
     openOverview();
     expect(await screen.findByText(/Changes older than 90 days are pruned\./)).toBeInTheDocument();
+    // Live check D13: a reader sees only their families, so the oldest entry
+    // they see is not when recording began; the footnote says what it knows.
+    expect(screen.getByText(/^The oldest change you can see is from /)).toBeInTheDocument();
+    expect(screen.queryByText(/Recorded since/)).not.toBeInTheDocument();
     expect(
       screen.getByText(
         "Role assignments and catalog tags are recorded after they commit and can be missing if the audit writer was overloaded.",

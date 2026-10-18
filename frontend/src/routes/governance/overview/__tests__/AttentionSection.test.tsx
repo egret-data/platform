@@ -96,6 +96,11 @@ describe("Needs attention", () => {
     expect(within(row).queryByRole("link", { name: "sr-prod" })).not.toBeInTheDocument();
     expect(within(row).getByText("sr-prod")).toBeInTheDocument();
     expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", "/governance/policies");
+    // Live check D17: the shared focus ring on every link of the row.
+    for (const a of within(row).getAllByRole("link")) {
+      expect(a.className).toContain("focus-visible:ring-2");
+      expect(a.className).toContain("focus-visible:ring-ring");
+    }
   });
 
   it("renders a source it could not check as a warning with no link", async () => {

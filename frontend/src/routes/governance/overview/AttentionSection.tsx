@@ -4,7 +4,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { AttentionRow, SEVERITY } from "@/routes/governance/overview/AttentionRow";
+import { AttentionRow, LINK, SEVERITY } from "@/routes/governance/overview/AttentionRow";
 
 /** What each check looks at, for the "Not checked for you" lines. */
 const CHECKS: Record<string, string> = {
@@ -108,7 +108,7 @@ export function AttentionSection({
         <p>
           Not checked here: views that may expose classified data through DEFINER (
           {canReadTags ? (
-            <Link to="/governance/classifications" className="text-primary hover:underline">
+            <Link to="/governance/classifications" className={LINK}>
               see Classifications
             </Link>
           ) : (

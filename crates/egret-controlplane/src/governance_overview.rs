@@ -502,8 +502,43 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or("")
+/// The longest first line of an error a sample shows, in characters.
+const DETAIL_CHARS: usize = 200;
+
+/// The first line of `s`, cut to [`DETAIL_CHARS`] with an ellipsis.
+fn first_line(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("");
+    if line.chars().count() > DETAIL_CHARS {
+        let mut cut: String = line.chars().take(DETAIL_CHARS).collect();
+        cut.push('…');
+        cut
+    } else {
+        line.to_string()
+    }
+}
+
+/// An overlap's coordinate (`catalog=[ice] column=[email] schema=[s]
+/// table=[t]`, Ranger's resource map) as a path, `ice.s.t.email`, or
+/// `tag pii` for a tag coordinate. Anything else is shown as it came.
+fn coordinate_path(coordinate: &str) -> String {
+    let mut levels: BTreeMap<&str, &str> = BTreeMap::new();
+    for part in coordinate.split_whitespace() {
+        if let Some((k, v)) = part.split_once("=[") {
+            levels.insert(k, v.trim_end_matches(']'));
+        }
+    }
+    if let Some(tag) = levels.get("tag") {
+        return format!("tag {tag}");
+    }
+    let path: Vec<&str> = ["catalog", "schema", "table", "column"]
+        .iter()
+        .map_while(|k| levels.get(k).copied())
+        .collect();
+    if path.is_empty() {
+        coordinate.to_string()
+    } else {
+        path.join(".")
+    }
 }
 
 // ── sources ─────────────────────────────────────────────────────────────
@@ -530,14 +565,17 @@ async fn unresolved_principals(c: &mut PgConnection) -> Result<Option<Finding>, 
         "unresolved_principals_fail_open",
         Severity::Critical,
         rows.len(),
-        format!(
-            "{} match nobody, so the compiled policy allows more than the model states.",
-            plural(
-                rows.len(),
-                "stored principal reference",
-                "stored principal references"
+        if rows.len() == 1 {
+            "1 stored principal reference matches nobody, so the compiled policy allows more than \
+             the model states."
+                .to_string()
+        } else {
+            format!(
+                "{} stored principal references match nobody, so the compiled policy allows more \
+                 than the model states.",
+                rows.len()
             )
-        ),
+        },
         sample,
         Some(Ref::Unmatched),
     ))
@@ -697,6 +735,8 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
         }
     };
     let r#ref = if n == 1 {
+        // The finding's sentence is this profile's: its sample need not repeat it.
+        sample[0].detail = None;
         Some(Ref::Profile {
             name: sample[0].label.clone(),
         })
@@ -830,7 +870,11 @@ async fn rule_overlaps(c: &mut PgConnection) -> Result<Option<Finding>, SourceEr
                 .map(|m| m.name.as_str())
                 .collect::<Vec<_>>()
                 .join(" and "),
-            detail: Some(format!("{} on {}", o.coordinate, o.service_name)),
+            detail: Some(format!(
+                "{}, in profile {}",
+                coordinate_path(&o.coordinate),
+                o.service_name
+            )),
             r#ref: o.rules.iter().find_map(|m| m.id).map(|id| Ref::Rule { id }),
         })
         .collect();
@@ -877,10 +921,15 @@ async fn lineage_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
         "lineage_failed",
         Severity::Warning,
         n,
-        format!(
-            "egret could not compute the lineage of {}, so the tables they read are not known.",
-            plural(n, "view", "views")
-        ),
+        if n == 1 {
+            "egret could not compute the lineage of 1 view, so the tables it reads are not known."
+                .to_string()
+        } else {
+            format!(
+                "egret could not compute the lineage of {n} views, so the tables they read are not \
+                 known."
+            )
+        },
         sample,
         r#ref,
     ))
@@ -909,10 +958,11 @@ async fn catalog_apply_failed(c: &mut PgConnection) -> Result<Option<Finding>, S
         "catalog_apply_failed",
         Severity::Warning,
         n,
-        format!(
-            "{} could not be applied to their engine.",
-            plural(n, "catalog attachment", "catalog attachments")
-        ),
+        if n == 1 {
+            "1 catalog attachment could not be applied to its engine.".to_string()
+        } else {
+            format!("{n} catalog attachments could not be applied to their engines.")
+        },
         sample,
         Some(Ref::Catalogs),
     ))
