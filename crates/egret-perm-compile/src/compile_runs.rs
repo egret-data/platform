@@ -19,6 +19,11 @@ use crate::CompileSummary;
 /// The longest error text stored, in characters.
 pub const MAX_ERROR_CHARS: usize = 2000;
 
+/// `error`, cut to [`MAX_ERROR_CHARS`] characters.
+pub fn capped(error: &str) -> String {
+    error.chars().take(MAX_ERROR_CHARS).collect()
+}
+
 fn count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
@@ -61,7 +66,18 @@ pub async fn record_compile_failure(
     service_id: i64,
     error: &str,
 ) -> Result<(), sqlx::Error> {
-    let error: String = error.chars().take(MAX_ERROR_CHARS).collect();
+    let mut conn = pool.acquire().await?;
+    record_compile_failure_via(&mut conn, service_id, error).await
+}
+
+/// [`record_compile_failure`] on a caller's connection — the manual compile
+/// route writes it in one transaction with its `profile:compile` event.
+pub async fn record_compile_failure_via(
+    conn: &mut PgConnection,
+    service_id: i64,
+    error: &str,
+) -> Result<(), sqlx::Error> {
+    let error = capped(error);
     sqlx::query(
         "INSERT INTO perm.compile_runs (service_id, outcome, attempted_at, error) \
          SELECT s.id, 'error', clock_timestamp(), $2 \
@@ -72,7 +88,7 @@ pub async fn record_compile_failure(
     )
     .bind(service_id)
     .bind(error)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

@@ -72,6 +72,7 @@ pub mod engine_capabilities;
 pub mod engine_grants;
 // DG #3: each profile's last compile (`perm.compile_runs`, migration 0196).
 pub mod compile_runs;
+mod governance_events;
 // SP4d-3 Task 6: the equivalence gate — probes derived from a profile's
 // before/after downloads, compared per plugin version over every affected
 // profile. Pure; Task 7's migration transaction is its caller.

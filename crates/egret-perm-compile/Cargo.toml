@@ -46,6 +46,8 @@ tracing.workspace = true
 axum.workspace = true
 egret-auth.workspace = true
 egret-core.workspace = true
+# DG #3: governance events in the write's own transaction.
+egret-audit.workspace = true
 # J-F3 Task 1b: `group_membership::PermGroupRecompiler` answers through
 # `egret_auth`'s port, whose error is `egret_core::Error`, and its `Internal`
 # arm carries an `anyhow::Error`.
