@@ -9,8 +9,11 @@ import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import { toast } from "sonner";
+import { ApiError } from "@/api/client";
 
 vi.mock("@/api/tags");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
 vi.mock("@/routes/governance/ViewExposureSection", () => ({
@@ -333,5 +336,25 @@ describe("TagDetail", () => {
     renderPage();
     await screen.findByRole("heading", { name: "PII" });
     expect(screen.queryByTestId("tag-rules")).not.toBeInTheDocument();
+  });
+
+  // Live check D4: the server refuses while a rule selects the tag (FK perm.rules.tag_key → tags(key)).
+  test("a refused delete keeps the server's sentence and points to the rules section on the page", async () => {
+    const user = userEvent.setup();
+    const sentence = "tag pii is still selected by a permission rule; delete or retarget that rule first";
+    vi.mocked(tagsApi.useDeleteTag).mockReturnValue({
+      mutate: vi.fn((_id: string, opts?: { onError?: (e: Error) => void }) => opts?.onError?.(new ApiError(409, sentence))),
+      isPending: false,
+    } as never);
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Delete/ }));
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+
+    expect(toast.error).toHaveBeenCalledWith(sentence, {
+      description: 'The "Mask and filter rules" section on this page lists the rules that select this tag.',
+      action: undefined,
+    });
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

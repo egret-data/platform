@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RuleView } from "@/api/generated/model";
-import { globMatch, orphanRules, rulesOnTag, tagUnresolved } from "@/routes/governance/ruleMatch";
+import { globMatch, rulesOnTag, tagUnresolved } from "@/routes/governance/ruleMatch";
 
 /**
  * How a tag rule finds its tag (DG redesign #2, P9). `globMatch` and
@@ -71,22 +71,5 @@ describe("rulesOnTag", () => {
       pathRule,
     ];
     expect(rulesOnTag(rules, tag).map((r) => r.id)).toEqual(["own", "same-name", "glob"]);
-  });
-});
-
-describe("orphanRules", () => {
-  it("lists tag rules whose tag is gone: a name that did not resolve, or a key no listed tag has", () => {
-    const rules = [
-      tagRule("gone", "pii", null),
-      tagRule("unlisted", "old_key", "Old"),
-      tagRule("ok", "pii", "PII"),
-      pathRule,
-    ];
-    expect(orphanRules(rules, new Set(["pii"])).map((r) => r.id)).toEqual(["gone", "unlisted"]);
-  });
-
-  it("without the tag list, trusts the server's resolution alone", () => {
-    const rules = [tagRule("gone", "pii", null), tagRule("unlisted", "old_key", "Old")];
-    expect(orphanRules(rules, null).map((r) => r.id)).toEqual(["gone"]);
   });
 });

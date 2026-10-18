@@ -58,7 +58,7 @@ memberships. Today those are read through Control Plane routes gated `user:read`
 | P6 | `public`, `workspace_members` and `user` subjects are refused by the member route with a sentence (users go to `/perm/explain`) | default decision (2026-10-17) |
 | P7 | Data's "Who can read?" takes a user, a group or a role (closes #1 spec §2.2's follow-up) | default decision (2026-10-17) |
 | P8 | Explain access, Data permissions and Mask & filter rules leave the sidebar and their URLs redirect to `/governance/people` (F7, the `LegacyGovernanceRedirect` pattern). The old deep links `?grant=<id>` and `?rule=<id>` redirect to new single-item pages `/governance/grants/:id` and `/governance/rules/:id`, which explain's attributions and the overlap report now link to. The three page files are deleted; tests of shared components they carried move to those components | default decision (2026-10-17) |
-| P9 | Tag-selected rules get a home outside the flat list: TagDetail lists the rules that reach its tag, and Classifications lists, to `policy:read` holders, the rules whose tag no longer exists. With P8 every stored grant and rule stays listed somewhere (§5) | default decision (2026-10-17) |
+| P9 | Tag-selected rules get a home outside the flat list: TagDetail lists the rules that reach its tag. (No rule can outlive its tag: `perm.rules.tag_key` references `tags(key)` since migration 0154, so deleting a tag a rule selects is refused with 409; live check D5 removed the Classifications list of such rules.) With P8 every stored grant and rule stays listed somewhere (§5) | default decision (2026-10-17) |
 | P10 | Principal pages list egret grants and rules only and say so: hand-written and egret-seeded engine policies are not listed (as #1's tabs say), and Check access gives the engines' answer. Hand-written policies per principal come with #4 (F12) | default decision (2026-10-17) |
 | P11 | The index has an "Unmatched names" tab rendering `GET /perm/unresolved-principals`, fail-open rows first | default decision (2026-10-17) |
 | P12 | D9a: the principal picker's list stays open after a pick while the input has focus, and reopens on typing or click | default decision (2026-10-17) |
@@ -113,9 +113,10 @@ memberships. Today those are read through Control Plane routes gated `user:read`
   that match nobody with `failsOpen` (`principal_refs.rs:322-350`). No page renders it.
 - **D9a** (#1 live doc §2.4): `add` closes the list (`PrincipalPicker.tsx:149-155`) and only `onFocus` opens it
   (`:230`), so a second pick needs a blur and refocus.
-- **Tag deletion leaves tag rules behind:** `delete_tag` deletes the tag only (`crates/egret-controlplane/src/tags.rs:217-224`);
-  such a rule shows `tag_name: null` (`RuleView`, `routes.rs:347-356`), which #1 calls unresolved
-  (`frontend/src/routes/governance/data/coverage.ts:108-110`).
+- **A tag cannot be deleted while a rule selects it** (corrected after live check D5): `perm.rules.tag_key` references
+  `tags(key)` (`migrations/0154_perm_model.sql`, no `ON DELETE`), and the server answers the delete with 409. A rule
+  shows `tag_name: null` (`RuleView`, `routes.rs:347-356`, which #1 calls unresolved,
+  `frontend/src/routes/governance/data/coverage.ts:108-110`) only if the foreign key is bypassed.
 
 ## 2. Routes and pages
 
@@ -218,8 +219,8 @@ them. Logged like the compiler's mint (`members.rs:420-425`).
 - `/governance/explain-access`, `/governance/data-permissions`, `/governance/mask-filter-rules` → `/governance/people`;
   with `?grant=<id>` or `?rule=<id>` → `/governance/grants/<id>` or `/governance/rules/<id>`.
 - Nothing becomes unlisted: every grant has a catalog scope (`migrations/0154_perm_model.sql:24`) and is listed on
-  Data's pages (#1, D4 fix) and on its principals' pages; a path rule on Data's pages; a tag rule on TagDetail; a
-  rule whose tag is gone on Classifications; any grant or rule by id on its single-item page.
+  Data's pages (#1, D4 fix) and on its principals' pages; a path rule on Data's pages; a tag rule on TagDetail (its
+  tag cannot be deleted while it selects it); any grant or rule by id on its single-item page.
 
 ## 6. Frontend standards
 
@@ -235,7 +236,7 @@ no source product in FE-REF-1's list; it follows #1's object-page structure, a d
   per member, truncation at 200, `notEvaluated`, every 400; the mint is idempotent, refuses on a stale ref, and needs
   `policy:update`; every route refuses without `policy:read`.
 - Frontend vitest: index tabs and search, each principal tab and reach group, Check access for each kind, redirects
-  and deep links, single-item pages, TagDetail and Classifications rule lists, the picker's second pick and
+  and deep links, single-item pages, TagDetail rule list and the refused tag delete, the picker's second pick and
   allocation, Who can read? per kind, empty, error and permission states.
 - Full frontend gate including a new `test:bundle:governance-people`.
 - **Live (required).** Task 1 measures engines before the UI claims anything about them (P15). The final task drives

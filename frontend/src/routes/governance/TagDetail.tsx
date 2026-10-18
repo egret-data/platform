@@ -40,6 +40,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import ViewExposureSection from "@/routes/governance/ViewExposureSection";
 import TagRulesSection from "@/routes/governance/TagRulesSection";
+import { toastTagDeleteFailure } from "@/routes/governance/tagDeleteFailure";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 const DEFAULT_COLOR = "#6366f1";
@@ -436,7 +437,7 @@ export default function TagDetail() {
               toast.success("Tag deleted");
               navigate("/governance/classifications");
             },
-            onError: (e) => toast.error((e as Error).message ?? "Failed to delete tag."),
+            onError: (e) => toastTagDeleteFailure(e, { where: "this page", canReadRules }),
           });
           setDeleteOpen(false);
         }}

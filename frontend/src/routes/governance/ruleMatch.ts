@@ -42,7 +42,12 @@ export function globMatch(patternText: string, valueText: string): boolean {
   return pi === pattern.length;
 }
 
-/** Whether `r` selects by a tag whose name did not resolve (see `ruleSelects` in `data/coverage.ts`): its tag was deleted, since `delete_tag` deletes the tag only. */
+/**
+ * Whether `r` selects by a tag whose name did not resolve (see `ruleSelects` in
+ * `data/coverage.ts`). `perm.rules.tag_key` references `tags(key)` (migration
+ * 0154), so a tag cannot be deleted while a rule selects it; this only answers
+ * a row that bypassed the foreign key, and keeps it from reading as covered.
+ */
 export function tagUnresolved(r: RuleView): boolean {
   return r.selector.type === "tag" && !r.tag_name;
 }
@@ -56,16 +61,4 @@ export function tagUnresolved(r: RuleView): boolean {
  */
 export function rulesOnTag(rules: RuleView[], tag: { name: string }): RuleView[] {
   return rules.filter((r) => r.selector.type === "tag" && !!r.tag_name && globMatch(r.tag_name, tag.name));
-}
-
-/**
- * The tag rules whose tag is gone: its name did not resolve (`tagUnresolved`),
- * or, when the tag list is known (`tagKeys`), no listed tag has its key.
- * Without the list (a reader without `tag:read`), the server's resolution
- * alone decides.
- */
-export function orphanRules(rules: RuleView[], tagKeys: ReadonlySet<string> | null): RuleView[] {
-  return rules.filter(
-    (r) => r.selector.type === "tag" && (tagUnresolved(r) || (tagKeys !== null && !tagKeys.has(r.selector.key))),
-  );
 }
