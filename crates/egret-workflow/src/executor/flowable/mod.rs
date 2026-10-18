@@ -444,6 +444,14 @@ pub(crate) fn open(
             // Computed and recorded: `CREATED RUNNING SUCCESS` in one round, as
             // Kestra records an `ExecutionUpdatableTask` (golden
             // `valids/set-variables`).
+            //
+            // **Defensive since the final review's I1**: the worker's
+            // `render_updates` now completes a computed run in the pass that
+            // computes it, so no worker-driven run reaches `open` with
+            // `rendered` set and still `CREATED`. The arm stays the same
+            // completion rather than `Waiting`, so a state that does carry one
+            // (an `advance()` caller that sets `rendered` itself, as the pure
+            // tests do) ends as it would have instead of stalling.
             Some(_) => Step::Commands(vec![
                 Command::StartRun { run, at: now },
                 Command::SetRunState {
@@ -536,7 +544,8 @@ pub(crate) fn descend(
         TaskKind::Exit { .. } => return crate::executor::exit::drive(plan, state, run, task),
         // Group C2 Task 3. A `RUNNING` update can only be one whose `StartRun`
         // and `SUCCESS` were split by a reader between the two -- none exists,
-        // since `open` emits the pair in one round -- so it ends as it would
+        // since `open` emits the pair in one round and the worker's
+        // `render_updates` applies it in one pass -- so it ends as it would
         // have. Returned without the `Done` mapping, as `open`'s pair is.
         TaskKind::Update { .. } => {
             return Step::Commands(vec![Command::SetRunState {

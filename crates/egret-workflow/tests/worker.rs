@@ -11490,6 +11490,67 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
     }
 }
 
+/// **A computed update beside a failing one in the same `Parallel` is SUCCESS,
+/// and its change is written** (final review I1). `u1` computes and `u2`
+/// (`overwrite: false` over the flow's `a`) fails in one render pass; before
+/// the fix the `Parallel`'s `fail_the_rest` recorded `u1` `CREATED FAILED`
+/// with no attempt while `settle` still wrote its `{a: 1}`. Kestra applies
+/// `u1` and fails only `u2`; the column and the run now agree.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_computed_update_beside_a_failing_one_is_success_and_written(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let (_db, ws) = seed(&pool).await;
+    let flow = String::from(
+        "id: par-update-fails\nnamespace: t\nvariables:\n  a: 0\ntasks:\n\
+         \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+         \x20     - id: u1\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+         variables:\n          a: 1\n\
+         \x20     - id: u2\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+         overwrite: false\n        variables:\n          a: 2\n",
+    );
+    let ex = start_updates(&pool, ws, &flow).await;
+
+    // Act
+    drain(&pool, &core_handlers()).await;
+
+    // Assert
+    assert_eq!(
+        execution_variables(&pool, ex).await,
+        Some(serde_json::json!({"a": 1}))
+    );
+    assert_eq!(
+        run_history(&pool, ex, "u1").await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "u1, whose change is written, is SUCCESS"
+    );
+    assert_eq!(
+        attempt_histories(&pool, ex, "u1").await,
+        vec![serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])]
+    );
+    let (run_end, attempt_ends, _) = ends_of(&pool, ex, "u1").await;
+    assert!(run_end.is_some(), "u1's ended_at is stamped");
+    assert!(
+        attempt_ends.len() == 1 && attempt_ends[0].is_some(),
+        "u1's one attempt's ended_at is stamped: {attempt_ends:?}"
+    );
+    assert_eq!(
+        run_history(&pool, ex, "u2").await,
+        serde_json::json!(["CREATED", "FAILED"])
+    );
+    assert_eq!(
+        attempt_histories(&pool, ex, "u2").await,
+        vec![serde_json::json!(["FAILED"])]
+    );
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("FAILED"))
+    );
+}
+
 /// An execution being killed writes no update: the `Log` `l` is killed before
 /// it completes, and the `SetVariables` after it is absent or `KILLED`, and
 /// nothing is written. (`l` is first on purpose: an update that is the first

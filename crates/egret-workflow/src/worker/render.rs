@@ -1209,6 +1209,79 @@ mod tests {
         }
     }
 
+    /// **A computed update beside a failing one in the same `Parallel` ends
+    /// SUCCESS** (final review I1). `render_updates` computes `u1` and fails
+    /// `u2` in one pass; were `u1` left `CREATED` for `advance()` to complete,
+    /// the `Parallel`'s `fail_the_rest` would reach it first and record it
+    /// `CREATED FAILED` with no attempt while `settle` still wrote its
+    /// `{a: 1}`. Kestra applies `u1` (SUCCESS, change kept) and fails only `u2`.
+    #[test]
+    fn a_computed_update_beside_a_failing_one_in_a_parallel_ends_success() {
+        use crate::executor::{advance, apply, plan_stored, ExecutionState};
+        // Arrange
+        let plan = plan_stored(
+            "id: u\nnamespace: t\nvariables:\n  a: 0\ntasks:\n  - id: p\n    \
+             type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+             - id: u1\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+             variables:\n          a: 1\n      \
+             - id: u2\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+             overwrite: false\n        variables:\n          a: 2\n",
+        )
+        .expect("the probe flow plans");
+        let mut state = ExecutionState::new(&plan);
+        let settle = |state: &mut ExecutionState| {
+            for _ in 0..32 {
+                let cmds = advance(&plan, state, Tick(0));
+                if cmds.is_empty() {
+                    return;
+                }
+                cmds.iter().for_each(|c| apply(state, c));
+            }
+            panic!("advance() reached no fixed point");
+        };
+        settle(&mut state);
+        let ix = |id: &str| {
+            (0..state.runs.len())
+                .find(|&i| plan.tasks[state.runs[i].task].id == id)
+                .unwrap_or_else(|| panic!("{id} was created"))
+        };
+        let (u1, u2) = (ix("u1"), ix("u2"));
+        assert_eq!(state.runs[u1].history, [RunState::Created], "u1 waits");
+        assert_eq!(state.runs[u2].history, [RunState::Created], "u2 waits");
+        let mut surface = bare_surface();
+        surface.set_vars(json!({"a": 0}));
+        let mut side = RenderSide::default();
+
+        // Act
+        let pass = render_updates(&mut surface, &plan, &mut state, Tick(0), &mut side);
+        settle(&mut state);
+
+        // Assert
+        assert_eq!(pass, Pass::Rendered);
+        assert_eq!(side.variables, Some(json!({"a": 1})), "u1's change");
+        let wire = |h: &[RunState]| h.to_vec();
+        assert_eq!(
+            wire(&state.runs[u1].history),
+            [RunState::Created, RunState::Running, RunState::Success],
+            "u1, whose change is written, is SUCCESS"
+        );
+        assert_eq!(state.runs[u1].attempts.len(), 1);
+        assert_eq!(
+            wire(&state.runs[u1].attempts[0].history),
+            [RunState::Created, RunState::Running, RunState::Success]
+        );
+        assert_eq!(
+            wire(&state.runs[u2].history),
+            [RunState::Created, RunState::Failed]
+        );
+        assert_eq!(state.runs[u2].attempts.len(), 1);
+        assert_eq!(
+            wire(&state.runs[u2].attempts[0].history),
+            [RunState::Failed]
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Failed));
+    }
+
     /// `set_labels` rebuilds the `labels` render value and keeps the `system`
     /// entry `load` built; `reserve_id` answers a known id unchanged.
     #[test]
@@ -1386,10 +1459,12 @@ impl RenderSide {
 /// In run order, against the CURRENT surface, so of two updates in one
 /// `Parallel` the later run applies on top of the earlier one.
 ///
-/// A computed update sets `rendered` to `""` (the signal `advance()` completes
-/// it on, `CREATED RUNNING SUCCESS` in one round) and records the new value in
-/// `side`. Both live and die with this settle's transaction: a settle that
-/// rolls back loses the `rendered` and the column write together, so no other
+/// A computed update records the new value in `side` and is completed HERE,
+/// `CREATED RUNNING SUCCESS` in this pass ([`complete`], final review I1) --
+/// not left `CREATED` for `advance()`, where a failing sibling in the same
+/// `Parallel`/`Dag` would fail it first while its change was still written.
+/// Both live and die with this settle's transaction: a settle that rolls back
+/// loses the completion and the column write together, so no other
 /// bookkeeping is needed. A failed one is `Command::FailUnstarted` -- one
 /// attempt `[FAILED]`, the golden's shape -- with its message.
 pub(super) fn render_updates(
@@ -1446,12 +1521,12 @@ pub(super) fn render_updates(
                 let v = Value::Object(v);
                 surface.set_vars(v.clone());
                 side.variables = Some(v);
-                state.runs[ix].rendered = Some(String::new());
+                complete(state, ix, now);
             }
             Ok(Change::Labels(l)) => {
                 surface.set_labels(l.clone());
                 side.labels = Some(l);
-                state.runs[ix].rendered = Some(String::new());
+                complete(state, ix, now);
             }
             Err(why) => {
                 crate::executor::apply(
@@ -1466,6 +1541,25 @@ pub(super) fn render_updates(
         }
     }
     Pass::Rendered
+}
+
+/// A computed update's completion, applied by [`render_updates`] in the pass
+/// that computed it (final review I1): `CREATED RUNNING SUCCESS` with one
+/// attempt `CREATED RUNNING SUCCESS`, the golden's shape. Its change and its
+/// SUCCESS therefore land together: no `advance()` round sits between them in
+/// which a sibling's failure (`Parallel`/`Dag` `fail_the_rest`) could record
+/// as FAILED a run whose change `settle` still writes. `rendered` is set too,
+/// so a reader of the run sees it was computed.
+fn complete(state: &mut ExecutionState, ix: RunIx, now: Tick) {
+    state.runs[ix].rendered = Some(String::new());
+    crate::executor::apply(state, &crate::executor::Command::StartRun { run: ix, at: now });
+    crate::executor::apply(
+        state,
+        &crate::executor::Command::SetRunState {
+            run: ix,
+            state: RunState::Success,
+        },
+    );
 }
 
 /// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a
