@@ -13459,3 +13459,9 @@ an over-refusal. So the entry is recorded here:
 | flow | where egret refuses it | why it is an over-refusal |
 |---|---|---|
 | `valids/task-runif` | publish, resolving the `Subflow` `notexecutedflowable` to `dummy_namespace/dummy_flow`, which does not exist (since group C1 Task 2, when its `OutputValues` stopped refusing it first) | that task has `runIf: "false"`, so it never runs; this Kestra published the flow with 200 (`corpus.json`) and ran it, and the executor oracle banks egret's run of it |
+| `valids/trigger-flow-listener-no-inputs` | publish, resolving the `Flow` trigger `listen-flow-failed`'s `dependsOn` to `io.kestra.tests.trigger/other-flow`, which no corpus flow defines (census line `not found: referenced object`) | this Kestra published it with 200 (`corpus.json`); a dependency on a flow that does not exist yet is legal there. Not C1's: found while writing this list, it predates the group |
+
+Both are the same shape: publish's reference resolution (`RefKind::Subflow`)
+refuses a reference to a flow that does not exist, and this Kestra does not.
+The census prints both lines by name in every run; neither is asserted as an
+over-refusal anywhere.
