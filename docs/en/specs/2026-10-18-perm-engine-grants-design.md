@@ -285,6 +285,7 @@ profile, of type `risingwave`, or with `status = 'deleting'` refuses the write (
 | `stored_user_refs_naming_via` (`principal_refs.rs:637-650`) | engine-grant `user` principals (`source = 'engine_grant'`). No arm for impersonation targets: they are stored by user id (E21, amended), so no stored name can go stale |
 | `UserRepo::hard_delete` (`crates/egret-auth/src/users.rs:295`), via `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx` | also locks and recompiles the profiles of engine grants that TARGET the user (E21, amended): the grants cascade with the user, and the same transaction reaps their compiled policies, which name the username the delete frees |
 | `recompile_role_referencing_profiles` (`crates/egret-perm-compile/src/role_membership.rs:251`) | engine-grant `role` principals join the boot-time role sweep |
+| the policy editor's create/edit/enable/delete (`crates/egret-policy/src/admin/mod.rs`, `write_policy_checked`, `fold_profile_of_stored`) | security re-review M-a: on a profile whose engines carry impersonation grants, every editor write locks the profile's unit rows and recompiles it in the same transaction, so a target the write makes near-root (or gives a hop) loses its `perm-engine-` policy at once. Infra seeding (`seed_admin_all_access`, the delegator and per-user baselines at engine apply) does not go through the editor and does not recompile: recorded as a follow-up |
 
 The workspace-member and tag recompile paths need no change: engine grants name no workspace and no tag.
 

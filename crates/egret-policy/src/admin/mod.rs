@@ -154,6 +154,48 @@ async fn changes_the_clearance_fold(
     Ok(folds.unwrap_or(false))
 }
 
+/// Whether profile `service_id` is downloaded by an engine that carries an
+/// impersonation grant (`perm.engine_grants` with a target). Such a grant's
+/// target is re-checked at every compile against every policy of the profile
+/// (security re-review M-a), so any hand-written write there must recompile
+/// the profile in its own transaction: a policy that makes the target
+/// near-root, or gives them a new hop, must reap the grant's `perm-engine-`
+/// policy at once, and undoing it must restore the policy.
+async fn carries_impersonation_grants(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<bool, PolicyHttpError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE e.authz_service_id = $1 AND g.target_user_id IS NOT NULL)",
+    )
+    .bind(service_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(crate::PolicyStoreError::from)?)
+}
+
+/// Lock the `policy.authz_services` rows of every evaluation unit
+/// `service_id` belongs to, ascending: the rows a recompile of it takes, in
+/// its order, so the editor's write and a concurrent recompile queue.
+async fn lock_unit_rows(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyHttpError> {
+    let mut rows: Vec<i64> = crate::unit_overlap::units_for_service_via(conn, service_id)
+        .await?
+        .into_iter()
+        .flat_map(|u| [u.resource, u.tag_service])
+        .flatten()
+        .chain([service_id])
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    crate::lock_service_rows_via(conn, &rows).await?;
+    Ok(())
+}
+
 /// The stored `(service_id, policy_jsonb)` of policy `id`, if it exists.
 async fn stored_policy(
     conn: &mut sqlx::PgConnection,
@@ -169,8 +211,10 @@ async fn stored_policy(
 }
 
 /// Whether removing, disabling or enabling stored policy `id` changes a
-/// StarRocks clearance fold; when it does, its profile's row is locked first,
-/// in the order a recompile takes it (I-3). Returns the profile to recompile.
+/// StarRocks clearance fold, or (security re-review M-a) lands on a profile
+/// whose engines carry impersonation grants; when it does, the profile's rows
+/// are locked first, in the order a recompile takes them (I-3). Returns the
+/// profile to recompile.
 async fn fold_profile_of_stored(
     conn: &mut sqlx::PgConnection,
     id: i64,
@@ -178,11 +222,17 @@ async fn fold_profile_of_stored(
     let Some((service_id, body)) = stored_policy(conn, id).await? else {
         return Ok(None);
     };
-    if !changes_the_clearance_fold(conn, service_id, &body).await? {
-        return Ok(None);
+    if changes_the_clearance_fold(conn, service_id, &body).await? {
+        crate::lock_service_rows_via(conn, &[service_id]).await?;
+        return Ok(Some(service_id));
     }
-    crate::lock_service_rows_via(conn, &[service_id]).await?;
-    Ok(Some(service_id))
+    // Security re-review M-a: impersonation targets are re-checked against
+    // every policy of the profile.
+    if carries_impersonation_grants(conn, service_id).await? {
+        lock_unit_rows(conn, service_id).await?;
+        return Ok(Some(service_id));
+    }
+    Ok(None)
 }
 
 impl FromRef<PolicyAdminState> for SessionService {
@@ -1377,8 +1427,15 @@ async fn write_policy_checked(
         },
         None => false,
     };
-    let refold = replaced_was_fold_input
+    let mut refold = replaced_was_fold_input
         || changes_the_clearance_fold(&mut tx, service_id, &pol.body).await?;
+    // Security re-review M-a: a profile whose engines carry impersonation
+    // grants is recompiled by every write, the unit's rows locked first (a
+    // mask or filter above has locked them already; re-taking is free).
+    if !refold && carries_impersonation_grants(&mut tx, service_id).await? {
+        lock_unit_rows(&mut tx, service_id).await?;
+        refold = true;
+    }
     refuse_ambiguous_arbitration(&mut tx, service_id, replacing, pol).await?;
     // SP4d-4 Task 11: a save that filled emptied levels with `*` lowers the
     // policy's evalOrder; report whom it now precedes. Runs after the
