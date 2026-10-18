@@ -49,6 +49,7 @@ pub(crate) mod kill;
 mod plan;
 mod retry;
 mod state;
+pub(crate) mod update;
 
 pub use command::Command;
 pub use plan::{
