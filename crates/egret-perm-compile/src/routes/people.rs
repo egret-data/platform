@@ -569,6 +569,7 @@ pub(super) async fn allocate_username(
     tracing::info!(
         %user_id,
         username = %username,
+        steward_id = %p.user_id.0,
         "allocated a username from Governance so a grant or rule can name them"
     );
     Ok(Json(AllocatedUsername {

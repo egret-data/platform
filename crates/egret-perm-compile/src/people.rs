@@ -18,10 +18,13 @@
 //! What this module adds is only the list itself: which users, groups and
 //! roles exist, filtered and paged.
 //!
-//! **What a row reveals.** Identity only: a user's id, display name, email and
-//! engine username; a group's name and source; a role's name and scopes; and a
-//! count. No password hash, session, permission, status or login time is read,
-//! so none can leak into a response (Q2: the routes are gated `policy:read`).
+//! **What a list row reveals.** Identity only: a user's id, display name,
+//! email and engine username; a group's name and source; a role's name and
+//! scopes; and a count. The list reads no password hash, session, permission,
+//! status or login time, so none can leak into it (Q2: the routes are gated
+//! `policy:read`). A single user's page (`UserPrincipal`) also carries the
+//! account's `status`, so a steward can see a disabled account; it still reads
+//! no password hash, session or login time.
 //!
 //! **Service accounts are listed, marked.** A Data API service account is a
 //! `users` row with `provider = 'service'` (migration `0119`). Engines enforce
