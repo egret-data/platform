@@ -1887,6 +1887,13 @@ pub async fn recompile_services_in_tx(
     // (see `lock_services_in_tx`). Re-taking a lock this transaction already
     // holds is free, so callers that pre-locked lose nothing.
     lock_services_in_tx(tx, service_ids).await?;
+    // After the profile locks (J-F3 order: profiles, then rows), mint every
+    // username this loop would mint in ONE ascending sweep, so the per-profile
+    // expansions below take no `users` row lock out of order
+    // (`crate::members::premint_model_usernames`).
+    if !service_ids.is_empty() {
+        crate::members::premint_model_usernames(tx).await?;
+    }
     let mut out = Vec::with_capacity(service_ids.len());
     for &service_id in service_ids {
         let summary = recompile_service_in_tx(tx, service_id).await?;

@@ -228,7 +228,17 @@ pub(crate) async fn role_usernames(
     {
         match names.get(user_id) {
             Some(name) => out.entry(role.clone()).or_default().push(name.clone()),
-            None => tracing::warn!(
+            // Unreachable after `Mint` (a mint either returns a name or fails
+            // the compile), so a warning there means a broken invariant. After
+            // `Omit` it is the expected answer for someone who has never used
+            // an engine, on a GET route: not worth a warning per request.
+            None if missing == MissingUsername::Mint => tracing::warn!(
+                %user_id,
+                role = %role,
+                "a role holder is still unnamed after minting, so the compiled policy does not \
+                 name them"
+            ),
+            None => tracing::debug!(
                 %user_id,
                 role = %role,
                 "a holder of this role has no `users.username` yet, so this read does not name \
@@ -242,6 +252,79 @@ pub(crate) async fn role_usernames(
         names.dedup();
     }
     Ok(out)
+}
+
+/// Mint, in ONE ascending sweep, the username of every person a compile of
+/// the current model would mint, and return how many were minted (Task 3
+/// review; `crate::trigger::recompile_services_in_tx` calls it after the
+/// profile locks).
+///
+/// **Why a sweep before the passes.** Each expansion mints on its own: the
+/// member pass in [`expand_enumerated_principals`], then its role pass, then
+/// the clearance's role pass, once per profile. Each is ascending, but the
+/// sequence is not: one recompile can lock user 3 and then user 2, while a
+/// concurrent recompile over other profiles locks 2 and then 3, and Postgres
+/// aborts one of them. Minting everyone first, ascending, means the passes
+/// find names already set and take no `users` row lock at all.
+///
+/// The set is a SUBSET of what the passes mint, never wider, because a mint is
+/// a write a compile must not make for someone it does not name: the same
+/// predicates as [`expand_enumerated_principals`] (workspace members, members
+/// of every non-`public` group) and [`role_usernames`] (holders of a role that
+/// a grant principal, a rule exemption or a clearance's `required_roles`
+/// names), over the whole model, which is what every recompile reads. A
+/// workspace ref matches only in its canonical text form here; a ref spelled
+/// otherwise is still minted by the member pass, just not in this sweep.
+pub(crate) async fn premint_model_usernames(
+    conn: &mut sqlx::PgConnection,
+) -> Result<usize, CompileError> {
+    let unnamed: Vec<Uuid> = sqlx::query_scalar(
+        "WITH refs AS ( \
+             SELECT kind::text AS kind, ref FROM perm.grant_principals \
+             UNION SELECT kind::text, ref FROM perm.rule_exemptions \
+         ), role_names AS ( \
+             SELECT ref AS name FROM refs WHERE kind = 'role' \
+             UNION SELECT unnest(required_roles) FROM classification_policies \
+         ) \
+         SELECT u.id FROM users u \
+          WHERE u.username IS NULL \
+            AND ( EXISTS (SELECT 1 FROM access_grants ag \
+                           JOIN refs m ON m.kind = 'workspace_members' \
+                                      AND m.ref = ag.scope_id::text \
+                          WHERE ag.principal_id = u.id \
+                            AND ag.principal_type = 'user' \
+                            AND ag.scope_type = 'workspace' \
+                            AND ag.effect = 'allow' \
+                            AND (ag.expires_at IS NULL OR ag.expires_at > now())) \
+               OR EXISTS (SELECT 1 FROM user_groups ug \
+                           JOIN groups g ON g.id = ug.group_id \
+                           JOIN refs m ON m.kind = 'group' AND m.ref = g.name \
+                          WHERE ug.user_id = u.id AND g.name <> $1) \
+               OR EXISTS (SELECT 1 FROM access_grants ag \
+                           JOIN roles r ON r.id = ag.role_id \
+                           JOIN role_names rn ON rn.name = r.name \
+                          WHERE ag.principal_id = u.id \
+                            AND ag.principal_type = 'user' \
+                            AND ag.effect = 'allow' \
+                            AND (ag.expires_at IS NULL OR ag.expires_at > now())) ) \
+          ORDER BY u.id",
+    )
+    .bind(PUBLIC_GROUP)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    for &user_id in &unnamed {
+        let minted = ensure_username_via(conn, UserId(user_id))
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+        tracing::info!(
+            %user_id,
+            username = %minted,
+            "minted a username for a person the model names, so the compiled policy can name them"
+        );
+    }
+    Ok(unnamed.len())
 }
 
 /// What [`role_usernames`] does with a holder who has no `users.username`
@@ -478,7 +561,9 @@ fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> Referenced {
 /// expansion only read, and this order was what kept such a person from
 /// silently dropping out of the `exclude` half; it is kept so the member pass
 /// mints in one ascending sweep and the role pass mints only the holders it
-/// did not reach.
+/// did not reach. Under `crate::trigger::recompile_services_in_tx` neither
+/// pass mints anyone: [`premint_model_usernames`] already has, in one
+/// ascending sweep across every pass.
 ///
 /// **A ref that does not parse as a uuid expands to nothing**, rather than
 /// erroring. That is exactly what the evaluator does with it
