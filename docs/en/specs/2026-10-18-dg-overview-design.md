@@ -66,7 +66,7 @@ code:
 | O6 | `perm.compile_runs` (migration 0196): the last compile per profile. Success is written by the compile funnel in the compile's transaction; failure only by entry points no write waits on (§3.3) | default decision (2026-10-18) |
 | O7 | `GET /api/control-plane/governance/attention`, gated `policy:read` OR `tag:read`; each finding computed only for a reader holding its source's permission, otherwise listed in `notChecked` | user, 2026-10-18 |
 | O8 | Each source runs in its own savepoint of one `REPEATABLE READ, READ ONLY` transaction with a 5 s `statement_timeout`; a failing source becomes a `source_unavailable` finding | default decision (2026-10-18) |
-| O9 | Drift: `plugin_silent` (critical, no poll in 24 h), `plugin_behind` (critical, version not confirmed 90 s after it was set), and an added `plugin_quiet` (warning, no poll in 5 min) so a stopped engine is not invisible for a day | default decision (2026-10-18); thresholds confirmed by Task 1 |
+| O9 | Drift: `plugin_silent` (critical, no poll in 24 h), `plugin_behind` (critical, version not confirmed 90 s after it was set), and an added `plugin_quiet` (warning, no poll in 5 min) so a stopped engine is not invisible for a day | default decision (2026-10-18); thresholds confirmed by Task 1 (`2026-10-18-dg-overview-live.md` §1.1), which also refined the rules: newest poll per profile, `-1` is "not yet reported", a kind with no recent download is not judged (§4.3) |
 | O10 | Migration numbers 0196 (`perm.compile_runs`) and 0197 (partial index on audit mutations). F11 holds 0195 | user, 2026-10-18 |
 | O11 | Frontend: lazy area `routes/governance/overview/`, the Governance index; the catch-all `*` redirects to `/governance` (the Overview); sidebar group headed **"Governance overview"**, item "Overview", first | default decision (2026-10-18) |
 | O12 | No charts. Counts strip, Needs attention (by severity), Recent changes (paged, 25 per page) | user, 2026-10-18 |
@@ -335,7 +335,7 @@ CREATE TABLE perm.compile_runs (
 Ref = { type: "grant", id } | { type: "rule", id } | { type: "unmatched" } | { type: "profile", name }
     | { type: "profiles" } | { type: "engine", id, name } | { type: "engines" } | { type: "catalog", id, name }
     | { type: "catalogs" } | { type: "object", catalog, schema, object } | { type: "tag", id, name }
-    | { type: "tags" } | { type: "data_catalog", name }
+    | { type: "tags" } | { type: "data" } | { type: "data_catalog", name }
 ```
 
 Findings are ordered critical, warning, info, then by kind. `count` is the true total; `sample` is at most five,
@@ -380,6 +380,19 @@ Sentences carry the honesty this programme learned in #1 and #2: a label never c
 - External engines are never judged for liveness or drift, and the drift findings say so in their detail when the
   profile also binds an external engine: "egret does not run external engines and cannot tell whether they should
   be polling" (`0184:13`).
+- **Refined by the live measurement (Task 1, `docs/en/plans/2026-10-18-dg-overview-live.md` §1.1):**
+  - Liveness (`plugin_quiet`, `plugin_silent`) reads the **newest** `policies` poll per profile. A rescheduled
+    pod's plugin id keeps its last `at` for 24 h; a rule reading "any row older than N" would raise a false
+    `plugin_quiet` on every reschedule. Only `policies` is read for liveness: every plugin polls it.
+  - `plugin_behind` reads only rows polled at or after U **and** within 5 min (a dead pod's id is neither
+    evidence nor blame), and only for a profile that is not already quiet or silent (liveness covers it). A
+    report of `lastKnownVersion = -1` is "not yet reported": it neither confirms nor counts as behind. Trino's
+    tag retriever reports `-1` for one tag poll after every policy download, and every plugin reports it on its
+    first poll after a restart. The cost, accepted: a plugin that never reports a version is not flagged as
+    behind. The threshold stays 90 s for both kinds (confirmation takes two polls, about 60 s at the rendered
+    30 s poll).
+  - A kind is judged only when the profile has a row of that kind polled within 24 h. StarRocks never
+    downloads tags, so a missing tags download is never reported for it.
 - `updated_at` is set by other updates too, which can only delay `plugin_behind`, never raise it falsely; the
   spec says so and Task 1 measures it.
 - `tags_without_clearance`: "N classifications have no clearance: they gate nothing." Not "unprotected".

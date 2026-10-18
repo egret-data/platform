@@ -16,6 +16,8 @@ pub mod audit;
 mod error;
 mod governance_browse;
 mod governance_lineage;
+/// DG #3: the Governance Overview. Public so its sources can be tested.
+pub mod governance_overview;
 mod governance_tags;
 mod lineage_sweep;
 mod secrets;
@@ -141,6 +143,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(governance_browse::router())
         .merge(governance_lineage::router())
         .merge(governance_tags::router())
+        .merge(governance_overview::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -159,5 +162,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(governance_browse::ControlPlaneGovernanceBrowseApi::openapi());
     doc.merge(governance_lineage::ControlPlaneGovernanceLineageApi::openapi());
     doc.merge(governance_tags::ControlPlaneGovernanceTagsApi::openapi());
+    doc.merge(governance_overview::ControlPlaneGovernanceOverviewApi::openapi());
     doc
 }

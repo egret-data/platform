@@ -3289,6 +3289,7 @@ dependencies = [
  "egret-metastore",
  "egret-perm",
  "egret-perm-compile",
+ "egret-policy",
  "egret-secrets",
  "egret-storage",
  "egret-test-db",

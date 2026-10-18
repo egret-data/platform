@@ -67,7 +67,7 @@ Brief đã được đối chiếu với code. Những câu sau trong brief sai 
 | O6 | `perm.compile_runs` (migration 0196): lần compile gần nhất của mỗi profile. Thành công do phễu compile ghi trong transaction của lần compile; thất bại chỉ do các điểm vào không có thao tác ghi nào chờ (§3.3) | quyết định mặc định (2026-10-18) |
 | O7 | `GET /api/control-plane/governance/attention`, gate `policy:read` HOẶC `tag:read`; mỗi phát hiện chỉ được tính cho người đọc giữ quyền của nguồn, nếu không thì nằm trong `notChecked` | user, 2026-10-18 |
 | O8 | Mỗi nguồn chạy trong savepoint riêng của một transaction `REPEATABLE READ, READ ONLY` với `statement_timeout` 5 s; nguồn lỗi trở thành phát hiện `source_unavailable` | quyết định mặc định (2026-10-18) |
-| O9 | Độ lệch: `plugin_silent` (critical, không poll trong 24 h), `plugin_behind` (critical, version chưa được xác nhận sau 90 s kể từ khi đặt), và thêm `plugin_quiet` (warning, không poll trong 5 phút) để engine đã dừng không vô hình suốt một ngày | quyết định mặc định (2026-10-18); ngưỡng do Task 1 xác nhận |
+| O9 | Độ lệch: `plugin_silent` (critical, không poll trong 24 h), `plugin_behind` (critical, version chưa được xác nhận sau 90 s kể từ khi đặt), và thêm `plugin_quiet` (warning, không poll trong 5 phút) để engine đã dừng không vô hình suốt một ngày | quyết định mặc định (2026-10-18); ngưỡng do Task 1 xác nhận (`2026-10-18-dg-overview-live.md` §1.1), Task 1 cũng làm rõ luật: lần poll mới nhất của mỗi profile, `-1` là "chưa báo", kind không có lần tải gần đây thì không xét (§4.3) |
 | O10 | Số migration 0196 (`perm.compile_runs`) và 0197 (partial index trên mutation của audit). F11 giữ 0195 | user, 2026-10-18 |
 | O11 | Frontend: khu lazy `routes/governance/overview/`, là index của Governance; catch-all `*` chuyển hướng về `/governance` (Overview); nhóm sidebar tên **"Governance overview"**, mục "Overview", đứng đầu | quyết định mặc định (2026-10-18) |
 | O12 | Không biểu đồ. Dải số đếm, Needs attention (theo mức độ), Recent changes (phân trang, 25 mỗi trang) | user, 2026-10-18 |
@@ -316,6 +316,18 @@ Các câu mang sự trung thực mà chương trình đã học ở #1 và #2: n
 - `plugin_quiet`: "No plugin has polled profile P for N minutes."
 - Engine external không bao giờ bị xét liveness hay độ lệch; khi profile cũng gắn một engine external, detail của phát
   hiện nói: "egret does not run external engines and cannot tell whether they should be polling" (`0184:13`).
+- **Được làm rõ bởi phép đo sống (Task 1, `docs/en/plans/2026-10-18-dg-overview-live.md` §1.1):**
+  - Liveness (`plugin_quiet`, `plugin_silent`) đọc lần poll `policies` **mới nhất** của mỗi profile. Plugin id của
+    một pod bị lập lịch lại giữ nguyên `at` cuối trong 24 h; luật "có dòng nào cũ hơn N" sẽ báo sai `plugin_quiet`
+    mỗi lần lập lịch lại. Liveness chỉ đọc `policies`: plugin nào cũng poll nó.
+  - `plugin_behind` chỉ đọc các dòng poll lúc hoặc sau U **và** trong 5 phút (id của pod đã chết không là bằng chứng
+    cũng không bị quy lỗi), và chỉ với profile chưa quiet/silent (liveness đã báo). Báo cáo
+    `lastKnownVersion = -1` là "chưa báo": không xác nhận và cũng không tính là chậm. Bộ lấy tag của Trino báo `-1`
+    trong một lần poll tag sau mỗi lần tải policy, và plugin nào cũng báo vậy ở lần poll đầu sau khi khởi động lại.
+    Cái giá được chấp nhận: plugin không bao giờ báo version nào thì không bị đánh dấu chậm. Ngưỡng vẫn 90 s cho cả
+    hai kind (xác nhận cần hai lần poll, khoảng 60 s ở poll 30 s mặc định).
+  - Một kind chỉ được xét khi profile có dòng của kind đó poll trong 24 h. StarRocks không bao giờ tải tag, nên
+    không bao giờ báo thiếu lần tải tag cho nó.
 - `updated_at` cũng bị các update khác đặt, điều đó chỉ có thể làm `plugin_behind` đến muộn, không bao giờ báo sai;
   spec nói vậy và Task 1 đo điều đó.
 - `tags_without_clearance`: "N classifications have no clearance: they gate nothing." Không nói "unprotected".
