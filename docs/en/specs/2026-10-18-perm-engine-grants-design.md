@@ -166,6 +166,9 @@ CREATE TABLE perm.engine_grants (
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
     CHECK (array_position(resource_values, NULL) IS NULL),
+    CHECK (array_position(resource_values, '') IS NULL),
+    CHECK (array_to_string(resource_values, chr(31))
+           !~ ('(^|' || chr(31) || ')\s|\s($|' || chr(31) || ')')),
     CHECK (array_to_string(resource_values, chr(31)) !~ '[*?{}]'),
     CHECK (cardinality(resource_values) = CASE capability
              WHEN 'trino.set_catalog_session_property' THEN 2

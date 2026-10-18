@@ -24,8 +24,14 @@ CREATE TABLE perm.engine_grants (
                     'trino.execute_function', 'starrocks.impersonate_user',
                     'starrocks.use_global_function', 'starrocks.manage_blacklist')),
     -- The capability's resource values other than an impersonation target, in
-    -- the catalogue's key order. Concrete only: no Ranger wildcard (`*`, `?`)
-    -- and no macro marker (`{`, `}`), so a grant never names more than it says.
+    -- the catalogue's key order. The CHECKs below refuse what this table can
+    -- check alone: NULL and empty elements, surrounding whitespace, the
+    -- characters Ranger reads as wildcards (`*`, `?`) or macro markers (`{`,
+    -- `}`), and the wrong number of values. The per-kind shape (identifier and
+    -- function-signature patterns, length, lower-casing), that a catalog value
+    -- names a catalog the engine reaches, and that the capability belongs to
+    -- the engine's type are checked by the route and again by the compiler,
+    -- which skips a row that fails them; not here.
     resource_values text[] NOT NULL,
     -- The impersonation target, by IDENTITY, never by name (spec E21, amended
     -- 2026-10-18). A username freed by a hard delete can be minted again for
@@ -36,6 +42,9 @@ CREATE TABLE perm.engine_grants (
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
     CHECK (array_position(resource_values, NULL) IS NULL),
+    CHECK (array_position(resource_values, '') IS NULL),
+    CHECK (array_to_string(resource_values, chr(31))
+           !~ ('(^|' || chr(31) || ')\s|\s($|' || chr(31) || ')')),
     CHECK (array_to_string(resource_values, chr(31)) !~ '[*?{}]'),
     CHECK (cardinality(resource_values) = CASE capability
              WHEN 'trino.set_catalog_session_property' THEN 2

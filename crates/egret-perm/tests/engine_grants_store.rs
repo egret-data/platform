@@ -295,6 +295,16 @@ async fn the_table_refuses_what_a_grant_cannot_mean() {
             None,
         ),
         ("NULL element", sys, vec![None], None),
+        ("empty value", sys, vals(&[""]), None),
+        ("whitespace-only value", sys, vals(&["   "]), None),
+        ("leading whitespace", sys, vals(&[" q"]), None),
+        ("trailing whitespace", sys, vals(&["q\t"]), None),
+        (
+            "empty second value",
+            "trino.set_catalog_session_property",
+            vals(&["ice", ""]),
+            None,
+        ),
         (
             "impersonation with no target",
             "trino.impersonate_user",
