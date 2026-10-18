@@ -649,6 +649,7 @@ valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
 valids/variables
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by one more `WaitFor` iteration (3 PAUSED, golden 2) under `maxDuration: PT3S`/`PT1S`, the poller-latency shape `loop-until-restart` is held by (measured).
+# Debt D14 (2026-10-19): this entry can MATCH by accident under CPU load, and the ratchet then fails "PROGRESS NOT BANKED". The driver's Tick clock is real time since `executions.created_at` plus what `pass_time` adds, so a slow machine leaks wall time into it and `reached_maximums` (`src/executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early -- golden's 2 PAUSED. Not progress: it needs a virtual clock in the driver. Do not bank it on such a run.
 valids/waitfor-child-task-warning
 valids/webhook-plaintext
 valids/working-directory-invalid-runif
