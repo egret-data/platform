@@ -819,3 +819,115 @@ async fn the_pre_mint_sweep_mints_only_holders_of_a_role_the_model_names() {
         "a holder of a role nothing names is not minted"
     );
 }
+
+/// Two concurrent recompiles of DIFFERENT profiles that must both mint the same
+/// two unnamed people do not deadlock (2026-10-18 design R5 rebase).
+///
+/// The shape that used to: a compile mints per pass — the member pass (here a
+/// group's member, the HIGHER id) before the role pass (a role's holder, the
+/// LOWER id) — while `recompile_services_in_tx`'s pre-mint sweep mints
+/// ascending, lower first. Opposite orders over one pair of `users` rows. A
+/// third transaction holds the lower row so both recompiles are mid-mint when
+/// it lets go; before `recompile_service_in_tx` pre-minted too, whichever of
+/// them then took the lower row waited on the higher one the other held, and
+/// Postgres aborted one about half the time per round. Now both sweep
+/// ascending first and simply queue.
+#[tokio::test]
+async fn concurrent_recompiles_minting_the_same_people_in_opposite_orders_both_succeed() {
+    let Some(db) = test_db().await else { return };
+    let a = seed(&db).await;
+    let b = seed(&db).await;
+
+    for round in 0..4 {
+        let (lo, hi) = {
+            let (x, y) = (Uuid::new_v4(), Uuid::new_v4());
+            if x < y {
+                (x, y)
+            } else {
+                (y, x)
+            }
+        };
+        for id in [lo, hi] {
+            sqlx::query("INSERT INTO users (id, provider, email, name) VALUES ($1,'local',$2,'T')")
+                .bind(id)
+                .bind(format!("{}@egret.local", unique("dl")))
+                .execute(&db.pool)
+                .await
+                .expect("insert user");
+        }
+        let group = unique("dl-group");
+        let gid: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+            .bind(&group)
+            .fetch_one(&db.pool)
+            .await
+            .expect("group");
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1,$2)")
+            .bind(hi)
+            .bind(gid)
+            .execute(&db.pool)
+            .await
+            .expect("member");
+        let role = unique("dl-role");
+        let rid = new_role(&db, &role).await;
+        grant_role(&db, lo, rid).await;
+        a.perm
+            .create_grant(&read_grant(
+                a.catalog_id,
+                PrincipalSet {
+                    include: vec![
+                        Principal {
+                            kind: PrincipalKind::Group,
+                            r#ref: group.clone(),
+                        },
+                        role_principal(&role),
+                    ],
+                    exclude: vec![],
+                },
+            ))
+            .await
+            .expect("create grant");
+
+        let mut holder = db.pool.begin().await.expect("holder tx");
+        sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+            .bind(lo)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the lower row");
+
+        let single = {
+            let (perm, policy, sid) = (a.perm.clone(), a.policy.clone(), a.service_id);
+            tokio::spawn(async move { recompile_service(&perm, &policy, sid).await })
+        };
+        let set = {
+            let (pool, sid) = (db.pool.clone(), b.service_id);
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.expect("begin");
+                egret_perm_compile::recompile_services_in_tx(&mut tx, &[sid]).await?;
+                tx.commit()
+                    .await
+                    .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+                Ok::<_, egret_perm::CompileError>(())
+            })
+        };
+        // Let both reach the held row before it is released.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        holder.rollback().await.expect("release");
+
+        let single = single.await.expect("join");
+        let set = set.await.expect("join");
+        assert!(
+            single.is_ok(),
+            "round {round}: recompile_service: {single:?}"
+        );
+        assert!(
+            set.is_ok(),
+            "round {round}: recompile_services_in_tx: {set:?}"
+        );
+        for id in [lo, hi] {
+            assert!(
+                stored_username(&db, id).await.is_some(),
+                "round {round}: {id} minted"
+            );
+        }
+    }
+}

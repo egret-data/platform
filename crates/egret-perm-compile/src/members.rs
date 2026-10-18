@@ -208,9 +208,7 @@ pub(crate) async fn role_usernames(
     }
     if missing == MissingUsername::Mint {
         for user_id in unnamed {
-            let minted = ensure_username_via(conn, UserId(user_id))
-                .await
-                .map_err(|e| CompileError::Db(e.to_string()))?;
+            let minted = mint_for_compile(conn, user_id).await?;
             tracing::info!(
                 %user_id,
                 username = %minted,
@@ -254,10 +252,44 @@ pub(crate) async fn role_usernames(
     Ok(out)
 }
 
+/// Mint `user_id`'s username for a compile, under the one compile-mint lock.
+///
+/// **Why a lock as well as the ascending sweep.** [`premint_model_usernames`]
+/// mints everyone it can see in ascending id order, but it reads the model
+/// and the memberships statement by statement, under READ COMMITTED, and the
+/// passes after it read again: someone named, or left without a username,
+/// by a write that commits in between is minted by a pass, AFTER rows the
+/// sweep already locked, which is out of order. Two compiles doing that over
+/// one pair of people deadlock, as the sweep alone was meant to prevent. So
+/// every mint a compile makes first takes this transaction-scoped advisory
+/// lock: whoever holds a `users` row lock from a compile's mint holds it too,
+/// so two compiles never hold one row each while waiting for the other's.
+///
+/// It is taken AFTER the profile locks (every recompile entry locks its
+/// profiles before it compiles, `crate::trigger::recompile_service_in_tx`)
+/// and no compile asks for a profile lock while it holds it, so it adds no
+/// cycle with those; `crate::view_tags::lock_view_tags_in_tx` comes first in
+/// any transaction that takes both. Re-taking it in the same transaction is
+/// free, and nothing is taken when nobody needs a username — the steady state.
+/// A mint outside a compile (`ensure_username` on login or token issue, the
+/// People allocation route) touches one row and does not take it.
+async fn mint_for_compile(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<String, CompileError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    ensure_username_via(conn, UserId(user_id))
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))
+}
+
 /// Mint, in ONE ascending sweep, the username of every person a compile of
 /// the current model would mint, and return how many were minted (Task 3
-/// review; `crate::trigger::recompile_services_in_tx` calls it after the
-/// profile locks).
+/// review; every `crate::trigger` recompile entry calls it after the profile
+/// locks and before compiling).
 ///
 /// **Why a sweep before the passes.** Each expansion mints on its own: the
 /// member pass in [`expand_enumerated_principals`], then its role pass, then
@@ -268,56 +300,73 @@ pub(crate) async fn role_usernames(
 /// find names already set and take no `users` row lock at all.
 ///
 /// The set is a SUBSET of what the passes mint, never wider, because a mint is
-/// a write a compile must not make for someone it does not name: the same
-/// predicates as [`expand_enumerated_principals`] (workspace members, members
-/// of every non-`public` group) and [`role_usernames`] (holders of a role that
-/// a grant principal, a rule exemption or a clearance's `required_roles`
-/// names), over the whole model, which is what every recompile reads. A
-/// workspace ref matches only in its canonical text form here; a ref spelled
-/// otherwise is still minted by the member pass, just not in this sweep.
+/// a write a compile must not make for someone it does not name. It is built
+/// from the SAME shared reads the passes and People use —
+/// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
+/// over the refs the whole model holds (grant principals, rule exemptions, a
+/// clearance's `required_roles`; `public` excluded; a workspace ref parsed as
+/// the member pass parses it), which is what every recompile reads. No
+/// membership predicate is restated here, so a change to one moves this sweep
+/// with it.
 pub(crate) async fn premint_model_usernames(
     conn: &mut sqlx::PgConnection,
 ) -> Result<usize, CompileError> {
-    let unnamed: Vec<Uuid> = sqlx::query_scalar(
-        "WITH refs AS ( \
-             SELECT kind::text AS kind, ref FROM perm.grant_principals \
-             UNION SELECT kind::text, ref FROM perm.rule_exemptions \
-         ), role_names AS ( \
-             SELECT ref AS name FROM refs WHERE kind = 'role' \
-             UNION SELECT unnest(required_roles) FROM classification_policies \
-         ) \
-         SELECT u.id FROM users u \
-          WHERE u.username IS NULL \
-            AND ( EXISTS (SELECT 1 FROM access_grants ag \
-                           JOIN refs m ON m.kind = 'workspace_members' \
-                                      AND m.ref = ag.scope_id::text \
-                          WHERE ag.principal_id = u.id \
-                            AND ag.principal_type = 'user' \
-                            AND ag.scope_type = 'workspace' \
-                            AND ag.effect = 'allow' \
-                            AND (ag.expires_at IS NULL OR ag.expires_at > now())) \
-               OR EXISTS (SELECT 1 FROM user_groups ug \
-                           JOIN groups g ON g.id = ug.group_id \
-                           JOIN refs m ON m.kind = 'group' AND m.ref = g.name \
-                          WHERE ug.user_id = u.id AND g.name <> $1) \
-               OR EXISTS (SELECT 1 FROM access_grants ag \
-                           JOIN roles r ON r.id = ag.role_id \
-                           JOIN role_names rn ON rn.name = r.name \
-                          WHERE ag.principal_id = u.id \
-                            AND ag.principal_type = 'user' \
-                            AND ag.effect = 'allow' \
-                            AND (ag.expires_at IS NULL OR ag.expires_at > now())) ) \
-          ORDER BY u.id",
+    // The model's refs, by kind. Who each one stands for is then asked of the
+    // shared membership reads below, never of a copy of their predicates, so
+    // this sweep cannot drift from what the passes (and People) read.
+    let refs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind::text, ref FROM perm.grant_principals \
+         UNION SELECT kind::text, ref FROM perm.rule_exemptions \
+         UNION SELECT 'role', unnest(required_roles) FROM classification_policies",
     )
-    .bind(PUBLIC_GROUP)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut roles: BTreeSet<String> = BTreeSet::new();
+    let mut groups: BTreeSet<String> = BTreeSet::new();
+    let mut workspaces: BTreeSet<Uuid> = BTreeSet::new();
+    for (kind, r) in refs {
+        match kind.as_str() {
+            "role" => {
+                roles.insert(r);
+            }
+            "group" if r != PUBLIC_GROUP => {
+                groups.insert(r);
+            }
+            // Parsed, as the member pass parses it, so a non-canonical
+            // spelling is swept too; a ref that is no uuid names nobody.
+            "workspace_members" => {
+                if let Ok(id) = Uuid::parse_str(&r) {
+                    workspaces.insert(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    let roles: Vec<String> = roles.into_iter().collect();
+    let groups: Vec<String> = groups.into_iter().collect();
+    let workspaces: Vec<Uuid> = workspaces.into_iter().collect();
+
+    // A `BTreeSet`: the mints below lock `users` rows in ascending id order.
+    let mut unnamed: BTreeSet<Uuid> = BTreeSet::new();
+    for h in role_holders_via(conn, &roles).await? {
+        if h.username.is_none() {
+            unnamed.insert(h.user_id);
+        }
+    }
+    for m in group_members_via(conn, &groups).await? {
+        if m.username.is_none() {
+            unnamed.insert(m.user_id);
+        }
+    }
+    for m in workspace_members_via(conn, &workspaces).await? {
+        if m.username.is_none() {
+            unnamed.insert(m.user_id);
+        }
+    }
 
     for &user_id in &unnamed {
-        let minted = ensure_username_via(conn, UserId(user_id))
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+        let minted = mint_for_compile(conn, user_id).await?;
         tracing::info!(
             %user_id,
             username = %minted,
@@ -617,9 +666,7 @@ pub(crate) async fn expand_enumerated_principals(
         }
     }
     for user_id in to_mint {
-        let minted = ensure_username_via(conn, UserId(user_id))
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+        let minted = mint_for_compile(conn, user_id).await?;
         tracing::info!(
             %user_id,
             username = %minted,

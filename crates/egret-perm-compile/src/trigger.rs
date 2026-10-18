@@ -1296,7 +1296,39 @@ async fn record_compiled(
 /// transaction (`egret-bi::catalog_tags`'s tag write is exactly that case —
 /// same shape as `egret_perm::sync_assignment_grants_in_tx`). Does not
 /// commit; the caller does, same as that function.
+///
+/// **Locks, then pre-mints, then compiles — the order every recompile path
+/// takes.** A compile can mint usernames (group, workspace and, since the
+/// 2026-10-18 design R5, role expansion, plus the clearance compile), and each
+/// of those mints is ascending only WITHIN its own call; the calls together
+/// are not. Run alone that is harmless, but against a concurrent
+/// [`recompile_services_in_tx`], whose pre-mint sweep takes the same `users`
+/// row locks in one global ascending order, the two could each hold a row the
+/// other wanted, and Postgres killed one (observed: one full-suite run in
+/// seven, `tests/role_grants.rs`). So this entry takes the profile locks first
+/// (J-F3 order: profiles, then rows; re-taking a lock a caller already holds
+/// is free) and then runs the same ascending
+/// [`crate::members::premint_model_usernames`] sweep, after which the
+/// per-pass expansions find every name already minted and take no `users`
+/// lock at all. A caller that loops over several profiles must lock them all
+/// first ([`lock_services_in_tx`]), as every caller does today; the repeated
+/// sweep then finds nothing to mint. The sweep reads statement by statement,
+/// so a person a concurrent commit names after it is still minted by a pass,
+/// out of order; every compile mint therefore also takes one transaction-scoped
+/// lock (`crate::members::mint_for_compile`), which is what rules the cycle
+/// out — the sweep keeps it to one acquisition in the common case.
 pub async fn recompile_service_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<CompileSummary, CompileError> {
+    lock_services_in_tx(tx, &[service_id]).await?;
+    crate::members::premint_model_usernames(tx).await?;
+    recompile_locked_service_in_tx(tx, service_id).await
+}
+
+/// [`recompile_service_in_tx`] without its lock and pre-mint, for a caller
+/// that has already taken both over a whole set ([`recompile_services_in_tx`]).
+async fn recompile_locked_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
@@ -1896,7 +1928,7 @@ pub async fn recompile_services_in_tx(
     }
     let mut out = Vec::with_capacity(service_ids.len());
     for &service_id in service_ids {
-        let summary = recompile_service_in_tx(tx, service_id).await?;
+        let summary = recompile_locked_service_in_tx(tx, service_id).await?;
         if !summary.skipped.is_empty() {
             tracing::warn!(
                 service_id,

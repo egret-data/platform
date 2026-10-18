@@ -2,8 +2,9 @@
 //! or role as its members' answers, each exactly `POST /perm/explain`'s for
 //! that username (spec §4.3, P5, P6).
 //!
-//! Its own binary: `egret-test-db` gives it a private database. Tests in it
-//! run concurrently, each on its own profile, catalog, group and role.
+//! Its own binary: `egret-test-db` gives it a private database. Each test has
+//! its own profile, catalog, group and role, and they run one at a time
+//! (`SERIAL`).
 //!
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -27,7 +28,16 @@ fn tag() -> String {
     Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
+/// Held for a whole test, so the tests in this binary run one at a time.
+/// Every compile expands — and since the 2026-10-18 design R5 rebase pre-mints
+/// for — the WHOLE model, so one test's `grant_to` mints the username of a
+/// member another test deliberately left without one, and its "not
+/// evaluated: no username" assertion then fails for a reason that is not its
+/// own.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Env {
+    _serial: tokio::sync::MutexGuard<'static, ()>,
     db: Db,
     app: axum::Router,
     admin: String,
@@ -99,6 +109,7 @@ async fn session(db: &Db, sessions: &SessionService, role: Option<(&str, &str)>)
 /// A StarRocks profile with one bound engine and one attached catalog, and
 /// three sessions.
 async fn env() -> Option<Env> {
+    let serial = SERIAL.lock().await;
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -188,6 +199,7 @@ async fn env() -> Option<Env> {
         pdp,
     });
     Some(Env {
+        _serial: serial,
         db,
         app,
         admin,
