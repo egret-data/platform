@@ -29,6 +29,11 @@ fn count(n: usize) -> i32 {
 }
 
 /// Upsert `outcome = 'ok'` with `s`'s counts on the compile's transaction.
+///
+/// Both upserts stamp `clock_timestamp()` (when the compile ran, not when its
+/// transaction began: a transaction can begin before a failure is recorded and
+/// compile after it) and keep whichever attempt is newer, so the row is always
+/// the last attempt, whichever of the two was written last.
 pub(crate) async fn record_compile_ok_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
@@ -38,12 +43,14 @@ pub(crate) async fn record_compile_ok_in_tx(
         "INSERT INTO perm.compile_runs \
              (service_id, outcome, attempted_at, error, last_ok_at, \
               created, updated, deleted, unchanged, skipped) \
-         VALUES ($1, 'ok', now(), NULL, now(), $2, $3, $4, $5, $6) \
+         SELECT $1, 'ok', c.t, NULL, c.t, $2, $3, $4, $5, $6 \
+           FROM (SELECT clock_timestamp() AS t) c \
          ON CONFLICT (service_id) DO UPDATE SET \
              outcome = 'ok', attempted_at = EXCLUDED.attempted_at, error = NULL, \
              last_ok_at = EXCLUDED.last_ok_at, created = EXCLUDED.created, \
              updated = EXCLUDED.updated, deleted = EXCLUDED.deleted, \
-             unchanged = EXCLUDED.unchanged, skipped = EXCLUDED.skipped",
+             unchanged = EXCLUDED.unchanged, skipped = EXCLUDED.skipped \
+         WHERE perm.compile_runs.attempted_at <= EXCLUDED.attempted_at",
     )
     .bind(service_id)
     .bind(count(s.created))

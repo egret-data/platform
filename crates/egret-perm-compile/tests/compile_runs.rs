@@ -444,3 +444,57 @@ async fn a_failure_text_is_capped_and_its_profile_listed() {
         .await
         .expect("no row, no error");
 }
+
+/// Review I1: the ok row is stamped when the compile ran, not when its
+/// transaction began. A transaction that began before a failure was recorded
+/// and compiled after it is the newer attempt, and its row says so.
+#[tokio::test]
+async fn a_success_after_a_recorded_failure_is_the_newer_attempt() {
+    let Some(e) = env().await else { return };
+    let p = profile(&e).await;
+    let mut tx = e.db.pool.begin().await.unwrap();
+    // Fix the transaction's `now()` before the failure is recorded.
+    sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    egret_perm_compile::compile_runs::record_compile_failure(&e.db.pool, p.service_id, "boom")
+        .await
+        .expect("record");
+    let failed = run_of(&e, p.service_id).await.expect("an error row");
+    assert_eq!(failed.outcome, "error");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    recompile_services_in_tx(&mut tx, &[p.service_id])
+        .await
+        .expect("recompile");
+    tx.commit().await.unwrap();
+    let run = run_of(&e, p.service_id).await.expect("a row");
+    assert_eq!(run.outcome, "ok");
+    assert!(
+        run.attempted_at > failed.attempted_at,
+        "the success ran after the failure: {:?} vs {:?}",
+        run.attempted_at,
+        failed.attempted_at
+    );
+    assert_eq!(run.last_ok_at, Some(run.attempted_at));
+}
+
+/// Review I1: both upserts keep the newer attempt; a success never
+/// overwrites a newer stored attempt.
+#[tokio::test]
+async fn a_success_older_than_the_stored_attempt_changes_nothing() {
+    let Some(e) = env().await else { return };
+    let p = profile(&e).await;
+    sqlx::query(
+        "INSERT INTO perm.compile_runs (service_id, outcome, attempted_at, error) \
+         VALUES ($1, 'error', clock_timestamp() + interval '1 hour', 'later failure')",
+    )
+    .bind(p.service_id)
+    .execute(&e.db.pool)
+    .await
+    .unwrap();
+    recompile_service(&e.perm, &e.policy, p.service_id)
+        .await
+        .expect("recompile");
+    let run = run_of(&e, p.service_id).await.expect("a row");
+    assert_eq!(run.outcome, "error");
+    assert_eq!(run.error.as_deref(), Some("later failure"));
+}
