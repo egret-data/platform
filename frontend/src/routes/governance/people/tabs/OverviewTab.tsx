@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import type { GroupRef, MemberRef, Membership, MembershipScope, NotOnEngines, Via } from "@/api/generated/model";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Section } from "@/routes/governance/tabParts";
+import { Section, STACKED_TABLE } from "@/routes/governance/tabParts";
 import type { Principal } from "@/routes/governance/people/principalData";
 import { principalUrl } from "@/routes/governance/people/peopleUrl";
 
@@ -77,7 +77,7 @@ function Empty({ children }: { children: ReactNode }) {
 function GroupsTable({ rows }: { rows: Membership[] }) {
   if (rows.length === 0) return <Empty>No groups.</Empty>;
   return (
-    <Table>
+    <Table className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Group</TableHead>
@@ -88,7 +88,7 @@ function GroupsTable({ rows }: { rows: Membership[] }) {
         {rows.map((m, i) => (
           <TableRow key={i}>
             <TableCell>{m.via.kind === "group" ? <GroupLink name={m.via.name} /> : null}</TableCell>
-            <TableCell>{appliedText(m)}</TableCell>
+            <TableCell data-label="Applied on engines">{appliedText(m)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -100,7 +100,7 @@ function GroupsTable({ rows }: { rows: Membership[] }) {
 function RolesTable({ rows, through }: { rows: Membership[]; through: boolean }) {
   if (rows.length === 0) return <Empty>No roles.</Empty>;
   return (
-    <Table>
+    <Table className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Role</TableHead>
@@ -114,14 +114,14 @@ function RolesTable({ rows, through }: { rows: Membership[]; through: boolean })
         {rows.map((m, i) => (
           <TableRow key={i}>
             <TableCell>{m.role ? <RoleLink name={m.role} /> : null}</TableCell>
-            <TableCell>{scopeText(m.scope)}</TableCell>
+            <TableCell data-label="Scope">{scopeText(m.scope)}</TableCell>
             {through ? (
-              <TableCell>
+              <TableCell data-label="Through">
                 <Through via={m.via} />
               </TableCell>
             ) : null}
-            <TableCell className="whitespace-nowrap tabular-nums">{expiryText(m)}</TableCell>
-            <TableCell>{appliedText(m)}</TableCell>
+            <TableCell data-label="Expires" className="whitespace-nowrap tabular-nums">{expiryText(m)}</TableCell>
+            <TableCell data-label="Applied on engines">{appliedText(m)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -132,7 +132,7 @@ function RolesTable({ rows, through }: { rows: Membership[]; through: boolean })
 function WorkspacesTable({ rows, through }: { rows: Membership[]; through: boolean }) {
   if (rows.length === 0) return <Empty>No workspaces.</Empty>;
   return (
-    <Table>
+    <Table className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Workspace</TableHead>
@@ -146,14 +146,14 @@ function WorkspacesTable({ rows, through }: { rows: Membership[]; through: boole
         {rows.map((m, i) => (
           <TableRow key={i}>
             <TableCell>{workspaceName(m)}</TableCell>
-            <TableCell>{m.role ? <RoleLink name={m.role} /> : null}</TableCell>
+            <TableCell data-label="Role">{m.role ? <RoleLink name={m.role} /> : null}</TableCell>
             {through ? (
-              <TableCell>
+              <TableCell data-label="Through">
                 <Through via={m.via} />
               </TableCell>
             ) : null}
-            <TableCell className="whitespace-nowrap tabular-nums">{expiryText(m)}</TableCell>
-            <TableCell>{appliedText(m)}</TableCell>
+            <TableCell data-label="Expires" className="whitespace-nowrap tabular-nums">{expiryText(m)}</TableCell>
+            <TableCell data-label="Applied on engines">{appliedText(m)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -174,7 +174,7 @@ function MembersTable({ rows, of, empty }: { rows: MemberRef[]; of: "group" | "r
       ? "No username yet: a grant naming this group allocates one at compile"
       : "Not named on engines until they have a username";
   return (
-    <Table>
+    <Table className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Name</TableHead>
@@ -192,7 +192,7 @@ function MembersTable({ rows, of, empty }: { rows: MemberRef[]; of: "group" | "r
                 {m.serviceAccount ? <Badge variant="outline">Service account</Badge> : null}
               </div>
             </TableCell>
-            <TableCell>
+            <TableCell data-label="Username">
               {m.username ? (
                 <span className="break-all font-mono text-xs">{m.username}</span>
               ) : (
@@ -212,7 +212,7 @@ const SOURCE: Record<string, string> = { local: "Local", oidc: "OIDC" };
 function HolderGroupsTable({ rows }: { rows: GroupRef[] }) {
   if (rows.length === 0) return <Empty>No group holds this role.</Empty>;
   return (
-    <Table>
+    <Table className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Group</TableHead>
@@ -226,8 +226,8 @@ function HolderGroupsTable({ rows }: { rows: GroupRef[] }) {
             <TableCell>
               <GroupLink name={g.name} />
             </TableCell>
-            <TableCell>{SOURCE[g.source] ?? g.source}</TableCell>
-            <TableCell>egret only — not applied on engines</TableCell>
+            <TableCell data-label="Source">{SOURCE[g.source] ?? g.source}</TableCell>
+            <TableCell data-label="Applied on engines">egret only — not applied on engines</TableCell>
           </TableRow>
         ))}
       </TableBody>

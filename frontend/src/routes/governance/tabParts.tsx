@@ -51,6 +51,22 @@ export function Section({ title, children }: { title: string; children: ReactNod
 export const ACTIONS_CELL = "sticky right-0 w-24 bg-background";
 
 /**
+ * A table whose rows stack into cards below `sm` (People live check D6): the
+ * header row is hidden and each cell is a line of its own, labelled by its
+ * column through the cell's `data-label` (the first cell, the row's name,
+ * carries none). The facts a column states (applied on engines, effect,
+ * reason) are then on screen at 390 px, where an inner scroller hid them; the
+ * page still never scrolls sideways. From `sm` up it is an ordinary table.
+ * A pinned `ACTIONS_CELL` falls back into the card's flow.
+ */
+export const STACKED_TABLE = [
+  "max-sm:block max-sm:[&_thead]:hidden max-sm:[&_tbody]:block",
+  "max-sm:[&_tr]:block max-sm:[&_tr]:py-2",
+  "max-sm:[&_td]:static max-sm:[&_td]:block max-sm:[&_td]:w-auto max-sm:[&_td]:py-0.5 max-sm:[&_td]:text-left max-sm:[&_td]:whitespace-normal",
+  "max-sm:[&_td]:before:block max-sm:[&_td]:before:text-xs max-sm:[&_td]:before:text-muted-foreground max-sm:[&_td]:before:content-[attr(data-label)]",
+].join(" ");
+
+/**
  * I2: the grants a Data page lists are egret's (`GET /perm/grants`) only. Access
  * can also come from hand-written Ranger policies and from the engine policies
  * egret seeds itself (the platform-admin set, the per-user baseline, the

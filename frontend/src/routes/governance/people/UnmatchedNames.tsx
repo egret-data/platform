@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { TabError } from "@/routes/governance/tabParts";
+import { STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 
 const KIND: Record<string, string> = {
   user: "user",
@@ -90,7 +90,7 @@ export function UnmatchedNames({ q, onClearSearch }: { q: string; onClearSearch:
         Names stored in grants and rule exemptions that match nobody. One that widens access makes the compiled policy
         allow more than its grant or rule states.
       </p>
-      <Table>
+      <Table className={STACKED_TABLE}>
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
@@ -107,14 +107,14 @@ export function UnmatchedNames({ q, onClearSearch }: { q: string; onClearSearch:
                 <span className="text-xs text-muted-foreground">{KIND[r.kind] ?? r.kind}</span>{" "}
                 <span className="break-all font-mono text-xs">{r.ref}</span>
               </TableCell>
-              <TableCell className="whitespace-nowrap">
+              <TableCell data-label="Effect" className="whitespace-nowrap">
                 <Effect r={r} />
               </TableCell>
-              <TableCell>
+              <TableCell data-label="In">
                 <SourceLink r={r} />
               </TableCell>
-              <TableCell className="whitespace-nowrap">{positionText(r)}</TableCell>
-              <TableCell className="min-w-48">{r.reason}</TableCell>
+              <TableCell data-label="Position" className="whitespace-nowrap">{positionText(r)}</TableCell>
+              <TableCell data-label="Reason" className="min-w-48 max-sm:min-w-0">{r.reason}</TableCell>
             </TableRow>
           ))}
         </TableBody>

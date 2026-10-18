@@ -8,6 +8,7 @@ import type { GroupPrincipal, Membership, MemberRef, RolePrincipal, UserPrincipa
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
+import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
 
 type Answer = { status: number; body: unknown } | "never";
 
@@ -340,6 +341,7 @@ describe("principal page: Overview", () => {
     const sales = within(ws).getByText("Sales").closest("tr")!;
     expect(within(sales).getByText("reader")).toBeInTheDocument();
     expect(within(sales).getByText("egret only — not applied on engines: held through a group")).toBeInTheDocument();
+    for (const region of [groups, roles, ws]) expectStackedLabels(within(region).getByRole("table"));
   });
 
   it("a user with no username: memberships say so", async () => {
@@ -389,6 +391,7 @@ describe("principal page: Overview", () => {
     const groups = screen.getByRole("region", { name: "Groups holding this role" });
     const analysts = within(groups).getByRole("link", { name: "analysts" }).closest("tr")!;
     expect(within(analysts).getByText("egret only — not applied on engines")).toBeInTheDocument();
+    for (const region of [holders, groups]) expectStackedLabels(within(region).getByRole("table"));
   });
 
   it("an empty group says it has no members", async () => {

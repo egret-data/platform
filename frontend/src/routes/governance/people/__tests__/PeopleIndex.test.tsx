@@ -7,6 +7,7 @@ import type { Me } from "@/api/hooks";
 import type { PersonRow, UnresolvedPrincipal } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
 import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
 
 type Answer = { status: number; body: unknown } | "never";
@@ -295,6 +296,7 @@ describe("People index: Unmatched names", () => {
       .slice(1)
       .map((r) => within(r).getAllByRole("cell")[0].textContent);
     expect(names).toEqual(["role gone_role", "user ex_user", "user old_ana", "group nobody"]);
+    expectStackedLabels(table);
 
     const open1 = screen.getByText("gone_role").closest("tr")!;
     expect(within(open1).getByText("Widens access")).toBeInTheDocument();

@@ -16,7 +16,7 @@ import { AssignmentBadge } from "@/routes/governance/GrantDialog";
 import { grantDeleteDescription, grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { GrantSentenceText } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
-import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
+import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError, STACKED_TABLE } from "@/routes/governance/tabParts";
 import { principalTitle, workspaceNamesOf, type Principal } from "@/routes/governance/people/principalData";
 import {
   REACH_GROUPS,
@@ -247,7 +247,7 @@ function GrantTable({
   onDelete: (g: GrantView) => void;
 }) {
   return (
-    <Table aria-label={label}>
+    <Table aria-label={label} className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Grant</TableHead>
@@ -275,14 +275,14 @@ function GrantTable({
                   ) : null}
                 </div>
               </TableCell>
-              <TableCell className="whitespace-normal">
+              <TableCell data-label="How it reaches" className="whitespace-normal">
                 <ul role="list" className="space-y-0.5 text-sm">
                   {reach.map((r, i) => (
                     <li key={i}>{reachText(r)}</li>
                   ))}
                 </ul>
               </TableCell>
-              <TableCell>
+              <TableCell data-label="Effect">
                 {g.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
               </TableCell>
               {canWrite ? (

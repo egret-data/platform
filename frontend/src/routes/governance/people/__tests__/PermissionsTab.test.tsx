@@ -8,6 +8,7 @@ import type { GrantView, GroupPrincipal, StandsFor, UserPrincipal } from "@/api/
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
+import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
@@ -313,6 +314,8 @@ describe("a principal's Permissions tab", () => {
     open("/governance/people/users/u-ana?tab=permissions", EDITOR);
     const ws = await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Through a workspace" });
     expect(within(ws).queryByRole("button", { name: /^Edit|^Delete/ })).not.toBeInTheDocument();
+    // Live check D6: below sm each row is a card, with Effect labelled and the actions in its flow.
+    for (const table of within(tab()).getAllByRole("table")) expectStackedLabels(table);
 
     await userEvent.click(within(tab()).getByRole("button", { name: "Edit user ana can read and write ice.sales.*" }));
     const dialog = await screen.findByRole("dialog");
@@ -333,6 +336,7 @@ describe("a principal's Permissions tab", () => {
     open("/governance/people/users/u-ana?tab=permissions");
     await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Directly" });
     expect(within(tab()).queryByRole("button", { name: /^Edit|^Delete/ })).not.toBeInTheDocument();
+    for (const table of within(tab()).getAllByRole("table")) expectStackedLabels(table);
   });
 });
 
