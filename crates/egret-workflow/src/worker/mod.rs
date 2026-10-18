@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+mod force_close;
 pub mod handlers;
 pub mod k8s;
 mod kill;
@@ -130,7 +131,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
-pub use kill::{kill_execution, KillOutcome};
+pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;

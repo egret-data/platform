@@ -1734,8 +1734,9 @@ async fn finish_claimed_kill(
 }
 
 /// Whether `e` is a [`WorkerError`] about the row's own content rather than
-/// I/O. A downcast, for [`no_handler_type`]'s reason.
-fn row_content_fault(e: &Error) -> bool {
+/// I/O. A downcast, for [`no_handler_type`]'s reason. Also `worker::kill`'s,
+/// for the force-close (debt §2.2).
+pub(super) fn row_content_fault(e: &Error) -> bool {
     matches!(e, Error::Internal(a) if a.downcast_ref::<WorkerError>().is_some_and(WorkerError::is_row_content))
 }
 
@@ -2449,10 +2450,45 @@ async fn commit_kill(pool: &PgPool, claimed: &Claimed, held: DateTime<Utc>) -> R
 /// attempt's end by `stamp_attempt_ends`, `claimed_at` cleared as the lease's
 /// release -- and runs `advance()`, which closes a `KILLING` execution whose
 /// last live run this was.
+///
+/// **An execution that cannot be loaded is closed by force** (debt D4,
+/// `worker::force_close`): the run is closed `KILLED` there when it is still
+/// this lease's, which is the answer, and so is every other live run no
+/// worker holds. Before, the load's error rolled the commit back, the lease
+/// lapsed and the reaper handed the run to the next kill-only claim, which
+/// failed the same way, every `working_timeout`, for ever. The route already
+/// audited the kill, so this side only logs.
 async fn commit_kill_with(at: &mut Txn, claimed: &Claimed) -> Result<bool> {
     let (conn, gate) = at.parts();
-    let (ctx, mut state, now) =
-        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
+    let (ctx, mut state, now) = match load(conn, claimed.execution_id, Stack::Fresh(gate.clone()))
+        .await
+    {
+        Ok(loaded) => loaded,
+        Err(e) if row_content_fault(&e) => {
+            let why = super::force_close::reason(&e);
+            let closed = super::force_close::close(
+                conn,
+                claimed.execution_id,
+                &why,
+                Some((claimed.id, claimed.claimed_at)),
+                Stack::Fresh(gate.clone()).caller(),
+            )
+            .await?;
+            tracing::warn!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                task_id = %claimed.task_id,
+                error = %why,
+                outcome = closed.state.wire(),
+                "the execution of this killed run could not be loaded, so it was closed by force"
+            );
+            for job in closed.reported {
+                run_job(conn, job).await?;
+            }
+            return Ok(closed.own);
+        }
+        Err(e) => return Err(e),
+    };
     let fenced: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM workflow.task_runs \
           WHERE id = $1 AND claimed_at = $2 AND state = 'KILLING' FOR UPDATE",
@@ -2844,11 +2880,21 @@ pub(super) async fn settle(
     .await
 }
 
-/// [`settle`] of a frame its caller built: the kill route's settle of each
+/// [`settle`] of a job its caller built: the kill route's settle of each
 /// descendant it has loaded and killed (`worker::kill`), each at the top of
-/// its own walk, in lock order.
-pub(super) async fn run_frame(conn: &mut PgConnection, frame: Frame<'static>) -> Result<()> {
-    walk(conn, frame).await
+/// its own walk, in lock order, and a force-close's report to its parent
+/// (`worker::force_close`, debt §2.2 rule 5).
+pub(super) async fn run_job(conn: &mut PgConnection, job: Job) -> Result<()> {
+    match job {
+        Job::Settle(frame) => walk(conn, *frame).await,
+        Job::Complete(completion) => {
+            match Box::pin(subflow::open_completion(conn, completion)).await? {
+                Some(frame) => walk(conn, frame).await,
+                None => Ok(()),
+            }
+        }
+        Job::Report(settled) => walk_tail(conn, settled).await,
+    }
 }
 
 /// The context a [`Frame`] settles: the owner's own, for the settle an owner
@@ -2950,6 +2996,25 @@ pub(super) enum Job {
     /// message, apply the states, and settle -- opened when the walk reaches
     /// it, which is where the call used to run.
     Complete(subflow::Completion),
+    /// A settle's tail with no head: tell the parent of an execution that
+    /// `worker::force_close` closed without a plan (debt §2.2 rule 5). The
+    /// parent is loaded when the walk reaches it, not when the job is made,
+    /// so a parent whose own kill settles earlier in the same walk is read
+    /// as that settle left it.
+    Report(Settled),
+}
+
+impl Job {
+    /// [`Job::Report`]: `execution` reached `terminal` outside any settle,
+    /// and a load nested in its report sits inside `caller`'s frame.
+    pub(super) fn report(execution: Uuid, terminal: RunState, caller: Caller) -> Self {
+        Job::Report(Settled {
+            id: execution,
+            terminal: notifies_parent(terminal).then_some(terminal),
+            caller,
+            outage: None,
+        })
+    }
 }
 
 /// Where a [`Frame`]'s head has got to: steps 1-3 of the settle and the
@@ -3027,11 +3092,19 @@ enum Step<'a> {
 ///
 /// An `Err` returns at once, as the `?` of the recursion did.
 ///
-/// Private, and called only by [`settle`] and [`run_frame`], which only the
+/// Private, and called only by [`settle`] and [`run_job`], which only the
 /// transaction owners call: no other function can run a settle, so nothing a
 /// settle calls can nest one.
 async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
-    let mut steps: Vec<Step<'a>> = vec![Step::Frame(Box::new(top))];
+    walk_from(conn, vec![Step::Frame(Box::new(top))]).await
+}
+
+/// [`walk`] of a settle's tail alone: [`Job::Report`].
+async fn walk_tail(conn: &mut PgConnection, settled: Settled) -> Result<()> {
+    walk_from(conn, vec![Step::Loop(settled)]).await
+}
+
+async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Result<()> {
     while let Some(step) = steps.pop() {
         match step {
             Step::Frame(mut frame) => {
@@ -3046,6 +3119,7 @@ async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
                 }
             }
             Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
+            Step::Job(Job::Report(settled)) => steps.push(Step::Loop(settled)),
             Step::Job(Job::Complete(completion)) => {
                 if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
                     steps.push(Step::Frame(Box::new(frame)));
@@ -3993,6 +4067,16 @@ pub(super) enum Stack {
 }
 
 impl Stack {
+    /// The [`Caller`] a load nested inside the execution this stack loads
+    /// would pass: [`ExecutionCtx::caller`] of the context it would build.
+    /// For `worker::force_close`, which builds no context.
+    pub(super) fn caller(&self) -> Caller {
+        Caller {
+            depth: self.depth(),
+            gate: self.gate(),
+        }
+    }
+
     /// [`ExecutionCtx::depth`] for the context this load is building.
     fn depth(&self) -> usize {
         match self {
