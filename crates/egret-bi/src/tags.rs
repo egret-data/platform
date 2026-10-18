@@ -347,6 +347,20 @@ impl TagRepo {
         // In the SAME transaction, like every other recompile on this seam: the
         // alternative is a committed delete with a deny nobody can remove.
         let mut tx = self.db.pool.begin().await?;
+        // The locks every other writer of a tag's rows takes, and in their
+        // order, BEFORE the delete row-locks the tag: the view-tag lock first,
+        // then the profiles the clearance recompile below locks, then the
+        // compile-mint lock (`egret_perm_compile::lock_compile_mints_in_tx`).
+        // `set_policy` and a catalog-tag write take their profile and mint
+        // locks before an insert whose `tag_id` foreign key needs `FOR KEY
+        // SHARE` on this tag. Deleting first and locking profiles only at the
+        // recompile was the opposite order, and the two deadlocked.
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx).await?;
+        let services = egret_perm_compile::affected_services_for_classification(&mut tx).await?;
+        if !services.is_empty() {
+            egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
+            egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
+        }
         let affected = sqlx::query("DELETE FROM tags WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)

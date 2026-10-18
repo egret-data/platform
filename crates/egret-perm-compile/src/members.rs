@@ -277,8 +277,9 @@ pub(crate) async fn role_usernames(
 /// touching a user-referencing row calls this right after its profile locks,
 /// BEFORE that write: the group-membership port
 /// (`PermGroupRecompiler::lock_affected_in_tx`, which every membership writer
-/// and `UserRepo::hard_delete` goes through), the catalog-tag write and the
-/// classification write (`egret-bi`). A writer whose own row writes take no
+/// and `UserRepo::hard_delete` goes through), the catalog-tag write, the
+/// classification write and the tag delete (`egret-bi`; the delete because
+/// its row lock on the tag meets those writes' `tag_id` foreign keys). A writer whose own row writes take no
 /// lock on a `users` row (a grant, a rule, an `access_grants` row, which has
 /// no foreign key to `users`) may leave it to the compile.
 ///
@@ -290,6 +291,25 @@ pub(crate) async fn role_usernames(
 /// same transaction is free. A mint outside a compile — `ensure_username` on
 /// login or token issue, the People allocation route — touches one row in its
 /// own short transaction and does not take it.
+///
+/// **What it costs.** The lock is global and held until commit. Every writer
+/// that takes it early therefore serialises installation-wide behind every
+/// other one, and behind any recompile that has someone to mint: an OIDC login
+/// whose claims change a group the model names, an admin's group-member write,
+/// a user's hard delete, a catalog-tag write, a clearance `set_policy` and a
+/// tag delete. A recompile with nobody to mint never takes it. This is the
+/// price of ruling the deadlock out. Taking it per user instead would need
+/// every writer to know, before its write, which users the compile will mint.
+///
+/// **Known gap (not closed).** A writer that takes this lock early and then
+/// recompiles reads its profile set again: `retag_bump_and_recompile`'s
+/// `services_bound_to_warehouses`, `recompile_for_clearance_in_tx`'s
+/// `affected_services_for_classification`, and `lock_services_in_tx`'s
+/// tag-service expansion. If that set grew in between (a profile bound or
+/// attached concurrently), the new profile is locked while this lock is held,
+/// against the stated order, and can deadlock with a compile of that profile.
+/// Closing it means refusing with a retryable error when the set grows, or
+/// taking those late profile locks `NOWAIT`.
 pub async fn lock_compile_mints_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
         .execute(&mut *conn)
