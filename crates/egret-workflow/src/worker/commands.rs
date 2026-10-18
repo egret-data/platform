@@ -2511,6 +2511,12 @@ pub const RUN_NAME_PREFIX: &str = "egret-run-";
 #[async_trait::async_trait]
 pub trait OrphanSweep: Send + Sync {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64>;
+
+    /// How long a kept (`delete: false`) container or pod outlives its run
+    /// before this sweep removes it; `None` is for ever (workflow debt D3).
+    /// Required, not defaulted, so a runner cannot forget to answer, and so
+    /// the deployment's wiring (`runtime::handlers_for`) is observable.
+    fn kept_retention(&self) -> Option<std::time::Duration>;
 }
 
 /// Of `ids`, which `task_runs` rows are terminal (and since when), and which
@@ -2530,8 +2536,14 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
         .filter(|s| s.is_terminal())
         .map(|s| s.wire())
         .collect();
-    let rows: Vec<(uuid::Uuid, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT id, state = ANY($2), COALESCE(ended_at, updated_at) \
+    type Row = (
+        uuid::Uuid,
+        bool,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, state = ANY($2), COALESCE(ended_at, updated_at), now() \
          FROM workflow.task_runs WHERE id = ANY($1)",
     )
     .bind(ids)
@@ -2545,8 +2557,9 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
     })?;
     let mut out = RunLiveness::default();
     let mut seen = std::collections::HashSet::new();
-    for (id, is_terminal, ended) in rows {
+    for (id, is_terminal, ended, now) in rows {
         seen.insert(id);
+        out.now = Some(now);
         if is_terminal {
             out.terminal.insert(id);
             out.ended.insert(id, ended);
@@ -2568,6 +2581,11 @@ pub(crate) struct RunLiveness {
     /// When each [`terminal`](Self::terminal) run ended:
     /// `COALESCE(ended_at, updated_at)`.
     pub ended: std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>,
+    /// The database's `now()` when it answered: the clock a deadline is
+    /// measured on, so [`ended`](Self::ended) and "now" come from ONE clock
+    /// and a skewed worker clock cannot sweep early. `None` only when no row
+    /// matched, and then nothing is terminal and nothing is compared.
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
     /// No row at all (the execution was deleted, cascading its runs — or the
     /// work belongs to ANOTHER egret sharing the backend).
     pub missing: std::collections::HashSet<uuid::Uuid>,
@@ -2648,7 +2666,7 @@ impl OrphanSweep for DockerRunner {
         }
         let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id, _)| *id).collect();
         let live = run_liveness(pool, &ids).await?;
-        let now = chrono::Utc::now();
+        let now = live.now.unwrap_or_else(chrono::Utc::now);
         let mut removed = 0u64;
         for (name, id, keep) in &listed {
             if !sweep_decision(&live, *id, *keep, self.kept_retention, now) {
@@ -2665,6 +2683,10 @@ impl OrphanSweep for DockerRunner {
             }
         }
         Ok(removed)
+    }
+
+    fn kept_retention(&self) -> Option<std::time::Duration> {
+        self.kept_retention
     }
 }
 

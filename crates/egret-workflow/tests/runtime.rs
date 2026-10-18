@@ -2821,6 +2821,10 @@ impl egret_workflow::worker::commands::OrphanSweep for CountingSweep {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(0)
     }
+
+    fn kept_retention(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// **The reaper's tick calls the registry's orphan sweep** (W5a spec §5,

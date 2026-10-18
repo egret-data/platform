@@ -754,6 +754,12 @@ pub struct WorkflowConfig {
     /// `ended_at`. Kestra keeps them for ever; egret bounds them because the
     /// Docker runner has no disk bound. Not a chart value, like the other
     /// workflow tuning keys.
+    ///
+    /// **A kept container whose run has no row is never swept.** The sweep
+    /// removes only work whose run THIS database sees as terminal; one it has
+    /// no row for may be another egret's on a shared daemon or namespace. So
+    /// deleting an execution (its task runs cascade) leaves its kept
+    /// containers or pods behind for an operator to remove.
     /// `EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS=7`.
     #[serde(default = "default_kept_container_retention_days")]
     pub kept_container_retention_days: u32,

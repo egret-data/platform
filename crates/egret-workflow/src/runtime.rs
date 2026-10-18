@@ -745,43 +745,55 @@ pub async fn handlers_for(
     // `workflow.task_logs` rows, scoped to the flow's namespace).
     crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
     let kept_retention = kept_retention(cfg.kept_container_retention_days);
-    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
-        .container_runner
-    {
-        egret_config::ContainerRunner::None => return Ok((handlers, None)),
-        egret_config::ContainerRunner::Docker => {
-            let mut r = DockerRunner::new()
-                .with_logs(LogRepo::new(pool.clone()))
-                .with_kept_retention(kept_retention);
-            // W9a Task 5: stored inputs stream from the installed store.
-            if let Some(files) = crate::storage::current() {
-                r = r.with_files(files);
-            }
-            let r = Arc::new(r);
-            (RunnerKind::Docker, r.clone(), r)
-        }
-        egret_config::ContainerRunner::Kubernetes => {
-            let pod = pod_config(&cfg.kubernetes);
-            pod.validate()
-                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
-            let client = kube::Client::try_default().await.map_err(|e| {
-                egret_core::Error::Internal(anyhow::anyhow!(
-                    "workflow.container_runner is kubernetes but no cluster client could be \
-                         built: {e}"
-                ))
-            })?;
-            let mut r =
-                crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool.clone()))
+    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
+        match cfg.container_runner {
+            egret_config::ContainerRunner::None => return Ok((handlers, None)),
+            egret_config::ContainerRunner::Docker => {
+                let mut r = DockerRunner::new()
+                    .with_logs(LogRepo::new(pool.clone()))
                     .with_kept_retention(kept_retention);
-            if let Some(files) = crate::storage::current() {
-                r = r.with_files(files);
+                // W9a Task 5: stored inputs stream from the installed store.
+                if let Some(files) = crate::storage::current() {
+                    r = r.with_files(files);
+                }
+                let r = Arc::new(r);
+                (RunnerKind::Docker, r.clone(), r)
             }
-            let r = Arc::new(r);
-            (RunnerKind::Kubernetes, r.clone(), r)
-        }
-    };
+            egret_config::ContainerRunner::Kubernetes => {
+                let pod = pod_config(&cfg.kubernetes);
+                pod.validate()
+                    .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+                let client = kube::Client::try_default().await.map_err(|e| {
+                    egret_core::Error::Internal(anyhow::anyhow!(
+                        "workflow.container_runner is kubernetes but no cluster client could be \
+                         built: {e}"
+                    ))
+                })?;
+                let r = Arc::new(kubernetes_runner(cfg, client, pod, pool.clone()));
+                (RunnerKind::Kubernetes, r.clone(), r)
+            }
+        };
     register_runner_tasks(&mut handlers, cfg, kind, runner, pool, secrets);
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))
+}
+
+/// The Kubernetes arm of [`handlers_for`] once it has a cluster client: the
+/// runner over `client`, with the re-attach window, the installed store and
+/// the kept-pod deadline (debt D3). A function of its own so a unit test
+/// reaches it with a client that never connects -- `handlers_for` itself
+/// builds one from the environment.
+fn kubernetes_runner(
+    cfg: &egret_config::WorkflowConfig,
+    client: kube::Client,
+    pod: crate::worker::k8s::PodConfig,
+    pool: PgPool,
+) -> crate::worker::k8s::KubernetesRunner {
+    let mut r = crate::worker::k8s::KubernetesRunner::new(client, pod, LogRepo::new(pool))
+        .with_kept_retention(kept_retention(cfg.kept_container_retention_days));
+    if let Some(files) = crate::storage::current() {
+        r = r.with_files(files);
+    }
+    r
 }
 
 /// `workflow.kept_container_retention_days` as the runners take it (debt D3):
@@ -1111,6 +1123,45 @@ mod tests {
             Arc::new(NoSecrets),
         );
         assert_eq!(served_for(&cfg), Served::from_handlers(&h));
+    }
+
+    /// **Debt D3, the deployment's wiring:** `handlers_for`'s Docker arm hands
+    /// the reaper a sweep carrying `kept_container_retention_days` -- `3`
+    /// becomes three days, `0` becomes `None` (for ever). The runners default
+    /// to `None`, so without this a dropped `with_kept_retention` in the arm
+    /// would keep every container for ever with every other test green.
+    #[tokio::test]
+    async fn handlers_for_gives_the_docker_sweep_the_configured_retention() {
+        use crate::worker::Registry as _;
+        let mut c = cfg(egret_config::ContainerRunner::Docker);
+        for (days, want) in [(3, Some(Duration::from_secs(3 * 86_400))), (0, None)] {
+            c.kept_container_retention_days = days;
+            let (h, _) = handlers_for(&c, unconnected_pool(), Arc::new(NoSecrets))
+                .await
+                .expect("builds without a daemon");
+            let sweep = h.orphan_sweep().expect("the runner is the sweep");
+            assert_eq!(sweep.kept_retention(), want, "{days} day(s)");
+        }
+    }
+
+    /// The same for the Kubernetes arm, through the function the arm builds
+    /// its runner with ([`kubernetes_runner`]), over a client that never
+    /// connects (`handlers_for` builds its client from the environment).
+    #[tokio::test]
+    async fn the_kubernetes_arm_gives_its_sweep_the_configured_retention() {
+        use crate::worker::commands::OrphanSweep as _;
+        // What egret-bin's `main` installs first; a kube client needs it.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut c = cfg(egret_config::ContainerRunner::Kubernetes);
+        for (days, want) in [(3, Some(Duration::from_secs(3 * 86_400))), (0, None)] {
+            c.kept_container_retention_days = days;
+            let client = kube::Client::try_from(kube::Config::new(
+                "http://127.0.0.1:1".parse().expect("a URL"),
+            ))
+            .expect("a client that never connects");
+            let r = kubernetes_runner(&c, client, pod_config(&c.kubernetes), unconnected_pool());
+            assert_eq!(r.kept_retention(), want, "{days} day(s)");
+        }
     }
 
     #[test]

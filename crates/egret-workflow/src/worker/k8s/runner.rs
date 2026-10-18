@@ -1490,6 +1490,10 @@ impl OrphanSweep for KubernetesRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
         sweep_orphans(&self.client, &self.cfg, pool, self.kept_retention).await
     }
+
+    fn kept_retention(&self) -> Option<Duration> {
+        self.kept_retention
+    }
 }
 
 /// **The pod half of the orphan sweep** (spec §5, *Orphans*): delete every
@@ -1548,7 +1552,7 @@ pub async fn sweep_orphans(
     }
     let ids: Vec<uuid::Uuid> = candidates.iter().map(|(_, id, _)| *id).collect();
     let live = run_liveness(pool, &ids).await?;
-    let now = Utc::now();
+    let now = live.now.unwrap_or_else(Utc::now);
     let mut deleted = 0u64;
     for (name, id, keep) in candidates {
         if live.missing.contains(&id) {
