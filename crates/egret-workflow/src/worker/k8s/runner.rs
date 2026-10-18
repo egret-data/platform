@@ -1414,7 +1414,13 @@ impl TaskRunner for KubernetesRunner {
     /// there then (or an API server that never answered) is a WARN and
     /// `Ok(())`, since the outcome is the budget's either way (`cancel.rs`
     /// fact 2). [`release`](TaskRunner::release) then deletes with grace 0.
-    async fn cancel(&self, task: &TaskInput, grace: Duration) -> Result<()> {
+    ///
+    /// **`delete: false` is deleted too** (debt D2, 2026-10-19): a pod cannot
+    /// be stopped without being deleted; `spec.delete` is not read here. The
+    /// only other way, an exec of `kill` inside the author's image, is
+    /// fragile; the divergence from Docker's kept container (D1) is written
+    /// in the workflow kill spec §4.2.
+    async fn cancel(&self, task: &TaskInput, grace: Duration, _spec: &RunnerSpec) -> Result<()> {
         let name = pod_name(task.run_id, attempt_of(task));
         if grace.is_zero() {
             return self.delete_pod(&name).await;
@@ -2292,9 +2298,16 @@ mod tests {
         let task = crate::worker::handlers::testing::input("t", serde_json::Value::Null);
         let grace = Duration::from_secs(1);
         let started = tokio::time::Instant::now();
-        let out = tokio::time::timeout(Duration::from_secs(30), runner.cancel(&task, grace))
-            .await
-            .expect("cancel returned: it is bounded, not the kube client's 295 s");
+        let out = tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.cancel(
+                &task,
+                grace,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Kubernetes),
+            ),
+        )
+        .await
+        .expect("cancel returned: it is bounded, not the kube client's 295 s");
         let took = started.elapsed();
         assert!(out.is_ok(), "past the bound it is a WARN and Ok: {out:?}");
         assert!(

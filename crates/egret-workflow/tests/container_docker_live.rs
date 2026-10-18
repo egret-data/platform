@@ -872,7 +872,7 @@ async fn docker_cancel_with_grace_lets_a_sigterm_trap_run() {
 
     let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
     let name = container_name(&t);
-    r.cancel(&t, std::time::Duration::from_secs(10))
+    r.cancel(&t, std::time::Duration::from_secs(10), &docker_spec())
         .await
         .expect("cancel with a grace");
     assert!(
@@ -885,12 +885,12 @@ async fn docker_cancel_with_grace_lets_a_sigterm_trap_run() {
         "SIGTERM reached PID 1's trap within the grace: {:?}",
         rec.lines()
     );
-    r.cancel(&t, std::time::Duration::from_secs(10))
+    r.cancel(&t, std::time::Duration::from_secs(10), &docker_spec())
         .await
         .expect("stopping a container that is not there is Ok, as `rm` is");
 
     let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
-    r.cancel(&t, std::time::Duration::ZERO)
+    r.cancel(&t, std::time::Duration::ZERO, &docker_spec())
         .await
         .expect("cancel with grace 0");
     assert!(!container_exists(&container_name(&t)));
@@ -911,7 +911,7 @@ async fn docker_cancel_returns_only_after_the_container_stopped() {
 
     let (t, rec, running) = start_running(&r, trapping("sleep 3; echo slow-term; exit 0")).await;
     let started = std::time::Instant::now();
-    r.cancel(&t, std::time::Duration::from_secs(20))
+    r.cancel(&t, std::time::Duration::from_secs(20), &docker_spec())
         .await
         .expect("cancel");
     let took = started.elapsed();
@@ -936,7 +936,7 @@ async fn docker_cancel_returns_only_after_the_container_stopped() {
     // then -- within grace + CANCEL_WAIT_MARGIN.
     let (t, _rec, running) = start_running(&r, trapping("")).await;
     let started = std::time::Instant::now();
-    r.cancel(&t, std::time::Duration::from_secs(2))
+    r.cancel(&t, std::time::Duration::from_secs(2), &docker_spec())
         .await
         .expect("cancel");
     let took = started.elapsed();
@@ -2151,17 +2151,19 @@ async fn namespace_files_are_staged_into_the_container_as_the_artifact_does() {
 //
 // With `taskRunner.delete: false` release keeps the container, so the only
 // call left that can stop it is the kill's `cancel` (`DockerRunner::cancel`
-// with the script handler's zero grace: `rm --force`). The case asserts the
-// container is not running and not there; without the cancel it is still
-// running `sleep 600` (measured: with `end_kill`'s cancel removed, this case
-// fails on "still running", and the other two pass their daemon assertions
-// and fail only on the worker's own record of the cancel).
+// with the script handler's zero grace and the task's own spec: `docker stop
+// -t 0`, debt D1). The case asserts the container is not running and is
+// still there, exited; without the cancel it is still running `sleep 600`
+// (measured before D1: with `end_kill`'s cancel removed, this case fails on
+// "still running", and the other two pass their daemon assertions and fail
+// only on the worker's own record of the cancel).
 //
 // The other direction does not exist on Docker: the kill's release cannot
-// be seen from the daemon, because the cancel has already removed the
-// container and `rm --force` of an absent name succeeds (measured: with
-// `end_kill`'s release removed, all three cases pass). That the kill path
-// releases is pinned without a daemon (`tests/worker.rs`, `KillRecorder`).
+// be seen from the daemon, because the cancel has already removed a `delete:
+// true` container (`rm --force` of an absent name succeeds) and release
+// leaves a kept one alone (measured before D1: with `end_kill`'s release
+// removed, all three cases pass). That the kill path releases is pinned
+// without a daemon (`tests/worker.rs`, `KillRecorder`).
 
 /// How often the live worker checks its run for a kill.
 const KILL_POLL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -2497,12 +2499,14 @@ async fn kill_stops_a_running_container() {
     killed.assert_the_worker_cancelled_once();
 }
 
-/// **The cancel, not the release, is what stops a killed container.** With
-/// `taskRunner.delete: false` release keeps the container, so only the
-/// kill's `cancel` can stop it -- see this section's doc. After the kill it
-/// is not running, and is gone: the Docker runner's zero-grace cancel is
-/// `rm --force` (`DockerRunner::cancel`).
-async fn a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false() {
+/// **A killed `delete: false` container is stopped and kept** (debt D1,
+/// decided 2026-10-18). With `taskRunner.delete: false` release keeps the
+/// container, so only the kill's `cancel` can stop it -- see this section's
+/// doc. After the kill it is not running, and is still there, exited: the
+/// Docker runner's cancel of a kept container is `docker stop -t <grace>`
+/// only, as Kestra's `Docker.cleanupContainer` removes only when `delete`
+/// (`DockerRunner::cancel`).
+async fn a_killed_delete_false_container_is_stopped_and_kept() {
     let w = KillWorld::new().await;
     let runner = format!(
         "      type: {}\n      delete: false\n",
@@ -2512,13 +2516,17 @@ async fn a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false()
     let name = &killed.name;
     assert!(
         !container_running(name),
-        "{name} is still running after its run was KILLED: nothing stopped it"
+        "{name} is still running after its run was KILLED"
     );
     assert!(
-        !container_exists(name),
-        "{name} remains after the kill's cancel"
+        container_exists(name),
+        "{name} was removed: `delete: false` keeps a killed container (debt D1)"
     );
     killed.assert_the_worker_cancelled_once();
+    // The case removes what it kept, so the daemon is left as it was found.
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "--force", name])
+        .status();
 }
 
 /// **Spec §8 and §4.3 (live): a kill survives the worker dying.** The first
@@ -2664,7 +2672,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_reattached_container_is_collected_under_the_same_uris),
         case!(namespace_files_are_staged_into_the_container_as_the_artifact_does),
         case!(kill_stops_a_running_container),
-        case!(a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false),
+        case!(a_killed_delete_false_container_is_stopped_and_kept),
         case!(a_kill_survives_the_worker_dying),
     ]
 }

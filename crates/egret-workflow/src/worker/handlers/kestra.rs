@@ -802,7 +802,11 @@ impl TaskHandler for Kestra {
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         self.rt
             .runner
-            .cancel(task, Duration::from_secs(self.rt.host.kill_grace_s))
+            .cancel(
+                task,
+                Duration::from_secs(self.rt.host.kill_grace_s),
+                &RunnerSpec::defaults(self.rt.runner_kind),
+            )
             .await
     }
 

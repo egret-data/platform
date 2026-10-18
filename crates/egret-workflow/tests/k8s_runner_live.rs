@@ -855,7 +855,13 @@ async fn cancel_deletes_the_pod() {
     });
     wait_main_running(&c, &name).await;
     let started = std::time::Instant::now();
-    r.cancel(&t, Duration::ZERO).await.expect("cancel");
+    r.cancel(
+        &t,
+        Duration::ZERO,
+        &RunnerSpec::defaults(RunnerKind::Kubernetes),
+    )
+    .await
+    .expect("cancel");
     assert!(
         wait_gone(&c, &name, Duration::from_secs(20)).await,
         "cancel deletes the pod"
@@ -870,9 +876,13 @@ async fn cancel_deletes_the_pod() {
     );
     assert!(started.elapsed() < Duration::from_secs(60));
     // A second cancel of a pod that is not there is Ok.
-    r.cancel(&t, Duration::ZERO)
-        .await
-        .expect("cancelling nothing is Ok");
+    r.cancel(
+        &t,
+        Duration::ZERO,
+        &RunnerSpec::defaults(RunnerKind::Kubernetes),
+    )
+    .await
+    .expect("cancelling nothing is Ok");
 }
 
 /// **W5b Task 5: `cancel` with a grace deletes the pod with that grace and
@@ -916,9 +926,13 @@ async fn k8s_cancel_with_grace_waits_for_termination_then_release_deletes() {
     assert!(ready, "main never printed `ready`: {:?}", rec.lines());
 
     let started = std::time::Instant::now();
-    r.cancel(&t, Duration::from_secs(30))
-        .await
-        .expect("cancel with a grace");
+    r.cancel(
+        &t,
+        Duration::from_secs(30),
+        &RunnerSpec::defaults(RunnerKind::Kubernetes),
+    )
+    .await
+    .expect("cancel with a grace");
     let took = started.elapsed();
     eprintln!("graceful cancel returned in {took:?}");
     assert!(
@@ -972,9 +986,13 @@ async fn k8s_cancel_with_grace_waits_for_termination_then_release_deletes() {
         gone,
         "after release the pod is gone well before its 30 s grace would have ended"
     );
-    r.cancel(&t, Duration::from_secs(30))
-        .await
-        .expect("cancelling a pod that is not there is Ok, with a grace too");
+    r.cancel(
+        &t,
+        Duration::from_secs(30),
+        &RunnerSpec::defaults(RunnerKind::Kubernetes),
+    )
+    .await
+    .expect("cancelling a pod that is not there is Ok, with a grace too");
 }
 
 /// The next holder of a lease re-attaches to the pod its predecessor left —

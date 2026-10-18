@@ -638,7 +638,22 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// plugin host's `kill()` short (spec §7.1). A container still running at
     /// the bound is a WARN and `Ok(())`: the outcome is the budget's either
     /// way (`cancel.rs` fact 2).
-    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()>;
+    ///
+    /// # `spec` (debt D1, 2026-10-19)
+    ///
+    /// The task's own `taskRunner:` spec, as [`release`](Self::release) gets
+    /// it. A runner that can stop its work without removing it keeps it for
+    /// `spec.delete == false`, as Kestra's `Docker.cleanupContainer` does
+    /// (`kill()`, then `removeContainerCmd` only when `delete`): the Docker
+    /// runner stops a kept container and leaves it, exited. A runner that
+    /// cannot -- the Kubernetes runner, whose pod cannot be stopped without
+    /// being deleted (D2) -- removes it whatever `spec` says.
+    async fn cancel(
+        &self,
+        task: &TaskInput,
+        grace: std::time::Duration,
+        spec: &RunnerSpec,
+    ) -> Result<()>;
 
     /// Free `task`'s container or pod once its outcome has **committed**
     /// (`TaskHandler::release`): delete it when `spec.delete` (the default),
@@ -1614,8 +1629,26 @@ impl TaskRunner for DockerRunner {
     /// return only then. Its wait is bounded by `grace` +
     /// [`CANCEL_WAIT_MARGIN`] in case the daemon never answers. Then W5a's
     /// `rm --force`, unchanged. A grace of zero is W5a's path exactly.
-    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
+    ///
+    /// # With `delete: false` (debt D1): `docker stop -t <grace>` only
+    ///
+    /// The container is stopped and kept, exited, for the author to inspect
+    /// -- Kestra's `Docker.cleanupContainer` kills, then removes only when
+    /// `delete` is true. A grace of zero is `docker stop -t 0`, an immediate
+    /// SIGKILL. An absent or already-stopped container is `Ok(())` (measured,
+    /// task 1.1 report): `docker stop` of an exited container exits 0, and of
+    /// an absent one exits 1, which [`stop`](Self::stop)'s probe turns into
+    /// `Ok(())`. Any other failure is the daemon's, surfaced as `rm`'s is.
+    async fn cancel(
+        &self,
+        task: &TaskInput,
+        grace: std::time::Duration,
+        spec: &RunnerSpec,
+    ) -> Result<()> {
         let name = container_name(task);
+        if !spec.delete {
+            return self.stop(task, &name, grace).await;
+        }
         if !grace.is_zero() {
             // A stop that failed must not leave the container running: log
             // it and remove anyway. `rm --force` surfaces its own error if
@@ -1644,14 +1677,17 @@ impl TaskRunner for DockerRunner {
 
     /// `docker rm --force` when `spec.delete` (the default); with
     /// `delete: false` the container is kept, exited -- measured on the
-    /// artifact -- and the orphan sweep leaves it too (its label).
+    /// artifact -- and the orphan sweep leaves it too (its label). After a
+    /// kill the container is already stopped and kept by
+    /// [`cancel`](TaskRunner::cancel) (debt D1), so this has nothing to do
+    /// for it either.
     async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()> {
         if !spec.delete {
             return Ok(());
         }
         // Grace 0: the outcome has committed, so there is nothing left to
         // let finish.
-        self.cancel(task, std::time::Duration::ZERO).await
+        self.cancel(task, std::time::Duration::ZERO, spec).await
     }
 }
 
@@ -1669,7 +1705,7 @@ impl DockerRunner {
             tracing::warn!(
                 run = %task.run_id,
                 container = %name,
-                "the task container did not stop within {bound:?} of its SIGTERM; removing it"
+                "the task container did not stop within {bound:?} of its SIGTERM; going on"
             );
             return Ok(());
         };
@@ -4320,7 +4356,11 @@ mod tests {
         let runner = DockerRunner::with_binary(shim.display().to_string());
         let task = leased(1_700_000_000);
         runner
-            .cancel(&task, std::time::Duration::from_secs(1))
+            .cancel(
+                &task,
+                std::time::Duration::from_secs(1),
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            )
             .await
             .expect("rm --force succeeded, so the cancel did");
         let argv = std::fs::read_to_string(&log).expect("the shim logged");
@@ -4337,6 +4377,81 @@ mod tests {
                 panic!("the container was removed after the failed stop: {calls:?}")
             });
         assert!(stop < rm, "{calls:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A `delete: false` container is stopped by `cancel`, not removed**
+    /// (debt D1): `docker stop -t <grace>` and no `rm`, as Kestra's
+    /// `Docker.cleanupContainer` removes only when `delete`. Grace zero is
+    /// `stop -t 0`, not a skipped stop. A stop the daemon refuses for a
+    /// container that is still there is an error, not a silent keep.
+    #[tokio::test]
+    async fn a_kept_container_is_stopped_by_cancel_and_not_removed() {
+        // Arrange: a shim whose `stop` succeeds unless STOP_FAILS is set.
+        let dir = staging("stop-keeps");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        let fails = dir.join("stop-fails");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> {log}\n\
+                 case \"$1\" in\n\
+                 \x20 stop) if [ -e {fails} ]; then echo 'Error response from daemon: boom' >&2; exit 1; fi ;;\n\
+                 \x20 inspect) echo running ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display(),
+                fails = fails.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let task = leased(1_700_000_000);
+        let name = container_name(&task);
+        let kept = RunnerSpec {
+            delete: false,
+            ..RunnerSpec::defaults(crate::scripts::RunnerKind::Docker)
+        };
+
+        // Act
+        runner
+            .cancel(&task, std::time::Duration::ZERO, &kept)
+            .await
+            .expect("the kept container stopped");
+        runner
+            .cancel(&task, std::time::Duration::from_secs(2), &kept)
+            .await
+            .expect("the kept container stopped with a grace");
+        std::fs::write(&fails, b"").expect("arm the failing stop");
+        let refused = runner.cancel(&task, std::time::Duration::ZERO, &kept).await;
+
+        // Assert
+        let argv = std::fs::read_to_string(&log).expect("the shim logged");
+        let calls: Vec<&str> = argv.lines().collect();
+        assert!(
+            calls.contains(&format!("stop -t 0 {name}").as_str()),
+            "grace zero is `stop -t 0`: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("stop -t 2 {name}").as_str()),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|l| l.starts_with("rm ")),
+            "a `delete: false` container is never removed by cancel: {calls:?}"
+        );
+        assert!(
+            refused.is_err(),
+            "a stop refused for a running container surfaces: {refused:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

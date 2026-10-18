@@ -2343,17 +2343,19 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 /// committed outcome (`run_one`'s "released AFTER the commit"). A kill whose
 /// commit is `LeaseLost` releases nothing: the run is someone else's.
 ///
-/// **On the runners egret has, the cancel already removed the container or
-/// pod, `taskRunner.delete: false` included** (W5a's cancel, unchanged). The
-/// Docker runner's `cancel` ends in `docker rm --force` (after `docker stop
-/// -t <grace>` when the grace is not zero), and the Kubernetes runner's
-/// deletes the pod; `delete: false` is read only by `release`. So a killed
-/// `delete: false` container is not kept for inspection, and the release that
-/// follows finds nothing left there (`rm --force` of an absent name exits 0).
-/// The release is still made: after a cancel that failed it is a second try
-/// at removing a `delete: true` container or pod. It is pinned by the worker
-/// tests' `KillRecorder`, not by the Docker live suite, which cannot observe
-/// it (workflow kill spec §4.2).
+/// **What the cancel left depends on the runner and on `taskRunner.delete`**
+/// (debt D1 and D2, decided 2026-10-18). On Docker, the cancel removes a
+/// `delete: true` container (`docker rm --force`, after `docker stop -t
+/// <grace>` when the grace is not zero) and only stops a `delete: false` one
+/// (`docker stop -t <grace>`), which is then kept, exited, for inspection, as
+/// Kestra's `Docker.cleanupContainer` keeps it. On Kubernetes the cancel
+/// deletes the pod, `delete: false` included: a pod cannot be stopped without
+/// being deleted. The release that follows therefore finds nothing to do on
+/// either path: `rm --force` of an absent name exits 0, and a kept container
+/// is left by `release` too. The release is still made: after a cancel that
+/// failed it is a second try at removing a `delete: true` container or pod.
+/// It is pinned by the worker tests' `KillRecorder`, not by the Docker live
+/// suite, which cannot observe it (workflow kill spec §4.2).
 async fn finish_kill(
     pool: &PgPool,
     claimed: &Claimed,

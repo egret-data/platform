@@ -766,13 +766,27 @@ impl TaskHandler for Script {
         }
     }
 
-    /// **Real cancellation**: the configured runner removes the attempt's
+    /// **Real cancellation**: the configured runner stops the attempt's
     /// container or pod (`TaskRunner::cancel`). The only runner that can have
     /// created anything for this task is the configured one -- a task naming
     /// another is refused before any runner is called -- so there is nothing
     /// to choose.
+    ///
+    /// The runner gets the task's own spec, parsed as
+    /// [`release`](Self::release) parses it, so Docker keeps a `delete:
+    /// false` container, stopped (debt D1). A task that does not parse, or
+    /// names another runner, cancels with the configured runner's defaults
+    /// (`delete: true`), as before.
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
-        self.rt.runner.cancel(task, std::time::Duration::ZERO).await
+        let spec = scripts::parse(task.type_id.as_str(), &task.spec)
+            .ok()
+            .and_then(|parsed| parsed.task_runner)
+            .filter(|spec| spec.kind == self.rt.runner_kind)
+            .unwrap_or_else(|| RunnerSpec::defaults(self.rt.runner_kind));
+        self.rt
+            .runner
+            .cancel(task, std::time::Duration::ZERO, &spec)
+            .await
     }
 
     /// **After the outcome committed** (`claim::run_one`; final review I3):
@@ -1887,6 +1901,36 @@ pub(crate) mod tests {
         assert_eq!(
             spy.released.lock().unwrap().as_slice(),
             [(name.clone(), true), (name, false)]
+        );
+    }
+
+    /// **`cancel` hands the runner the task's own `delete`** (debt D1), as
+    /// `release` does: Docker then keeps a `delete: false` container, stopped.
+    /// A task naming the other runner, or one that does not parse, cancels with
+    /// the configured runner's defaults (`delete: true`), as before.
+    #[tokio::test]
+    async fn cancel_passes_the_tasks_delete_to_the_runner() {
+        // Arrange
+        let spy = Spy::ok(CommandsResult::default());
+        let h = open(spy.clone());
+        let mut kept = alias_spec();
+        kept["taskRunner"] = serde_json::json!({"type": scripts::DOCKER_RUNNER, "delete": false});
+        let mut other = alias_spec();
+        other["taskRunner"] = serde_json::json!({"type": scripts::KUBERNETES_RUNNER});
+        // Act
+        h.cancel(&input(scripts::ALIAS_CONTAINER, alias_spec()))
+            .await
+            .expect("cancel");
+        h.cancel(&input(scripts::ALIAS_CONTAINER, kept))
+            .await
+            .expect("cancel");
+        h.cancel(&input(scripts::ALIAS_CONTAINER, other))
+            .await
+            .expect("cancel");
+        // Assert
+        assert_eq!(
+            spy.cancel_deletes.lock().unwrap().as_slice(),
+            [true, false, true]
         );
     }
 

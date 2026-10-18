@@ -1178,6 +1178,7 @@ impl egret_workflow::worker::commands::TaskRunner for SpyRunner {
         &self,
         _task: &egret_workflow::worker::TaskInput,
         _grace: std::time::Duration,
+        _spec: &scripts::RunnerSpec,
     ) -> egret_core::Result<()> {
         Ok(())
     }
@@ -1483,11 +1484,16 @@ impl egret_workflow::worker::commands::TaskRunner for FakeDaemon {
         &self,
         task: &egret_workflow::worker::TaskInput,
         _grace: std::time::Duration,
+        spec: &scripts::RunnerSpec,
     ) -> egret_core::Result<()> {
-        self.work
-            .lock()
-            .unwrap()
-            .remove(&egret_workflow::worker::commands::container_name(task));
+        // As the Docker runner: a `delete: false` container is stopped and
+        // kept (debt D1).
+        if spec.delete {
+            self.work
+                .lock()
+                .unwrap()
+                .remove(&egret_workflow::worker::commands::container_name(task));
+        }
         Ok(())
     }
     async fn release(
