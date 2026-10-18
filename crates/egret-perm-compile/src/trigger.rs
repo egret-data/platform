@@ -1734,16 +1734,7 @@ pub async fn affected_services_for_role_membership(
     // seeds them engine admin), so a change of who holds the role re-checks
     // every impersonation grant's target.
     if role_name == crate::engine_grants::PLATFORM_ADMIN_ROLE {
-        ids.extend(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
-                   JOIN engine_mgmt.engines e ON e.id = g.engine_id \
-                  WHERE g.target_user_id IS NOT NULL AND e.authz_service_id IS NOT NULL",
-            )
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(db_err)?,
-        );
+        ids.extend(impersonation_grant_profiles_via(conn).await?);
     }
 
     normalize_service_order(&mut ids);
@@ -1909,8 +1900,40 @@ pub async fn affected_services_for_group_membership(
     }
     // F11: the profile of every engine whose engine grants name the group.
     ids.extend(engine_grant_profiles_naming_via(conn, "group", &names).await?);
+    // F11: a group holding `platform_admin` makes its members platform admins,
+    // whom an impersonation grant may not target; joining or leaving it
+    // re-checks every impersonation grant's target.
+    let holds_platform_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM access_grants ag \
+           JOIN groups g ON g.id = ag.principal_id \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'group' AND ag.scope_type = 'platform' \
+            AND r.name = $1 AND g.name = ANY($2))",
+    )
+    .bind(crate::engine_grants::PLATFORM_ADMIN_ROLE)
+    .bind(&names)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if holds_platform_admin {
+        ids.extend(impersonation_grant_profiles_via(conn).await?);
+    }
     normalize_service_order(&mut ids);
     Ok(ids)
+}
+
+/// The profiles of every engine carrying an impersonation grant.
+async fn impersonation_grant_profiles_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, CompileError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE g.target_user_id IS NOT NULL AND e.authz_service_id IS NOT NULL",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
 }
 
 /// F11 (spec §4.5): the profiles of every engine whose engine grants name a

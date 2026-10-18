@@ -191,6 +191,34 @@ fn is_pattern(value: &str) -> bool {
 /// (`egret_engine_mgmt`'s `admin_usernames` → `seed_admin_all_access`).
 pub(crate) const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
 
+/// Whether `username` holds `platform_admin` at platform scope, directly or
+/// through a group: the same two arms as
+/// `egret_auth::roles::RoleRepo::platform_admin_user_ids`, the list
+/// `seed_admin_all_access` seeds as engine admins.
+async fn is_platform_admin(
+    conn: &mut sqlx::PgConnection,
+    username: &str,
+) -> Result<bool, CompileError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM users u JOIN access_grants ag ON ag.principal_id = u.id \
+             JOIN roles r ON r.id = ag.role_id \
+            WHERE u.username = $1::citext AND r.name = $2 \
+              AND ag.scope_type = 'platform' AND ag.principal_type = 'user' \
+           UNION ALL \
+           SELECT 1 FROM users u JOIN user_groups ug ON ug.user_id = u.id \
+             JOIN access_grants ag ON ag.principal_id = ug.group_id \
+             JOIN roles r ON r.id = ag.role_id \
+            WHERE u.username = $1::citext AND r.name = $2 \
+              AND ag.scope_type = 'platform' AND ag.principal_type = 'group')",
+    )
+    .bind(username)
+    .bind(PLATFORM_ADMIN_ROLE)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
+}
+
 /// How far [`impersonation_closure_problem`] walks before it refuses. A chain
 /// longer than this is refused rather than followed: refusing is the safe side.
 const MAX_IMPERSONATION_WALK: usize = 256;
@@ -495,7 +523,7 @@ pub(crate) async fn impersonation_closure_problem(
         // egret seeds every platform admin as an engine admin (`egret-admin -
         // …`, `seed_admin_all_access`) at each engine apply, so a platform admin
         // is near-root whether or not that seed has run on this profile yet.
-        if roles.iter().any(|r| r == PLATFORM_ADMIN_ROLE) {
+        if is_platform_admin(conn, &user).await? {
             return Ok(Some(format!(
                 "{via}is a platform admin, whom egret seeds as an engine admin"
             )));

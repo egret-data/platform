@@ -543,3 +543,76 @@ async fn a_target_who_becomes_platform_admin_loses_the_grant_in_the_same_commit(
         "no explicit recompile: the role assignment reaps it"
     );
 }
+
+/// A platform admin through a GROUP (an OIDC `platform-admins` group, which
+/// `platform_admin_user_ids` expands and `seed_admin_all_access` seeds) is a
+/// platform admin too: refused as a target, and joining such a group reaps the
+/// member's impersonation grant in the membership write's own transaction.
+#[tokio::test]
+async fn a_platform_admin_through_a_group_is_refused_and_joining_one_reaps() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let (_ua, a) = person(pool).await;
+    let (ub, b) = person(pool).await;
+    let (uc, _c) = person(pool).await;
+    let (gid, _g) = group_with(pool, &[ub]).await;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'group', $1, id, 'platform', NULL FROM roles \
+          WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(gid)
+    .execute(pool)
+    .await
+    .expect("group holds platform_admin");
+
+    // b is a platform admin through the group: refused at write.
+    let (status, body) = call_json(
+        &e,
+        "POST",
+        &format!("/perm/engines/{}/grants", e.engine),
+        json!({"capability": "starrocks.impersonate_user", "values": [b],
+               "principals": [{"kind": "user", "ref": a}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // c is not yet: the grant compiles; joining the group reaps it.
+    let id = create(
+        &e,
+        "starrocks.impersonate_user",
+        &[],
+        Some(uc),
+        vec![p(PrincipalKind::User, &a)],
+    )
+    .await;
+    assert!(compiled_users(&e, id).await.is_some());
+    e.groups
+        .add_member(gid, UserId(uc), &PermGroupRecompiler)
+        .await
+        .expect("add member");
+    assert_eq!(compiled_users(&e, id).await, None, "joining reaps it");
+}
+
+async fn call_json(e: &Env, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = e
+        .app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header("Cookie", format!("egret_session={}", e.admin))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
