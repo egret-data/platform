@@ -550,3 +550,41 @@ async fn the_premint_sweep_mints_a_member_of_a_group_only_an_engine_grant_names(
         "the sweep must mint the member's username"
     );
 }
+
+/// Security fix C1: egret runs as `root` on StarRocks, so a grant targeting a
+/// user who carries that username (stored before the route refused it, or
+/// renamed into it) is skipped at compile.
+#[tokio::test]
+async fn a_target_whose_username_is_root_is_skipped() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let pool = &f.db.pool;
+    let (_ua, ua) = person(pool, "ua").await;
+    let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = 'root'")
+        .fetch_optional(pool)
+        .await
+        .expect("read");
+    let root = match existing {
+        Some(id) => id,
+        None => user(pool, Some("root")).await,
+    };
+    let id = create(
+        pool,
+        f.sr_engine,
+        "starrocks.impersonate_user",
+        &[],
+        Some(root),
+        vec![p(PrincipalKind::User, &ua)],
+    )
+    .await;
+    let summary = recompile_service(&f.perm, &f.policy, f.sr_profile)
+        .await
+        .expect("recompile");
+    let skip = summary
+        .skipped
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap_or_else(|| panic!("skipped: {summary:?}"));
+    assert!(skip.reason.contains("reserved"), "{}", skip.reason);
+    assert!(compiled(pool, f.sr_profile, id).await.is_none());
+}

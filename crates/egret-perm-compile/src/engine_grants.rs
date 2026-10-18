@@ -30,11 +30,20 @@ fn invalid(g: &EngineGrant, reason: impl Into<String>) -> CompileError {
     }
 }
 
+/// The StarRocks superuser egret connects as for DDL and catalog management
+/// (`egret_engine_mgmt::engines::starrocks_root_conn_opts`). Refused as an
+/// impersonation target on every engine (security review C1): on StarRocks
+/// impersonating it is root; on Trino no egret principal carries the name,
+/// and refusing it there costs nothing.
+pub(crate) const ROOT_TARGET: &str = "root";
+
 /// Whether `username` may never be an impersonation target: a principal egret
-/// itself runs as on an engine (spec E11, C6).
+/// itself runs as on an engine (spec E11, C6, and security review C1 for
+/// `root`). Case-insensitive: both engines match these keys ignoring case.
 pub(crate) fn is_reserved_target(username: &str) -> bool {
-    egret_core::engine_principals::is_reserved_engine_username(username)
+    egret_core::engine_principals::is_reserved_engine_username(&username.to_lowercase())
         || username.eq_ignore_ascii_case(egret_core::engine_principals::DELEGATOR_PRINCIPAL)
+        || username.eq_ignore_ascii_case(ROOT_TARGET)
 }
 
 /// Compile `g` for `profile` on `engine`. `target` is the impersonation
@@ -342,6 +351,8 @@ mod tests {
             (Some("al*"), "a wildcard target"),
             (Some("egret-lineage"), "the lineage principal"),
             (Some("egret_delegator"), "the delegator"),
+            (Some("root"), "root, which egret runs as on StarRocks"),
+            (Some("ROOT"), "root in another case"),
         ] {
             assert!(
                 matches!(

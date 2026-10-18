@@ -593,6 +593,12 @@ async fn every_refusal_answers_its_status() {
         ("risingwave", rw, sys_grant(&ua)),
         ("delegator target", trino.engine, imp("egret_delegator")),
         ("lineage target", trino.engine, imp("egret-lineage")),
+        ("root target (Trino)", trino.engine, imp("root")),
+        (
+            "Root target (StarRocks)",
+            sr.engine,
+            json!({"capability": "starrocks.impersonate_user", "values": ["Root"], "principals": user}),
+        ),
         ("admin target", trino.engine, imp(&admin_target)),
     ];
     for (why, eng, body) in conflicts {
