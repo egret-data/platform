@@ -80,7 +80,7 @@ use sqlx::{Postgres, Transaction};
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
 use crate::grants::{resource_level_names, validate_grant_shape};
-use crate::principal_refs::resolve_principal_refs;
+use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
@@ -1091,7 +1091,7 @@ pub(crate) async fn write_grant(
     // The OLD affected set, and the origin the patched row keeps. Read from
     // the stored row BEFORE anything is written — after the UPDATE the old
     // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin, old_principals) = match id {
+    let (old_services, origin, stored_principals, effect_unchanged) = match id {
         Some(id) => {
             let Some(old) = get_grant_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1122,12 +1122,13 @@ pub(crate) async fn write_grant(
             (
                 affected_services_for_grant(tx, &old).await?,
                 old.origin,
-                effect_unchanged.then_some(old.principals),
+                Some(old.principals),
+                effect_unchanged,
             )
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
         // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit, None),
+        None => (Vec::new(), GrantOrigin::Explicit, None, false),
     };
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
@@ -1158,9 +1159,34 @@ pub(crate) async fn write_grant(
     // finds this grant and answers 409, or this grant finds no `G` and is
     // refused. The names are known from the body, since resolution only
     // rewrites USER refs, and the lock order is unchanged: group locks, then
-    // profile locks (below).
+    // profile locks (below). A patch also locks every group the STORED row
+    // names, whatever the effect, so a patch that drops a group serialises
+    // with that group's delete too.
+    //
+    // **The kept set is re-read under those locks (fix round 1, I-1).** The
+    // stored row above was read before the locks, so it is a prediction: a
+    // concurrent patch may have dropped `G` from it and a delete of `G` (now
+    // named by nothing) committed, both while this write waited on `G`'s
+    // lock. Skipping `G` as "already stored" on that stale copy stored a
+    // reference to a deleted group — the E7 outcome through the R6 door. So
+    // a ref is kept unchecked only if the row read NOW, under the locks,
+    // still holds it in the same position, and the stale copy did too (only
+    // its groups are locked), and the effect is still the body's.
     let mut principals = body.principals;
-    lock_named_groups(tx, [&principals].into_iter().chain(old_principals.as_ref())).await?;
+    lock_named_groups(
+        tx,
+        [&principals].into_iter().chain(stored_principals.as_ref()),
+    )
+    .await?;
+    let old_principals = match (id, stored_principals.as_ref()) {
+        (Some(id), Some(stale)) if effect_unchanged => {
+            let Some(fresh) = get_grant_via(tx, id).await? else {
+                return Err(PermHttpError::NotFound);
+            };
+            (fresh.effect == body.effect).then(|| still_stored(stale, &fresh.principals))
+        }
+        _ => None,
+    };
     resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
     let g = Grant {
@@ -1326,9 +1352,21 @@ pub(crate) async fn write_rule(
     // The group locks first, for the reason [`write_grant`] gives at the same
     // point (R3, spec E7): validate-then-lock let an exemption store a
     // reference to a group deleted while it waited.
+    // And the kept set is re-read under them, for the reason `write_grant`
+    // gives (fix round 1, I-1): the stored exemptions above were read before
+    // the locks.
     let mut exempt = body.exempt;
     lock_named_groups(tx, [&exempt].into_iter().chain(old_exempt.as_ref())).await?;
-    resolve_principal_refs(tx, "exempt", &mut exempt, old_exempt.as_ref()).await?;
+    let kept_exempt = match (id, old_exempt.as_ref()) {
+        (Some(id), Some(stale)) => {
+            let Some(fresh) = get_rule_via(tx, id).await? else {
+                return Err(PermHttpError::NotFound);
+            };
+            Some(still_stored(stale, &fresh.exempt))
+        }
+        _ => None,
+    };
+    resolve_principal_refs(tx, "exempt", &mut exempt, kept_exempt.as_ref()).await?;
 
     let r = Rule {
         id: id.unwrap_or_else(Uuid::nil),

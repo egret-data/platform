@@ -290,6 +290,22 @@ pub(crate) fn unstable() -> egret_core::Error {
     ))
 }
 
+/// How much a delete or rename refused because the model names the group
+/// (2026-10-18 design R1) says about the entries.
+///
+/// **The caller decides, from what the requester may read** (default decision
+/// 2026-10-18, review M-2). `group:delete` and `group:update` can be granted
+/// without `policy:read`, and the entries are policy metadata — grant ids,
+/// effects, rule names. So the route lists them only to a requester who holds
+/// `policy:read`; anyone else gets the count and who to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceDetail {
+    /// List each entry (at most [`MAX_LISTED_REFERENCES`], then a count).
+    Entries,
+    /// Only how many entries there are.
+    CountOnly,
+}
+
 /// How many entries a "still named" refusal lists before it counts the rest.
 const MAX_LISTED_REFERENCES: usize = 20;
 
@@ -303,9 +319,16 @@ pub(crate) fn referenced_conflict(
     subject: String,
     references: &[GroupReference],
     name_each: bool,
+    detail: ReferenceDetail,
 ) -> egret_core::Error {
     let n = references.len();
     let entries = if n == 1 { "entry" } else { "entries" };
+    if detail == ReferenceDetail::CountOnly {
+        return egret_core::Error::Conflict(format!(
+            "{subject} named by {n} permission {entries}; ask an admin with policy:read and \
+             policy:update to remove them first"
+        ));
+    }
     let mut listed: Vec<String> = references
         .iter()
         .take(MAX_LISTED_REFERENCES)
@@ -428,8 +451,9 @@ impl GroupRepo {
     /// it checks that the group has a row (2026-10-18 design R3), and a local
     /// group's delete or rename takes it before checking that nothing names
     /// the group (R1). So none of them interleaves with this check: a grant
-    /// that runs first can only name a group that has a row, which this login
-    /// then treats as existing; one that runs second sees the row this login
+    /// that runs first can only name a group that has a row (a patch re-reads
+    /// under the lock which stored refs it may keep unchecked), which this
+    /// login then treats as existing; one that runs second sees the row this login
     /// created, or no row, and is refused. A delete that runs first has
     /// already refused if anything named the group, so the name it frees is
     /// named by nothing. The INSERT is `ON CONFLICT (name) DO NOTHING`, so a
@@ -739,6 +763,7 @@ impl GroupRepo {
         id: Uuid,
         name: &str,
         recompiler: &dyn GroupMembershipRecompiler,
+        detail: ReferenceDetail,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -786,16 +811,28 @@ impl GroupRepo {
                 format!("cannot rename group `{old}` to `{name}`: these names are"),
                 &references,
                 true,
+                detail,
             ));
         }
         let services = recompiler.lock_affected_in_tx(&mut tx, &names).await?;
-        let rows = sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
-            .bind(id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?
-            .rows_affected();
+        // `create_local` takes no group lock, so a group of the new name can
+        // still be created between the `taken` read above and this UPDATE: the
+        // unique index refuses it, answered like `create_local`'s.
+        let rows =
+            match sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
+                .bind(id)
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(done) => done.rows_affected(),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    return Err(egret_core::Error::Conflict(format!(
+                        "group already exists: {name}"
+                    )))
+                }
+                Err(e) => return Err(db_err(e)),
+            };
         if rows > 0 {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
@@ -825,6 +862,7 @@ impl GroupRepo {
         &self,
         id: Uuid,
         recompiler: &dyn GroupMembershipRecompiler,
+        detail: ReferenceDetail,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -855,6 +893,7 @@ impl GroupRepo {
                 format!("group `{name}` is"),
                 &references,
                 false,
+                detail,
             ));
         }
         let services = recompiler

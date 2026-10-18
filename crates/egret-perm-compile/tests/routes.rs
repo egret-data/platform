@@ -3302,7 +3302,15 @@ async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_d
     let delete = {
         let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
         let pausing = pausing.clone();
-        tokio::spawn(async move { groups.delete_local(group_id, &*pausing).await })
+        tokio::spawn(async move {
+            groups
+                .delete_local(
+                    group_id,
+                    &*pausing,
+                    egret_auth::groups::ReferenceDetail::Entries,
+                )
+                .await
+        })
     };
     h.reached
         .await
@@ -3325,6 +3333,7 @@ async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_d
     let early = tokio::time::timeout(std::time::Duration::from_millis(800), &mut post)
         .await
         .ok();
+    let post_waited = early.is_none();
     let _ = h.go.send(());
     assert_eq!(delete.await.expect("join").expect("delete"), 1);
     let (status, created) = match early {
@@ -3350,6 +3359,10 @@ async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_d
     assert!(
         created.to_string().contains("no group has this name"),
         "the grant is refused by validation: {created}"
+    );
+    assert!(
+        post_waited,
+        "the grant write must wait on the group's lock while the delete holds it"
     );
 
     // The third party: an IdP login claiming the freed name.
@@ -3387,6 +3400,151 @@ async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_d
             "no policy may reach the IdP's user through `{group}`"
         );
     }
+}
+
+/// How many transactions wait on the per-group membership lock of `group` —
+/// the queue a lock-ordering test builds one entry at a time.
+async fn group_lock_waiters(f: &Fixture, group: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks \
+          WHERE locktype = 'advisory' AND NOT granted AND objsubid = 2 \
+            AND classid::bigint = $1 \
+            AND objid::bigint = (hashtext($2)::bigint & 4294967295)",
+    )
+    .bind(i64::from(egret_auth::groups::MEMBERSHIP_GROUP_LOCK_SPACE))
+    .bind(group)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("pg_locks")
+}
+
+async fn until_group_lock_waiters(f: &Fixture, group: &str, n: i64) {
+    for _ in 0..200 {
+        if group_lock_waiters(f, group).await >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("{n} writers never queued on {group:?}'s lock");
+}
+
+/// **Fix round 1, I-1: a PATCH must not keep a group ref on a stale read.** A
+/// patch skips re-checking a ref the stored row already holds (design R6), and
+/// it read that row BEFORE taking the group locks. Interleaving, made
+/// deterministic by the advisory lock's FIFO queue behind a lock the test
+/// holds on `G`:
+///
+/// 1. PATCH1 (drop `G` from grant `X`) queues on `G`;
+/// 2. DELETE `G` queues behind it;
+/// 3. PATCH2 (an edit that keeps `G`) reads `X` — still naming `G`, PATCH1 has
+///    not committed — and queues last.
+///
+/// Released: PATCH1 commits `X` without `G`; the delete then finds nothing
+/// naming `G` and deletes it; PATCH2 gets the lock. Before the fix it skipped
+/// `G` as "already stored" on its stale copy and stored `X` naming a group
+/// that no longer exists — the E7 outcome R3 closes for creates. With the
+/// kept set re-read under the lock, `G` is checked, and the patch is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_queued_behind_a_group_delete_does_not_keep_the_deleted_group() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let group = unique("race-patch");
+    let group_id: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert group");
+    let someone = known_user(&f, unique("racepatch")).await;
+    let with_group = {
+        let mut b = grant_body(f.catalog_id, &someone);
+        b["principals"]["include"] = json!([
+            { "kind": "group", "ref": group },
+            { "kind": "user", "ref": someone }
+        ]);
+        b
+    };
+    let without_group = grant_body(f.catalog_id, &someone);
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(with_group.clone()),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let grant_id = created["id"].as_str().expect("id").to_string();
+
+    // Hold `G`'s lock so the three writers queue in a known order.
+    let mut holder = f.db.pool.begin().await.expect("begin");
+    egret_auth::groups::lock_group_names_via(&mut holder, std::slice::from_ref(&group))
+        .await
+        .expect("hold the group's lock");
+
+    let patch = |body: Value| {
+        let app = f.app();
+        let token = token.clone();
+        let uri = format!("/perm/grants/{grant_id}");
+        tokio::spawn(async move {
+            into_json(
+                app.oneshot(req("PATCH", &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        })
+    };
+    let patch1 = patch(without_group);
+    until_group_lock_waiters(&f, &group, 1).await;
+    let delete = {
+        let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+        tokio::spawn(async move {
+            groups
+                .delete_local(
+                    group_id,
+                    &egret_perm_compile::PermGroupRecompiler,
+                    egret_auth::groups::ReferenceDetail::Entries,
+                )
+                .await
+        })
+    };
+    until_group_lock_waiters(&f, &group, 2).await;
+    let patch2 = patch(with_group);
+    until_group_lock_waiters(&f, &group, 3).await;
+    holder.commit().await.expect("release");
+
+    let (s1, b1) = patch1.await.expect("join");
+    assert!(s1.is_success(), "PATCH1 drops the group: {s1} {b1}");
+    assert_eq!(
+        delete
+            .await
+            .expect("join")
+            .expect("the delete finds nothing naming G"),
+        1
+    );
+    let (s2, b2) = patch2.await.expect("join");
+
+    let dangling: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM perm.grant_principals p \
+          WHERE p.kind = 'group' AND p.ref = $1 \
+            AND NOT EXISTS (SELECT 1 FROM groups g WHERE g.name = p.ref)",
+    )
+    .bind(&group)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("read");
+    assert_eq!(
+        dangling, 0,
+        "no grant may name the deleted group (PATCH2 answered {s2}: {b2})"
+    );
+    assert_eq!(s2, StatusCode::BAD_REQUEST, "{b2}");
+    assert!(b2.to_string().contains("no group has this name"), "{b2}");
 }
 
 /// `explain` resolves the target's tags itself — it never made the caller

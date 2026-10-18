@@ -676,7 +676,12 @@ async fn deleting_or_renaming_a_referenced_group_is_refused_until_the_grants_are
 
     let msg = conflict_message(
         f.groups
-            .rename(gid, &new_name, &PermGroupRecompiler)
+            .rename(
+                gid,
+                &new_name,
+                &PermGroupRecompiler,
+                egret_auth::groups::ReferenceDetail::Entries,
+            )
             .await
             .expect_err("a rename of a referenced group is refused"),
     );
@@ -694,7 +699,11 @@ async fn deleting_or_renaming_a_referenced_group_is_refused_until_the_grants_are
     );
     let msg = conflict_message(
         f.groups
-            .delete_local(gid, &PermGroupRecompiler)
+            .delete_local(
+                gid,
+                &PermGroupRecompiler,
+                egret_auth::groups::ReferenceDetail::Entries,
+            )
             .await
             .expect_err("a delete of a referenced group is refused"),
     );
@@ -716,7 +725,12 @@ async fn deleting_or_renaming_a_referenced_group_is_refused_until_the_grants_are
     delete_grant(&f, new_id).await;
     let msg = conflict_message(
         f.groups
-            .rename(gid, &new_name, &PermGroupRecompiler)
+            .rename(
+                gid,
+                &new_name,
+                &PermGroupRecompiler,
+                egret_auth::groups::ReferenceDetail::Entries,
+            )
             .await
             .expect_err("still refused: the OLD name is named"),
     );
@@ -728,13 +742,22 @@ async fn deleting_or_renaming_a_referenced_group_is_refused_until_the_grants_are
     delete_grant(&f, old_id).await;
     let rows = f
         .groups
-        .rename(gid, &new_name, &PermGroupRecompiler)
+        .rename(
+            gid,
+            &new_name,
+            &PermGroupRecompiler,
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
         .await
         .expect("rename once nothing names either name");
     assert_eq!(rows, 1);
     let rows = f
         .groups
-        .delete_local(gid, &PermGroupRecompiler)
+        .delete_local(
+            gid,
+            &PermGroupRecompiler,
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
         .await
         .expect("delete once nothing names the group");
     assert_eq!(rows, 1);
@@ -770,7 +793,12 @@ async fn renaming_into_a_name_a_leftover_grant_names_is_refused() {
 
     let msg = conflict_message(
         f.groups
-            .rename(gid, &target, &PermGroupRecompiler)
+            .rename(
+                gid,
+                &target,
+                &PermGroupRecompiler,
+                egret_auth::groups::ReferenceDetail::Entries,
+            )
             .await
             .expect_err("renaming into a referenced name is refused"),
     );

@@ -93,7 +93,10 @@
 //! delete or rename is refused while anything names it (`GroupRepo::rename`,
 //! `GroupRepo::delete_local`), checked under the per-group lock that every
 //! grant and rule write takes BEFORE it resolves refs (R3), so the check
-//! cannot go stale. A leftover reference to a group with no row can still
+//! cannot go stale. A patch's kept set (R6, below) is re-read under those
+//! locks too (`still_stored`): kept on a copy read before them, a group
+//! dropped by a concurrent patch and then deleted would be stored again
+//! unchecked (fix round 1, I-1). A leftover reference to a group with no row can still
 //! exist — stored before J-F3, or written directly — and the OIDC login
 //! refuses to create a group of that name (`GroupRepo::upsert_claimed_oidc_groups`).
 //! A new local group of that name is allowed, with a warning (R4): its members
@@ -120,6 +123,21 @@ struct Unknown {
     r#ref: String,
     position: String,
     why: String,
+}
+
+/// The refs `stale` and `fresh` both hold, each in the same position — the set
+/// a patch may keep without re-checking (design R6), when `stale` is the row
+/// read BEFORE the per-group locks and `fresh` the row read under them (fix
+/// round 1, I-1). A ref only `fresh` holds is not kept: its group was not
+/// locked by this write, so it could be dropped and deleted before commit.
+pub(crate) fn still_stored(stale: &PrincipalSet, fresh: &PrincipalSet) -> PrincipalSet {
+    let both = |a: &[Principal], b: &[Principal]| -> Vec<Principal> {
+        a.iter().filter(|p| b.contains(p)).cloned().collect()
+    };
+    PrincipalSet {
+        include: both(&stale.include, &fresh.include),
+        exclude: both(&stale.exclude, &fresh.exclude),
+    }
 }
 
 /// Resolve every principal in `set` (include AND exclude) against the table its

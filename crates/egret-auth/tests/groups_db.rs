@@ -85,11 +85,22 @@ async fn group_local_crud_and_membership() {
 
     // Rename the local group.
     let new_name = uniq("t_group_renamed");
-    let rows = groups.rename(group_id, &new_name, &rc).await.unwrap();
+    let rows = groups
+        .rename(
+            group_id,
+            &new_name,
+            &rc,
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
+        .await
+        .unwrap();
     assert_eq!(rows, 1);
 
     // Delete the local group.
-    let rows = groups.delete_local(group_id, &rc).await.unwrap();
+    let rows = groups
+        .delete_local(group_id, &rc, egret_auth::groups::ReferenceDetail::Entries)
+        .await
+        .unwrap();
     assert_eq!(rows, 1);
     assert!(groups
         .list_with_meta()
@@ -122,8 +133,25 @@ async fn rename_and_delete_are_noop_on_oidc_group() {
     let group_id = groups.upsert_oidc_group(&name).await.unwrap();
 
     // Neither rename nor delete affects an oidc-sourced group.
-    assert_eq!(groups.rename(group_id, "renamed", &rc).await.unwrap(), 0);
-    assert_eq!(groups.delete_local(group_id, &rc).await.unwrap(), 0);
+    assert_eq!(
+        groups
+            .rename(
+                group_id,
+                "renamed",
+                &rc,
+                egret_auth::groups::ReferenceDetail::Entries
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        groups
+            .delete_local(group_id, &rc, egret_auth::groups::ReferenceDetail::Entries)
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(
         rc.take(),
         Vec::<Call>::new(),
@@ -211,7 +239,18 @@ async fn every_membership_writer_calls_the_recompile_port() {
     groups.add_member(gid, uid, &rc).await.unwrap();
     rc.take();
     let renamed = uniq("t_port_renamed");
-    assert_eq!(groups.rename(gid, &renamed, &rc).await.unwrap(), 1);
+    assert_eq!(
+        groups
+            .rename(
+                gid,
+                &renamed,
+                &rc,
+                egret_auth::groups::ReferenceDetail::Entries
+            )
+            .await
+            .unwrap(),
+        1
+    );
     let mut both = vec![name.clone(), renamed.clone()];
     both.sort();
     assert_eq!(
@@ -227,7 +266,13 @@ async fn every_membership_writer_calls_the_recompile_port() {
         "deleting a user removes them from every group they were in"
     );
 
-    assert_eq!(groups.delete_local(gid, &rc).await.unwrap(), 1);
+    assert_eq!(
+        groups
+            .delete_local(gid, &rc, egret_auth::groups::ReferenceDetail::Entries)
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(rc.take(), vec![Call::Lock(vec![renamed]), Call::Recompile]);
 }
 
@@ -478,7 +523,10 @@ async fn a_referenced_group_cannot_be_deleted_or_renamed() {
         },
     ]);
 
-    let err = groups.delete_local(gid, &rc).await.unwrap_err();
+    let err = groups
+        .delete_local(gid, &rc, egret_auth::groups::ReferenceDetail::Entries)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, egret_core::Error::Conflict(m) if m == &format!(
             "group `{name}` is named by 1 permission entry; remove them first: \
@@ -488,7 +536,15 @@ async fn a_referenced_group_cannot_be_deleted_or_renamed() {
     );
     assert_eq!(rc.take(), Vec::<Call>::new(), "refused before any lock");
 
-    let err = groups.rename(gid, &target, &rc).await.unwrap_err();
+    let err = groups
+        .rename(
+            gid,
+            &target,
+            &rc,
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, egret_core::Error::Conflict(m) if m == &format!(
             "cannot rename group `{name}` to `{target}`: these names are named by 2 \
@@ -508,7 +564,12 @@ async fn a_referenced_group_cannot_be_deleted_or_renamed() {
         .await
         .unwrap();
     let err = groups
-        .rename(gid, &taken_name, &Recorder::default())
+        .rename(
+            gid,
+            &taken_name,
+            &Recorder::default(),
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -522,4 +583,71 @@ async fn a_referenced_group_cannot_be_deleted_or_renamed() {
         .await
         .unwrap();
     assert_eq!(still, name, "nothing written");
+}
+
+/// Review M-3: `create_local` takes no group lock, so a group of the new name
+/// can appear between the rename's "already exists" read and its UPDATE. The
+/// unique index then refuses the UPDATE, and the rename answers `Conflict`
+/// like `create_local` does — not an internal error. Deterministic: the
+/// competing insert is held uncommitted while the rename runs, so the read
+/// misses it and the UPDATE waits on it.
+#[tokio::test]
+async fn a_rename_racing_a_create_of_the_new_name_is_a_conflict() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let gid = groups
+        .create_local(&uniq("t_race_rn"), &Recorder::default())
+        .await
+        .unwrap();
+    let target = uniq("t_race_target");
+
+    let mut competing = db.pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO groups (name, source) VALUES ($1, 'local')")
+        .bind(&target)
+        .execute(&mut *competing)
+        .await
+        .unwrap();
+    let rename = {
+        let groups = groups.clone();
+        let target = target.clone();
+        tokio::spawn(async move {
+            groups
+                .rename(
+                    gid,
+                    &target,
+                    &Recorder::default(),
+                    egret_auth::groups::ReferenceDetail::Entries,
+                )
+                .await
+        })
+    };
+    // Wait until the rename has passed its read and is blocked in the UPDATE
+    // on the uncommitted index entry — otherwise its read would see the row
+    // and answer from there, and this test would not reach the UPDATE.
+    let mut blocked = false;
+    for _ in 0..200 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE wait_event_type = 'Lock' AND query LIKE 'UPDATE groups SET name%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if n > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(blocked, "the rename never reached its UPDATE");
+    competing.commit().await.unwrap();
+
+    let err = rename.await.unwrap().unwrap_err();
+    assert!(
+        matches!(&err, egret_core::Error::Conflict(m) if m == &format!("group already exists: {target}")),
+        "{err:?}"
+    );
 }

@@ -636,7 +636,7 @@ async fn create_group(
         (status = 204, description = "Group renamed"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing group:update permission", body = ErrorBody),
-        (status = 409, description = "Cannot rename an OIDC-synced group; or another group already has the new name; or grants or rule exemptions still name the old or the new name (the message lists them; remove them first)", body = ErrorBody),
+        (status = 409, description = "Cannot rename an OIDC-synced group; or another group already has the new name; or grants or rule exemptions still name the old or the new name (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -651,7 +651,12 @@ async fn rename_group(
     // them) while anything names the old or the new name (2026-10-18 R1).
     let rows = st
         .groups
-        .rename(id, &body.name, &egret_perm_compile::PermGroupRecompiler)
+        .rename(
+            id,
+            &body.name,
+            &egret_perm_compile::PermGroupRecompiler,
+            reference_detail(&st, &p).await?,
+        )
         .await?;
     if rows == 0 {
         return Err(CpError::Conflict(
@@ -670,7 +675,7 @@ async fn rename_group(
         (status = 204, description = "Group deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing group:delete permission", body = ErrorBody),
-        (status = 409, description = "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them; remove them first)", body = ErrorBody),
+        (status = 409, description = "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -684,7 +689,11 @@ async fn delete_group(
     // listing them) while grants or rule exemptions name the group (R1).
     let rows = st
         .groups
-        .delete_local(id, &egret_perm_compile::PermGroupRecompiler)
+        .delete_local(
+            id,
+            &egret_perm_compile::PermGroupRecompiler,
+            reference_detail(&st, &p).await?,
+        )
         .await?;
     if rows == 0 {
         return Err(CpError::Conflict(
@@ -692,6 +701,23 @@ async fn delete_group(
         ));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// How much a group delete or rename refused because grants or rule
+/// exemptions name the group says about them (default decision 2026-10-18,
+/// review M-2). The entries are policy metadata, and `group:delete` /
+/// `group:update` can be held without `policy:read`: such a caller gets the
+/// count and who to ask, not the grant ids and rule names.
+async fn reference_detail(
+    st: &CpState,
+    p: &egret_core::Principal,
+) -> Result<egret_auth::groups::ReferenceDetail, CpError> {
+    use egret_auth::groups::ReferenceDetail;
+    match egret_core::authz::require(&*st.pdp, p, "policy:read").await {
+        Ok(()) => Ok(ReferenceDetail::Entries),
+        Err(egret_core::Error::Forbidden) => Ok(ReferenceDetail::CountOnly),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
