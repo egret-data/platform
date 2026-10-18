@@ -463,12 +463,20 @@ async fn count(
     }
 }
 
+/// A source that failed: a fixed sentence for the page, the database's own
+/// error in the log (review M1: it can name schema internals and says nothing
+/// a steward can act on).
 fn unavailable(s: &Source, error: &str) -> Finding {
+    tracing::warn!(
+        source = s.kind,
+        error,
+        "governance overview: a source failed"
+    );
     Finding {
         kind: "source_unavailable".into(),
         severity: Severity::Warning,
         count: 1,
-        sentence: format!("Could not check {}: {error}", s.what),
+        sentence: format!("Could not check {}.", s.what),
         sample: Vec::new(),
         r#ref: None,
         source: Some(s.kind.to_string()),

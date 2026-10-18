@@ -108,13 +108,13 @@ describe("Needs attention", () => {
       ok(
         response({
           findings: [
-            finding({ kind: "source_unavailable", severity: "warning", source: "rule_overlaps", sentence: "Could not check rule overlaps: timeout" }),
+            finding({ kind: "source_unavailable", severity: "warning", source: "rule_overlaps", sentence: "Could not check rule overlaps." }),
           ],
         }),
       ),
     );
     openOverview();
-    const row = (await screen.findByText("Could not check rule overlaps: timeout")).closest("li")!;
+    const row = (await screen.findByText("Could not check rule overlaps.")).closest("li")!;
     expect(within(row).getByText("Warning")).toBeInTheDocument();
     expect(within(row).queryByRole("link")).not.toBeInTheDocument();
     // A failed check is not a clean bill.

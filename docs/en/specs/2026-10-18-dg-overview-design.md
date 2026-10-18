@@ -347,7 +347,7 @@ ordered deterministically (named in each source). Permission checks call `egret_
 One `REPEATABLE READ, READ ONLY` transaction with `SET LOCAL statement_timeout = '5s'` (the pattern of
 `list_overlaps`, `routes.rs:1662-1667`). Each source runs in its own savepoint (`tx.begin()`), because in Postgres one
 failed statement aborts the transaction: a failing or timed-out source rolls back its savepoint and yields
-`{kind: "source_unavailable", severity: "warning", source: <kind>, sentence: "Could not check <what>: <error>"}`;
+`{kind: "source_unavailable", severity: "warning", source: <kind>, sentence: "Could not check <what>."}` (the error is logged, not shown);
 the other sources continue. Sources call store functions on the transaction, never routes. The plugin ledger, the
 engines and the profiles are read in the same snapshot, so drift is judged on one state.
 

@@ -949,12 +949,10 @@ async fn a_failing_source_is_reported_and_every_other_source_still_answers() {
         .collect();
     assert_eq!(unavailable.len(), 1, "{:?}", r.findings);
     assert_eq!(unavailable[0].source.as_deref(), Some("failing"));
-    assert!(
-        unavailable[0]
-            .sentence
-            .starts_with("Could not check a source that divides by zero: "),
-        "{}",
-        unavailable[0].sentence
+    // Review M1: a fixed sentence; the database's error is logged, not shown.
+    assert_eq!(
+        unavailable[0].sentence,
+        "Could not check a source that divides by zero."
     );
     assert!(
         r.findings.iter().any(|f| f.kind == "engine_failed"),
@@ -981,10 +979,9 @@ async fn the_snapshot_is_read_only() {
     tx.commit().await.unwrap();
     assert_eq!(r.findings.len(), 1, "{:?}", r.findings);
     assert_eq!(r.findings[0].kind, "source_unavailable");
-    assert!(
-        r.findings[0].sentence.contains("read-only"),
-        "{}",
-        r.findings[0].sentence
+    assert_eq!(
+        r.findings[0].sentence,
+        "Could not check a source that writes."
     );
     let written: i64 = sqlx::query_scalar("SELECT count(*) FROM tags WHERE key = 'i_written'")
         .fetch_one(&f.db.pool)

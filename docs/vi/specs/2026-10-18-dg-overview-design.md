@@ -287,7 +287,7 @@ mọi lỗi khác là 500 (PDP hỏng không phải là thiếu quyền).
 Một transaction `REPEATABLE READ, READ ONLY` với `SET LOCAL statement_timeout = '5s'` (mẫu của `list_overlaps`,
 `routes.rs:1662-1667`). Mỗi nguồn chạy trong savepoint riêng (`tx.begin()`), vì trong Postgres một câu lệnh lỗi sẽ
 huỷ cả transaction: một nguồn lỗi hoặc quá hạn rollback savepoint của nó và cho ra
-`{kind: "source_unavailable", severity: "warning", source: <kind>, sentence: "Could not check <what>: <error>"}`; các
+`{kind: "source_unavailable", severity: "warning", source: <kind>, sentence: "Could not check <what>."}` (lỗi được ghi log, không hiện ra); các
 nguồn khác vẫn chạy tiếp. Nguồn gọi hàm store trên transaction, không bao giờ gọi route. Sổ download plugin, engine và
 profile được đọc trong cùng snapshot, nên độ lệch được xét trên một trạng thái.
 
