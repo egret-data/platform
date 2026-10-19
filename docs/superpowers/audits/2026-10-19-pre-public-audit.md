@@ -1,13 +1,13 @@
 # Pre-public audit (P0) — 2026-10-19
 
 Scope: full git history (all refs, 1103 commits, ~117 MB) of `egretdb/egret`, tool gitleaks 8.x.
-Result: 29 raw findings, triaged below. **Verdict: NOT ready to publish until items A1–A3 are done.**
+Result: 29 raw findings, triaged below. **Verdict (updated after follow-up): no real secret found; secrets and licence gates pass. Remaining gate is P1 hygiene + owner's final confirmation.**
 
 ## Triage
 
 | Finding | Where | Verdict |
 |---|---|---|
-| `EGRET_SECURITY__SECRET_KEY=<64-byte base64>` | `.env.example:30` (commit 4f98ab25, still at HEAD) | **REAL-LOOKING dev key. Must replace with placeholder; rotate anywhere it was used** |
+| `EGRET_SECURITY__SECRET_KEY=<64-byte base64>` | `.env.example:30`, `egret-config` test | Documented PUBLIC dev key (comment in file says so), encrypts only the OIDC state cookie; also a test fixture. Initial triage over-estimated this. Decision (owner): rotate-only — any non-dev deployment must use its own key; no history rewrite |
 | `SECRET_PGPASS` base64 (decodes to a `w5b…Pw42` test password) | `crates/egret-workflow/oracle-exec/docker-compose.w5b.yml` | Throw-away test compose password; acceptable, rename to obvious placeholder |
 | `--user egret:egretsecret` (curl) | 7 e2e files, `frontend/tests/e2e/README.md` | Local dev MinIO/RustFS credentials; acceptable, document as dev-only |
 | `curl -u …` | docs/plans/2026-07-04-trino-auth-ingress.md | Doc example; acceptable |
@@ -19,16 +19,12 @@ Result: 29 raw findings, triaged below. **Verdict: NOT ready to publish until it
 | `EGRET_SECURITY__SECRET_KEY=` in plan doc | docs/en/plans/2026-07-01-oidc-default-dev-e2e.md | Same key as A1; scrub |
 | `EgretPluginHostTest.java` `SECRET = "s3cr3t-pw-zq9.invalid"` | plugin-host test | Fixture; acceptable |
 
-## Actions required before public
+## Actions (status)
 
-- **A1** Replace `.env.example` and the plan-doc value with a placeholder + generation hint
-  (`openssl rand -base64 64`). Because the old value stays in git history, **treat it as burned**:
-  rotate in every environment that ever used it (dev stack, kind, any shared cluster).
-  Secrets encrypted under that key must be re-encrypted. Owner decides: rotate-only (recommended,
-  the key is a dev default) vs. history rewrite.
-- **A2** Add `.gitleaks.toml` allowlist for the fixtures above; add gitleaks to CI.
-- **A3** Run licence scan (cargo-deny, npm license-checker) — NOT yet done; `third_party/mysql_async`
-  ships LICENSE-APACHE and LICENSE-MIT (compatible).
+- **A1 DONE (decision)** Rotate-only: owner's non-dev environments must not reuse the dev key. Dev default stays so `cp .env.example .env` keeps working.
+- **A2 DONE** `.gitleaks.toml` allowlist added; working-tree scan: no leaks. Gitleaks goes into CI (P1).
+- **A3 DONE** Licences: `cargo deny check licenses` OK with `deny.toml` (3 own crates were missing `license.workspace = true`, fixed); npm production deps all permissive (MIT 209, ISC, Apache-2.0, BSD-3, 0BSD, CC0, MPL-2.0 OR Apache-2.0, Python-2.0). `third_party/mysql_async` ships Apache + MIT.
+- Owner decision: keep maintainer email in tracked files.
 
 ## Other inventory
 
@@ -36,8 +32,7 @@ Result: 29 raw findings, triaged below. **Verdict: NOT ready to publish until it
   third_party, apps-image, tests, plugin-host, scripts, renderer, .github). Scratch files seen in the
   main checkout (`*.png`, `*.json`, `*.md` at its root) are untracked/ignored; keep them out of git.
 - No `LICENSE`, `CONTRIBUTING`, etc. yet (P1).
-- Maintainer personal email appears 116× in tracked files (git identity in docs/plans). Decide: keep or
-  replace with a project address before public (owner).
+- Maintainer personal email appears 116× in tracked files — owner chose to keep.
 - Large tracked data: `crates/egret-workflow/oracle-exec/traces.json` (6.6 MB) and oracle corpora (~1 MB each);
   fine, but mention in CONTRIBUTING.
 - RFC1918/internal-looking hosts are test fixtures (SSRF tests). No real internal hostnames found.
