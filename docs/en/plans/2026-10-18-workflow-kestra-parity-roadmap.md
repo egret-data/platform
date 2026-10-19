@@ -1,66 +1,127 @@
 # Workflow engine: Kestra parity roadmap
 
-**Status:** order approved by the user on 2026-10-18. Measured 2026-10-18 on `feat/workflow-kestra-executor-tasks` (main `a2850644` + group C2 in progress) against the Kestra checkout `data-portal/kestra` at `96893b589` (2.0.0-SNAPSHOT, the programme's pin). Both measurements read code and oracle files only (no cargo, no docker); the evidence, with `file:line` for every row, is in Appendix A (oracle corpus) and Appendix B (feature surface).
+**Goal (user, 2026-10-19):** egret's workflow engine does what Kestra OSS's engine does, except where egret diverges for security (§3.1). Every gap is either scheduled as a package in §2 or listed in §3 with the reason it stays. Nothing sits in an unscheduled "later" bucket any more, and no refusal is permanent unless §3 says why.
 
-**As of (2026-10-18, C2 final review):** §1 and the appendices are the 2026-10-18 measurement taken while C2 was in progress; C2 has since been built (73 baselined, LIVE 293) — see §2 row 0.
+**Status:**
+- **Revised 2026-10-19.** The user set the goal above and reopened the decided refusals: `Pause` `tasks:`/`errors:`/`behavior:`/`onPause:`, `AllowFailure` block `retry:`, plugin triggers (W5b §11), and `Loop` STORE/AUTO `outputs:` (the 2026-10-03 ruling).
+- **First approved 2026-10-18.** Measured that day on `feat/workflow-kestra-executor-tasks` (main `a2850644` + group C2 in progress) against the Kestra checkout `data-portal/kestra` at `96893b589` (2.0.0-SNAPSHOT, the programme's pin). Both measurements read code and oracle files only (no cargo, no docker). The evidence, with `file:line` for every row, is in Appendix A (oracle corpus) and Appendix B (feature surface).
 
-**Programme spec:** `docs/en/specs/2026-09-01-workflow-programme-design.md`. Every W-package in its §9 has merged; this roadmap orders what comes after group C (`docs/en/specs/2026-10-18-workflow-core-tasks-design.md`).
+**As of (2026-10-18, C2 final review):** the appendices are the 2026-10-18 measurement, taken while C2 was in progress.
+
+**Programme spec:** `docs/en/specs/2026-09-01-workflow-programme-design.md`. Every W-package in its §9 has merged. This roadmap orders what comes after group C (`docs/en/specs/2026-10-18-workflow-core-tasks-design.md`) and the debt package (`docs/en/specs/2026-10-19-workflow-debt-design.md`).
 
 ## 1. Where egret stands
 
-**Oracle corpus** (Kestra's own test flows, `crates/egret-workflow/oracle-exec/`):
+**Oracle corpus** (Kestra's own test flows, `crates/egret-workflow/oracle-exec/`), on main after the debt package (#698). Source: `cargo test -p egret-workflow --test executor` (the ratchet printout and the census constants in `oracle-exec/driver.rs`), and `PUBLISHED_BUT_REFUSED` in `src/executor/mod.rs`:
 
-| | count | source |
+| | 2026-10-18 | 2026-10-19 |
 |---|---|---|
-| corpus flows | 351 (some `driver.rs` comments still say 345, which is stale) | `corpus.json` |
-| published and live on egret | 281 | `driver.rs` `LIVE` |
-| compared against Kestra's golden | 301 | `golden.json` |
-| match the golden | 217 | 301 − 84 |
-| mismatch, baselined with a cause | 84 | `baseline.txt` |
-| Kestra runs them, egret refuses | 18: 12 group C2, 3 `Pause` properties and 1 `AllowFailure` block `retry:` (both decided), 2 over-refusals | `executor/mod.rs` `PUBLISHED_BUT_REFUSED` |
+| corpus flows | 351 | 351 |
+| published and live on egret (`LIVE`) | 281 | **295** |
+| compared against Kestra's golden | 301 | 301 |
+| match the golden | 217 | **228** |
+| mismatch, baselined with a cause | 84 | **73** |
+| refused at publish by validation (`VALIDATE_REFUSED`) | 27 | **25** |
+| Kestra runs them, egret refuses (`PUBLISHED_BUT_REFUSED`) | 18 | **6**: 3 `Pause` properties, 1 `AllowFailure` block `retry:`, 1 templated Subflow `namespace:`, 1 Flow-trigger `dependsOn` entry with only some keys |
 
-The 84 by cause: C2 12, `finally:` 11, `afterExecution:` 9, renderer divergences 8, `sla: MAX_DURATION` 5, `Loop` own `outputs:` 5, timing/poller latency 4 and order pairs a clockless driver cannot reach 4 (both mostly permanent harness limits), invalids over-accepted 4, unattributed `Loop` divergences 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, Subflow retry 2, missing Pebble functions 2, single causes 4, deliberate 1.
+In the 2026-10-18 count of 84, C2 accounted for 12 entries. The other 72, by cause: `finally:` 11, `afterExecution:` 9, renderer divergences 8, `sla: MAX_DURATION` 5, `Loop` own `outputs:` 5, timing/poller latency 4, order pairs a clockless driver cannot reach 4, invalid flows over-accepted 4, unattributed `Loop` divergences 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, Subflow retry 2, missing Pebble functions 2, single causes 4, deliberate 1.
 
-**Feature surface** (Kestra 2.0 OSS, beyond the corpus):
-- **Core tasks:** 49. 38 supported (11 of them partly), 3 in progress (C2), 8 missing: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`.
-- **Silent drops, the worst class:** flow-level `finally:` and `afterExecution:` are parsed and never planned (checked: `build_plan` reads neither; only a depth test does), and `finally:` on every flowable except `AllowFailure` is dropped too. `stopAfter` and `retry.warningOnRetry` are parsed and have no effect. No warning names any of them.
-- **Registered but unserved:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack` have `TASK_TYPES` rows and no deployment wires a handler (checked: `runtime.rs` wires none of them), so publish refuses them with `task_type_not_served`.
-- **Inputs:** `required`, type, `values`, `validator`, min/max and date bounds are not checked at manual, API, webhook or flow-trigger start; only backfill checks `required`.
-- **Triggers:** `ScheduleOnDates` and `http.Trigger` missing; Schedule `when:` and webhook `wait`/`returnOutputs` refused.
-- **Execution operations:** start, list, get, graph, logs, files, kill, resume (no inputs) and whole-execution replay exist. Restart in place, replay from a task, change-status, pause, delete, labels API, bulk operations, live streaming and the expression-eval endpoint are missing.
-- **Expressions:** `render`/`renderOnce`/`errorLogs`/`subflow` refused; `max`/`min`, ten Pebble filters and the `null`/`empty`/`map`/`json` tests missing; `secret()` resolves only in `kestra.*` plugin tasks.
-- **Plugins:** the plugin host runs `RunnableTask`s from 3 jars (9 JDBC classes), with a 1.6–3.6 s JVM start per attempt.
-- **Runners:** `WorkingDirectory` runs on Docker only, which the chart refuses in production.
+**Feature surface** (Kestra 2.0 OSS, beyond the corpus; Appendix B has the evidence):
+- **Core tasks:** 49. C2 is done, so 41 are supported, 11 of them only partly. 8 are missing: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`.
+- **Silent drops, the worst class:**
+  - flow-level `finally:` and `afterExecution:` are parsed and never planned;
+  - `finally:` is dropped on every flowable except `AllowFailure`;
+  - `stopAfter` and `retry.warningOnRetry` are parsed and have no effect;
+  - the Subflow and input keys egret does not model are dropped;
+  - unknown properties on core tasks are ignored.
+  No warning names any of them.
+- **Registered but unserved:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`.
+- **Inputs:** none of `required`, type, `values`, `validator`, min/max or date bounds is checked at manual, API, webhook or flow-trigger start.
+- **Triggers:**
+  - missing: `ScheduleOnDates`, `http.Trigger`, plugin triggers;
+  - refused: Schedule `when:`, webhook `wait`/`returnOutputs`.
+- **Execution operations:**
+  - present: start, list, get, graph, logs, files, kill, resume (no inputs) and whole-execution replay;
+  - missing: restart in place, replay from a task, change-status, pause, delete, labels API, bulk operations, live streaming, the expression-eval endpoint.
+- **Expressions:**
+  - refused: `render`/`renderOnce`/`errorLogs`/`subflow`;
+  - missing: `max`/`min`, ten Pebble filters, the `null`/`empty`/`map`/`json` tests;
+  - `secret()` resolves only in `kestra.*` plugin tasks.
+- **Plugins:** `RunnableTask`s from 3 jars (9 JDBC classes) only.
+- **Runners:** `WorkingDirectory` runs on Docker only.
 
-## 2. Approved order
+## 2. Order
 
-Each package goes through the usual flow: spec (or a spec section) → plan → subagent-driven build → final review → gate → PR → merge. Sizes: S ≈ one task, M ≈ one package, L ≈ more than one package. "Banks" is the oracle's upper bound from Appendix A; the ratchet measures the real number.
+Each package goes through the usual flow: spec (or a spec section) → plan → subagent-driven build → final review → gate → PR → merge.
+- **Sizes:** S ≈ one task, M ≈ one package, L ≈ more than one package.
+- **"Banks":** the oracle's upper bound from Appendix A. The ratchet measures the real number.
+- **"Lifts":** the refusals and silent drops a package turns into Kestra behaviour.
 
-| # | Package | Scope | Banks | Size |
+**Rule 1: a refusal is a placeholder.** Every refusal or warning a package adds names the package in this table that lifts it. Package #1 adds them only for keys whose package is not next. Flow `finally:`/`afterExecution:` go straight to #2, so a flow that publishes today is not refused for one package and then accepted again.
+
+**Rule 2: re-check after #2.** The sweep's premise, "a terminal execution has no live work", holds only while egret runs no `afterExecution:` (debt spec D15). #2 must re-check it.
+
+| # | Package | Scope (what it lifts) | Banks | Size |
 |---|---|---|---|---|
-| 0 | **Group C2** (built 2026-10-18, PR pending: 11 of 12 banked, 73 baselined, LIVE 293) | `SetVariables`, `UnsetVariables`, `Labels`; migration 0196 | 11 of up to 12 | M |
-| 1 | **No silent drops** | Turn every parsed-but-ignored key into a named refusal or warning: flow and flowable `finally:`/`afterExecution:` (until #2 runs them), trigger `stopAfter`, `retry.warningOnRetry`, the Subflow keys egret does not model (`revision`, `labels`, `inheritLabels`, `scheduleDate`, `restartBehavior`), the input keys egret does not model. Fix the stale "345" figures in `driver.rs` comments | 0 (correctness) | S |
-| 2 | **End hooks: `finally:` and `afterExecution:`** | Flow-level `finally:` and `afterExecution:`, and `finally:` on every flowable (`AllowFailure` already plans one, so the pattern exists); `Loop errors:` if it falls out cheaply | ~20 upper, 14–15 strict | M |
-| 3 | **Inputs checked at start** | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date bounds, ARRAY items, at manual, API, webhook and flow-trigger start; the `validate inputs` endpoint | a few invalids | M |
-| 4 | **HTTP and the unserved platform tasks** | `http.Request` and `http.Download` as worker handlers with an egress policy (same SSRF stance as `http()`); decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*` rows, or remove the rows | 0 | M |
-| 5 | **Renderer parity** | Division by zero (the `restart-*` Infinity case), undefined `taskrun.value`, number-vs-string comparison, `??` on a missing root; `render`/`renderOnce`, `errorLogs`, `max`/`min`, the missing filters and tests | ~8–10 | S–M |
-| 6 | **`Loop` own `outputs:`** | Evaluate a `Loop`'s `outputs:` at its end (STORE/AUTO stay deferred by the 2026-10-03 ruling); name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
-| 7 | **Execution operations** | Restart failed tasks in place, replay from a chosen task (with inputs), change-status, pause, delete, labels API; then bulk operations | 0 (operability) | M–L |
+| 0 | **Group C2** — done, #693 (`78c182ab`) | `SetVariables`, `UnsetVariables`, `Labels` | 11 of 12 | M |
+| — | **Debt package** — done, #696 (`92c0a66a`) and #698 (`071973c9`) | Kill and `WorkingDirectory` follow-ups; C2 caps and ordering; `LoopUntil` task-run ids; publish refs scoped to the workspace (2 over-refusals lifted) | 0 (LIVE +2) | M |
+| 1 | **No silent drops** | A named refusal or warning, naming the package that lifts it, for every parsed-but-ignored key except flow `finally:`/`afterExecution:`. That covers flowable `finally:` outside #2's reach, `stopAfter` (#11), `retry.warningOnRetry` (#13), the Subflow keys (#12), the input keys (#3), and unknown properties on core tasks, which Kestra's schema refuses (aligns Appendix B §8 item 15). Also fix the stale "345" figures in `driver.rs` | 0 (correctness) | S |
+| 2 | **End hooks** | Flow-level `finally:` and `afterExecution:`. `finally:` on every flowable: Sequential, Parallel, If, Switch, Dag, Loop, LoopUntil, Pause. `Loop errors:`. Re-check the sweep's premise (Rule 2) | ~20 upper, 14–15 strict | M |
+| 3 | **Inputs checked at start** | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date/time bounds, ARRAY items, SECRET/URI/EMAIL/YAML/ION type checks, at manual, API, webhook and flow-trigger start. The `validate inputs` endpoint | a few invalids | M |
+| 4 | **HTTP and the unserved platform tasks** | `http.Request`, `http.Download`, `http.SseRequest` as worker handlers with an egress policy. Decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*`/`core.*` rows, or remove the rows | 0 | M |
+| 5 | **Renderer parity** | Division by zero (the `restart-*` Infinity case), undefined `taskrun.value`, number-vs-string comparison, `??` on a missing root. `render`/`renderOnce`, `errorLogs`, `subflow`, `max`/`min`. The ten missing filters and four missing tests. `escape` strategies `js`/`css`/`url_param`. Lazy chained comparisons, BigDecimal arithmetic, `{{ task.type }}` on a flowable | ~8–10 | M |
+| 6 | **`Loop` own `outputs:`** | A `Loop`'s `outputs:` evaluated at its end, including STORE/AUTO (reopened). Name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
+| 7 | **Execution operations** | Restart failed tasks in place, replay from a chosen task (with inputs and a revision choice), change-status and task-run state, pause, delete (with logs and storage), labels API. Resume with `onResume` inputs, and resume-validate. Logs follow (SSE), download and delete. Execution follow (SSE), the expression-eval endpoint, export/distinct/average-duration/latest. Then every `by-ids`/`by-query` bulk operation | 0 (operability) | L |
 | 8 | **Flow `concurrency:`** | `limit` with QUEUE/CANCEL/FAIL, unqueue and force-run | few | M |
-| 9 | **Later, in this order unless re-ranked** | Schedule `when:` + `stopAfter` + `ScheduleOnDates` (S–M); synchronous webhooks `wait`/`returnOutputs` (M); `secret()` outside plugin tasks, by injecting rather than rendering (M–L); `WorkingDirectory` on Kubernetes (M); `sla: MAX_DURATION` with a harness time-model change (M–L); Python `dependencies:`/uv and more script languages (S–M each); Subflow `labels`/`inheritLabels`/`revision`/`scheduleDate`, Pause `onResume` and resume-with-inputs (S–M each); `checks:`, `metric.Publish` and a metric store (L), `http.Trigger`, `PurgeExecutions`/`PurgeFlows`/`PurgeStorage`, `TemplatedTask`; SSE follow and the expression-eval endpoint | — | — |
+| 9 | **`Pause` and `AllowFailure` in full** (reopened) | `Pause` `tasks:`, `errors:`, `behavior:`, `onPause:`, `onResume:`. `AllowFailure` block `retry:` | 4 refused → live | M |
+| 10 | **`secret()` everywhere** | `secret()` in script env, Log, inputs, `runIf`, triggers and http tasks, by injecting the value (env from a Kubernetes Secret, or a file mount) rather than rendering it into the pod spec. This replaces Appendix B §8 item 3's confinement with Kestra's reach | 0 | M–L |
+| 11 | **Triggers in full** | Schedule `when:` with the date functions, `stopAfter`, `ScheduleOnDates`, `http.Trigger`. Synchronous webhooks: `wait`, `returnOutputs`, `responseContentType`, `responseCode`. Trigger `labels` on Schedule and Webhook. Flow-trigger `dependsOn` entries with only some keys (the `listener-namespace-condition` refusal). Trigger unlock/restart where egret's claim model needs one | 1 refused → live | M |
+| 12 | **Subflow in full** | `revision`, `labels`, `inheritLabels`, `scheduleDate`, `restartBehavior`. A templated `namespace:`/`flowId:` resolved at run time (the `task-flow-dynamic` refusal). Subflow retry (2 baselined) | 1 refused + 2 | M |
+| 13 | **Task properties** | `retry.warningOnRetry`, `logLevel`, `logToFile`, `taskCache` on every task kind | 0 | S–M |
+| 14 | **Missing core tasks** | `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `TemplatedTask`. `PurgeLogs.purgeNonExecutionLogs` | 0 | S each |
+| 15 | **Metrics** | A metric store, `metric.Publish`, `Assert` metrics, the metrics API, and the plugin host's `metric()` writing real metrics | 0 | L |
+| 16 | **`sla: MAX_DURATION` and `checks:`** | Both, with the harness time model they need | 5 | M–L |
+| 17 | **Runners and script languages** | `WorkingDirectory` on Kubernetes. Python `dependencies:`/uv/`packageManager`/`pythonVersion`. node, R, Julia, Ruby, Go and the other Kestra script plugins. The Docker options and `targetOS` that are refused today | 0 | M + S–M each |
+| 18 | **Plugin host in full** (plugin triggers reopened) | Polling and realtime plugin triggers. Flowable and dynamic-result plugin tasks. The `RunContext` gaps (exit code 4). Deferred and per-row rendering. More plugin jars | 0 | L |
+| 19 | **Flow API** | Import/export, bulk enable/disable/delete, search-in-source/replace, validate task/trigger, delete revisions | 0 | M |
+| 20 | **Remaining non-security divergences** | Appendix B §8 items 8 (soft-deleted namespace-file history), 9 (Flow-trigger windows cascade, expired window replaced) and 12 (kill on a terminal execution answers 409): align with Kestra unless the spec shows Kestra's behaviour is a bug. Every other §8 item is placed: 1, 2 and 4–7 in §3.1; 10, 11, 14 and 16 in §3.2; 3 in #10 (its KV half in §3.1); 13 in #14 and #15; 15 in #1 | 0 | S each |
 
-**Expected after #0 and #2:** the baseline falls from 84 to about 52.
+**Expected after #2:** the baseline falls from 73 to about 52.
 
-## 3. Not planned
+## 3. What stays different, and why
 
-- **Harness limits** (8 entries): timing and poller latency, and order pairs a clockless driver cannot reach. They stay baselined unless the driver gains a time model.
-- **Deliberate divergences** (16, listed in Appendix B §8), among them: namespace-confined writes and purges, `http()` refused, `Process` runner refused, `PurgeLogs` scope, no metrics from `Assert`.
-- **Decided refusals:** `Pause` `behavior:`/`errors:`/`onPause:` (ruling 2026-10-11) and `AllowFailure` block `retry:`, until a package takes them on; plugin triggers (W5b §11).
-- **Not workflow-engine scope:** Kestra dashboards, previews, blueprints, AI, MCP, Apps, EE features.
+### 3.1 Security divergences (kept)
+
+These stay because matching Kestra would open a cross-workspace hole, an SSRF, or an unbounded resource in a multi-tenant deployment. Kestra OSS is single-tenant.
+- **Workspace features and allowlists:** containers and plugins sit behind workspace features, off by default, plus a global image and type allowlist (§8 item 1).
+- **Runners:** the `Process` task runner is refused, and the chart refuses the Docker runner in production (§8 item 2). `WorkingDirectory` gets Kubernetes in #17 instead.
+- **`secret()` in KV values:** `secret()` inside a KV `Set`/`Put` value stays refused at publish, so a secret is never persisted in clear. The rest of §8 item 3 is lifted by #10.
+- **`http()` in expressions:** refused, because it renders on the control plane (§8 item 4). The http tasks in #4 run on workers behind an egress policy.
+- **`allowedFileExtensions`:** a FILE input's allowlist is enforced (§8 item 5).
+- **Namespace confinement:** KV, namespace-file writes, `PurgeKV`, `PurgeFiles` and `PurgeLogs` are confined to the flow's own namespace and its children (§8 item 6).
+- **Caps:** KV value size and density, number digits (§8 item 7), and `executions.variables`/`Labels` (debt D8, D9).
+- **Workspace-scoped references:** publish resolves Subflow/`dependsOn` targets only in the caller's workspace (debt §5.1).
+
+### 3.2 egret design kept, with no loss of Kestra behaviour
+
+- **Draft/publish split** (§8 item 11).
+- **Log lines** live in Postgres with retention rather than object storage (§8 item 16). This is a storage choice, not a behaviour.
+- **A disabled `Dag` node** is dropped together with its edges, where Kestra hangs (§8 item 14). This is a Kestra bug that egret does not copy.
+- **Publish freezing references** (§8 item 10). Re-state at #12's spec what remains of it after debt §5.1, where a target absent at publish freezes nothing and run time resolves by name.
+
+### 3.3 Not engine scope, or not OSS
+
+- **Kestra Enterprise:** `quotas`, `workerSelector` (flow and task), `policyRefs`, FORM and REUSABLE_INPUTS inputs, the namespace-secrets API.
+- **Product surfaces beside the engine:** dashboards and previews, blueprints, AI, MCP (including `McpToolTrigger`), Apps.
+- **Check at #13's spec:** if Kestra OSS has `assets` (lineage) and the per-task plugin `version`, #13 takes them on; if they are Enterprise-only, they go here.
+
+### 3.4 Harness limits
+
+8 baselined entries: timing and poller latency, and order pairs a clockless driver cannot reach. These are limits of the oracle driver, not missing features. They stay baselined unless the driver gains a time model; #16 builds one and re-measures them.
 
 ## 4. Keeping this current
 
-Re-measure when a package merges: the ratchet's printout gives the corpus counts, and `python3 handler_surface.py` the handler surface. Update §1, mark the package done in §2 with its PR, and leave the appendices as the dated record of 2026-10-18.
+Re-measure when a package merges: the ratchet's printout gives the corpus counts, and `python3 handler_surface.py` gives the handler surface. Update §1, mark the package done in §2 with its PR, and leave the appendices as the dated record of 2026-10-18. When a package's spec finds a gap that no row names, add it to a row or to §3 with its reason. Never leave it unlisted.
 
 ---
 
