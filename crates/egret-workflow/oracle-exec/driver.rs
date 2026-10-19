@@ -939,7 +939,16 @@ const CREATE_REFUSED: usize = 4;
 /// (`worker::handlers::purge_logs`, registered by its own `register` in
 /// [`registry`] and `runtime::handlers_for`) and a `runtime::served_for` key.
 /// All five leave [`UNKNOWN_TYPE_REFUSED`].
-const LIVE: usize = 281;
+///
+/// **281 -> 293 at group C2 Task 5 (2026-10-18)**: SetVariables,
+/// UnsetVariables and Labels have `TASK_TYPES` rows and are `EXECUTOR_LEVEL`
+/// (`spec::registry::EXECUTOR_LEVEL`, planned `executor::TaskKind::ExecutionUpdate`;
+/// no worker handler, no [`registry`] entry, no `runtime::served_for` key), so
+/// every deployment serves them. 12 flows leave [`UNKNOWN_TYPE_REFUSED`]: the
+/// seven `valids/*labels*` flows, `valids/set-variables`,
+/// `-set-variables-duplicate`, `-unset-variables`,
+/// `-task-runif-executionupdating` and `-task-runif-taskswithstate`.
+const LIVE: usize = 293;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -1013,7 +1022,11 @@ const LIVE: usize = 281;
 ///
 /// **38 -> 33 at group C1 Task 4 (2026-10-18)**: the five
 /// `valids/purge_logs_*` (see [`LIVE`]).
-const UNKNOWN_TYPE_REFUSED: usize = 33;
+///
+/// **33 -> 21 at group C2 Task 5 (2026-10-18)**: SetVariables, UnsetVariables
+/// and Labels have `TASK_TYPES` rows and are `EXECUTOR_LEVEL`; 12 flows leave
+/// this bucket for [`LIVE`] (named there), none for [`VALIDATE_REFUSED`].
+const UNKNOWN_TYPE_REFUSED: usize = 21;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -1051,6 +1064,11 @@ const UNKNOWN_TYPE_REFUSED: usize = 33;
 /// **26 -> 27 at group C1 Task 2 (2026-10-18)**: `valids/task-runif`, which
 /// used to stop at its `OutputValues`, is now refused at its `Subflow`'s
 /// reference (see [`LIVE`] and `SUBFLOW_LOOKUPS_ON_REFUSED`).
+///
+/// **27, unchanged at group C2 Task 5 (2026-10-18)**: SetVariables,
+/// UnsetVariables and Labels have `TASK_TYPES` rows and are `EXECUTOR_LEVEL`;
+/// the 12 flows that leave [`UNKNOWN_TYPE_REFUSED`] all publish live, so none
+/// arrives here.
 const VALIDATE_REFUSED: usize = 27;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the

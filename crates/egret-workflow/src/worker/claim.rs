@@ -3322,14 +3322,22 @@ async fn begin(
     // W9a Task 11: what a render produced beside the state -- the runs it
     // failed WITH a message, and a file `Loop`'s values -- written after the
     // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
+    // Group C2 Task 4: and an executor update's new `variables`/`labels`.
     let mut side = render::RenderSide::default();
-    let (spawns, subflows, killed) =
-        drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
+    let (spawns, subflows, killed) = drive(
+        ctx,
+        &mut surface,
+        state,
+        now,
+        &mut marks,
+        &mut seq,
+        &mut side,
+    )?;
     // W7b Task 1: the attempt ends this settle produced, stamped into the state
     // `persist` serialises, so they ride the same UPDATE as the terminal state.
     stamps::stamp_attempt_ends(before, state, now);
     persist(conn, ctx, before, state, release, &marks, seq).await?;
-    if !side.failures.is_empty() || !side.file_values.is_empty() {
+    if !side.is_empty() {
         // Built and boxed in a SYNC callee: `settle` re-enters itself through
         // a `Subflow` chain, and a statement future built inline (even one
         // boxed here) grows every level's poll frame in a debug build -- the
@@ -3510,6 +3518,7 @@ pub async fn start_execution_with_trigger(
                 // only; a backfill is the scheduler's.
                 labels: None,
                 backfill_id: None,
+                variables: None,
             },
         )
         .await
@@ -3572,6 +3581,11 @@ pub struct NewExecution<'a> {
     pub labels: Option<serde_json::Value>,
     /// The backfill that fired this tick (D2); `Some` only with `scheduled_date`.
     pub backfill_id: Option<Uuid>,
+    /// The executor-level `variables` this execution starts with (migration
+    /// 0196, group C2): the replayed execution's column for the user's replay
+    /// route (D3, final review I3), as the retry replay copies it. `None`
+    /// stores NULL -- "the flow's `variables:`" -- for every other start.
+    pub variables: Option<serde_json::Value>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -3634,6 +3648,7 @@ async fn start_execution_in_on(
         input_files,
         labels,
         backfill_id,
+        variables,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -3661,10 +3676,11 @@ async fn start_execution_in_on(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
-            flow_trigger_event_id, replayed_from_execution_id, labels, backfill_id, ",
+            flow_trigger_event_id, replayed_from_execution_id, labels, backfill_id, \
+            variables, ",
         stamp_columns!(),
         ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
-                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, ",
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, ",
         // Both NULL for a row born `CREATED`; spelled through the helper so the
         // rule has no exception for the reader to remember (`stamps`).
         stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
@@ -3685,6 +3701,7 @@ async fn start_execution_in_on(
     .bind(id)
     .bind(labels)
     .bind(backfill_id)
+    .bind(variables)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -4409,7 +4426,8 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
 /// message of each run a render failed with one, and each file `Loop`'s
 /// values, one row per record in file order (migration 0167) -- replacing
 /// any rows a previous rendering of the same run left, so a run's values
-/// are the ones its current `rendered` counts.
+/// are the ones its current `rendered` counts. Group C2 Task 4: and the
+/// executor updates' `variables`, `labels` and reserved `taskrun.id`s.
 fn write_render_side(
     conn: &mut PgConnection,
     execution: Uuid,
@@ -4449,13 +4467,44 @@ fn write_render_side(
             .await
             .map_err(db_err)?;
         }
+        // Group C2 Task 4 (spec §3.3): the execution's new variables and
+        // labels -- each the WHOLE value after this settle's last update --
+        // and the `taskrun.id` an update rendered with, onto the row `persist`
+        // has just inserted with the column default.
+        if let Some(vars) = side.variables {
+            sqlx::query("UPDATE workflow.executions SET variables = $2 WHERE id = $1")
+                .bind(execution)
+                .bind(vars)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+        if let Some(labels) = side.labels {
+            sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
+                .bind(execution)
+                .bind(serde_json::to_value(&labels).expect("labels serialise"))
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+        for (run, id) in side.run_ids {
+            sqlx::query(
+                "UPDATE workflow.task_runs SET id = $3 WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .bind(id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
         Ok(())
     })
 }
 
 fn drive(
     ctx: &ExecutionCtx,
-    surface: &Surface,
+    surface: &mut Surface,
     state: &mut ExecutionState,
     now: Tick,
     marks: &mut Marks,
@@ -4495,6 +4544,15 @@ fn drive(
 
         let snapshot = state.clone();
         if render::render_expressions(surface, plan, state, now, side) == Pass::Rendered {
+            *seq += 1;
+            marks.observe(&snapshot, state, *seq);
+            continue;
+        }
+
+        // Group C2 Task 4: the executor updates, which change `surface` for
+        // every later render of this settle.
+        let snapshot = state.clone();
+        if render::render_updates(surface, plan, state, now, side) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -5226,6 +5284,7 @@ mod tests {
                     input_files: Vec::new(),
                     labels: None,
                     backfill_id: None,
+                    variables: None,
                 },
             )
             .await
@@ -5519,6 +5578,7 @@ mod tests {
                 input_files: Vec::new(),
                 labels: None,
                 backfill_id: None,
+                variables: None,
             },
         )
         .await
@@ -5805,6 +5865,7 @@ mod tests {
                 input_files: Vec::new(),
                 labels: None,
                 backfill_id: None,
+                variables: None,
             },
         )
         .await

@@ -1123,6 +1123,7 @@ pub async fn run_with_labels(
             input_files: Vec::new(),
             labels,
             backfill_id: None,
+            variables: None,
         },
     )
     .await

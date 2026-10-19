@@ -803,7 +803,11 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // `valids/assert` banks; 88 + 213 = 301.
         // 88 -> 84 baselined, 213 -> 217 matching at group C1 Task 4: four
         // `valids/purge_logs_*` bank; 84 + 217 = 301.
-        (301, 217, 84),
+        // 84 -> 73 baselined, 217 -> 228 matching at group C2 Task 5
+        // (2026-10-18): eleven entries `SetVariables`, `UnsetVariables` and
+        // `Labels` held bank; `valids/task-runif-taskswithstate` stays
+        // baselined on the flow-level `finally:`; 73 + 228 = 301.
+        (301, 228, 73),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2370,7 +2374,11 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 /// `valids/if-in-parallel` are planned and run (`Assert` has a handler);
 /// `if-in-parallel`'s three iterations carry the five nested pairs (measured:
 /// the test prints `egret produces 755 + 130`).
-const EGRET_TOP_LEVEL_PAIRS: usize = 755;
+/// **777 since group C2 Task 5 (2026-10-18)**: the twelve entries
+/// `SetVariables`, `UnsetVariables` and `Labels` held are planned and run, and
+/// carry 22 more top-level pairs (measured: the test prints `egret produces
+/// 777 + 130`). The nested figure does not move.
+const EGRET_TOP_LEVEL_PAIRS: usize = 777;
 const EGRET_NESTED_PAIRS: usize = 130;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2463,7 +2471,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // (`OutputValues` has a handler); measured.
         // + the 1 top-level pair of `valids/assert` (`before` before `fail`),
         // banked at group C1 Task 3; measured.
-        (426, 103, 529),
+        // + the 21 top-level pairs of the eleven entries group C2 Task 5 banked
+        // (`SetVariables`, `UnsetVariables`, `Labels` are executor-level);
+        // measured.
+        (447, 103, 550),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2483,7 +2494,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // 610 -> 588 at group C1 Task 2: the 22 top-level pairs of the eleven
         // entries it banked moved to the matching side.
         // 588 -> 587 at group C1 Task 3: `valids/assert`'s one pair.
-        (463, 124, 587),
+        // 587 -> 566 at group C2 Task 5: the 21 top-level pairs of the eleven
+        // entries it banked moved to the matching side.
+        (442, 124, 566),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2906,7 +2919,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // runs moved to the banked side.
 // 329 -> 325 at group C1 Task 4 (2026-10-18, measured): the four banked
 // `valids/purge_logs_*` entries' one run each.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 325;
+// 325 -> 303 at group C2 Task 5 (2026-10-18, measured): the eleven banked
+// entries' 22 runs.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 303;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2935,7 +2950,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // sub-execution) is banked.
 // 123 -> 119 at group C1 Task 4: the four banked `valids/purge_logs_*` (one
 // top-level execution each, no sub-execution).
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 119;
+// 119 -> 108 at group C2 Task 5: the eleven entries it banked (one top-level
+// execution each, no sub-execution).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 108;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2957,7 +2974,10 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 119;
 /// **1257 since group C1 Task 4 (2026-10-18)**: 16 on the four banked
 /// `valids/purge_logs_*` entries' one run each (`CREATED SUBMITTED RUNNING
 /// SUCCESS`; measured).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1257;
+/// **1192 since group C2 Task 5 (2026-10-18)**: 65 on the eleven entries it
+/// banked (22 runs; `CREATED RUNNING SUCCESS` for an update, `CREATED FAILED`
+/// for a failed one, `CREATED SKIPPED` for a falsy `runIf`; measured).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1192;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2981,7 +3001,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1257;
 /// one execution (`CREATED RUNNING FAILED`).
 /// **422 since group C1 Task 4 (2026-10-18)**: three on each of the four
 /// banked `valids/purge_logs_*` executions (`CREATED RUNNING SUCCESS`).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 422;
+/// **389 since group C2 Task 5 (2026-10-18)**: three on each of the eleven
+/// banked executions (`CREATED RUNNING <terminal>`).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 389;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3123,7 +3145,9 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 // 970 -> 977 at group C1 Task 3 (2026-10-18, measured): the pairs egret
 // produces for `valids/assert` and `valids/if-in-parallel`, which used to be
 // refused at start.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 977;
+// 977 -> 999 at group C2 Task 5 (2026-10-18, measured): the 22 pairs
+// `EGRET_TOP_LEVEL_PAIRS` gained, counted before the restriction.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 999;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4348,7 +4372,10 @@ const MISMATCH_ON_EXECUTION: usize = 32;
 // run (FAILED, not SUCCESS).
 // 53 -> 54 at group C1 Task 4 (2026-10-18, measured): the same entry's
 // `purge_logs` run (FAILED, not SUCCESS).
-const MISMATCH_ON_RUNS: usize = 54;
+// 54 -> 55 at group C2 Task 5 (2026-10-18, measured):
+// `valids/task-runif-taskswithstate` runs and differs on `runs` as a trace
+// (its two flow-level `finally:` runs are missing), not as a refusal.
+const MISMATCH_ON_RUNS: usize = 55;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4370,7 +4397,9 @@ const MISMATCH_ON_RUNS: usize = 54;
 // 19 -> 20 at WorkingDirectory Task 8 (measured).
 // 20 -> 26 at group C1 Task 2 (measured): six of those seven also differ on
 // `order` (their missing `afterExecution:` run, or the extra iteration).
-const MISMATCH_ON_ORDER: usize = 26;
+// 26 -> 27 at group C2 Task 5 (2026-10-18, measured): the same entry, whose
+// missing `finally:` runs take five golden pairs with them.
+const MISMATCH_ON_ORDER: usize = 27;
 /// The `runs` entries egret refuses on purpose, in golden order: each is a
 /// flow Kestra ran holding a task egret cannot run, which before its refusal
 /// was an opaque runnable that stalled the execution for ever.
@@ -4386,7 +4415,8 @@ const MISMATCH_ON_ORDER: usize = 26;
 ///   cause; it has three more rows, flows with no golden entry. (`Exit` left
 ///   at kill-and-exit Task 3, and its four entries with it; `OutputValues` at
 ///   group C1 Task 2, and its eighteen; `Assert` at Task 3, and its two;
-///   `PurgeLogs` at Task 4, and its five.)
+///   `PurgeLogs` at Task 4, and its five; `SetVariables`, `UnsetVariables`
+///   and `Labels` at group C2 Task 5, and the last twelve.)
 // 49 -> 45 at WorkingDirectory Task 3 (not Task 8): its four `WorkingDirectory`
 // valids are planned now, so `unsupported_working_directory` refuses none of them.
 // 45 -> 41 at kill-and-exit Task 3: `Exit` is registered, so the four
@@ -4397,23 +4427,14 @@ const MISMATCH_ON_ORDER: usize = 26;
 // `valids/if-in-parallel` plan and are run (`assert` matches).
 // 21 -> 16 at group C1 Task 4: `PurgeLogs` is registered, so the five
 // `valids/purge_logs_*` plan and are run.
-const RUNS_REFUSED: [&str; 16] = [
-    "valids/labels-update-nested-value-list",
-    "valids/labels-update-nested-value-map",
-    "valids/labels-update-task",
-    "valids/labels-update-task-deduplicate",
-    "valids/labels-update-task-empty",
-    "valids/npe-labels-update-task",
+// 16 -> 4 at group C2 Task 5 (2026-10-18): `SetVariables`, `UnsetVariables`
+// and `Labels` are registered (executor-level), so the twelve entries they
+// held plan and are run (eleven match). No `unknown_task_type` entry is left.
+const RUNS_REFUSED: [&str; 4] = [
     "valids/pause-behavior",
     "valids/pause-errors-finally-after-execution",
     "valids/pause_on_pause",
-    "valids/primitive-labels-flow",
     "valids/retry-with-flowable-errors",
-    "valids/set-variables",
-    "valids/set-variables-duplicate",
-    "valids/task-runif-executionupdating",
-    "valids/task-runif-taskswithstate",
-    "valids/unset-variables",
 ];
 /// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
 /// [`RUNS_REFUSED`] carried a sub-execution.
@@ -4437,7 +4458,10 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 // 84 -> 80 at group C1 Task 4 (2026-10-18, measured): four `valids/purge_logs_*`
 // banked; `valids/purge_logs_full_arguments` moved from `refused` to a traced
 // mismatch (the decided scope rule, spec §2.3).
-const MISMATCHING_RUNS_ENTRIES: usize = 80;
+// 80 -> 69 at group C2 Task 5 (2026-10-18, measured): eleven entries
+// `SetVariables`, `UnsetVariables` and `Labels` held banked;
+// `valids/task-runif-taskswithstate` moved from `refused` to a traced mismatch.
+const MISMATCHING_RUNS_ENTRIES: usize = 69;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5352,6 +5376,14 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // `SUBMITTED`. It is `TaskKind::Exit` now, so its runs are `flowable`.
     // Derived and added back below, for `is_a_subflow`'s reason.
     let mut is_an_exit = 0usize;
+    // **Group C2 Task 3 moved the three update types the same way.**
+    // `SetVariables`, `UnsetVariables` and `Labels` are still unregistered
+    // (Task 5 registers them), so `build_plan` refuses them and this test
+    // reads them from `plan_stored`, which plans them `TaskKind::ExecutionUpdate` now
+    // instead of an opaque `Runnable`: `flowable` rather than `fed` and
+    // over-fed (no update run in the golden carries `SUBMITTED`). Derived and
+    // added back below, per type, for `is_a_subflow`'s reason.
+    let mut is_an_update: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -5460,6 +5492,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             entry.id, run.task
                         );
                     }
+                    Some(TaskKind::ExecutionUpdate { op, .. }) => {
+                        flowable += 1;
+                        *is_an_update.entry(op.type_id().to_string()).or_default() += 1;
+                        assert!(
+                            !submitted,
+                            "{}: update run {} carries SUBMITTED in the GOLDEN, which would \
+                             refute planning it executor-level",
+                            entry.id, run.task
+                        );
+                    }
                     Some(_) => flowable += 1,
                 }
             }
@@ -5498,11 +5540,38 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `valids/exit-killed` and `valids/exit-nested` (`nested_was_false`)"
     );
     assert_eq!(
+        is_an_update,
+        BTreeMap::from([
+            (
+                "io.kestra.plugin.core.execution.Labels".to_string(),
+                11usize
+            ),
+            (
+                "io.kestra.plugin.core.execution.SetVariables".to_string(),
+                5
+            ),
+            (
+                "io.kestra.plugin.core.execution.UnsetVariables".to_string(),
+                3
+            ),
+        ]),
+        "every update run in the comparable golden: 19 in all, each of them `fed` \
+         and over-fed while `plan_stored` planned the type an opaque `Runnable`, \
+         and exactly the (fed, flowable, over-feed) = (-19, +19, -19) movement \
+         group C2 Task 3 measured on the sum below"
+    );
+    let update_types: Vec<String> = is_an_update.keys().cloned().collect();
+    let is_an_update: usize = is_an_update.values().sum();
+    assert_eq!(
         (
-            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit,
-            flowable - is_a_subflow - is_an_exit,
+            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit + is_an_update,
+            flowable - is_a_subflow - is_an_exit - is_an_update,
             unplanned + in_an_errors_list - refused_pause_runs,
-            over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs + is_an_exit
+            over_fed.values().sum::<usize>()
+                + is_a_subflow
+                + refused_pause_runs
+                + is_an_exit
+                + is_an_update
         ),
         (438, 109, 311, 104),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -5566,10 +5635,24 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `TaskKind::Exit`; it contributed {:?}",
         over_fed.get(egret_workflow::executor::exit::TYPE_ID)
     );
+    // Group C2 Task 3 took the three update types out as TYPES, `Exit`'s way
+    // (none is a `core.flow.` type, so `flow_then` does not move either).
+    for t in &update_types {
+        assert!(
+            !over_fed.contains_key(t),
+            "`{t}` must contribute NO over-submitted run since it is planned \
+             `TaskKind::ExecutionUpdate`; it contributed {:?}",
+            over_fed.get(t)
+        );
+    }
     assert_eq!(
         (
             flow_then + is_a_subflow + refused_pause_runs,
-            over_fed.len() + 1 + usize::from(refused_pause_runs > 0) + usize::from(is_an_exit > 0)
+            over_fed.len()
+                + 1
+                + usize::from(refused_pause_runs > 0)
+                + usize::from(is_an_exit > 0)
+                + update_types.len()
         ),
         // AllowFailure left the over-feed: its four block runs are flowables now
         // (the three targets, and `valids/retry-with-flowable-errors`), and its
@@ -6783,8 +6866,11 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "ExecutionUpdatableTask",
             // 16 until kill-and-exit Task 3 banked the four `valids/exit*`
-            // entries; `Labels`, `SetVariables` and `UnsetVariables` hold the 12.
-            12,
+            // entries; 12 until group C2 Task 5 banked the eleven `Labels`,
+            // `SetVariables` and `UnsetVariables` entries. The 1 left is
+            // `valids/task-runif-taskswithstate`, which a `SetVariables` no
+            // longer holds: its flow-level `finally:` does (the row above).
+            1,
             &[
                 "io.kestra.plugin.core.execution.Labels",
                 "io.kestra.plugin.core.execution.SetVariables",
@@ -7500,9 +7586,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // (2, 87, 89) -> (2, 86, 88) at group C1 Task 3: nor does `valids/assert`.
     // (2, 86, 88) -> (2, 82, 84) at group C1 Task 4: nor do the four
     // `valids/purge_logs_*` it banked.
+    // (2, 82, 84) -> (2, 71, 73) at group C2 Task 5: nor do the eleven
+    // entries it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 82, 84),
+        (2, 71, 73),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

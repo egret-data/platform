@@ -928,6 +928,21 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 ended_at: None,
             });
         }
+        // `FAILED` and the one attempt Kestra records with it, in one write --
+        // see `Command::FailUnstarted`. The attempt reads `[FAILED]`, not
+        // `[CREATED, FAILED]`: the golden's failed updates
+        // (`valids/set-variables-duplicate`) hold `[["FAILED"]]`, and a `Loop`
+        // failing at `CREATED` (`valids/loop-null`, `[]`) is the shape this
+        // command exists to NOT produce.
+        Command::FailUnstarted { run, at } => {
+            let r = &mut state.runs[*run];
+            r.history.push(RunState::Failed);
+            r.attempts.push(Attempt {
+                history: vec![RunState::Failed],
+                started_at: *at,
+                ended_at: None,
+            });
+        }
         Command::ScheduleRetry { run, not_before } => {
             state.runs[*run].not_before = Some(*not_before);
         }

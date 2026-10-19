@@ -116,9 +116,10 @@ impl Plan {
     /// alone.
     fn direct_task_children(&self, ix: TaskIx) -> Vec<TaskIx> {
         match &self.tasks[ix].kind {
-            TaskKind::Runnable { .. } | TaskKind::Executable { .. } | TaskKind::Exit { .. } => {
-                Vec::new()
-            }
+            TaskKind::Runnable { .. }
+            | TaskKind::Executable { .. }
+            | TaskKind::Exit { .. }
+            | TaskKind::ExecutionUpdate { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
             | TaskKind::Loop { tasks, .. }
@@ -618,6 +619,28 @@ pub enum TaskKind {
     /// ([`super::exit::expression`]).
     Exit {
         state: Option<String>,
+    },
+    /// `io.kestra.plugin.core.execution.{SetVariables,UnsetVariables,Labels}`
+    /// -- group C2 Task 3 (spec §3.1). `ExecutionUpdatableTask`s in Kestra, as
+    /// an [`Exit`](TaskKind::Exit) is: the executor runs them, no worker ever
+    /// sees one (no `type_id` is persisted, so no claim takes it), and they
+    /// have no children.
+    ///
+    /// The change is **computed at `CREATED`** by the worker's render pass
+    /// ([`super::update::compute`]), which records it and then sets
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered); a run whose
+    /// `rendered` is still `None` waits. `advance()` then completes it as
+    /// `CREATED RUNNING SUCCESS` in **one round** (`StartRun` and
+    /// `SetRunState(SUCCESS)` together), which is the golden's shape for
+    /// `valids/set-variables`. A change that cannot be computed fails the run
+    /// with [`Command::FailUnstarted`](crate::executor::Command::FailUnstarted)
+    /// (attempts `[[FAILED]]`, spec D6).
+    ///
+    /// `spec` is the leaf spec's JSON text, not a `serde_json::Value`, because
+    /// this enum derives `Eq`.
+    ExecutionUpdate {
+        op: super::update::UpdateOp,
+        spec: String,
     },
 }
 
@@ -1335,6 +1358,16 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         (ModelKind::Leaf { spec }, _) if task.r#type == super::exit::TYPE_ID => {
             out[ix].kind = TaskKind::Exit {
                 state: super::exit::source_of(spec),
+            };
+        }
+        // Group C2 Task 3. The three update types are registered leaf types to
+        // `models` and `spec`, and executor-level tasks here, as `Exit` is.
+        (ModelKind::Leaf { spec }, _) if super::update::UpdateOp::of(&task.r#type).is_some() => {
+            let op = super::update::UpdateOp::of(&task.r#type)
+                .expect("the guard above matched this type");
+            out[ix].kind = TaskKind::ExecutionUpdate {
+                op,
+                spec: spec.to_string(),
             };
         }
         (ModelKind::Subflow(_), Some(SUBFLOW_TYPE)) => {

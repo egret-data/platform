@@ -208,6 +208,26 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // Group C2 Task 5 (2026-10-18): Kestra's three `ExecutionUpdatableTask`s,
+    // FQCN only, no alias, no reference. Like `Exit` they have no worker
+    // handler on purpose: `advance()` plans them `executor::TaskKind::ExecutionUpdate`
+    // and the worker's render pass computes them (`executor::update`), so they
+    // are in [`EXECUTOR_LEVEL`] and every deployment serves them.
+    TaskTypeSpec {
+        r#type: crate::executor::update::SET_VARIABLES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::executor::update::UNSET_VARIABLES,
+        aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::executor::update::LABELS,
+        aliases: &[],
+        references: &[],
+    },
     // Group C1 Task 2 (`worker::handlers::output_values`): FQCN only, no
     // alias, and no reference -- it renders `values:` and nothing else.
     TaskTypeSpec {
@@ -353,7 +373,12 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
 /// The registered types `advance()` runs itself, with no worker handler:
 /// `build_plan` plans them as executor-level kinds, so no run of one is ever
 /// claimed, and every deployment serves them (`runtime::Served::serves`).
-pub const EXECUTOR_LEVEL: &[&str] = &[crate::executor::exit::TYPE_ID];
+pub const EXECUTOR_LEVEL: &[&str] = &[
+    crate::executor::exit::TYPE_ID,
+    crate::executor::update::SET_VARIABLES,
+    crate::executor::update::UNSET_VARIABLES,
+    crate::executor::update::LABELS,
+];
 
 /// Whether `t` is one of [`EXECUTOR_LEVEL`].
 pub fn executor_level(t: &str) -> bool {

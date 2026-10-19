@@ -42505,7 +42505,7 @@
             "items": {
               "$ref": "#/components/schemas/LabelDto"
             },
-            "description": "The labels this execution was started with beyond its flow's own\n`labels:` (a backfill's, a replay's copy); `null` for none. Not the flow's."
+            "description": "The execution's own label column; `null` for none. At start it holds\nthe labels beyond the flow's own `labels:` (a backfill's, a replay's\ncopy); once a `Labels` task has run it holds the full merged list, the\nflow's labels included. The detail's `effective_labels` is the list to\ndisplay."
           },
           "backfill_id": {
             "type": [

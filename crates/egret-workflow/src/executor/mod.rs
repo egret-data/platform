@@ -49,6 +49,7 @@ pub(crate) mod kill;
 mod plan;
 mod retry;
 mod state;
+pub(crate) mod update;
 
 pub use command::Command;
 pub use plan::{
@@ -175,15 +176,16 @@ use flowable::{sequential, Step};
 /// `CREATED` and [`apply`] clears both slots there, so a caller that answers
 /// once and caches is answering only for attempt 1. See `apply`'s rule 2.
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
-    if state.history.last().is_some_and(|s| s.is_terminal()) {
-        return Vec::new();
-    }
-
-    // A kill in progress (spec §5): nothing is created, started, retried or
-    // resumed, and nothing below -- `reopen_due`, the walk, `retry::scan`,
-    // `pause_mark` -- sees this state. See [`kill`].
-    if state.history.last() == Some(&RunState::Killing) {
-        return kill::advance_killing(plan, state);
+    if !drives_forward(state) {
+        // A kill in progress (spec §5): nothing is created, started, retried
+        // or resumed, and nothing below -- `reopen_due`, the walk,
+        // `retry::scan`, `pause_mark` -- sees this state. See [`kill`]. A
+        // terminal execution gets nothing at all.
+        return if state.history.last() == Some(&RunState::Killing) {
+            kill::advance_killing(plan, state)
+        } else {
+            Vec::new()
+        };
     }
 
     // The execution-delay loop, which in the artifact is a different loop from
@@ -312,6 +314,20 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         return cmds;
     }
     work
+}
+
+/// **Whether [`advance`] still drives this execution's runs forward**: it
+/// is neither terminal nor `KILLING`. Every other state -- `RUNNING`,
+/// `PAUSED`, `RETRYING`, `CREATED`, `RESTARTED` -- reaches the walk, which
+/// creates, starts and completes runs. `advance` branches on exactly this,
+/// and the worker's update pass (`worker::render::render_updates`, group C2
+/// ruling D9) gates on it, so the two cannot disagree about when a sibling
+/// may still move.
+pub fn drives_forward(state: &ExecutionState) -> bool {
+    !state
+        .history
+        .last()
+        .is_some_and(|s| s.is_terminal() || *s == RunState::Killing)
 }
 
 /// Which execution state, if any, this batch of commands owes — W8 Task 3.
@@ -752,6 +768,13 @@ mod tests {
                     // its `CREATED RUNNING <state>` directly.
                     TaskKind::Exit { .. } => {
                         panic!("{corpus_id}: no flow in this fixture declares an `Exit`")
+                    }
+                    // Group C2 Task 3. No flow in the list declares one, and
+                    // this fixture never sets `rendered` on one, so it would
+                    // wait at `CREATED`; the update tests below assert its
+                    // `CREATED RUNNING SUCCESS` directly.
+                    TaskKind::ExecutionUpdate { .. } => {
+                        panic!("{corpus_id}: no flow in this fixture declares an update task")
                     }
                     TaskKind::Executable { .. } => {
                         executables += 1;
@@ -3524,8 +3547,9 @@ mod tests {
             /// A typed kind; `build_plan` descended and flattened its children.
             Descends,
             /// A typed kind the executor drives ITSELF and whose children are
-            /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], and since
-            /// kill-and-exit Task 3 [`TaskKind::Exit`].
+            /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], since
+            /// kill-and-exit Task 3 [`TaskKind::Exit`], and since group C2
+            /// Task 3 [`TaskKind::ExecutionUpdate`].
             ///
             /// **A fourth tier, for the reason `Subflow` needed a third.** A
             /// `Pause` is not `Opaque` (no worker ever sees it and no `Pause`
@@ -3572,6 +3596,10 @@ mod tests {
                 // Kill-and-exit Task 3: an `Exit` is a `Leaf` to the model and
                 // a kind the executor drives itself in the plan.
                 K::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => PlannedAs::Waits,
+                // Group C2 Task 3: the three update types, likewise.
+                K::Leaf { .. } if crate::executor::update::UpdateOp::of(&task.r#type).is_some() => {
+                    PlannedAs::Waits
+                }
                 // W8 Task 4: `LoopUntil` moved out of the opaque tier. Like
                 // `Pause`, its tier depends on the task's CONTENT -- a bound
                 // this pure builder cannot read plans it opaque instead
@@ -3607,7 +3635,9 @@ mod tests {
                 | TaskKind::LoopUntil { .. }
                 | TaskKind::AllowFailure { .. }
                 | TaskKind::WorkingDirectory { .. } => PlannedAs::Descends,
-                TaskKind::Pause { .. } | TaskKind::Exit { .. } => PlannedAs::Waits,
+                TaskKind::Pause { .. }
+                | TaskKind::Exit { .. }
+                | TaskKind::ExecutionUpdate { .. } => PlannedAs::Waits,
             }
         }
 
@@ -4274,70 +4304,15 @@ mod tests {
         // (2026-10-18, group C1 Task 4: the five `valids/purge_logs_*` rows
         // are gone -- `io.kestra.plugin.core.log.PurgeLogs` is registered
         // (`worker::handlers::purge_logs`).)
-        PublishedButRefused {
-            id: "valids/labels-update-nested-value-list",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/labels-update-nested-value-map",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/labels-update-task-deduplicate",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/labels-update-task-empty",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/labels-update-task",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/npe-labels-update-task",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/primitive-labels-flow",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
+        //
+        // (2026-10-18, group C2 Task 5: the twelve rows whose unported types
+        // were `io.kestra.plugin.core.execution.SetVariables`, `UnsetVariables`
+        // or `Labels` are gone -- all three are registered and executor-level
+        // (`spec::registry::EXECUTOR_LEVEL`, planned `TaskKind::ExecutionUpdate`).)
         PublishedButRefused {
             id: "valids/retry-with-flowable-errors",
             cause: "an `AllowFailure` flowable with `retry:` on the block itself. Kestra retries the failing child; egret refuses the block-level `retry:` on purpose (spec §2, a non-goal for the AllowFailure flowable package), so the flow is refused where Kestra ran it.",
             codes: &["unsupported_allow_failure_retry"],
-        },
-        PublishedButRefused {
-            id: "valids/set-variables-duplicate",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/set-variables",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/task-runif-executionupdating",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/task-runif-taskswithstate",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/unset-variables",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
-            codes: &["unknown_task_type"],
         },
     ];
 

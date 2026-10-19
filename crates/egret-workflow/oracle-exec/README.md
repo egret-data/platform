@@ -6275,7 +6275,7 @@ found.
 |---|---|---|
 | 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
-| 12 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`; `Exit` left at kill-and-exit Task 3, 16 → 12) | **unclaimed** (`Exit`: kill-and-exit Task 3, banked) |
+| 1 | `ExecutionUpdatableTask` (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | group C2 Task 5 banked eleven; the one left, `valids/task-runif-taskswithstate`, is held by its flow-level `finally:` and not by its `SetVariables` |
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
@@ -13465,3 +13465,42 @@ Both are the same shape: publish's reference resolution (`RefKind::Subflow`)
 refuses a reference to a flow that does not exist, and this Kestra does not.
 The census prints both lines by name in every run; neither is asserted as an
 over-refusal anywhere.
+
+## Group C2 Task 5: `SetVariables`, `UnsetVariables` and `Labels`, eleven entries bank
+
+**What changed.** The three `ExecutionUpdatableTask`s have `spec::registry`
+rows (FQCN only) and are in `spec::registry::EXECUTOR_LEVEL`, as `Exit` is: no
+worker handler, no `driver::registry` entry and no `runtime::served_for` key,
+because `runtime::Served::serves` answers true for every executor-level type
+(`spec::unrunnable`'s `the_executor_level_types_publish_on_a_deployment_with_no_handlers`
+pins it on an empty `Served`). `build_plan` plans each `TaskKind::ExecutionUpdate`
+(group C2 Task 3) and the worker's render pass computes it (Task 4). The census
+moved 281 → 293 live and `UNKNOWN_TYPE_REFUSED` 33 → 21 (`VALIDATE_REFUSED`
+stays 27). The last twelve `unknown_task_type` rows of `PUBLISHED_BUT_REFUSED`
+went, and `RUNS_REFUSED` went 16 → 4. The ratchet went from 84 mismatching / 84
+baselined to 73 / 73, 0 broken.
+
+**Banked (11):** `labels-update-nested-value-list`,
+`labels-update-nested-value-map`, `labels-update-task`,
+`labels-update-task-deduplicate`, `labels-update-task-empty`,
+`npe-labels-update-task`, `primitive-labels-flow`, `set-variables`,
+`set-variables-duplicate`, `task-runif-executionupdating` and
+`unset-variables`. Both failure shapes match the golden's (`CREATED FAILED`,
+attempts `[["FAILED"]]`).
+
+**Still baselined (1):** `task-runif-taskswithstate`. Measured with a
+temporary probe (reverted): egret's `hello` and `will_fail` runs and the
+execution `CREATED RUNNING FAILED` match the golden exactly; the two runs
+missing are `write_execution_context` (the `SetVariables`) and
+`skipped_when_failures_exist`, both in the flow-level `finally:`, which egret
+does not run. Not a C2 defect.
+
+The handler-surface ceiling went 250 → 261 (population 228; `W3A_EXECUTOR_LEVEL`
+holds the three). The derived figures that moved, each with a dated note where
+it is pinned: the bank split (301, 217, 84) → (301, 228, 73), the field
+breakdown (runs 54 → 55, order 26 → 27, total 80 → 69), the ordered pairs
+(`EGRET_TOP_LEVEL_PAIRS` 755 → 777, `EGRET_PAIRS_BEFORE_RESTRICTION`
+977 → 999, asserted 529 → 550, baselined 587 → 566), the timeout split
+(2, 82, 84) → (2, 71, 73), baselined terminals 325 → 303, executions
+119 → 108, run-history tokens 1257 → 1192 and execution-history tokens
+422 → 389. The residual `ExecutionUpdatableTask` row went 12 → 1.
