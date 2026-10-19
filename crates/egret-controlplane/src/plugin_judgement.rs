@@ -35,7 +35,6 @@ pub(crate) struct ProfileVersions {
 
 /// One row of `policy.ranger_plugin_downloads`.
 #[derive(Debug, Clone, sqlx::FromRow)]
-#[allow(dead_code)] // TEMP: `plugin_id`/`served_version` are read by the plugin route (next commit)
 pub(crate) struct LedgerRow {
     pub service_id: i64,
     pub plugin_id: String,

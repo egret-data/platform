@@ -6218,6 +6218,80 @@
         }
       }
     },
+    "/api/control-plane/governance/engines/{id}/plugin": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "What the Ranger plugins of an engine's profile report downloading.",
+        "description": "The plugin download ledger of the engine's policy profile, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.",
+        "operationId": "engine_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The engine's plugin download state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnginePluginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Lacks policy:read or engine:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No engine with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/governance/lineage/{catalog_id}": {
       "get": {
         "tags": [
@@ -42424,6 +42498,65 @@
           "groups_not_enforced"
         ]
       },
+      "EnginePluginResponse": {
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "engine",
+          "sharedWith",
+          "plugin",
+          "judged",
+          "kinds",
+          "rows"
+        ],
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/PluginEngine"
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PluginProfile",
+                "description": "The engine's policy profile; `null` when it has none."
+              }
+            ]
+          },
+          "sharedWith": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginEngineRef"
+            },
+            "description": "The other engines bound to the same profile (legacy shared), by name."
+          },
+          "plugin": {
+            "$ref": "#/components/schemas/PluginReportDto"
+          },
+          "judged": {
+            "$ref": "#/components/schemas/Judged"
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KindReport"
+            },
+            "description": "One entry per kind (`policies`, then `tags`); empty when not judged."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LedgerRowDto"
+            },
+            "description": "The profile's raw ledger rows, newest first; empty without a profile."
+          }
+        }
+      },
       "EnginePodDto": {
         "type": "object",
         "required": [
@@ -44495,6 +44628,46 @@
           }
         }
       },
+      "Judged": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "judged"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason",
+              "sentence",
+              "state"
+            ],
+            "properties": {
+              "reason": {
+                "$ref": "#/components/schemas/NotJudgedReason"
+              },
+              "sentence": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "not_judged"
+                ]
+              }
+            }
+          }
+        ]
+      },
       "JwksDoc": {
         "type": "object",
         "description": "JWK set served at `/.well-known/jwks.json`. Doc-only mirror of the\n`serde_json::Value` the handler builds; each key is a raw RFC 7517 JWK.",
@@ -44509,6 +44682,76 @@
             }
           }
         }
+      },
+      "KindReport": {
+        "type": "object",
+        "required": [
+          "kind",
+          "currentVersion",
+          "state",
+          "sentence"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PluginKind"
+          },
+          "currentVersion": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The profile's counter for this kind (`policy_version` or `tag_version`)."
+          },
+          "lastDownloadAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The newest poll of this kind by any plugin."
+          },
+          "newestReportedVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The version the newest poll reported holding; `null` when it reported\nnone (`-1`) or there is no poll."
+          },
+          "servedVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The version egret served on the newest poll, kept for diagnosis; never\ncounted as held."
+          },
+          "state": {
+            "$ref": "#/components/schemas/KindStateDto"
+          },
+          "notReported": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotReportedDto"
+              }
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          }
+        }
+      },
+      "KindStateDto": {
+        "type": "string",
+        "enum": [
+          "up_to_date",
+          "pending",
+          "behind",
+          "quiet",
+          "silent",
+          "not_reported"
+        ]
       },
       "KvDetailDto": {
         "type": "object",
@@ -44719,6 +44962,40 @@
             "type": "string"
           },
           "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "LedgerRowDto": {
+        "type": "object",
+        "required": [
+          "pluginId",
+          "kind",
+          "at"
+        ],
+        "properties": {
+          "pluginId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "lastKnownVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "servedVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "at": {
             "type": "string",
             "format": "date-time"
           }
@@ -46228,6 +46505,14 @@
           }
         }
       },
+      "NotJudgedReason": {
+        "type": "string",
+        "enum": [
+          "external",
+          "not_running",
+          "no_profile"
+        ]
+      },
       "NotListed": {
         "type": "object",
         "required": [
@@ -46262,6 +46547,13 @@
           "held_through_group",
           "expired",
           "no_username"
+        ]
+      },
+      "NotReportedDto": {
+        "type": "string",
+        "enum": [
+          "no_download",
+          "version_unreported"
         ]
       },
       "NsFileRevisionDto": {
@@ -47013,6 +47305,117 @@
           "serviceAccount": {
             "type": "boolean",
             "description": "Whether the row is a Data API service account (users only; false\notherwise). Engines enforce grants on it like on any user."
+          }
+        }
+      },
+      "PluginEngine": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "origin",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` or `external`."
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginEngineRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "origin"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginKind": {
+        "type": "string",
+        "enum": [
+          "policies",
+          "tags"
+        ]
+      },
+      "PluginProfile": {
+        "type": "object",
+        "required": [
+          "serviceId",
+          "name",
+          "policyVersion",
+          "tagVersion",
+          "updatedAt"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "policyVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tagVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PluginReportDto": {
+        "type": "object",
+        "description": "Which Ranger plugin the engine runs (`egret_perm::ranger_plugin_report`).",
+        "required": [
+          "modelled"
+        ],
+        "properties": {
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelled": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
