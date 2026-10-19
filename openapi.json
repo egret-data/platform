@@ -3679,6 +3679,154 @@
         }
       }
     },
+    "/api/control-plane/classifications/{id}/handwritten": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "Hand-written tag policies of a classification.",
+        "description": "Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it; `sameName` lists other tags with this name, which those policies reach too. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.",
+        "operationId": "tag_handwritten",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tag id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hand-written tag policies naming the classification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagHandWritten"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Lacks policy:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No tag with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/classifications/{id}/usage": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "Where a classification is used.",
+        "description": "The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Requires tag:read or policy:read.",
+        "operationId": "tag_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tag id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the classification is used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagUsage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Lacks both tag:read and policy:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No tag with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/classifications/{id}/view-exposure": {
       "get": {
         "tags": [
@@ -6401,6 +6549,209 @@
           },
           "504": {
             "description": "(egret catalog) egret's warehouse did not answer within the deadline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/objects/{catalog_id}/handwritten": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "Hand-written policies that reach a Data object.",
+        "description": "Every hand-written (operator) Ranger policy of the profiles whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.",
+        "operationId": "object_handwritten",
+        "parameters": [
+          {
+            "name": "catalog_id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "The schema (StarRocks: database); needed for `table`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "The table or view; needs `schema`, needed for `column`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "column",
+            "in": "query",
+            "description": "The column; needs `table`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hand-written policies reaching the object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectHandWritten"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A level named without its parent, or empty or `*`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Lacks policy:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No catalog with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/governance/principals/{kind}/{id}/handwritten": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "Hand-written policies that name a principal.",
+        "description": "Every hand-written (operator) Ranger policy, in every profile and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.",
+        "operationId": "principal_handwritten",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "`user`, `group` or `role`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A user's id, or a group's or role's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hand-written policies naming the principal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalHandWritten"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Lacks policy:read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user, group or role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -37879,6 +38230,68 @@
           }
         }
       },
+      "BiObject": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "workspaceSlug"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`dashboard`, `chart`, `dataset`, `saved_query`, `app` or `folder`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "workspaceSlug": {
+            "type": "string"
+          }
+        }
+      },
+      "BiUsage": {
+        "type": "object",
+        "required": [
+          "readable",
+          "unreadable",
+          "deleted",
+          "checked",
+          "remaining"
+        ],
+        "properties": {
+          "readable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BiObject"
+            },
+            "description": "Readable objects, in check order (workspace id, kind, object id)."
+          },
+          "unreadable": {
+            "$ref": "#/components/schemas/Unreadable"
+          },
+          "deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assignments whose object no longer exists (CL11)."
+          },
+          "checked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Objects checked, at most [`BI_CHECK_CAP`]."
+          },
+          "remaining": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Existing objects beyond the cap, not checked (CL12)."
+          }
+        }
+      },
       "Branch": {
         "type": "string",
         "enum": [
@@ -38051,6 +38464,18 @@
           }
         ],
         "description": "Where the listing was read."
+      },
+      "Bucket": {
+        "type": "string",
+        "description": "Which of a policy's six item lists an item came from.",
+        "enum": [
+          "allow",
+          "deny",
+          "allow_exception",
+          "deny_exception",
+          "mask",
+          "row_filter"
+        ]
       },
       "BulkResultDto": {
         "type": "object",
@@ -41179,6 +41604,39 @@
           }
         }
       },
+      "DataUsage": {
+        "type": "object",
+        "required": [
+          "tables",
+          "tableCount",
+          "columnCount",
+          "orphaned"
+        ],
+        "properties": {
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TableUsage"
+            },
+            "description": "Sorted by catalog name, schema, table."
+          },
+          "tableCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tables carrying the tag on the table itself."
+          },
+          "columnCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tagged columns."
+          },
+          "orphaned": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assignments in a warehouse no catalog names (CL11); not in `tables`."
+          }
+        }
+      },
       "DataapiMetric": {
         "type": "string",
         "description": "The Data API metric a `dataapi_alert` watches — the closed vocabulary of\nmigration 0128's `schedule_dataapi_metric_valid` CHECK.\n\nA typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`\nmatches on internally: an unknown metric then fails to DESERIALIZE — a 4xx\nthe JSON layer names before `to_new`'s validation ever runs — rather than\nreaching Rust as an unchecked string.",
@@ -42716,6 +43174,52 @@
             ],
             "description": "Machine-readable discriminant, present only where clients must branch on\nthe reason. Currently only `\"feature_disabled\"`. Omitted otherwise, so\nno existing response changes shape.",
             "example": "feature_disabled"
+          }
+        }
+      },
+      "EveryonePolicy": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "bucket"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "bucket": {
+            "$ref": "#/components/schemas/Bucket"
+          }
+        }
+      },
+      "EveryoneSummary": {
+        "type": "object",
+        "description": "Policies with an item naming `public` or `{USER}`: they apply to everyone,\nnever attributed to this principal.",
+        "required": [
+          "count",
+          "policies"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct policies."
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EveryonePolicy"
+            },
+            "description": "One entry per (policy, bucket)."
           }
         }
       },
@@ -44497,6 +45001,218 @@
           }
         }
       },
+      "HandWrittenCatalog": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "HandWrittenEngine": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "origin"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` or `external`. External engines are read from the\ndatabase only; nothing is dialled."
+          }
+        }
+      },
+      "HandWrittenEngineRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "HandWrittenPolicy": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "inTagService",
+          "policyType",
+          "match",
+          "throughPattern",
+          "resourceSummary",
+          "enabled",
+          "denyAllElse",
+          "unmodelled",
+          "items"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string",
+            "description": "The profile (or tag service) that stores it."
+          },
+          "inTagService": {
+            "type": "boolean"
+          },
+          "policyType": {
+            "type": "string",
+            "description": "`access`, `masking` or `rowfilter`."
+          },
+          "match": {
+            "$ref": "#/components/schemas/MatchWord"
+          },
+          "throughPattern": {
+            "type": "boolean"
+          },
+          "viaTag": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ViaTag"
+              }
+            ]
+          },
+          "resourceSummary": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "`policy.authz_policies.enabled`, never the body's `isEnabled`."
+          },
+          "denyAllElse": {
+            "type": "boolean"
+          },
+          "unmodelled": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemSummary"
+            }
+          },
+          "parseError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the body could not be read; `match` is then `unknown`."
+          }
+        }
+      },
+      "HandWrittenProfile": {
+        "type": "object",
+        "required": [
+          "serviceId",
+          "name",
+          "type",
+          "engines"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "tagService": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The profile's usable tag service, if any."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenEngine"
+            }
+          }
+        }
+      },
+      "HandWrittenProfileRef": {
+        "type": "object",
+        "required": [
+          "serviceId",
+          "name"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "HandWrittenTarget": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ImpersonationDto": {
         "type": "object",
         "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
@@ -44539,6 +45255,68 @@
             ],
             "format": "date-time",
             "description": "Optional hard expiry. Absent means the client lives until revoked."
+          }
+        }
+      },
+      "ItemSummary": {
+        "type": "object",
+        "description": "One item of a hand-written policy, as a page shows it.",
+        "required": [
+          "bucket",
+          "users",
+          "groups",
+          "roles",
+          "everyone",
+          "accesses"
+        ],
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/Bucket"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Usernames, `{USER}` excluded (it is `everyone`)."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrincipalMark"
+            },
+            "description": "Groups, `public` excluded (it is `everyone`)."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrincipalMark"
+            }
+          },
+          "everyone": {
+            "type": "boolean",
+            "description": "The item names the group `public` or the user `{USER}`."
+          },
+          "accesses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Access types, in the item's order."
+          },
+          "maskType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A mask item's `dataMaskType`."
+          },
+          "rowFilter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A row-filter item's `filterExpr`."
           }
         }
       },
@@ -45085,6 +45863,13 @@
           }
         }
       },
+      "ListedState": {
+        "type": "string",
+        "enum": [
+          "listed",
+          "not_determined"
+        ]
+      },
       "ListingDto": {
         "type": "object",
         "required": [
@@ -45363,6 +46148,16 @@
             "type": "boolean"
           }
         }
+      },
+      "MatchWord": {
+        "type": "string",
+        "description": "How a policy reaches the object (Q2), or `unknown` when its body cannot be\nread.",
+        "enum": [
+          "applies",
+          "part",
+          "parent",
+          "unknown"
+        ]
       },
       "MatchedBy": {
         "type": "string",
@@ -46126,6 +46921,42 @@
           }
         }
       },
+      "Naming": {
+        "type": "object",
+        "required": [
+          "bucket",
+          "how",
+          "onEngines"
+        ],
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/Bucket"
+          },
+          "how": {
+            "$ref": "#/components/schemas/NamingHow"
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The group or role named, for `group` and `role`."
+          },
+          "onEngines": {
+            "type": "boolean",
+            "description": "Whether an engine applies the item to this principal."
+          }
+        }
+      },
+      "NamingHow": {
+        "type": "string",
+        "description": "How an item names the principal.",
+        "enum": [
+          "direct",
+          "group",
+          "role"
+        ]
+      },
       "NewEngineCatalog": {
         "type": "object",
         "description": "One catalog to attach when the engine is created.",
@@ -46483,6 +47314,15 @@
           }
         }
       },
+      "NotDeterminedReason": {
+        "type": "string",
+        "description": "Why route A cannot say which hand-written policies reach the object.",
+        "enum": [
+          "no_engine_attached",
+          "no_profile",
+          "catalog_not_in_profile"
+        ]
+      },
       "NotEvaluatedReason": {
         "type": "string",
         "description": "Why a member was not evaluated.",
@@ -46828,6 +47668,58 @@
               "null"
             ],
             "description": "Optional expiry (RFC3339). `None` = never expires. This is the\nmanagement roll-up, so an expired grant is still returned (not filtered)."
+          }
+        }
+      },
+      "ObjectHandWritten": {
+        "type": "object",
+        "description": "Route A's answer.",
+        "required": [
+          "catalog",
+          "target",
+          "state",
+          "profiles",
+          "policies",
+          "seeded"
+        ],
+        "properties": {
+          "catalog": {
+            "$ref": "#/components/schemas/HandWrittenCatalog"
+          },
+          "target": {
+            "$ref": "#/components/schemas/HandWrittenTarget"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ListedState"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotDeterminedReason"
+              }
+            ]
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenProfile"
+            }
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenPolicy"
+            }
+          },
+          "seeded": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeededCount"
+            },
+            "description": "egret-seeded (`infra`) policies that reach the object, counted per\nprofile and never listed."
           }
         }
       },
@@ -47716,6 +48608,33 @@
           }
         }
       },
+      "PrincipalHandWritten": {
+        "type": "object",
+        "description": "Route B's answer.",
+        "required": [
+          "principal",
+          "state",
+          "policies",
+          "everyone"
+        ],
+        "properties": {
+          "principal": {
+            "$ref": "#/components/schemas/PrincipalRef"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PrincipalState"
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrincipalPolicy"
+            }
+          },
+          "everyone": {
+            "$ref": "#/components/schemas/EveryoneSummary"
+          }
+        }
+      },
       "PrincipalInfo": {
         "type": "object",
         "required": [
@@ -47751,6 +48670,112 @@
           "workspace_members"
         ]
       },
+      "PrincipalMark": {
+        "type": "object",
+        "description": "A group or role an item names. `on_engines` is false for every one: engines\nresolve no groups (but `public`, which is reported as `everyone` instead)\nand no roles (Q1).",
+        "required": [
+          "name",
+          "onEngines"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "onEngines": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PrincipalPolicy": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "inTagService",
+          "policyType",
+          "resourceSummary",
+          "enabled",
+          "denyAllElse",
+          "unmodelled",
+          "naming",
+          "engines"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "inTagService": {
+            "type": "boolean"
+          },
+          "policyType": {
+            "type": "string"
+          },
+          "resourceSummary": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "denyAllElse": {
+            "type": "boolean"
+          },
+          "unmodelled": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "naming": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Naming"
+            }
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenEngineRef"
+            },
+            "description": "The engines that download the policy."
+          }
+        }
+      },
+      "PrincipalRef": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "label"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`user`, `group` or `role`."
+          },
+          "id": {
+            "type": "string",
+            "description": "The user's id, or the group's or role's name."
+          },
+          "label": {
+            "type": "string"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A user's engine username; `null` for groups, roles and a user without one."
+          }
+        }
+      },
       "PrincipalSet": {
         "type": "object",
         "description": "A principal subtract: `include` minus `exclude`. This is what lets egret\ndrop Ranger's allow-exception/deny-exception blocks from the authoring\nsurface (see `crates/egret-perm/tests/store.rs`) — both `Grant.principals`\nand `Rule.exempt` use it, and both round-trip through a `(kind, ref, mode)`\ntable (`perm.grant_principals`, `perm.rule_exemptions`).",
@@ -47772,6 +48797,13 @@
             }
           }
         }
+      },
+      "PrincipalState": {
+        "type": "string",
+        "enum": [
+          "listed",
+          "no_username"
+        ]
       },
       "ProfileDto": {
         "type": "object",
@@ -49656,6 +50688,22 @@
           "grace"
         ]
       },
+      "SameNameTag": {
+        "type": "object",
+        "required": [
+          "id",
+          "key"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string"
+          }
+        }
+      },
       "Sample": {
         "type": "object",
         "required": [
@@ -50382,6 +51430,22 @@
             "type": "integer",
             "format": "int64",
             "description": "How many default policies were created (0 if the profile already had any)."
+          }
+        }
+      },
+      "SeededCount": {
+        "type": "object",
+        "required": [
+          "service",
+          "count"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -51784,6 +52848,44 @@
           }
         }
       },
+      "TableUsage": {
+        "type": "object",
+        "description": "One table of an egret catalog carrying the tag, on the table and/or on\nsome of its columns.",
+        "required": [
+          "catalogId",
+          "catalogName",
+          "schema",
+          "table",
+          "onTable",
+          "columns"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "catalogName": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "onTable": {
+            "type": "boolean",
+            "description": "The tag is on the table itself."
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tagged columns, sorted."
+          }
+        }
+      },
       "TabularDto": {
         "type": "object",
         "required": [
@@ -51890,6 +52992,165 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TagHandWritten": {
+        "type": "object",
+        "description": "Route D's answer.",
+        "required": [
+          "tag",
+          "state",
+          "policies",
+          "sameName"
+        ],
+        "properties": {
+          "tag": {
+            "$ref": "#/components/schemas/TagRef"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TagPolicyState"
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TagPolicyRow"
+            }
+          },
+          "sameName": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SameNameTag"
+            },
+            "description": "Other tags with this name: engine tag policies on the name apply to\nthem too (CL10)."
+          }
+        }
+      },
+      "TagOn": {
+        "type": "string",
+        "description": "Where the tag a tag policy matched sits relative to the object.",
+        "enum": [
+          "this",
+          "parent",
+          "below"
+        ]
+      },
+      "TagPolicyRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "policyType",
+          "resourceSummary",
+          "throughPattern",
+          "enabled",
+          "denyAllElse",
+          "unmodelled",
+          "items",
+          "profiles",
+          "engines"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string",
+            "description": "The tag service that stores it."
+          },
+          "policyType": {
+            "type": "string"
+          },
+          "resourceSummary": {
+            "type": "string"
+          },
+          "throughPattern": {
+            "type": "boolean",
+            "description": "The tag value matched by `*`/`?` rather than literally."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "denyAllElse": {
+            "type": "boolean"
+          },
+          "unmodelled": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemSummary"
+            }
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenProfileRef"
+            },
+            "description": "The Trino profiles whose tag service this is."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenEngineRef"
+            },
+            "description": "The engines bound to those profiles."
+          }
+        }
+      },
+      "TagPolicyState": {
+        "type": "string",
+        "enum": [
+          "listed",
+          "no_tag_service"
+        ]
+      },
+      "TagRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TagUsage": {
+        "type": "object",
+        "description": "Route C's answer.",
+        "required": [
+          "tag",
+          "data",
+          "bi"
+        ],
+        "properties": {
+          "tag": {
+            "$ref": "#/components/schemas/UsageTag"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DataUsage"
+          },
+          "bi": {
+            "$ref": "#/components/schemas/BiUsage"
           }
         }
       },
@@ -52757,6 +54018,19 @@
           }
         }
       },
+      "Unreadable": {
+        "type": "object",
+        "description": "Objects the caller cannot read: a count, and nothing else (Q5).",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "UnresolvedPrincipal": {
         "type": "object",
         "description": "One stored grant principal or rule exemption whose ref matches nobody.",
@@ -53460,6 +54734,26 @@
           }
         }
       },
+      "UsageTag": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "UserDto": {
         "type": "object",
         "required": [
@@ -53764,6 +55058,28 @@
           }
         ],
         "description": "How a principal comes to stand for another (spec §4.2)."
+      },
+      "ViaTag": {
+        "type": "object",
+        "required": [
+          "name",
+          "on"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "on": {
+            "$ref": "#/components/schemas/TagOn"
+          },
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The tagged column, when the tag is on a column."
+          }
+        }
       },
       "ViewExposureDto": {
         "type": "object",

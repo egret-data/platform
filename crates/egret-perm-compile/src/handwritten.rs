@@ -1018,7 +1018,7 @@ pub struct Naming {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct EngineRef {
+pub struct HandWrittenEngineRef {
     pub id: Uuid,
     pub name: String,
 }
@@ -1037,7 +1037,7 @@ pub struct PrincipalPolicy {
     pub unmodelled: Vec<String>,
     pub naming: Vec<Naming>,
     /// The engines that download the policy.
-    pub engines: Vec<EngineRef>,
+    pub engines: Vec<HandWrittenEngineRef>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -1080,7 +1080,7 @@ async fn engines_downloading_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
     service_name: &str,
-) -> Result<Vec<EngineRef>, HandWrittenError> {
+) -> Result<Vec<HandWrittenEngineRef>, HandWrittenError> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT DISTINCT e.id, e.name FROM engine_mgmt.engines e \
            JOIN policy.authz_services s ON s.id = e.authz_service_id \
@@ -1093,7 +1093,7 @@ async fn engines_downloading_via(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name)| EngineRef { id, name })
+        .map(|(id, name)| HandWrittenEngineRef { id, name })
         .collect())
 }
 
@@ -1202,7 +1202,7 @@ pub async fn handwritten_for_principal_via(
             .into_iter()
             .filter(|r| r.managed_by == "operator")
             .collect();
-        let mut engines: Option<Vec<EngineRef>> = None;
+        let mut engines: Option<Vec<HandWrittenEngineRef>> = None;
         for row in &rows {
             // A body that cannot be read names nobody we can see; route A
             // lists it as `unknown` on every object of its profile.
@@ -1323,7 +1323,7 @@ pub fn tag_policy_state(tag_services: usize) -> TagPolicyState {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ProfileRef {
+pub struct HandWrittenProfileRef {
     pub service_id: i64,
     pub name: String,
 }
@@ -1344,9 +1344,9 @@ pub struct TagPolicyRow {
     pub unmodelled: Vec<String>,
     pub items: Vec<ItemSummary>,
     /// The Trino profiles whose tag service this is.
-    pub profiles: Vec<ProfileRef>,
+    pub profiles: Vec<HandWrittenProfileRef>,
     /// The engines bound to those profiles.
-    pub engines: Vec<EngineRef>,
+    pub engines: Vec<HandWrittenEngineRef>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -1399,12 +1399,12 @@ pub async fn handwritten_for_tag_via(
     let ids: Vec<i64> = trino.iter().map(|(i, _)| *i).collect();
     let links = usable_tag_services_via(&mut *conn, &ids).await?;
     let profile_name: BTreeMap<i64, String> = trino.into_iter().collect();
-    let mut by_tag_service: BTreeMap<String, Vec<ProfileRef>> = BTreeMap::new();
+    let mut by_tag_service: BTreeMap<String, Vec<HandWrittenProfileRef>> = BTreeMap::new();
     for (sid, tag_service) in links {
         by_tag_service
             .entry(tag_service)
             .or_default()
-            .push(ProfileRef {
+            .push(HandWrittenProfileRef {
                 service_id: sid,
                 name: profile_name.get(&sid).cloned().unwrap_or_default(),
             });
@@ -1436,7 +1436,7 @@ pub async fn handwritten_for_tag_via(
                 engines_of_profile_via(&mut *conn, p.service_id)
                     .await?
                     .into_iter()
-                    .map(|e| EngineRef {
+                    .map(|e| HandWrittenEngineRef {
                         id: e.id,
                         name: e.name,
                     }),

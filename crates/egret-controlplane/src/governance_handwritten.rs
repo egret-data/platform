@@ -10,12 +10,12 @@ use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
 use egret_perm_compile::handwritten::{
-    self, Bucket, EngineRef, EveryonePolicy, EveryoneSummary, HandWrittenCatalog,
-    HandWrittenEngine, HandWrittenError, HandWrittenPolicy, HandWrittenProfile, HandWrittenTarget,
-    ItemSummary, ListedState, MatchWord, Naming, NamingHow, NotDeterminedReason, ObjectHandWritten,
-    ObjectTarget, PrincipalHandWritten, PrincipalMark, PrincipalPolicy, PrincipalRef,
-    PrincipalState, ProfileRef, SameNameTag, SeededCount, TagHandWritten, TagOn, TagPolicyRow,
-    TagPolicyState, TagRef, ViaTag,
+    self, Bucket, EveryonePolicy, EveryoneSummary, HandWrittenCatalog, HandWrittenEngine,
+    HandWrittenEngineRef, HandWrittenError, HandWrittenPolicy, HandWrittenProfile,
+    HandWrittenProfileRef, HandWrittenTarget, ItemSummary, ListedState, MatchWord, Naming,
+    NamingHow, NotDeterminedReason, ObjectHandWritten, ObjectTarget, PrincipalHandWritten,
+    PrincipalMark, PrincipalPolicy, PrincipalRef, PrincipalState, SameNameTag, SeededCount,
+    TagHandWritten, TagOn, TagPolicyRow, TagPolicyState, TagRef, ViaTag,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -61,14 +61,14 @@ pub(crate) fn router() -> Router<CpState> {
         PrincipalPolicy,
         Naming,
         NamingHow,
-        EngineRef,
+        HandWrittenEngineRef,
         EveryoneSummary,
         EveryonePolicy,
         TagHandWritten,
         TagRef,
         TagPolicyState,
         TagPolicyRow,
-        ProfileRef,
+        HandWrittenProfileRef,
         SameNameTag
     ))
 )]
