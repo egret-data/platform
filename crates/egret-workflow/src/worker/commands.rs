@@ -2665,6 +2665,10 @@ pub(crate) struct RunLiveness {
 ///   logged: the sweep is the backstop `run_one` documents, and the rename
 ///   (D12) must not take that backstop away. Safe for D15's reason: the
 ///   execution is this database's and terminal.
+///
+/// Both superseded rules, and the terminal ones, rest on "execution terminal
+/// means no live work of it". That holds while egret runs no `afterExecution:`
+/// (roadmap #2); the package that adds it must re-check this rule.
 pub(crate) fn sweep_decision(
     live: &RunLiveness,
     id: uuid::Uuid,
@@ -2718,8 +2722,9 @@ pub(crate) enum DockerSweep {
 /// for the whole retention (for ever with the setting `0`).
 ///
 /// A container that is not running (exited, created, dead) has nothing to
-/// stop. A live run's, or one with no row here, is left, as
-/// [`sweep_decision`] leaves it.
+/// stop. A live run's, or one with no row here and no terminal execution of
+/// this database, is left, as [`sweep_decision`] leaves it; a superseded
+/// run's is judged by [`sweep_decision`] like a terminal one's.
 pub(crate) fn docker_sweep_action(
     live: &RunLiveness,
     id: uuid::Uuid,

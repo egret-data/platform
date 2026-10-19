@@ -183,7 +183,7 @@ impl Task {
             TaskKind::If(i) => i.errors.iter().collect(),
             TaskKind::Switch(s) => s.errors.iter().collect(),
             TaskKind::Dag(d) => d.errors.iter().collect(),
-            // Six kinds now. `Pause.errors` is real -- `valids/pause-errors-
+            // `Pause.errors` is real -- `valids/pause-errors-
             // finally-after-execution` declares one -- and it is read for the
             // same reason `children()` reads `Pause.tasks`: a handler nested
             // in it must be findable by `worker::claim::leaf_spec`.
