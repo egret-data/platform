@@ -12,6 +12,7 @@ import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
 import { browseItems, catalog, serveData, type FakeData } from "./fakeDataServer";
+import { handwrittenAnswer } from "./handwrittenFixture";
 
 /**
  * The column panel (`?column=`), the "Who can read?" dialog and the "Add tag"
@@ -234,10 +235,10 @@ describe("ColumnPanel", () => {
       ]),
     );
     expect(within(panel).getByText("Grants on the table and above reach this column too. See Permissions.")).toBeInTheDocument();
-    // I2: the list is egret's grants only; explain gives the engines' answer.
+    // #4b: hand-written policies are listed below; explain gives the engines' answer.
     expect(
       within(panel).getByText(
-        "Lists egret grants. Hand-written and egret-seeded engine policies are not listed here; Who can read this column? gives the engines' answer.",
+        "egret grants are above; hand-written policies below. To see who can actually read, use Who can read this column?",
       ),
     ).toBeInTheDocument();
   });
@@ -247,7 +248,7 @@ describe("ColumnPanel", () => {
     renderPage("/governance/data/ice/sales/orders?column=id");
     const panel = await screen.findByRole("dialog", { name: "id" });
     expect(await within(panel).findByText("No egret grant is set on this column")).toBeInTheDocument();
-    expect(within(panel).getByText(/^Lists egret grants\. Hand-written and egret-seeded engine policies are not listed here/)).toBeInTheDocument();
+    expect(within(panel).getByText(/^egret grants are above; hand-written policies below\./)).toBeInTheDocument();
     // The table's tag still reaches it, and so does the rule on that tag.
     await waitFor(() => expect(items(panel, "Masking rules of id")).toEqual(["redact_confidential mask · MASK · by tag CONFIDENTIAL"]));
     expect(items(panel, "Tags of id")).toEqual(["CONFIDENTIAL from table"]);
@@ -656,5 +657,19 @@ describe("Add tag", () => {
     renderPage("/governance/data/ice/sales", TAGGER);
     expect(await screen.findByRole("button", { name: "Who can read?" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add tag" })).not.toBeInTheDocument();
+  });
+});
+
+/** #4b spec §6 (F12): every hand-written policy that reaches the column, from route A with `column`. */
+describe("the column panel's hand-written policies", () => {
+  it("lists every row for the column, asking route A with the column", async () => {
+    const calls = serveData(fixture({ handwritten: { "c-ice|sales|orders|email": handwrittenAnswer("c-ice") } }));
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    const section = await within(panel).findByRole("region", { name: "Hand-written policies (3)" });
+    for (const name of ["hw-access", "hw-mask", "hw-filter"]) {
+      expect(within(section).getByRole("link", { name })).toBeInTheDocument();
+    }
+    expect(calls.handwrittenCalls).toContain("c-ice|sales|orders|email");
   });
 });

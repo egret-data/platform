@@ -21,7 +21,8 @@ import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLeve
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
+import { ACTIONS_CELL, HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
+import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -68,7 +69,17 @@ export function PermissionsTab({
   catalog: CatalogState;
   onEdit: (grant: GrantView) => void;
 }) {
-  return <CatalogGate catalog={catalog}>{(c) => <Grants path={path} kind={kind} catalog={c} onEdit={onEdit} />}</CatalogGate>;
+  return (
+    <CatalogGate catalog={catalog}>
+      {(c) => (
+        <div className="space-y-6">
+          <Grants path={path} kind={kind} catalog={c} onEdit={onEdit} />
+          {/* F12 (#4b spec §6): the hand-written access policies that reach the object. */}
+          <HandWrittenSection catalogId={c.id} schema={path.schema} table={path.object} show="access" />
+        </div>
+      )}
+    </CatalogGate>
+  );
 }
 
 function Grants({
@@ -132,13 +143,13 @@ function Grants({
   inherited.sort((a, b) => order.indexOf(a.from) - order.indexOf(b.from) || bySentence(a.grant, b.grant));
 
   // The tab renders the grants only with policy:read, which is also what Who can read? needs.
-  const note = <EgretGrantsOnlyNote explainLabel={canRead ? "Who can read?" : null} />;
+  const note = <HandWrittenPointer explainLabel={canRead ? "Who can read?" : null} />;
   if (here.length + inherited.length + inside.length + byPattern.length === 0) {
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     return (
       <div className="space-y-2">
-        {note}
         <EmptyState icon={KeyRound} title={`No egret grant reaches this ${noun}`} />
+        {note}
       </div>
     );
   }
@@ -160,7 +171,6 @@ function Grants({
 
   return (
     <div className="space-y-6">
-      {note}
       {here.length > 0 ? <Section title="Here">{table("Here", here)}</Section> : null}
       {inherited.length > 0 ? (
         <Section title="Inherited">
@@ -184,6 +194,7 @@ function Grants({
           })}
         </Section>
       ) : null}
+      {note}
 
       <ConfirmDeleteDialog
         open={deleting !== null}

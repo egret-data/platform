@@ -101,3 +101,41 @@ export function EgretGrantsOnlyNote({
     </p>
   );
 }
+
+/**
+ * #4b (spec §6): the line between a page's egret grants (or rules) and its
+ * hand-written policies section, replacing the I2 note now that hand-written
+ * policies are listed. egret-seeded policies are counted in that section.
+ * `explainLabel` names the control that gives the engines' answer (a link
+ * when `explainTo` is set); without it (no `policy:read`) the line stops.
+ */
+export function HandWrittenPointer({
+  explainLabel,
+  explainTo,
+  subject = "egret grants",
+  lead = "To see who can actually read, use",
+}: {
+  explainLabel: string | null;
+  explainTo?: string;
+  /** What is listed above: `egret grants` (the default) or `egret rules`. */
+  subject?: string;
+  /** The sentence before the control's name. */
+  lead?: string;
+}) {
+  const first = `${subject} are above; hand-written policies below.`;
+  if (!explainLabel) return <p className="text-xs text-muted-foreground">{first}</p>;
+  const end = explainLabel.endsWith("?") ? "" : ".";
+  return (
+    <p className="text-xs text-muted-foreground">
+      {`${first} ${lead} `}
+      {explainTo ? (
+        <Link to={explainTo} className="text-primary underline">
+          {explainLabel}
+        </Link>
+      ) : (
+        explainLabel
+      )}
+      {end}
+    </p>
+  );
+}
