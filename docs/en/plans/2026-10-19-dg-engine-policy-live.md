@@ -198,3 +198,85 @@ proxying `/api`, `/catalog`, `/oauth` to `dgep-egret`. Playwright MCP; logins �
 | L7b | reader `vr` (`policy:read` only) | no Grant, Edit, Delete, enable/disable, New profile, Create policy, Seed, Migrate apply anywhere; Check is present |
 | L8 | keyboard, Escape, widths, themes | every tab and both dialogs reachable by Tab/arrow keys with a visible focus ring; Escape closes each dialog and returns focus to its trigger; at 390 px no horizontal page scroll (tables scroll inside their own container); 1280 px light and dark render with no unreadable text |
 | L9 | People: user `ua` Permissions tab | "Engine permissions" section at the end listing both impersonation grants with engine links and capability labels; `ub`'s page lists none ("No engine permission reaches this user.") |
+
+### 2.1 Result (read this first)
+
+**Every cell ran; four defects found and fixed red-first; apply/undo of Migrate not exercised.** Impersonation granted
+through the dialog works on both real engines (L1), the refusals read the server's reason with the dialog kept open
+(L2), Check answers Undecidable / Allowed / Denied as predicted (L3), the Plugin tab and the Overview agree through a
+5-minute StarRocks stop and recovery (L4), every old URL lands where spec §3 says with Back skipping it (L6), the
+steward and the reader see what their permissions allow (L7), and the pages hold at 390 px (L8). Defects:
+
+| # | defect (cell) | fix |
+|---|---|---|
+| D1 | the index showed every healthy StarRocks engine as "Not reported": its tags kind is always `not_reported` because StarRocks never downloads tags, and the worst-kind word counted it (L0a) | `23dd7f90` — `pluginWord` ignores a StarRocks engine's tags kind |
+| D2 | a created engine grant left the grant dialog open with no toast and the list unrefreshed: create answers **201** and the success handler returned on any status but 200; the test harness answered 200 (L1a) | `aab8ae6a` — any 2xx is success; harness `created()` answers 201 |
+| D3 | closing the Grant or Check dialog dropped focus to `<body>`: the dialogs open from state, so Radix had no trigger to return to (L8) | `24624438` — the panel remembers the opener and focuses it on close |
+| D4 | after an editor save or delete, the Advanced/Policies tab it returned to showed the old row until a reload: the editor invalidated only the legacy `["control-plane","policies"]` key, the tabs read the generated key (L5f) | `04d46f5b` — the editor invalidates both keys |
+
+Wrong predictions that are not defects: L5b (a compiler-owned policy does **not** open read-only; it opens editable
+and Save shows the server's 409 as "This policy is owned by the permission model. … edit or delete that grant/rule
+instead" — exactly main's behaviour; the plan's "read-only exactly as today" was wrong about today); L5d (both
+previews were refused, "did not prove", so apply/undo could not be reached, see 2.3).
+
+### 2.2 Stack and deviations
+
+- Image `egret-backend:dgep-2` from a `git archive` of `c87bb9c9` (scratchpad `dgep2/dgep-build.sh`; 23 min; lowest
+  free disk 148 GiB). DB `egret_dgep_live` in `dgep-pg`; `dgep-egret`, `dgep-rustfs`, `dgep-trino` (483, JWT + TLS,
+  fresh self-signed leaf), `dgep-sr` (4.1.6 allin1, `access_control = ranger`) on `dgep-net`; poll 5 s. Vite from this
+  worktree on 127.0.0.1:5397 with a scratch config proxying `/api`, `/catalog`, `/oauth` to 18497. Fixes D1–D4 were
+  checked live through Vite HMR (frontend only; the image needs no rebuild).
+- Profiles through the API: `dgtr-tag` (1), `dgtr` (2, `tagService`), `dgsr` (3), `dgext-tag` (5), `dgext` (6,
+  `tagService` — registering an external Trino engine on a profile without one is refused 400), `dgloose` (via the
+  index dialog). External engine `dgext` through `POST /control-plane/engines/external`.
+- **DEV-1/DEV-2 (SQL)** as §1.2: engine rows `dgtr`/`dgsr` `running`, attachments to `ice`.
+- **DEV-3: Trino trusts a test-only key.** Copying egret's machine-IdP private key out of the throwaway DB (Task 1's
+  recipe) was refused by the session's permission classifier, so Trino's `jwt.key-file` points at the public half of a
+  fresh RSA key made for this run, and `tq.py` signs with it. JWT authentication only names the principal; the
+  impersonation decision is Ranger's, so L1's proof is unaffected.
+- **DEV-4 (SQL): `origin` flipped to `manual`** around three hand-written creates on the generated `dgtr`
+  (`hw-mask-country` attempt, `hw-read-ub`, `hw-read-ua`), as Task 1. `hw-mask-country` itself was then **inserted by
+  SQL** (both the API and the compile refuse an overlapping pair), to give the Overlaps tab a row.
+- Users `ua`, `ub`, `uc`, `root` (egret allocated the username `root` without objection), `vs` (role
+  `policy:read`+`policy:update`), `vr` (`policy:read`); StarRocks users `ua`, `ub`, `uc` by `root`.
+
+### 2.3 Every cell
+
+| id | prediction | observed | verdict |
+|---|---|---|---|
+| L0a | index lists 3 engines, origins, counts | `dgext` Trino External "Not judged: external" 0/0; `dgsr` StarRocks Provisioned **"Not reported"**; `dgtr` Up to date 0/6; summary "3 engines · 0 profiles without an engine · 7 hand-written" | D1, then "Up to date" after `23dd7f90` |
+| L0b | unbound section lists only `dgloose` | after New profile: `dgloose` Trino Manual 0, Delete offered; `dgtr-tag`/`dgext-tag` absent | as predicted |
+| L0c | no plugin column without `engine:read` | `vs` and `vr`: columns Engine/Type/Origin/Profile/Engine grants/Hand-written; no plugin request | as predicted |
+| L1a | grant ua→ub on `dgtr`, Trino proof | three POSTs: 409 (root), 409 (admin), **201 — dialog stayed open, no toast** (D2). Then `tq.py ua ub` → `OK [["ub"]]`; `uc` → "Principal uc cannot become user ub" | D2; engine proof as predicted |
+| L1b | the same on `dgsr` | (after D2's fix) toast "Saved and compiled into dgsr. The engine applies it at its next plugin download."; row `ub` linked to its People page; `ua` → `'ub'@'%'`, `uc` → ERROR 5204 | as predicted |
+| L2 | root / platform admin refused, dialog open | "Not saved: \"root\" is a principal egret runs as on the engine; it cannot be impersonated"; "Not saved: the impersonation target \"admin\" is a platform admin, whom egret seeds as an engine admin: …"; inputs kept | as predicted |
+| L3a | Trino Undecidable with `{USER}` | "Cannot be decided ahead of time", the impersonation sentence, cause "egret-user-impersonate-self … {USER}" | as predicted |
+| L3b | StarRocks Allowed / Denied | `ua` "Allowed", "Decided by perm-engine-b4696f81… (egret engine grant)" linked to `?grant=`; `uc` "Denied", "No policy grants it." | as predicted |
+| L4 | quiet then recovery, Overview agrees | `docker stop dgep-sr` 08:08:40; at +6 min the route said `quiet` "No plugin has polled profile dgsr for 6 minutes." and `/attention` raised `plugin_quiet` with the same sentence; start + a compile: `pending` (cur 7, rep 6) for ~10 s, then `up_to_date`; `plugin_quiet` gone | as predicted |
+| L5 | Policies tab | "13 policies: 4 egret-compiled · 3 egret-seeded · 6 hand-written"; Open source → grant page, rule page, `?tab=engine-permissions&grant=` (row `aria-current`, highlighted); hand-written Edit → editor, Save → `?tab=advanced`; switch re-enable toasts "Policy enabled." | as predicted |
+| L5b | compiler-owned opens read-only | opens editable; Save → the 409 sentence above (unchanged from main) | prediction wrong, not a defect |
+| L5c | Overlaps | badge 1; the pair with links to the editor and the rule page, sentence, "How to fix" | as predicted |
+| L5d | Migrate dry run / apply / undo | `hw-read-ub` and `hw-read-ua` each "Migratable"; both previews "did not prove this migration" (275 / 271 probe disagreements across 2 profiles), "Nothing was written", Migrate stays disabled. **Apply and undo not exercised** | partly measured |
+| L5e | generated `dgtr` Advanced | fixed warning + "egret compiles this profile, so new hand-written policies are refused. …"; no Create/Seed | as predicted |
+| L5f | manual `dgloose` Advanced | menu Access/Masking/Row filter (no By tag); Seed → "Added 13 default policies." (all `infra`, so the hand-written list stays empty); create `loose-read` → back to the tab, listed; edit (disable) → back to the tab **still "Enabled"** until reload (D4) | D4 |
+| L6 | old URLs | all 14 typed URLs landed as spec §3 (incl. `?tab=masking`→`&type=masking`, `?tab=tags`→`&type=tag`, `/control-plane/policies/*`, unknown → index with "No policy profile named …"); Back returned to the page before each time. `/governance/policies/dgtr-tag` lands on the tag service's own profile page | as predicted |
+| L6b | Overview links | `policy_warnings` sample `dgtr` → `/governance/engines/profiles/dgtr?tab=policies` → replaced by the engine page `?tab=policies`; `rule_overlaps` sample → rule page; `plugin_quiet` ref is the profile (route checked by API, not clicked) | as predicted |
+| L7a | steward | Plugin tab "Plugin state needs the engine:read permission." (header too) and no `/plugin` request; Grant, Edit, Delete, enable switches present; no policy Delete (no `policy:delete`); "Download Trino config" still offered (EP18, `policy:read`) | as predicted |
+| L7b | reader | no Grant/Edit/Delete/switch/New profile/Create/Seed anywhere; Check present; editor "read-only for this account …", Save disabled | as predicted |
+| L8 | keyboard, Escape, widths, themes | Tab order reaches the index rows, Enter opens, arrows move tabs and the URL; focus ring `:focus-visible`; Escape closes suggestions then the dialog, but **focus fell to `<body>`** (D3, fixed and re-checked: focus back on Check); 390 px: `scrollWidth = clientWidth` on the index, every tab, the profile page, the editor and People; dialog fits with margins; 1280 dark/light read cleanly (screenshots checked with `sips`: 390×844 and 1280×900, 52–173 kB) | D3 |
+| L9 | People | `ua`: "Engine permissions" lists `dgsr` and `dgtr` "Impersonate a user", `ub`, "Directly · applied on engines"; `ub`: "No engine permission reaches this user." | as predicted |
+
+### 2.4 Defects
+
+D1–D4 above, each with a failing test first (`EnginesIndex.test.tsx`, `EngineGrantDialog.test.tsx` + harness,
+`CheckCapabilityDialog.test.tsx`, `PolicyEditorPage.test.tsx`). Noted, not fixed (outside #4a or a wording choice):
+a managed row with no mapped capability shows an empty "Capability" label (`queryid=*` baseline); the editor offers
+"By tag" on a profile without a tag service (unchanged editor); `PUT /policies/{id}/enabled` leaves
+`policy_jsonb.isEnabled` at its old value (server, unchanged); egret allocates the engine username `root` to a user
+named root (the grant path refuses it as a target, as L2 shows).
+
+### 2.5 Left behind
+
+Containers `dgep-egret`, `dgep-trino`, `dgep-sr`, `dgep-rustfs`, network `dgep-net` and DB `egret_dgep_live` removed
+after the run; image `egret-backend:dgep-2` removed. Kept: `dgep-pg`, `dgep-valkey`; scratchpad scripts, configs and
+screenshots.
