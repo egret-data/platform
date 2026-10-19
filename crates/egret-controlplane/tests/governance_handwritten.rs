@@ -343,3 +343,112 @@ async fn route_a_refusals() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ── route B ──────────────────────────────────────────────────────────────
+
+/// A user `ua…` with a username, in a new group, named by a hand-written
+/// allow directly and by the group.
+async fn user_named(f: &Fixture) -> (Uuid, String) {
+    let p = &f.db.pool;
+    let username = unique("ua");
+    let user: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, 'Ua', $2) RETURNING id",
+    )
+    .bind(format!("{}@egret.local", unique("hwrb")))
+    .bind(&username)
+    .fetch_one(p)
+    .await
+    .unwrap();
+    let group = unique("g");
+    let gid: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group)
+            .fetch_one(p)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user)
+        .bind(gid)
+        .execute(p)
+        .await
+        .unwrap();
+    let prof = unique("hwrb-tr");
+    let sid = f
+        .policy
+        .create_service(&prof, "trino", &json!({}))
+        .await
+        .unwrap()
+        .id;
+    let body = json!({
+        "name": "hw-b", "service": prof, "policyType": 0, "isEnabled": true,
+        "resources": { "catalog": { "values": ["c"] } },
+        "policyItems": [
+            { "users": [username], "accesses": [{ "type": "select", "isAllowed": true }] },
+            { "groups": [group], "accesses": [{ "type": "select", "isAllowed": true }] }
+        ]
+    });
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, 'hw-b', $2, 'operator')",
+    )
+    .bind(sid)
+    .bind(body)
+    .execute(p)
+    .await
+    .unwrap();
+    (user, group)
+}
+
+#[tokio::test]
+async fn route_b_needs_policy_read_and_answers_with_it() {
+    let f = setup().await;
+    let (user, group) = user_named(&f).await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+    let uri = format!("/governance/principals/user/{user}/handwritten");
+    let (status, _) = get(&st, &tag_reader, &uri).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = get(&st, &reader, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "listed");
+    assert_eq!(body["principal"]["kind"], "user");
+    let p = &body["policies"][0];
+    assert_eq!(p["name"], "hw-b");
+    assert_eq!(
+        p["naming"],
+        json!([
+            { "bucket": "allow", "how": "direct", "via": null, "onEngines": true },
+            { "bucket": "allow", "how": "group", "via": group, "onEngines": false }
+        ])
+    );
+    assert!(body["everyone"]["count"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn route_b_refusals() {
+    let f = setup().await;
+    let admin = session(&f, &["platform_admin"]).await;
+    let st = state(&f).await;
+    for (uri, want) in [
+        (
+            format!("/governance/principals/user/{}/handwritten", Uuid::new_v4()),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/governance/principals/group/{}/handwritten", unique("nog")),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/governance/principals/role/{}/handwritten", unique("nor")),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/governance/principals/workspace/x/handwritten".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (status, _) = get(&st, &admin, &uri).await;
+        assert_eq!(status, want, "{uri}");
+    }
+}

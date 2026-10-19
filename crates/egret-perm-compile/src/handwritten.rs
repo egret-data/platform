@@ -970,6 +970,329 @@ pub async fn handwritten_for_object_via(
     Ok(out)
 }
 
+// ── Route B: hand-written policies naming a principal (spec §4.3, Q1) ─────
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalRef {
+    /// `user`, `group` or `role`.
+    pub kind: String,
+    /// The user's id, or the group's or role's name.
+    pub id: String,
+    pub label: String,
+    /// A user's engine username; `null` for groups, roles and a user without one.
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalState {
+    Listed,
+    /// The user has no username, so no hand-written item can name them on an
+    /// engine; only the `everyone` policies are reported.
+    NoUsername,
+}
+
+/// How an item names the principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NamingHow {
+    /// By username (a user page), or the group or role itself (its own page).
+    Direct,
+    /// By a group: engines resolve no groups, so it reaches nobody there (Q1).
+    Group,
+    /// By a role: engines resolve no roles, so it reaches nobody there (Q1).
+    Role,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Naming {
+    pub bucket: Bucket,
+    pub how: NamingHow,
+    /// The group or role named, for `group` and `role`.
+    pub via: Option<String>,
+    /// Whether an engine applies the item to this principal.
+    pub on_engines: bool,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineRef {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalPolicy {
+    pub id: i64,
+    pub name: String,
+    pub service: String,
+    pub in_tag_service: bool,
+    pub policy_type: String,
+    pub resource_summary: String,
+    pub enabled: bool,
+    pub deny_all_else: bool,
+    pub unmodelled: Vec<String>,
+    pub naming: Vec<Naming>,
+    /// The engines that download the policy.
+    pub engines: Vec<EngineRef>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryonePolicy {
+    pub id: i64,
+    pub name: String,
+    pub service: String,
+    pub bucket: Bucket,
+}
+
+/// Policies with an item naming `public` or `{USER}`: they apply to everyone,
+/// never attributed to this principal.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryoneSummary {
+    /// Distinct policies.
+    pub count: i64,
+    /// One entry per (policy, bucket).
+    pub policies: Vec<EveryonePolicy>,
+}
+
+/// Route B's answer.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalHandWritten {
+    pub principal: PrincipalRef,
+    pub state: PrincipalState,
+    pub policies: Vec<PrincipalPolicy>,
+    pub everyone: EveryoneSummary,
+}
+
+fn internal(e: impl std::fmt::Display) -> HandWrittenError {
+    HandWrittenError::Internal(e.to_string())
+}
+
+/// The engines that download `service`'s policies: those bound to it, or —
+/// for a tag service — those bound to a profile naming it as `tagService`.
+async fn engines_downloading_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    service_name: &str,
+) -> Result<Vec<EngineRef>, HandWrittenError> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT DISTINCT e.id, e.name FROM engine_mgmt.engines e \
+           JOIN policy.authz_services s ON s.id = e.authz_service_id \
+          WHERE s.id = $1 OR s.config_jsonb ->> 'tagService' = $2 \
+          ORDER BY e.name, e.id",
+    )
+    .bind(service_id)
+    .bind(service_name)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| EngineRef { id, name })
+        .collect())
+}
+
+/// Route B (spec §4.3): every hand-written (`operator`) policy of every
+/// profile and tag service whose items name the principal — `kind` is
+/// `user` (`id` a user id), `group` or `role` (`id` a name).
+pub async fn handwritten_for_principal_via(
+    conn: &mut sqlx::PgConnection,
+    kind: &str,
+    id: &str,
+) -> Result<PrincipalHandWritten, HandWrittenError> {
+    // Who the principal is on an engine: a username, plus the groups and
+    // roles an item could name (Q1: these reach nobody there).
+    let (principal, username, groups, roles) = match kind {
+        "user" => {
+            let uid = Uuid::parse_str(id).map_err(|_| HandWrittenError::NotFound)?;
+            let user = crate::people::read_user_via(&mut *conn, uid)
+                .await
+                .map_err(internal)?
+                .ok_or(HandWrittenError::NotFound)?;
+            let mut groups = BTreeSet::new();
+            let mut roles = BTreeSet::new();
+            for s in &user.stands_for {
+                match &s.via {
+                    crate::people::Via::Group { name } => {
+                        groups.insert(name.clone());
+                    }
+                    crate::people::Via::Role { name } => {
+                        roles.insert(name.clone());
+                    }
+                    _ => {}
+                }
+            }
+            let label = if user.name.trim().is_empty() {
+                user.email.clone()
+            } else {
+                user.name.clone()
+            };
+            (
+                PrincipalRef {
+                    kind: "user".into(),
+                    id: uid.to_string(),
+                    label,
+                    username: user.username.clone(),
+                },
+                user.username,
+                groups,
+                roles,
+            )
+        }
+        "group" => {
+            let g = crate::people::read_group_via(&mut *conn, id)
+                .await
+                .map_err(internal)?
+                .ok_or(HandWrittenError::NotFound)?;
+            (
+                PrincipalRef {
+                    kind: "group".into(),
+                    id: g.name.clone(),
+                    label: g.name.clone(),
+                    username: None,
+                },
+                None,
+                BTreeSet::from([g.name]),
+                BTreeSet::new(),
+            )
+        }
+        "role" => {
+            let r = crate::people::read_role_via(&mut *conn, id)
+                .await
+                .map_err(internal)?
+                .ok_or(HandWrittenError::NotFound)?;
+            (
+                PrincipalRef {
+                    kind: "role".into(),
+                    id: r.name.clone(),
+                    label: r.name.clone(),
+                    username: None,
+                },
+                None,
+                BTreeSet::new(),
+                BTreeSet::from([r.name]),
+            )
+        }
+        other => {
+            return Err(HandWrittenError::BadRequest(format!(
+                "kind must be user, group or role, not {other:?}"
+            )))
+        }
+    };
+    let no_username = kind == "user" && username.is_none();
+
+    let services: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, name, type FROM policy.authz_services ORDER BY name, id")
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut policies = Vec::new();
+    let mut everyone = Vec::new();
+    let mut everyone_ids = BTreeSet::new();
+    for (sid, sname, stype) in services {
+        if !matches!(stype.as_str(), "trino" | "starrocks" | "tag") {
+            continue;
+        }
+        let rows: Vec<PolicyRow> = policy_rows_via(&mut *conn, sid)
+            .await?
+            .into_iter()
+            .filter(|r| r.managed_by == "operator")
+            .collect();
+        let mut engines: Option<Vec<EngineRef>> = None;
+        for row in &rows {
+            // A body that cannot be read names nobody we can see; route A
+            // lists it as `unknown` on every object of its profile.
+            let Ok(policy) = parse_policy(row) else {
+                continue;
+            };
+            let mut naming = Vec::new();
+            for (bucket, items) in buckets(&policy) {
+                let bucket = Bucket::of(bucket);
+                for item in items {
+                    if item_names_everyone(item) {
+                        everyone_ids.insert(row.id);
+                        everyone.push(EveryonePolicy {
+                            id: row.id,
+                            name: row.name.clone(),
+                            service: sname.clone(),
+                            bucket,
+                        });
+                    }
+                    if no_username {
+                        continue;
+                    }
+                    if let Some(u) = &username {
+                        if item.users.iter().any(|x| x == u) {
+                            naming.push(Naming {
+                                bucket,
+                                how: NamingHow::Direct,
+                                via: None,
+                                on_engines: true,
+                            });
+                        }
+                    }
+                    for g in item
+                        .groups
+                        .iter()
+                        .filter(|g| *g != PUBLIC && groups.contains(*g))
+                    {
+                        naming.push(Naming {
+                            bucket,
+                            how: NamingHow::Group,
+                            via: Some(g.clone()),
+                            on_engines: false,
+                        });
+                    }
+                    for r in item.roles.iter().filter(|r| roles.contains(*r)) {
+                        naming.push(Naming {
+                            bucket,
+                            how: NamingHow::Role,
+                            via: Some(r.clone()),
+                            on_engines: false,
+                        });
+                    }
+                }
+            }
+            if naming.is_empty() {
+                continue;
+            }
+            if engines.is_none() {
+                engines = Some(engines_downloading_via(&mut *conn, sid, &sname).await?);
+            }
+            policies.push(PrincipalPolicy {
+                id: row.id,
+                name: row.name.clone(),
+                service: sname.clone(),
+                in_tag_service: stype == "tag",
+                policy_type: policy_type_word(policy.policy_type).to_string(),
+                resource_summary: resource_summary(&policy),
+                enabled: row.enabled,
+                deny_all_else: policy.is_deny_all_else,
+                unmodelled: unmodelled_sentences(&policy),
+                naming,
+                engines: engines.clone().unwrap_or_default(),
+            });
+        }
+    }
+    Ok(PrincipalHandWritten {
+        principal,
+        state: if no_username {
+            PrincipalState::NoUsername
+        } else {
+            PrincipalState::Listed
+        },
+        policies,
+        everyone: EveryoneSummary {
+            count: everyone_ids.len() as i64,
+            policies: everyone,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

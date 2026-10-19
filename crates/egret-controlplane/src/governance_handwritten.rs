@@ -10,10 +10,11 @@ use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
 use egret_perm_compile::handwritten::{
-    self, Bucket, HandWrittenCatalog, HandWrittenEngine, HandWrittenError, HandWrittenPolicy,
-    HandWrittenProfile, HandWrittenTarget, ItemSummary, ListedState, MatchWord,
-    NotDeterminedReason, ObjectHandWritten, ObjectTarget, PrincipalMark, SeededCount, TagOn,
-    ViaTag,
+    self, Bucket, EngineRef, EveryonePolicy, EveryoneSummary, HandWrittenCatalog,
+    HandWrittenEngine, HandWrittenError, HandWrittenPolicy, HandWrittenProfile, HandWrittenTarget,
+    ItemSummary, ListedState, MatchWord, Naming, NamingHow, NotDeterminedReason, ObjectHandWritten,
+    ObjectTarget, PrincipalHandWritten, PrincipalMark, PrincipalPolicy, PrincipalRef,
+    PrincipalState, SeededCount, TagOn, ViaTag,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -22,15 +23,20 @@ use crate::governance_overview::begin_snapshot;
 use crate::{CpError, CpState};
 
 pub(crate) fn router() -> Router<CpState> {
-    Router::new().route(
-        "/governance/objects/{catalog_id}/handwritten",
-        get(object_handwritten),
-    )
+    Router::new()
+        .route(
+            "/governance/objects/{catalog_id}/handwritten",
+            get(object_handwritten),
+        )
+        .route(
+            "/governance/principals/{kind}/{id}/handwritten",
+            get(principal_handwritten),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(object_handwritten),
+    paths(object_handwritten, principal_handwritten),
     components(schemas(
         ObjectHandWritten,
         HandWrittenCatalog,
@@ -46,7 +52,16 @@ pub(crate) fn router() -> Router<CpState> {
         SeededCount,
         ItemSummary,
         Bucket,
-        PrincipalMark
+        PrincipalMark,
+        PrincipalHandWritten,
+        PrincipalRef,
+        PrincipalState,
+        PrincipalPolicy,
+        Naming,
+        NamingHow,
+        EngineRef,
+        EveryoneSummary,
+        EveryonePolicy
     ))
 )]
 pub(crate) struct ControlPlaneGovernanceHandWrittenApi;
@@ -111,6 +126,42 @@ async fn object_handwritten(
     };
     let mut tx = begin_snapshot(&st).await?;
     let out = handwritten::handwritten_for_object_via(&mut tx, &target).await;
+    let _ = tx.rollback().await;
+    Ok(Json(out.map_err(map_err)?))
+}
+
+/// Hand-written policies that name a principal.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/governance/principals/{kind}/{id}/handwritten",
+    tag = "control-plane-governance",
+    params(
+        ("kind" = String, Path, description = "`user`, `group` or `role`"),
+        ("id" = String, Path, description = "A user's id, or a group's or role's name"),
+    ),
+    description = "Every hand-written (operator) Ranger policy, in every profile and tag service, \
+                   with an item naming the principal: a user's username (`direct`), or a group or \
+                   role the user holds (`group` / `role`, with `onEngines: false`: engines resolve \
+                   no groups or roles, so such an item reaches nobody there). Items naming `public` \
+                   or `{USER}` are reported under `everyone`, never attributed. A user with no \
+                   username is `no_username` with only the `everyone` policies. Requires policy:read.",
+    responses(
+        (status = 200, description = "The hand-written policies naming the principal", body = PrincipalHandWritten),
+        (status = 400, description = "An unknown kind", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Lacks policy:read", body = ErrorBody),
+        (status = 404, description = "No such user, group or role", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    )
+)]
+async fn principal_handwritten(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<Json<PrincipalHandWritten>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut tx = begin_snapshot(&st).await?;
+    let out = handwritten::handwritten_for_principal_via(&mut tx, &kind, &id).await;
     let _ = tx.rollback().await;
     Ok(Json(out.map_err(map_err)?))
 }
