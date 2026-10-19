@@ -185,3 +185,122 @@ so it can open a classification, L5); `ub`; egret group `g1` (`ua` in it); egret
 | L7c | delete the rule, delete again | navigates to the index; `PII` not listed; `tag_assignments` and `catalog_tag_assignments` have no row for its id |
 | L8 | old links | Overview `tags_without_clearance` row → `/governance/classifications/<id>`; Engine & policy compiled clearance row "Open source" → `…?tab=clearance` (Clearance tab selected); `ub`'s People Clearances → `?tab=clearance`; RulePage "Open classification" → `?tab=rules`; `/control-plane/classifications/<id>` → `/governance/classifications/<id>` |
 | L9 | keyboard, Escape, widths, themes | the index, the tabs (arrow keys move `?tab=`), Edit form, delete dialog and clearance picker reachable by keyboard with a visible focus ring; Escape closes each and focus returns to its opener; 390 px: `scrollWidth = clientWidth` on the index, every tab, the Data placements and People (stacked tables); 1280 px light and dark readable |
+
+### 2.1 Result (read this first)
+
+**Every cell ran; five defects found and fixed red-first; no user decision, security behaviour or scope changed.** The
+cells were driven by scripted Playwright (`@playwright/test`'s Chromium from `frontend/node_modules`, node scripts in
+the scratchpad), with every visual screenshot inspected; each engine claim was checked by running the query on Trino
+483 and StarRocks 4.1.6 as that user. Route A's match words agree with what both engines did (L1, L2: an `ice.s.*.*`
+allow applied, a column deny refused exactly its column, the explain dialog named the same hand-written policy); the
+Trino tag mask is listed under the tag service only and the engine masked on Trino and not on StarRocks (L3); a
+group-named item is marked as reaching nobody and the engines refused it (L4); Where used counts unreadable objects
+only (L5); the delete dialog states every consequence and needs the exact key, the 409 is toasted with focus back on
+Delete, and the delete removes every assignment (L7); every old link lands on its tab (L8); no page scrolls sideways at
+390 px (L9). Defects:
+
+| # | defect (cell) | fix |
+|---|---|---|
+| D1 | the Clearance tab asked a `tag:read` holder for the role and group lists it may not read and showed "The roles and groups could not be loaded" with a Retry; a `tag:manage` holder without `role:read` saw "No roles found." (L5d, L6a) | `aa01ce14` — the role list is asked only by an editor, the group list by an editor or to name required groups; a 403 says which permission lists them |
+| D2 | the compile line said StarRocks gets "a select deny per tagged column"; on StarRocks the clearance's `MASK_NULL` decides and an uncleared reader reads NULL, not a refusal (L6b) | `aa01ce14` — the line names the NULL mask and its effect |
+| D3 | on group `g1`'s page the policies naming `g1` sat under "Through a group or role" (route B reports the group's own name as `how: group`) (L4) | `1bfb3a03` — on a group or role page its own naming is Direct, Q1's sentence kept |
+| D4 | Escape on New classification dropped focus to `<body>` (dialog opened from state) (L9) | `2ee0e418` — focus returns to the opener |
+| D5 | Cancel or Save in the header's Edit form dropped focus to `<body>` (L9) | `77da0460` — Edit takes focus back |
+
+Wrong predictions that are not defects: L1a (one row per profile, sorted `clsr` before `cltr`, as designed); L3a (the
+column panel's tag row reads "Through tag PII on column email", not "on this object": the server names the column);
+L6b on StarRocks (D2 fixes the wording; the engine behaviour is SP4c/view-governance's, unchanged by #4b, and explain
+already states it); L5a's route (the UI refused a table-level `PII` on `s.u` while hand-written tag mask `hw-l3`
+exists — the existing unreadable-table guard, a correct 400 with the form kept — so that assignment was inserted by
+SQL, DEV-6).
+
+### 2.2 Stack and deviations
+
+- **DEV-1: egret as a host binary, not image `egret-backend:dgcl-2`.** `cargo build -p egret-bin` at `79176846`
+  (100 s, 152 GiB free), run on 127.0.0.1:18498 against DB `egret_dgcl_live` in `dgcl-pg` (`migrate`, `init`) with
+  Ranger, the embedded catalog (`EGRET_CATALOG__ENABLED`) and a fresh secrets master key enabled. Vite from this worktree
+  on 127.0.0.1:5398 through a scratch config that imports `frontend/vite.config.ts` and points `/api`, `/catalog`,
+  `/oauth` at 18498. Fixes D1–D5 were re-checked live through Vite (frontend only; no binary rebuild needed).
+- **DEV-2: two copies of `ice`.** The egret catalog `ice` (warehouse `ice` in `w1`, objects in `dgcl-rustfs`,
+  `rustfs/rustfs:1.0.1`) holds Iceberg tables `s.t (id, email, country)`, `s.u (id)`, `s2.v (id)` created through the
+  Iceberg REST API (metadata only), so the Data pages browse them; the engines' catalog `ice` reads the same tables
+  from PostgreSQL DB `dgcl_src` (Trino `postgresql` connector, StarRocks JDBC catalog), as Task 1 DEV-2.
+- Engines: `dgcl-trino` (`trinodb/trino@sha256:db58cc93…` = 483, user from `X-Trino-User`, no signing key) and
+  `dgcl-sr` (allin1 `5cbf09c4…` = 4.1.6-6862092, users and catalog created by `root`, then `access_control = ranger`),
+  on `dgcl-net`, registered through `POST /control-plane/engines/external` on profiles `cltr` (tag service `cltr-tag`)
+  and `clsr`; plugin files from `GET /engines/{id}/ranger-plugin-config` with the poll set to 5000 ms.
+- **DEV-3:** catalog `ice` unassigned from `w1` (`PUT /catalogs/{id}/workspaces []`), because the workspace-assignment
+  grant gave every `w1` member, `ua` included, `select` on `ice.*.*.*` and would have decided L1e/L2c/L6.
+- **DEV-4 (SQL):** `origin` flipped to `manual` on `cltr`/`clsr` around the hand-written creates through
+  `POST /policies` (binding an engine made both `generated`), as #4a DEV-4. `hw-l3` was created on the manual
+  `cltr-tag` without a flip.
+- **DEV-5 (SQL):** per engine phase, hand-written rows enabled/disabled with `version` and `policy_version` bumped,
+  then a 14 s wait (`only.sh`); the enabled set of each phase is in 2.3. From L5 on, `hw-l3` stayed disabled.
+- **DEV-6 (SQL):** the table-level `PII` assignment on `ice.s.u` (see 2.1).
+- **DEV-7:** users through the API with engine usernames allocated (`POST /perm/people/users/{id}/username`); `vs`
+  holds a custom role `tag:read`, `tag:manage`, `policy:read`, to which `role:read` and `group:read` (both in the
+  seeded `data_steward`) were added for L6 after D1 was observed; `ua` and `vt` hold a role with `tag:read` only; `ub`
+  holds role `cleared`; `ua` is `ws_viewer` of `w1` and in group `g1`.
+- **Extra cell LX** (not in the plan; the implementer named it a risk): after the main stack was torn down, a reduced
+  stack (egret, `dgcl-rustfs`, the same catalog, external engines registered with no container behind them) showed
+  route A's `not_determined` before the engines were attached, and `parent` and `unknown` rows after.
+
+### 2.3 Every cell
+
+| id | prediction | observed | verdict |
+|---|---|---|---|
+| L1a | `hw-l1` on `ice.s.t` Permissions: applies · through a pattern | "Hand-written policies (6)": `hw-l1-clsr`, `hw-l1-cltr` "Applies to this object · through a pattern", "Allow: ua, ub — select", badge, links to `/governance/engines/<id>/advanced/policies/access/<id>`; `hw-l4-g1-*` "Applies to this object"; `hw-l2-*` part | as predicted |
+| L1b | on `ice.s`, no pattern | "Applies to this object" without the pattern; `hw-l2`, `hw-l4-*` "Applies to part of it" | as predicted |
+| L1c | column panel `email`: pattern | `hw-l1-*` "· through a pattern", `hw-l2-*` "Applies to this object", plus `hw-l3` (7 rows, all types) | as predicted |
+| L1d | `ice.s2`: not listed | "Hand-written policies (0)", "No hand-written policy reaches this object." | as predicted |
+| L1e | engines, `hw-l1` only | `ua` `SELECT email FROM ice.s.t`: Trino and StarRocks return both rows; `SELECT id FROM ice.s2.v`: Trino "Cannot select from columns [id]", StarRocks ERROR 5204 | as predicted |
+| L2a–b | part on the table, applies on the column, deny icon | as stated; Deny with the ban icon | as predicted |
+| L2c | engines, `hw-l1` + `hw-l2` | `email` refused on both ("Cannot select from columns [email]", ERROR 5204 on COLUMN email); `id` returned on both | as predicted |
+| L2d | Who can read? `ua` on `email` | `cltr` "Refused by a deny item … Ranger policy hw-l2-cltr, id 5"; `clsr` the same with `hw-l2-clsr`, id 9 | as predicted |
+| L3a | column panel: `hw-l3`, `cltr-tag`, applies, via tag on this object | applies, "Through tag PII on column email", "Mask: ua — mask MASK" | wording differs, not a defect |
+| L3b | table Masks & filters: part, absent from Permissions | "Applies to part of it", "Through tag PII on column email"; not on Permissions | as predicted |
+| L3c | `PII` Hand-written tab | `hw-l3`, engines "cltr", link `…/94a8b3eb…/advanced/policies/masking/3?scope=tag` opens the editor on By tag, tag PII | as predicted |
+| L3d | Trino masked, StarRocks plain | Trino `ua` `["xxxxx@xxxxxxx.xxx"]…`; StarRocks `alice@example.com …`; `ub` plain on both | as predicted |
+| L4a | `ua` Permissions groups | Direct: `hw-l1-*`, `hw-l2-*`, `hw-base-imp`, `hw-base-qid`; Through a group or role: `hw-l4-g1-*` with "Names group g1, which this user is in. …"; "2 hand-written policies name everyone." → Show them lists `hw-l4-pub-clsr`, `hw-l4-pub-cltr`. Group `g1`'s page: its own policies under "Through a group or role" (D3); role `cleared`: none | as predicted; D3 |
+| L4b | engines, `hw-l4-g1` only | Trino "Cannot access catalog ice"; StarRocks ERROR 5204 | as predicted |
+| L4c | `ua` Masks & filters | `hw-l3` under Direct | as predicted |
+| L5a | index "1 table · 1 column", 2 BI | as stated (before the table tag: "0 tables · 1 column"); adding `PII` to `ice.s2.v.id` in the Data page and returning by the sidebar showed "1 table · 2 columns" without a reload (CL16), removed after | as predicted |
+| L5b | Where used as admin | `ice.s`: `t` "Columns: email", `u` "Table"; BI "W2 secret board" (w2) and "W1 customers" (w1) linking to `/explore/<slug>/dashboards/<id>` (server order, w2's workspace id first) | as predicted |
+| L5c | as `ua` | BI "W1 customers" only and "1 object you cannot read."; no `w2` anywhere | as predicted |
+| L5d | as `vt` | "2 objects you cannot read."; Mask & filter and Hand-written show the policy:read sentences and send no `/perm/rules` or `/handwritten` request; **Clearance tab: 403s on `/access/roles` and `/groups` shown as "could not be loaded" + Retry** (D1, also for `ua`) | D1 |
+| L6a | `vs` adds `cleared`; compile line | without `role:read` the picker said "No roles found." (D1); after adding it: PUT 200 `skipped: []`, row "role cleared", the compile line shown; focus returned to the picker trigger | D1, then as predicted |
+| L6b | `ua` refused on both, `ub` reads | Trino `ua` refused, `ub` reads; **StarRocks `ua` reads `NULL NULL`** (the clearance's `MASK_NULL`; Who can read? says StarRocks does not access-check a masked column), `ub` reads | prediction wrong on StarRocks; D2 |
+| L6c | remove: `ua` reads after one poll | DELETE 200; 12 s later `ua` reads plain on both | as predicted |
+| L7a | consequences, key only | "Removes it from 1 table and 1 column." / "2 BI objects." / "Removes its clearance (1 role, 0 groups)." / "1 rule selects it: the delete will be refused …"; disabled after `PII`, enabled after `pii` | as predicted |
+| L7b | 409 toast, focus on Delete | DELETE 409, dialog closed, toast with the server's sentence and "The "Mask and filter rules" section on this page lists the rules …", focus on the page's Delete; the row-menu dialog returns focus to "Actions for PII" | as predicted |
+| L7c | delete again | "No rule selects it."; DELETE 204; index lists only `Finance`; `tags`, `tag_assignments`, `catalog_tag_assignments`, `classification_policies` and the `perm-clearance-<id>` policies have no row for it | as predicted |
+| L8 | old links | Overview `tags_without_clearance` row (`Finance`) → its page; Engine & policy "Open source" of the compiled clearance → `?tab=clearance`, Clearance selected; `ub`'s Clearances → `?tab=clearance`; RulePage "Open classification" → `?tab=rules`, Mask & filter selected; `/control-plane/classifications/<id>` → the tag page; `/control-plane/classifications` → the index | as predicted |
+| L9 | keyboard, Escape, widths, themes | Tab reaches every index control with a visible ring; arrow keys move the tabs and `?tab=` (the first tab drops it); delete dialog and clearance picker return focus on Escape; **New classification and the Edit form dropped focus to `<body>`** (D4, D5); 390 × 844: `scrollWidth = clientWidth = 390` on the index, all five tabs, Data Permissions / Masks / column panel and People (hand-written tables stack; Where used's tables scroll inside their border); 1280 × 900 dark: all readable. Screenshots checked with `sips`: 390×844 (36–73 kB) and 1280×900 (65–195 kB) | D4, D5 |
+| LX | (extra) | before attaching engines: "No engine is attached to this catalog, so no hand-written policy reaches it." on the table and column; after: `{ice}` and `{ice, s}` allows "Set on a parent" with "Names catalog=ice; schema=s only; engines do not apply it to this object's data." (Task 1 M2a/b: both engines refuse these shapes); an unparsable body "Could not be matched: invalid type: string "ice", expected struct ResourceLevel", "No items"; on `ice.s` the schema policy applies and the catalog one is a parent; on `ice` the catalog policy applies and the schema one is part | no defect |
+
+### 2.4 Defects
+
+D1–D5 above, each with a failing test first, run red for the stated reason, then fixed and re-checked live:
+`ClearanceTab.test.tsx` (a reader asks for neither list and sees no load error; a steward refused the role list reads
+the permission sentence; the compile line), `PrincipalHandWrittenSection.test.tsx` (a group page's own naming is
+Direct), `ClassificationsIndex.test.tsx` (focus back on New classification), `TagPage.test.tsx` (focus back on Edit
+after Cancel and after Save). D1's guards were mutation-checked (asking for the role list regardless, dropping the
+403 filter, dropping the picker's refusal branch: each turned a test red; the restore verified with `cmp`).
+
+Noted, not fixed: Where used lists BI objects in the server's order (workspace id), not by name; the delete 409 toast
+says the rules section is "on this page" while it is on the Mask & filter tab; the row-menu delete dialog opens with
+focus on Cancel and the page's on the key field. Outside #4b: on StarRocks a clearance on a column the reader may
+otherwise select returns NULL rather than a refusal (`MASK_NULL` decides; explain already says so); a table-level tag
+with a clearance compiles nothing on StarRocks (Task 1).
+
+### 2.5 Left behind
+
+Removed after the run: the egret processes, Vite, containers `dgcl-trino`, `dgcl-sr`, `dgcl-rustfs`, network
+`dgcl-net` (`dgcl-pg` disconnected first), DBs `egret_dgcl_live` and `dgcl_src`, the binary copy, the admin and user
+password files, the master key, S3 and catalog secrets, cookie jars and browser storage states. Kept in the scratchpad
+`dgcl3/`: the scripts, plugin files, logs, `engine.out` and the screenshots. `dgcl-pg` and `dgcl-valkey` stay for the
+package.
+
+Gate after the fixes (frontend only; no Rust changed): `npx tsc -b` clean; `npm run lint` 0 errors (153 warnings,
+none in a touched file); `npx vitest run` 574 files, 7781 tests passed; `openapi.json` regenerated and
+`npm run gen:api` leave no diff.
