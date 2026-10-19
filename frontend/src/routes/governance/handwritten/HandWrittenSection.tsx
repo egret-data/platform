@@ -46,12 +46,6 @@ function subjectOf(profile: HandWrittenProfile | undefined): EditorSubject | nul
 }
 
 /**
- * Where the tag a tag policy matched sits. `this` is the object; `parent` is
- * the table of the column asked about; `below` names the tagged table or
- * column relative to the page (a schema page says `orders.email`, a catalog
- * page `sales.orders.email`), never "a parent".
- */
-/**
  * Where a seeded count's policies are listed: the Policies tab of each engine
  * of the profile that stores them — or, for a tag service, of every profile
  * naming it as its tag service (a tag service has no page of its own) — or an
@@ -67,6 +61,12 @@ function seededLinks(service: string, profiles: HandWrittenProfile[]): { to: str
   return [...links].map(([to, label]) => ({ to, label }));
 }
 
+/**
+ * Where the tag a tag policy matched sits. `this` is the object; `parent` is
+ * the table of the column asked about; `below` names the tagged table or
+ * column relative to the page (a schema page says `orders.email`, a catalog
+ * page `sales.orders.email`), never "a parent".
+ */
 function viaTagText(v: NonNullable<HandWrittenPolicy["viaTag"]>, target: HandWrittenTarget): string {
   const head = `Through tag ${v.name} on`;
   if (v.on === "this") return `${head} this object`;
