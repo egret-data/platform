@@ -29,6 +29,10 @@ const ASSETS = join(DIST, "assets");
 const MARKERS = [
   // The index's empty state (spec §3).
   ["src/routes/governance/classifications/ClassificationsIndex.tsx", "No classification yet."],
+  // The tag page's not-found state (spec §5).
+  ["src/routes/governance/classifications/TagPage.tsx", "No classification with this id."],
+  // The header's save toast.
+  ["src/routes/governance/classifications/TagHeader.tsx", "Classification saved."],
 ];
 
 const entry = entryChunkName(DIST);

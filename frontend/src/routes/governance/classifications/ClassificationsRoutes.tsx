@@ -1,15 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import ClassificationsIndex from "@/routes/governance/classifications/ClassificationsIndex";
+import TagPage from "@/routes/governance/classifications/TagPage";
 import { CLASSIFICATIONS_BASE } from "@/routes/governance/classifications/tagUrl";
-
-/** Task 9 stub: replaced by the tag page in Task 11. */
-function TagPage() {
-  return (
-    <section aria-label="Classification">
-      <h1 className="text-2xl font-semibold">Classification</h1>
-    </section>
-  );
-}
 
 /**
  * The Classification area's routes (spec §2), mounted lazily by `App.tsx` at
