@@ -11529,18 +11529,20 @@ async fn labels_can_read_its_own_taskrun_id(pool: sqlx::PgPool) {
     );
 }
 
-/// Two `SetVariables` in one `Parallel` apply in run order: the second's `x`
-/// wins, every time -- five executions, so it does not depend on timing. And
-/// the second renders against the surface the first changed IN THE SAME
-/// settle (`y` reads the first's `x`), which no later task's render can show:
-/// the `OutputValues` renders in a later settle, from the column.
+/// Two `SetVariables` in one `Parallel` merge in run order: the second's `x`
+/// wins, every time -- five executions, so it does not depend on timing. But
+/// the second RENDERS against the execution as the render pass began (`y`
+/// reads the flow's `x: 0`, not the first's `1`), as Kestra's
+/// `handleWorkerTasks` freezes every `RunContext` before
+/// `handleExecutionUpdatingTasks` applies any update (debt D10). The flow
+/// declares `x` because Kestra's strict Pebble fails `two` without it.
 #[sqlx::test(migrations = "../../migrations")]
-async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
+async fn two_updates_in_one_parallel_render_the_start_and_merge_in_run_order(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
     let flow = String::from(
-        "id: par-updates\nnamespace: t\ntasks:\n\
+        "id: par-updates\nnamespace: t\nvariables:\n  x: 0\ntasks:\n\
          \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
          \x20     - id: one\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
          variables:\n          x: 1\n\
@@ -11566,8 +11568,9 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
         );
         assert_eq!(
             execution_variables(&pool, ex).await,
-            Some(serde_json::json!({"x": 2, "y": "1"})),
-            "`two` read `one`'s `x` in the same settle"
+            Some(serde_json::json!({"x": 2, "y": "0"})),
+            "`two` renders the execution as the pass began (Kestra's frozen RunContext) \
+             and merges onto `one`'s result (debt D10)"
         );
     }
 }

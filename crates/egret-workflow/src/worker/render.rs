@@ -1442,8 +1442,9 @@ impl RenderSide {
 /// A pass of its own rather than an arm of [`render_expressions`]: that pass's
 /// population is "one expression per task" and it reads a fixed surface,
 /// while an update renders a whole spec and CHANGES the surface -- every later
-/// render of this settle (the next task's `{{ vars.x }}`, the next update)
-/// must see the new value, as Kestra's next task reads the updated execution.
+/// render pass of this settle (the next task's `{{ vars.x }}`, an update
+/// created in a later pass) must see the new value, as Kestra's next task
+/// reads the updated execution. Updates in THIS pass do not: see below.
 ///
 /// The population: an `Update` run still `CREATED` with no `rendered`, whose
 /// `runIf:` (if any) has rendered truthy -- a falsy one is `advance()`'s
@@ -1456,8 +1457,13 @@ impl RenderSide {
 /// run's siblings and a retrying run's siblings, and an update there must not
 /// wait for the resume or the retry delay.
 ///
-/// In run order, against the CURRENT surface, so of two updates in one
-/// `Parallel` the later run applies on top of the earlier one.
+/// Each update renders against the surface as this pass began, and its
+/// change is computed onto the CURRENT value, in run order -- Kestra's
+/// `handleWorkerTasks` builds every `RunContext` from the execution as the
+/// cycle began, and `handleExecutionUpdatingTasks` then applies each update
+/// to the live, already updated execution (debt D10). So of two updates in
+/// one `Parallel` the later one renders what the earlier one saw and merges
+/// onto what the earlier one wrote; `overwrite: false` checks the live value.
 ///
 /// A computed update records the new value in `side` and is completed HERE,
 /// `CREATED RUNNING SUCCESS` in this pass ([`complete`], final review I1) --
@@ -1496,15 +1502,22 @@ pub(super) fn render_updates(
     if pending.is_empty() {
         return Pass::Nothing;
     }
-    for ix in pending {
-        // Group C2 (spec §3.1): computed at CREATED against the CURRENT
-        // surface, so an update earlier in this pass is seen by this one (two
-        // branches of a Parallel apply in run order).
-        let (id, fresh) = surface.reserve_id(ix);
-        if fresh {
-            side.run_ids.push((ix, id));
-        }
-        let cx = surface.context(plan, state, Some(ix));
+    // Debt D10: every context first, from the surface as this pass began
+    // (Kestra's frozen `RunContext`); no update below changes what another
+    // one renders.
+    let contexts: Vec<(RunIx, RenderContext)> = pending
+        .into_iter()
+        .map(|ix| {
+            let (id, fresh) = surface.reserve_id(ix);
+            if fresh {
+                side.run_ids.push((ix, id));
+            }
+            (ix, surface.context(plan, state, Some(ix)))
+        })
+        .collect();
+    for (ix, cx) in contexts {
+        // ... and each change onto the CURRENT value, in run order: a later
+        // update merges onto an earlier one's result.
         let TaskKind::ExecutionUpdate { op, spec } = &plan.tasks[state.runs[ix].task].kind else {
             unreachable!("filtered on TaskKind::ExecutionUpdate above")
         };
