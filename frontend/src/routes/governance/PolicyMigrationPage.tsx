@@ -514,6 +514,7 @@ const COMPILED_KINDS: readonly (readonly [string, string, string])[] = [
   ["perm-grant-", "compiled grant policy", "compiled grant policies"],
   ["perm-rule-", "compiled rule policy", "compiled rule policies"],
   ["perm-clearance-", "compiled clearance policy", "compiled clearance policies"],
+  ["perm-engine-", "compiled engine grant policy", "compiled engine grant policies"],
 ];
 
 /**

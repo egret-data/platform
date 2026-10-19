@@ -13617,3 +13617,189 @@ async fn list_catalog_level_reads_a_provisioned_engine_as_root_and_scrubs_its_pa
     assert!(err.contains("5501"), "{err}");
     assert!(!err.contains(password), "the root password leaked: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// F11 Task 8: an engine's FORMER profile is recompiled on rebind and delete
+// (engine grants spec C11/E10). An engine grant compiles into its engine's
+// profile; a rebind or a delete that left the former profile uncompiled would
+// leave the grant's `perm-engine-` policy served there.
+// ---------------------------------------------------------------------------
+
+/// An engine grant on `engine_id`, inserted behind the routes' back.
+async fn former_profile_grant(f: &Fixture, engine_id: Uuid) -> Uuid {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.engine_grants (engine_id, capability, resource_values) \
+         VALUES ($1, 'trino.set_system_session_property', ARRAY['query_max_memory']) \
+         RETURNING id",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine grant");
+    sqlx::query(
+        "INSERT INTO perm.engine_grant_principals (engine_grant_id, kind, ref) \
+         VALUES ($1, 'user', 'analyst')",
+    )
+    .bind(id)
+    .execute(&f.db.pool)
+    .await
+    .expect("principal");
+    id
+}
+
+async fn former_profile_recompile(f: &Fixture, service_id: i64) {
+    egret_perm_compile::recompile_service(
+        &egret_perm::PermStore::new(f.db.pool.clone()),
+        &egret_policy::PolicyStore::new(f.db.clone()),
+        service_id,
+    )
+    .await
+    .expect("recompile");
+}
+
+async fn holds_engine_grant(f: &Fixture, service_id: i64, grant: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM policy.authz_policies WHERE service_id = $1 AND name = $2)",
+    )
+    .bind(service_id)
+    .bind(format!("perm-engine-{grant}"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("read")
+}
+
+/// A second engine bound to `profile` by SQL: the legacy shared profile I2
+/// refuses to create (spec C5).
+async fn former_profile_share(f: &Fixture, ty: &str, profile: i64) {
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, $2, 'egret', '{}'::jsonb, $3)",
+    )
+    .bind(format!("legacy-share-{}", Uuid::new_v4().simple()))
+    .bind(ty)
+    .bind(profile)
+    .execute(&f.db.pool)
+    .await
+    .expect("legacy shared engine");
+}
+
+#[tokio::test]
+async fn former_profile_a_rebind_moves_the_engine_grant_to_the_new_profile() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "former_profile_rebind", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let before = authz_service_of(&f, &name).await.expect("auto-bound");
+    let grant = former_profile_grant(&f, engine_id).await;
+    former_profile_recompile(&f, before).await;
+    assert!(holds_engine_grant(&f, before, grant).await);
+
+    let other = seed_ranger_profile(&f, &format!("other-{}", Uuid::new_v4().simple()), &[]).await;
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(rebind_body(&name, wh_id, serde_json::json!(other))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    assert!(
+        holds_engine_grant(&f, other, grant).await,
+        "the new profile gains it"
+    );
+    assert!(
+        !holds_engine_grant(&f, before, grant).await,
+        "the former profile must lose it"
+    );
+}
+
+#[tokio::test]
+async fn former_profile_deleting_an_engine_recompiles_a_profile_another_engine_still_binds() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "former_profile_delete_shared", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let profile = authz_service_of(&f, &name).await.expect("auto-bound");
+    former_profile_share(&f, "trino", profile).await;
+    let grant = former_profile_grant(&f, engine_id).await;
+    former_profile_recompile(&f, profile).await;
+    assert!(holds_engine_grant(&f, profile, grant).await);
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(
+        !holds_engine_grant(&f, profile, grant).await,
+        "the still-bound profile must not keep the deleted engine's grant"
+    );
+}
+
+#[tokio::test]
+async fn former_profile_deleting_an_external_engine_recompiles_a_profile_another_engine_still_binds(
+) {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "former_profile_ext_shared", true).await;
+    let profile = seed_ranger_profile(&f, &format!("ext-{}", Uuid::new_v4().simple()), &[]).await;
+    let (engine_id, _) = register_external(&f, &token, "trino", "2.5.0", Some(profile), &[]).await;
+    former_profile_share(&f, "trino", profile).await;
+    let grant = former_profile_grant(&f, engine_id).await;
+    former_profile_recompile(&f, profile).await;
+    assert!(holds_engine_grant(&f, profile, grant).await);
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(!holds_engine_grant(&f, profile, grant).await);
+}
+
+/// With no engine left on the profile nothing downloads it, and the next bind
+/// recompiles it: an unshared delete does not call the compiler.
+#[tokio::test]
+async fn former_profile_deleting_the_only_engine_of_a_profile_compiles_nothing() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "former_profile_unshared", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let profile = seed_ranger_profile(&f, &format!("ext-{}", Uuid::new_v4().simple()), &[]).await;
+    let (ext_id, _) = register_external(&f, &token, "trino", "2.5.0", Some(profile), &[]).await;
+    compiler.calls.lock().unwrap().clear();
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    for id in [engine_id, ext_id.to_string()] {
+        let (status, j) = call(&f, "DELETE", &format!("/engines/{id}"), &token, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    }
+    assert!(compiler.calls.lock().unwrap().is_empty(), "no recompile");
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "no recompile"
+    );
+}

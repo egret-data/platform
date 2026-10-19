@@ -106,14 +106,15 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_perm::{
-    list_grants_via, list_rules_via, CompileError, EngineType, Grant, PermStore, Rule, Selector,
+    list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
+    EngineType, Grant, PermStore, Rule, Selector,
 };
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
     tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
-    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -215,12 +216,15 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 /// plus, since SP4c Task 2, a third source that is not in the `perm` model at
 /// all: a TAG's classification clearance (`classification_policies`), compiled
 /// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
-/// grant or rule id.
+/// grant or rule id. And since F11 a fourth: an ENGINE GRANT
+/// (`perm.engine_grants`, [`crate::engine_grants`]), whose id is the engine
+/// grant's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Grant,
     Rule,
     Clearance,
+    EngineGrant,
 }
 
 impl SourceKind {
@@ -229,6 +233,7 @@ impl SourceKind {
             SourceKind::Grant => "grant",
             SourceKind::Rule => "rule",
             SourceKind::Clearance => "clearance",
+            SourceKind::EngineGrant => "engine_grant",
         }
     }
 }
@@ -442,7 +447,19 @@ async fn compile_desired(
     // so the pure compilers below never see one. See `crate::members`
     // for what a member is, what it costs, and why a role name cannot be left
     // for Ranger to resolve.
-    crate::members::expand_enumerated_principals(conn, &mut all_grants, &mut all_rules).await?;
+    // F11: the engine grants of every engine bound to this profile, expanded
+    // in the same call so a person named by a grant and an engine grant
+    // resolves to one name.
+    let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
+        .await
+        .map_err(db_err)?;
+    crate::members::expand_enumerated_principals(
+        conn,
+        &mut all_grants,
+        &mut all_rules,
+        &mut engine_grants,
+    )
+    .await?;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
@@ -509,6 +526,18 @@ async fn compile_desired(
             Err(other) => return Err(other),
         }
     }
+
+    compile_engine_grants(
+        conn,
+        service_id,
+        &svc.name,
+        engine,
+        &engine_grants,
+        &writable,
+        &mut desired,
+        &mut skipped,
+    )
+    .await?;
 
     for r in &all_rules {
         compile_one_rule(
@@ -649,6 +678,84 @@ async fn compile_desired(
         sweep,
         profile_name: svc.name,
     }))
+}
+
+/// F11 (spec §4.2): compile every engine grant of the profile into
+/// `desired`. A grant with no grantee left, or whose impersonation target can
+/// no longer be compiled (spec E11), or that the compiler cannot express, is
+/// SKIPPED with its reason rather than failing the profile: a user deleted or
+/// renamed elsewhere must not fail every recompile.
+#[allow(clippy::too_many_arguments)]
+async fn compile_engine_grants(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    profile_name: &str,
+    engine: EngineType,
+    engine_grants: &[EngineGrant],
+    writable: &HashMap<String, i64>,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+    skipped: &mut Vec<SkippedItem>,
+) -> Result<(), CompileError> {
+    let mut skip = |id: Uuid, reason: String| {
+        tracing::warn!(
+            service_id,
+            engine_grant_id = %id,
+            reason = %reason,
+            "engine grant skipped during recompile"
+        );
+        skipped.push(SkippedItem {
+            source_kind: SourceKind::EngineGrant,
+            id,
+            reason,
+        });
+    };
+    for g in engine_grants {
+        if g.principals.include.is_empty() {
+            skip(
+                g.id,
+                "the engine grant's principals name no engine principal (a role or group \
+                 reference that expands to no member)"
+                    .to_string(),
+            );
+            continue;
+        }
+        let target = match g.target_user_id {
+            Some(user_id) => {
+                match crate::engine_grants::impersonation_target_ok(conn, service_id, user_id)
+                    .await?
+                {
+                    Ok(username) => Some(username),
+                    Err(reason) => {
+                        skip(g.id, reason);
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        match crate::engine_grants::compile_engine_grant(g, target.as_deref(), profile_name, engine)
+        {
+            Ok(input) => {
+                let name = input.name.clone();
+                let body = stamp_service_type(access_to_ranger_json(&input), engine);
+                let target_service =
+                    target_service_id(&body, writable, &format!("engine grant {}", g.id))?;
+                desired.insert(
+                    (target_service, name),
+                    DesiredPolicy {
+                        body,
+                        source_kind: SourceKind::EngineGrant,
+                        grant_id: None,
+                        rule_id: None,
+                    },
+                );
+            }
+            Err(e @ CompileError::InvalidEngineGrant { .. })
+            | Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => skip(g.id, e.to_string()),
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(())
 }
 
 /// What one profile's compile produced: the desired policies keyed by the
@@ -1016,7 +1123,8 @@ async fn apply_diff_in_tx(
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
          WHERE service_id = ANY($1) \
-           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')",
+           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%' \
+                OR name LIKE $5 || '%')",
     )
     .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
@@ -1026,6 +1134,9 @@ async fn apply_diff_in_tx(
     // would be enforced forever (SP4a Task 7 fix round 1's Critical, one
     // source over).
     .bind(COMPILER_CLEARANCE_PREFIX)
+    // F11: an engine grant's policy is reaped when the grant (or its engine,
+    // or its target user) is deleted, for the same reason.
+    .bind(COMPILER_ENGINE_GRANT_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -1271,7 +1382,14 @@ async fn record_compiled(
     // (`COMPILER_CLEARANCE_PREFIX{tag_id}`), so the provenance question is
     // answered by the row that decides reaping rather than by a second table
     // that can cascade away beneath it.
-    if dp.source_kind == SourceKind::Clearance {
+    //
+    // **An ENGINE GRANT records none either** (F11, spec C10), for the same
+    // reason: it is neither a grant nor a rule, and its policy name
+    // (`perm-engine-{id}`) already carries its id.
+    if matches!(
+        dp.source_kind,
+        SourceKind::Clearance | SourceKind::EngineGrant
+    ) {
         return Ok(());
     }
     sqlx::query(
@@ -1560,6 +1678,7 @@ pub async fn affected_services_for_classification(
 /// - **Grant arm:** catalog-scoped, exactly like [`affected_services_for_grant`]
 ///   — a `role` principal in `perm.grant_principals` only reaches the profiles
 ///   bound to that grant's catalog.
+/// - **Engine-grant arm** (F11): the profile of the grant's engine.
 ///
 /// **There is deliberately no rule-EXEMPTION arm**, and that is not the
 /// defensive omission it looks like. `validate_rule_shape` refuses a `Role` in
@@ -1608,6 +1727,14 @@ pub async fn affected_services_for_role_membership(
                 .await
                 .map_err(db_err)?,
         );
+    }
+    // F11: the profile of every engine whose engine grants name the role.
+    ids.extend(engine_grant_profiles_naming_via(conn, "role", &[role_name]).await?);
+    // F11: a platform admin is near-root as an impersonation target (egret
+    // seeds them engine admin), so a change of who holds the role re-checks
+    // every impersonation grant's target.
+    if role_name == crate::engine_grants::PLATFORM_ADMIN_ROLE {
+        ids.extend(impersonation_grant_profiles_via(conn).await?);
     }
 
     normalize_service_order(&mut ids);
@@ -1708,6 +1835,7 @@ pub async fn affected_services_for_workspace_members(
 ///   [`affected_services_for_grant`].
 /// - **Rule exemptions**: a PATH selector is catalog-scoped; a TAG selector
 ///   reaches every compiler-targeted profile (this module's Task 9 section).
+/// - **Engine grants** (F11): the profile of the grant's engine.
 ///
 /// **There is deliberately no clearance arm.** A tag's `required_groups` is not
 /// expanded — a group-only gate still compiles to nothing and reports the skip
@@ -1770,13 +1898,105 @@ pub async fn affected_services_for_group_membership(
                 .map_err(db_err)?,
         );
     }
+    // F11: the profile of every engine whose engine grants name the group.
+    ids.extend(engine_grant_profiles_naming_via(conn, "group", &names).await?);
+    // F11: a group holding `platform_admin` makes its members platform admins,
+    // whom an impersonation grant may not target; joining or leaving it
+    // re-checks every impersonation grant's target.
+    let holds_platform_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM access_grants ag \
+           JOIN groups g ON g.id = ag.principal_id \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'group' AND ag.scope_type = 'platform' \
+            AND r.name = $1 AND g.name = ANY($2))",
+    )
+    .bind(crate::engine_grants::PLATFORM_ADMIN_ROLE)
+    .bind(&names)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if holds_platform_admin {
+        ids.extend(impersonation_grant_profiles_via(conn).await?);
+    }
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The profiles of every engine carrying an impersonation grant.
+async fn impersonation_grant_profiles_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, CompileError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE g.target_user_id IS NOT NULL AND e.authz_service_id IS NOT NULL",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// F11 (spec §4.5): the profiles of every engine whose engine grants name a
+/// principal of `kind` in `refs` — the engine arm of the two membership
+/// affected sets. An engine grant reaches exactly its engine's profile.
+async fn engine_grant_profiles_naming_via(
+    conn: &mut sqlx::PgConnection,
+    kind: &str,
+    refs: &[&str],
+) -> Result<Vec<i64>, CompileError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id FROM perm.engine_grant_principals p \
+           JOIN perm.engine_grants g ON g.id = p.engine_grant_id \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE p.kind = $1::perm.principal_kind AND p.ref = ANY($2) \
+            AND e.authz_service_id IS NOT NULL",
+    )
+    .bind(kind)
+    .bind(refs)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// F11 (spec E21, amended): the profiles of every engine whose impersonation
+/// grants target `user_id`, with those engines' rows held `FOR SHARE`. Deleting that user cascades those grants away, so
+/// the delete must recompile these profiles in its own transaction or the
+/// compiled policy keeps naming a username the next person can be minted.
+pub async fn affected_services_for_user_delete(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<i64>, CompileError> {
+    // Security review M1: the engines' rows `FOR SHARE`, ascending, BEFORE
+    // their profiles are read, so a concurrent rebind (which UPDATEs the row)
+    // either commits first — and this reads the profile it moved to — or waits
+    // until this delete has recompiled. Same order as an engine-grant write:
+    // group locks, engine rows, profile locks.
+    let engines: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT engine_id FROM perm.engine_grants WHERE target_user_id = $1 \
+          ORDER BY engine_id",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let mut ids: Vec<i64> = Vec::new();
+    for engine_id in engines {
+        let profile: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT authz_service_id FROM engine_mgmt.engines WHERE id = $1 FOR SHARE",
+        )
+        .bind(engine_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        ids.extend(profile.flatten());
+    }
     normalize_service_order(&mut ids);
     Ok(ids)
 }
 
 /// Every stored reference to a group in `group_names` by NAME: the grant
-/// principals and rule exemptions [`affected_services_for_group_membership`]
-/// reads, one row each, ordered by name, source, id and position. The body of
+/// principals, rule exemptions and (F11) engine-grant principals
+/// [`affected_services_for_group_membership`] reads, one row each, ordered by name, source, id and position. The body of
 /// `egret_auth::groups::GroupMembershipRecompiler::group_references_in_tx`
 /// (2026-10-18 design R8), which the OIDC login asks before creating a group
 /// for a claimed name with no row.
@@ -1801,6 +2021,10 @@ pub async fn group_references_via(
          SELECT e.ref, 'rule', r.id, r.name, NULL::text, e.mode::text \
            FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
           WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) AND e.ref <> $2 \
+         UNION ALL \
+         SELECT ep.ref, 'engine_grant', ep.engine_grant_id, NULL::text, 'allow', 'include' \
+           FROM perm.engine_grant_principals ep \
+          WHERE ep.kind = 'group'::perm.principal_kind AND ep.ref = ANY($1) AND ep.ref <> $2 \
          ORDER BY group_name, source, id, position",
     )
     .bind(group_names)

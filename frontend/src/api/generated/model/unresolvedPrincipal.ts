@@ -10,7 +10,10 @@
  * One stored grant principal or rule exemption whose ref matches nobody.
  */
 export interface UnresolvedPrincipal {
-  /** `"grant"` or `"rule"`. */
+  /**
+     * `"grant"`, `"rule"` or `"engine_grant"` (F11: always an allow include,
+     * so it never fails open).
+     */
   source: string;
   /** The grant's or the rule's id. */
   id: string;

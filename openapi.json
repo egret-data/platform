@@ -7095,6 +7095,393 @@
         }
       }
     },
+    "/api/control-plane/perm/engine-capabilities": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_engine_capabilities",
+        "responses": {
+          "200": {
+            "description": "The curated engine capability catalogue, per engine type, with what is deliberately not grantable and why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineCapabilitiesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/engine-grants": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_all_engine_grants",
+        "responses": {
+          "200": {
+            "description": "Every engine grant, each with the engines it reaches (People pages match principals against `standsFor`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EngineGrantView"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/engine-grants/{id}": {
+      "delete": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "delete_engine_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine grant id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Engine grant deleted AND its compiled policy reaped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineGrantWriteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "patch_engine_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine grant id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEngineGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Engine grant replaced (the engine is fixed) AND its profile recompiled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineGrantWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "As for create",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "As for create",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/engines/{engine_id}/grants": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_engine_grants",
+        "parameters": [
+          {
+            "name": "engine_id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The engine, its profile, every engine it shares that profile with, its engine grants and the profile's seeded (managed) policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineGrantsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "create_engine_grant",
+        "parameters": [
+          {
+            "name": "engine_id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEngineGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Engine grant created AND the engine's profile recompiled, in one transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineGrantWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown capability, a capability of another engine type, a value that breaks the catalogue's rules, a catalog the engine does not reach, or empty/invalid/unresolvable principals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine has no profile, is being deleted or is RisingWave; the impersonation target is reserved or an engine admin; the engine already has that grant; or the recompile refused (overlap, ceiling)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/explain": {
       "post": {
         "tags": [
@@ -7156,6 +7543,87 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/explain/capability": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "description": "Evaluate one user and one engine capability on the artifact the engine's profile serves. Undecidable is returned as such: on a delegating Trino profile every impersonation question is Undecidable, because the self-impersonation baseline names `{USER}`, which egret's evaluator does not expand.",
+        "operationId": "explain_capability",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainCapabilityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The decision, or `outcome: no_profile` with `decision: null` for an engine that downloads no profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainCapabilityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown capability, a capability of another engine type, or a value that breaks the catalogue's rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The profile's engines run a plugin version egret does not model",
             "content": {
               "application/json": {
                 "schema": {
@@ -37461,6 +37929,72 @@
           "running"
         ]
       },
+      "CapabilityOutcome": {
+        "type": "string",
+        "description": "Whether the engine's profile could be asked at all.",
+        "enum": [
+          "per_profile",
+          "no_profile"
+        ]
+      },
+      "CapabilityResource": {
+        "type": "object",
+        "description": "One resource key of a capability and the value a grant supplies for it.",
+        "required": [
+          "key",
+          "valueKind"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "valueKind": {
+            "type": "string",
+            "description": "`username` | `identifier` | `catalog` | `function_signature`, or\n`fixed` (the compiler supplies `*`; the grant gives no value)."
+          }
+        }
+      },
+      "CapabilityTagResolution": {
+        "type": "string",
+        "description": "What egret did about tags for this question.",
+        "enum": [
+          "not_applicable",
+          "declined"
+        ]
+      },
+      "CapabilityView": {
+        "type": "object",
+        "description": "One grantable capability.",
+        "required": [
+          "id",
+          "label",
+          "description",
+          "resources",
+          "access"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityResource"
+            },
+            "description": "The Ranger resource keys in hierarchy order."
+          },
+          "access": {
+            "type": "string",
+            "description": "The one Ranger access type."
+          }
+        }
+      },
       "CardInput": {
         "type": "object",
         "description": "Card as supplied by the client when saving a layout.",
@@ -41163,6 +41697,48 @@
           "starrocks"
         ]
       },
+      "EngineCapabilities": {
+        "type": "object",
+        "description": "One engine type's catalogue.",
+        "required": [
+          "engineType",
+          "capabilities",
+          "notGrantable"
+        ],
+        "properties": {
+          "engineType": {
+            "type": "string",
+            "description": "`trino` | `starrocks`."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityView"
+            }
+          },
+          "notGrantable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotGrantableView"
+            }
+          }
+        }
+      },
+      "EngineCapabilitiesResponse": {
+        "type": "object",
+        "description": "`GET /perm/engine-capabilities`.",
+        "required": [
+          "engines"
+        ],
+        "properties": {
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineCapabilities"
+            }
+          }
+        }
+      },
       "EngineClearance": {
         "oneOf": [
           {
@@ -41404,6 +41980,128 @@
           }
         }
       },
+      "EngineGrantView": {
+        "type": "object",
+        "description": "One engine grant as the API shows it.",
+        "required": [
+          "id",
+          "engineId",
+          "engineName",
+          "capability",
+          "values",
+          "principals",
+          "policyName",
+          "reach"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "engineId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The engine the grant was written on. On a legacy shared profile a\nlisting of another engine of the profile shows it too (it reaches that\nengine), marked by this id and [`Self::engine_name`]."
+          },
+          "engineName": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The values in the catalogue's key order, an impersonation target as the\nuser's CURRENT username (it is stored by id). A target with no username\nis left out; `targetUserId` still names them."
+          },
+          "targetUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The impersonation target's user id, for an impersonation capability."
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermPrincipal"
+            },
+            "description": "Allow-only, include-only (spec E5)."
+          },
+          "policyName": {
+            "type": "string",
+            "description": "`perm-engine-{id}`."
+          },
+          "reach": {
+            "$ref": "#/components/schemas/Reach"
+          }
+        }
+      },
+      "EngineGrantWriteResponse": {
+        "type": "object",
+        "description": "What a write did.",
+        "required": [
+          "id",
+          "compile",
+          "reach"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "compile": {
+            "$ref": "#/components/schemas/CompileResponse"
+          },
+          "reach": {
+            "$ref": "#/components/schemas/Reach"
+          }
+        }
+      },
+      "EngineGrantsResponse": {
+        "type": "object",
+        "description": "`GET /perm/engines/{engine_id}/grants`.",
+        "required": [
+          "engine",
+          "reach",
+          "grants",
+          "managed"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineRef"
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProfileRef",
+                "description": "`null` when the engine downloads no profile."
+              }
+            ]
+          },
+          "reach": {
+            "$ref": "#/components/schemas/Reach"
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineGrantView"
+            }
+          },
+          "managed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedEntry"
+            }
+          }
+        }
+      },
       "EngineNotChecked": {
         "type": "object",
         "description": "An engine that reaches the classification but was not asked.",
@@ -41447,6 +42145,35 @@
           },
           "ready": {
             "type": "boolean"
+          }
+        }
+      },
+      "EngineRef": {
+        "type": "object",
+        "description": "The engine a listing is about.",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "origin",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
         }
       },
@@ -41964,9 +42691,118 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "`perm-engine-{uuid}`: one engine grant (F11, `perm.engine_grants`).",
+            "required": [
+              "engine_grant_id",
+              "kind"
+            ],
+            "properties": {
+              "engine_grant_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "engine_grant"
+                ]
+              }
+            }
           }
         ],
         "description": "The `perm` model object the DECIDING policy's Ranger NAME maps back to —\n[`crate::attribute_policy_name`], resolved per decision.\n\n**`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**\nFour live categories of policy have no model object at all — the\n`egret-admin`/`all` hierarchies auto-bind seeds onto every generated\nprofile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw\nJSON, and Ranger's own `superuser` short-circuit — and every one of them\ncan decide a real request. They are reported by their Ranger name and id on\nthe decision itself and never dropped: dropping what egret's compiler does\nnot own is exactly the blindness this endpoint was rerouted to remove."
+      },
+      "ExplainCapabilityRequest": {
+        "type": "object",
+        "description": "`POST /perm/explain/capability`.",
+        "required": [
+          "subject",
+          "engineId",
+          "capability"
+        ],
+        "properties": {
+          "subject": {
+            "$ref": "#/components/schemas/ExplainSubject",
+            "description": "A username; no groups or roles, as `/perm/explain`."
+          },
+          "engineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "In the catalogue's key order, an impersonation target as a username."
+          }
+        }
+      },
+      "ExplainCapabilityResponse": {
+        "type": "object",
+        "description": "The answer.",
+        "required": [
+          "engine",
+          "reach",
+          "outcome",
+          "tagResolution"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineRef"
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProfileRef"
+              }
+            ]
+          },
+          "reach": {
+            "$ref": "#/components/schemas/Reach"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CapabilityOutcome"
+          },
+          "decision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WireDecision"
+              }
+            ]
+          },
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution"
+              }
+            ]
+          },
+          "policyName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tagResolution": {
+            "$ref": "#/components/schemas/CapabilityTagResolution"
+          }
+        }
       },
       "ExplainMask": {
         "type": "object",
@@ -43756,6 +44592,82 @@
           }
         }
       },
+      "ManagedEntry": {
+        "type": "object",
+        "description": "One seeded policy of the profile, read-only (spec E12).",
+        "required": [
+          "policyId",
+          "policyName",
+          "kind",
+          "resources",
+          "accesses",
+          "users",
+          "groups",
+          "enabled"
+        ],
+        "properties": {
+          "policyId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policyName": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ManagedKind"
+          },
+          "capability": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The catalogue id whose resource key set equals this policy's, if any."
+          },
+          "resources": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "accesses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManagedKind": {
+        "type": "string",
+        "description": "What a managed (seeded, `managed_by = 'infra'`) policy of the profile is.",
+        "enum": [
+          "user_baseline",
+          "delegator",
+          "admin_all_access",
+          "default_all_access"
+        ]
+      },
       "MaskItemInput": {
         "type": "object",
         "properties": {
@@ -44609,6 +45521,32 @@
           }
         }
       },
+      "NewEngineGrant": {
+        "type": "object",
+        "description": "An engine grant as authored over HTTP. The engine is the path's.",
+        "required": [
+          "capability"
+        ],
+        "properties": {
+          "capability": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "In the catalogue's key order; an impersonation target as a username."
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermPrincipal"
+            },
+            "description": "`user`, `group` (never `public`) or `role`; at least one."
+          }
+        }
+      },
       "NewGrant": {
         "type": "object",
         "description": "A grant as authored over HTTP.\n\n**There is no `origin` field, and that is deliberate.** `perm.grants.origin`\ndistinguishes a human's `explicit` grant from a `workspace_assignment` row\nthe assignment path owns and recreates from the assignment on demand (D3),\nand `grants_one_per_assignment` allows at most one of the latter per\n`(catalog_id, workspace_id)`. A human-authored grant is always `explicit`;\nletting a request claim `workspace_assignment` would let the HTTP surface\nmint rows the assignment sync believes it owns, which it would then\nsilently delete or refuse to recreate.",
@@ -44904,6 +45842,22 @@
         "enum": [
           "no_username"
         ]
+      },
+      "NotGrantableView": {
+        "type": "object",
+        "description": "An engine-level permission egret does not offer, and why (spec E4).",
+        "required": [
+          "what",
+          "why"
+        ],
+        "properties": {
+          "what": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        }
       },
       "NotListed": {
         "type": "object",
@@ -46074,6 +47028,23 @@
           }
         }
       },
+      "ProfileRef": {
+        "type": "object",
+        "description": "The policy profile an engine downloads.",
+        "required": [
+          "serviceId",
+          "name"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ProfileWarnings": {
         "type": "object",
         "description": "The `policyId`-keyed answer of `GET .../warnings`: how many warnings the\nprofile carries in all and which policies carry them.",
@@ -46677,6 +47648,46 @@
           }
         },
         "additionalProperties": false
+      },
+      "Reach": {
+        "type": "object",
+        "description": "Every engine a grant reaches: every engine bound to the profile it compiles\ninto, ordered by name (spec E9). One engine in every installation created\nsince I2; more only on a legacy shared profile.",
+        "required": [
+          "engines",
+          "sharedProfile"
+        ],
+        "properties": {
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReachEngine"
+            }
+          },
+          "sharedProfile": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ReachEngine": {
+        "type": "object",
+        "description": "One engine of a [`Reach`].",
+        "required": [
+          "id",
+          "name",
+          "origin"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          }
+        }
       },
       "ReadersIncomplete": {
         "type": "object",
@@ -48668,12 +49679,12 @@
         "properties": {
           "source_kind": {
             "type": "string",
-            "description": "`grant` | `rule` | `clearance`."
+            "description": "`grant` | `rule` | `clearance` | `engine_grant`."
           },
           "id": {
             "type": "string",
             "format": "uuid",
-            "description": "The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`\nwhose classification gate could not be expressed (SP4c Task 2)."
+            "description": "The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`\nwhose classification gate could not be expressed (SP4c Task 2), or for\n`engine_grant` the `perm.engine_grants` id (F11)."
           },
           "reason": {
             "type": "string"
@@ -49492,7 +50503,7 @@
       },
       "StoredUserRef": {
         "type": "object",
-        "description": "One stored grant principal or rule exemption that names a username as a\n`user` ref.",
+        "description": "One stored grant principal, rule exemption or (F11) engine-grant principal\nthat names a username as a `user` ref.\n\nAn engine grant's impersonation TARGET is not one: it is stored by user id\n(spec E21, amended), so no stored name can go stale and be inherited.",
         "required": [
           "source",
           "id",
@@ -49502,7 +50513,7 @@
         "properties": {
           "source": {
             "type": "string",
-            "description": "`\"grant\"` or `\"rule\"`."
+            "description": "`\"grant\"`, `\"rule\"` or `\"engine_grant\"`."
           },
           "id": {
             "type": "string",
@@ -50619,7 +51630,7 @@
         "properties": {
           "source": {
             "type": "string",
-            "description": "`\"grant\"` or `\"rule\"`."
+            "description": "`\"grant\"`, `\"rule\"` or `\"engine_grant\"` (F11: always an allow include,\nso it never fails open)."
           },
           "id": {
             "type": "string",

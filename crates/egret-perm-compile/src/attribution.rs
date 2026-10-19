@@ -37,7 +37,10 @@
 //! `rules.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
 //! re-typing them: two independent copies would drift.
 
-use egret_policy::{COMPILER_CLEARANCE_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX};
+use egret_policy::{
+    COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX,
+    COMPILER_RULE_PREFIX,
+};
 use uuid::Uuid;
 
 /// The compiler-owned model object a Ranger policy NAME attributes to.
@@ -79,6 +82,9 @@ pub enum PolicyAttribution {
     /// It belongs to no single tag: its exceptions are the users cleared for
     /// every classification on the profile.
     MaterializedViewDeny,
+    /// `perm-engine-{uuid}` (F11): one `perm.engine_grants` row, always a bare
+    /// id like a grant.
+    EngineGrant(Uuid),
 }
 
 /// A `Uuid`'s hyphenated `Display` (8-4-4-4-12 hex) is always exactly this
@@ -102,6 +108,9 @@ pub fn attribute_policy_name(name: &str) -> Option<PolicyAttribution> {
         }
         let (tag_id, locator) = parse_uuid_and_locator(rest)?;
         return Some(PolicyAttribution::Clearance { tag_id, locator });
+    }
+    if let Some(rest) = name.strip_prefix(COMPILER_ENGINE_GRANT_PREFIX) {
+        return parse_bare_uuid(rest).map(PolicyAttribution::EngineGrant);
     }
     None
 }
@@ -153,5 +162,19 @@ mod tests {
         for _ in 0..16 {
             assert_eq!(Uuid::new_v4().to_string().len(), UUID_DISPLAY_LEN);
         }
+    }
+
+    /// F11 (spec §4.3 item 5): an engine grant is `perm-engine-{uuid}`, a bare
+    /// id like a grant. It never carries a locator, so anything after the id is
+    /// not an engine grant's name.
+    #[test]
+    fn an_engine_grant_name_attributes_to_its_id_and_never_carries_a_locator() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            attribute_policy_name(&format!("perm-engine-{id}")),
+            Some(PolicyAttribution::EngineGrant(id))
+        );
+        assert_eq!(attribute_policy_name(&format!("perm-engine-{id}-x")), None);
+        assert_eq!(attribute_policy_name("perm-engine-not-a-uuid"), None);
     }
 }

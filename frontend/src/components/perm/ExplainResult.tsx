@@ -687,6 +687,18 @@ function DecidedBy({
     );
   }
 
+  // An engine-scoped grant (F11): one `perm.engine_grants` row, compiled as
+  // `perm-engine-{id}`. It names no tag, so it must not reach the clearance
+  // block below.
+  if (attribution.kind === "engine_grant") {
+    return (
+      <div data-testid="engine-grant-attribution" className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <span>Engine grant {attribution.engine_grant_id}</span>
+        {ranger}
+      </div>
+    );
+  }
+
   // A classification gate. D10's pre-existing defect was here: `clearance` had
   // no entry in the reason map at all, so it rendered the raw wire string with
   // "Unrecognized reason class." and dropped the gating tag and the clearing

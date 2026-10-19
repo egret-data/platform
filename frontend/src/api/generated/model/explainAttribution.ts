@@ -44,4 +44,7 @@ export type ExplainAttribution = {
   kind: 'clearance';
 } | {
   kind: 'materialized_view_deny';
+} | {
+  engine_grant_id: string;
+  kind: 'engine_grant';
 };

@@ -754,6 +754,7 @@ pub(crate) async fn build_provision_req_with(
                     .seed_admin_all_access(svc.id, service_name, "trino", &admins)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+                recompile_after_infra_seed(st, svc.id).await;
             }
             // The per-user baseline, for impersonate AND jwt: every delegated
             // session is checked for it (DG Task 7).
@@ -2368,7 +2369,9 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
             &dp::delegator_impersonate_policy(service_name),
         )
         .await
-        .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))
+        .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
+    recompile_after_infra_seed(st, svc.id).await;
+    Ok(())
 }
 
 /// Seed the per-user baseline ([`crate::delegator_policy::user_baseline_policies`])
@@ -2397,7 +2400,42 @@ pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Resu
             .await
             .map_err(|e| CpError::BadRequest(format!("seed policy {name}: {e}")))?;
     }
+    recompile_after_infra_seed(st, svc.id).await;
     Ok(())
+}
+
+/// Recompile a profile egret has just seeded infra policies on, when its
+/// engines carry impersonation grants: a grant's target is re-checked against
+/// every policy of the profile (engine grants spec E11, security re-review
+/// M-a). The seeded users (platform admins, `egret_delegator`, `{USER}`) are
+/// refused as targets already, so this only re-applies a decision the check
+/// has made; it runs after the seed (the seed's upserts are not one
+/// transaction), fire-and-forget and logged with the repair URL.
+async fn recompile_after_infra_seed(st: &CpState, service_id: i64) {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return;
+    };
+    let carries: Result<bool, sqlx::Error> = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.engine_grants g \
+           JOIN engine_mgmt.engines e ON e.id = g.engine_id \
+          WHERE e.authz_service_id = $1 AND g.target_user_id IS NOT NULL)",
+    )
+    .bind(service_id)
+    .fetch_one(st.engine_mgmt.pool())
+    .await;
+    match carries {
+        Ok(false) => {}
+        Ok(true) => {
+            if let Err(e) = compiler.recompile_profile(service_id).await {
+                tracing::error!(service_id, error = %e,
+                    "could not recompile a profile after seeding its infra policies; its \
+                     impersonation grants are re-checked at the next recompile, POST \
+                     /api/control-plane/perm/compile/{service_id}");
+            }
+        }
+        Err(e) => tracing::error!(service_id, error = %e,
+            "could not tell whether a seeded profile carries impersonation grants"),
+    }
 }
 
 /// Seed the per-user baseline on ONE existing engine, without an apply.
@@ -3566,6 +3604,7 @@ async fn build_starrocks_provision_req(
                     .seed_admin_all_access(svc.id, service_name, "starrocks", &admins)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+                recompile_after_infra_seed(st, svc.id).await;
             }
         }
     }
@@ -5224,6 +5263,46 @@ async fn restore_engine_authz_service(st: &CpState, engine_id: Uuid, previous: O
     }
 }
 
+/// Recompile the profile an engine has just LEFT (engine grants spec C11/E10).
+/// An engine grant compiles into its engine's profile; the bind path compiles
+/// only the profile the engine moves to, and the delete paths compiled none,
+/// so a former profile kept serving the engine's `perm-engine-` policies.
+///
+/// After commit, fire-and-forget and logged with the repair URL, as
+/// [`restore_engine_authz_service`] does: not in the binding's transaction,
+/// because the port recompiles one profile per call under its own
+/// `lock_services_in_tx`, and two calls in one transaction would not take both
+/// profile locks in one ascending order. `only_if_shared` (the delete paths):
+/// with no engine left on the profile nothing downloads it, and the next bind
+/// recompiles it, so only a profile another engine still binds is recompiled.
+async fn recompile_former_profile(st: &CpState, previous: Option<i64>, only_if_shared: bool) {
+    let (Some(sid), Some(compiler)) = (previous, st.perm_compiler.clone()) else {
+        return;
+    };
+    if only_if_shared {
+        match st
+            .engine_mgmt
+            .count_engines_bound_to_authz_service(sid)
+            .await
+        {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(service_id = sid, error = %e,
+                    "could not tell whether an engine's former policy profile is still bound; \
+                     it may serve a stale policy set until POST \
+                     /api/control-plane/perm/compile/{sid} succeeds");
+                return;
+            }
+        }
+    }
+    if let Err(e) = compiler.recompile_profile(sid).await {
+        tracing::error!(service_id = sid, error = %e,
+            "could not recompile the policy profile an engine left; it will serve a stale \
+             policy set until POST /api/control-plane/perm/compile/{sid} succeeds");
+    }
+}
+
 /// Every refusal a profile bind makes BEFORE it writes anything, shared by
 /// `PUT /engines/{id}` ([`apply_authz_service_update`]) and external-engine
 /// registration so the two cannot drift: the profile must exist (400), its
@@ -5545,6 +5624,11 @@ async fn update_engine(
     // re-pointed. See `restore_engine_authz_service`.
     if out.is_err() && rebound {
         restore_engine_authz_service(&st, engine_id, previous_authz_service_id).await;
+    }
+    // The update stood: the profile the engine left must stop serving what the
+    // engine's grants compiled there (spec E10).
+    if out.is_ok() && rebound {
+        recompile_former_profile(&st, previous_authz_service_id, false).await;
     }
     out
 }
@@ -5963,6 +6047,9 @@ async fn delete_engine(
 
     // 6. Cross-seam cleanup after commit: logged, never returned.
     cleanup_deleted_engine(&st, &engine, &attachments).await;
+    // 7. A profile another engine still binds loses the engine grants that
+    //    cascaded with the row (spec E10).
+    recompile_former_profile(&st, engine.authz_service_id, true).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6004,9 +6091,10 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
         DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
         DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
     }
-    // The profile this engine was bound to loses its engine with the row; the
-    // grants it compiled stay as the profile's own (as for a provisioned
-    // engine, whose delete does not recompile either).
+    // The profile this engine was bound to loses its engine with the row. Its
+    // catalog grants stay the profile's own; its ENGINE grants cascaded with
+    // the row, so a profile another engine still binds is recompiled (spec E10).
+    recompile_former_profile(st, engine.authz_service_id, true).await;
     tracing::info!(engine = %engine.name,
         "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)

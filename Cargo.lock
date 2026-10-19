@@ -3667,6 +3667,7 @@ dependencies = [
 name = "egret-ranger-eval"
 version = "0.1.0"
 dependencies = [
+ "egret-engine-mgmt",
  "egret-perm",
  "egret-perm-compile",
  "egret-policy",

@@ -88,6 +88,7 @@ use crate::trigger::{
     SourceKind,
 };
 
+mod engine_grants;
 mod error;
 mod people;
 pub use error::PermHttpError;
@@ -131,6 +132,23 @@ pub fn perm_router() -> Router<PermState> {
         )
         .route("/perm/overlaps", get(list_overlaps))
         .route(
+            "/perm/engine-capabilities",
+            get(engine_grants::list_engine_capabilities),
+        )
+        .route(
+            "/perm/engines/{engine_id}/grants",
+            get(engine_grants::list_engine_grants).post(engine_grants::create_engine_grant),
+        )
+        .route(
+            "/perm/engine-grants",
+            get(engine_grants::list_all_engine_grants),
+        )
+        .route(
+            "/perm/engine-grants/{id}",
+            axum::routing::patch(engine_grants::patch_engine_grant)
+                .delete(engine_grants::delete_engine_grant),
+        )
+        .route(
             "/perm/unresolved-principals",
             get(list_unresolved_principals),
         )
@@ -144,6 +162,10 @@ pub fn perm_router() -> Router<PermState> {
         .route("/perm/people/roles/{name}", get(people::read_role))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
+        .route(
+            "/perm/explain/capability",
+            post(engine_grants::explain_capability),
+        )
         .route("/perm/explain/principal", post(people::explain_principal))
         .route("/perm/compile/{service_id}", post(compile))
         .route(
@@ -185,6 +207,13 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         delete_rule,
         list_overlaps,
         list_unresolved_principals,
+        engine_grants::list_engine_capabilities,
+        engine_grants::list_engine_grants,
+        engine_grants::list_all_engine_grants,
+        engine_grants::create_engine_grant,
+        engine_grants::patch_engine_grant,
+        engine_grants::delete_engine_grant,
+        engine_grants::explain_capability,
         people::list_people,
         people::read_user,
         people::allocate_username,
@@ -200,6 +229,25 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         undo_service_policy_migration
     ),
     components(schemas(
+        engine_grants::EngineCapabilitiesResponse,
+        engine_grants::EngineCapabilities,
+        engine_grants::CapabilityView,
+        engine_grants::CapabilityResource,
+        engine_grants::NotGrantableView,
+        engine_grants::EngineGrantsResponse,
+        engine_grants::EngineRef,
+        engine_grants::ProfileRef,
+        engine_grants::Reach,
+        engine_grants::ReachEngine,
+        engine_grants::EngineGrantView,
+        engine_grants::ManagedKind,
+        engine_grants::ManagedEntry,
+        engine_grants::NewEngineGrant,
+        engine_grants::EngineGrantWriteResponse,
+        engine_grants::ExplainCapabilityRequest,
+        engine_grants::ExplainCapabilityResponse,
+        engine_grants::CapabilityOutcome,
+        engine_grants::CapabilityTagResolution,
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
         crate::principal_refs::UnresolvedPrincipal,
@@ -553,6 +601,8 @@ pub enum ExplainAttribution {
     /// users cleared for EVERY classification with a column on the profile,
     /// so it names no single tag.
     MaterializedViewDeny,
+    /// `perm-engine-{uuid}`: one engine grant (F11, `perm.engine_grants`).
+    EngineGrant { engine_grant_id: Uuid },
 }
 
 /// One Ranger ACCESS TYPE's verdict inside one profile.
@@ -920,10 +970,11 @@ pub struct PreviewResponse {
 /// time, not one a steward discovers from a query that returns no rows.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SkipReport {
-    /// `grant` | `rule` | `clearance`.
+    /// `grant` | `rule` | `clearance` | `engine_grant`.
     pub source_kind: String,
     /// The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
-    /// whose classification gate could not be expressed (SP4c Task 2).
+    /// whose classification gate could not be expressed (SP4c Task 2), or for
+    /// `engine_grant` the `perm.engine_grants` id (F11).
     pub id: Uuid,
     pub reason: String,
 }
@@ -942,6 +993,9 @@ impl From<SkippedItem> for SkipReport {
                 // not express — `id` is the `tags.id`, not a grant or rule id
                 // (see `SkipReport::id`).
                 SourceKind::Clearance => "clearance".into(),
+                // F11: an engine grant with no grantee left, or whose
+                // impersonation target can no longer be compiled.
+                SourceKind::EngineGrant => "engine_grant".into(),
             },
             id: sk.id,
             reason: sk.reason,
@@ -3026,6 +3080,9 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
         Some(PolicyAttribution::MaterializedViewDeny) => {
             Some(ExplainAttribution::MaterializedViewDeny)
         }
+        Some(PolicyAttribution::EngineGrant(engine_grant_id)) => {
+            Some(ExplainAttribution::EngineGrant { engine_grant_id })
+        }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
@@ -4288,6 +4345,29 @@ mod wiring_tests {
             assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
             assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
         }
+    }
+
+    /// F11 (spec §4.3 item 5): a deciding `perm-engine-{uuid}` attributes to
+    /// the engine grant, on the wire as `{"kind":"engine_grant",
+    /// "engine_grant_id":…}`, with no clearance lookup.
+    #[tokio::test]
+    async fn an_engine_grant_attributes_by_its_id_and_asks_no_clearance_lookup() {
+        let id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
+        let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
+        let got = attribution_for(&mut lookups, &denied(&format!("perm-engine-{id}")))
+            .await
+            .expect("ok");
+        assert_eq!(
+            got,
+            Some(ExplainAttribution::EngineGrant {
+                engine_grant_id: id
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(got.unwrap()).unwrap(),
+            serde_json::json!({"kind": "engine_grant", "engine_grant_id": id.to_string()})
+        );
+        assert!(lookups.tags_asked.is_empty() && lookups.gates_asked.is_empty());
     }
 }
 

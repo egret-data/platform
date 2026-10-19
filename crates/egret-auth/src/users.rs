@@ -291,7 +291,10 @@ impl UserRepo {
     /// person whose email slugs to it, who would inherit every allow the stale
     /// policy still grants. The groups are read before the delete, their
     /// profiles locked first, and recompiled on this transaction after the user
-    /// row is gone, through `recompiler`.
+    /// row is gone, through `recompiler`. Since F11 the same pass covers the
+    /// profiles of engine grants that target this user (they cascade with the
+    /// row; their compiled policies name the freed username), through
+    /// `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx`.
     pub async fn hard_delete(
         &self,
         target: UserId,
@@ -316,11 +319,11 @@ impl UserRepo {
                 return Err(crate::groups::unstable());
             }
         };
-        let services = if groups.is_empty() {
-            Vec::new()
-        } else {
-            recompiler.lock_affected_in_tx(&mut tx, &groups).await?
-        };
+        // The groups' services and (F11) the profiles of engine grants that
+        // target this user, in one ascending pass.
+        let services = recompiler
+            .lock_affected_by_user_delete_in_tx(&mut tx, target.0, &groups)
+            .await?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(target.0)
             .execute(&mut *tx)
@@ -365,7 +368,7 @@ impl UserRepo {
                 return Err(db_err(e));
             }
         };
-        if !groups.is_empty() {
+        if !groups.is_empty() || !services.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
         tx.commit().await.map_err(db_err)?;

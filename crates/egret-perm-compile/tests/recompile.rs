@@ -1527,3 +1527,43 @@ async fn two_rules_masking_one_column_the_same_way_still_compile() {
         "the decisive buckets must be equal — that is what makes the tie harmless"
     );
 }
+
+/// F11 (spec E7, §4.3 item 4): the `perm-engine-` prefix is in
+/// `apply_diff_in_tx`'s existing-state query. A compiler-owned
+/// `perm-engine-{uuid}` row that no engine grant produces is reaped by the
+/// next recompile of its profile, exactly as a stale `perm-grant-` row is.
+#[tokio::test]
+async fn a_stale_compiled_engine_grant_is_reaped_by_the_sweep() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_no_grants_yet(&db).await;
+    let pool = &db.pool;
+    let name = format!(
+        "{}{}",
+        egret_policy::COMPILER_ENGINE_GRANT_PREFIX,
+        Uuid::new_v4()
+    );
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, $2, jsonb_build_object('name', $2::text), 'compiler')",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .execute(pool)
+    .await
+    .expect("seed a stale compiled engine grant");
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let names: Vec<String> = policies_for(pool, f.service_id)
+        .await
+        .into_iter()
+        .map(|(_, n, _)| n)
+        .collect();
+    assert!(
+        !names.contains(&name),
+        "the sweep must reap {name}; the profile still holds {names:?}"
+    );
+    assert_eq!(summary.deleted, 1, "exactly the one stale row is reaped");
+}

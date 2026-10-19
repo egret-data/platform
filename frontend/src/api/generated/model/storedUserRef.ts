@@ -7,11 +7,14 @@
  */
 
 /**
- * One stored grant principal or rule exemption that names a username as a
- * `user` ref.
+ * One stored grant principal, rule exemption or (F11) engine-grant principal
+ * that names a username as a `user` ref.
+ *
+ * An engine grant's impersonation TARGET is not one: it is stored by user id
+ * (spec E21, amended), so no stored name can go stale and be inherited.
  */
 export interface StoredUserRef {
-  /** `"grant"` or `"rule"`. */
+  /** `"grant"`, `"rule"` or `"engine_grant"`. */
   source: string;
   /** The grant's or the rule's id. */
   id: string;

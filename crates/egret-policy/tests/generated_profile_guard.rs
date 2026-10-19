@@ -1074,3 +1074,35 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
         Ok(())
     }
 }
+
+/// F11 (spec E7, §4.3 item 3): a compiled engine grant (`perm-engine-{uuid}`)
+/// is a compiler-owned policy like the other three, so a profile holding one
+/// cannot be deleted out from under it; once it is gone, the profile can.
+#[tokio::test]
+async fn delete_service_refuses_while_a_compiled_engine_grant_remains() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (_svc_name, svc_id) = seed_generated_profile(&f).await;
+    let name = format!("perm-engine-{}", uuid::Uuid::new_v4());
+    let policy_id = insert_policy_directly(&f, svc_id, &name).await;
+
+    match f.store.delete_service(svc_id).await {
+        Err(egret_policy::PolicyStoreError::CompilerOwned(msg)) => assert!(
+            msg.contains("perm-engine-"),
+            "the refusal must name the engine-grant prefix too: {msg}"
+        ),
+        other => panic!("expected CompilerOwned, got {other:?}"),
+    }
+
+    sqlx::query("DELETE FROM policy.authz_policies WHERE id = $1")
+        .bind(policy_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("remove the compiled row");
+    f.store
+        .delete_service(svc_id)
+        .await
+        .expect("with no compiler-owned row left, the profile deletes");
+}

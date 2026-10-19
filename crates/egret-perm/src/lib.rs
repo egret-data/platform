@@ -16,6 +16,7 @@
 //! consumer of `egret-policy`.
 pub mod actions;
 pub mod assignment;
+pub mod engine_grants;
 pub mod engine_images;
 pub mod error;
 pub mod eval;
@@ -27,6 +28,11 @@ pub use actions::{
     EngineType, OverlapKind, OverlapRule, EXTERNAL_PLUGIN_ASSUMPTIONS, MODELLED_RANGER_PLUGINS,
 };
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
+pub use engine_grants::{
+    create_engine_grant_in_tx, delete_engine_grant_in_tx, get_engine_grant_via,
+    list_engine_grants_for_engine_via, list_engine_grants_for_profile_via, list_engine_grants_via,
+    update_engine_grant_in_tx, EngineGrant,
+};
 pub use engine_images::{
     plugin_version_for_image, stored_engine_image, trino_image_ref, DefaultEngineImages,
     KnownEngineImage, DEFAULT_ENGINE_IMAGES, KNOWN_ENGINE_IMAGES,
