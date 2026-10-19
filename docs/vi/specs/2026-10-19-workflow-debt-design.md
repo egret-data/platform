@@ -2,7 +2,7 @@
 
 # Gói nợ workflow: những gì nhóm B, C1, C2 và WorkingDirectory còn để mở
 
-**Trạng thái:** thiết kế ngày 2026-10-19. PR-1 đã xây và kiểm chứng ngày 2026-10-19 trên nhánh `feat/workflow-debt-kill-wd` (PR-1); PR-2 chưa xây. Thứ tự của user ngày 2026-10-18 đặt gói này sau khi C2 merge và trước roadmap parity với Kestra (dòng 1 của `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` chờ gói này).
+**Trạng thái:** thiết kế ngày 2026-10-19. PR-1 đã xây và kiểm chứng ngày 2026-10-19 trên nhánh `feat/workflow-debt-kill-wd` (PR-1); PR-2 đã xây và kiểm chứng ngày 2026-10-19. Thứ tự của user ngày 2026-10-18 đặt gói này sau khi C2 merge và trước roadmap parity với Kestra (dòng 1 của `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` chờ gói này).
 
 **Nguồn của các khẳng định:** mọi khẳng định về code egret đều đã kiểm tra ở worktree `egret-coretasks` tại `481d9101` (nhánh `feat/workflow-kestra-executor-tasks`, C2 ở HEAD, tức là hình dạng của main sau khi C2 merge). Code được trích dẫn dạng `path:line`, tính từ `crates/egret-workflow/src/` trừ khi ghi gốc khác. Kestra là bản checkout tại `data-portal/kestra`, đường dẫn của nó tính từ đó. Khẳng định nào không kiểm tra tĩnh được thì ghi "to measure in Task N" và nêu task của plan sẽ đo. Chỗ nào ghi chú nợ nói điều mà code không còn cho thấy, mục đó được báo là lỗi thời (stale), không đưa vào kế hoạch.
 
@@ -40,6 +40,7 @@
 - **D13. (M8) `executionLabels` của Flow trigger được ghi lại như một khác biệt, không sửa** (§4.5).
 
 - **D14. Driver của oracle chạy tiếp một run có hạn ngắn đã qua khi máy tải nặng.** Đây là một bản sửa trong driver của oracle (harness test), không phải code production, được thêm ngày 2026-10-19 sau cuộc điều tra ratchet flake (§3.2). Đó là PR-1 Task 1.6b.
+- **D15. Container được giữ mà run id của nó không còn dòng nào, vì một lần lặp `LoopUntil` đã thay nó, được sweep khi execution của nó đã terminal.** Nó nhận thời hạn giữ của D3, tính từ lúc execution kết thúc, qua label `egret.io/execution-id` của container. Container `delete: true` không bị quy tắc này đụng tới. Một block `WorkingDirectory` bên trong `LoopUntil` được chuẩn bị lại ở mỗi lần lặp, và việc dọn `_wd` xoá các prefix của id cũ (§4.7). Thêm ngày 2026-10-19 trong lúc xây D12 (PR-2 Task 3b).
 
 ## 1. Mọi mục nợ, đã kiểm chứng
 
@@ -95,6 +96,8 @@
 - Config: `WorkflowConfig::kept_container_retention_days: u32`, mặc định 7, được tài liệu hoá như `storage_retention_days`, với env `EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS`. Nó không phải giá trị chart, theo quy tắc ở `deploy/helm/egret/templates/configmap-env.yaml:44-51`.
 
 **Một hệ quả cần nêu:** run của body `LoopUntil` dùng lại task-run id và khởi động lại attempt từ 0 (§4.4), nên tên container `egret-run-{run}-{attempt}` (`worker/commands.rs:793-795`) lặp lại qua các lần lặp. `find` coi container đã thoát là `Started` (`:1717-1719`), nên với `delete: false`, lần lặp thứ hai có thể gắn lại vào container đã thoát của lần đầu thay vì chạy. Tin rằng điều này đang xảy ra hiện nay; đo trong PR-2 Task 3. D12 loại bỏ nó.
+
+**(2026-10-19, đã đo và đã xây.)** Case Docker live `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`cargo test -p egret-workflow --test container_docker_live`) cho thấy mỗi lần lặp có một container mới, đặt tên từ run id mới của lần lặp đó. D15 (§4.7) nói container được giữ của một lần lặp đã bị thay thì sau đó ra sao.
 
 ### 2.2 Đóng cưỡng bức (force-close)
 
@@ -271,6 +274,11 @@ Không có gì chặn `executions.variables` sau merge hay các label mà task `
 
 Gạch đầu dòng "Each one sees the result of the one before it" của spec C2 §3.1 được sửa.
 
+**(2026-10-19, đã xây.)**
+- Test là `two_updates_in_one_parallel_render_the_start_and_merge_in_run_order` (`cargo test -p egret-workflow --test worker`). Nó đỏ với code cũ (`y` là `"1"`) và nay xanh.
+- **Đã đo (chỗ "cần đo" ở trên):** `{{ vars.x }}` khi không có `vars` thì fail trong egret, như trong Kestra. Renderer trả `undefined value` với key `vars` vắng, với `vars: null` và với `vars: {}`. Nó không bao giờ render ra rỗng, vì renderer chặt với giá trị undefined.
+- Vậy **không có khác biệt M5** nào để liệt kê. Thay đổi duy nhất là quy tắc theo thứ tự run của D10.
+
 ### 4.3 M6: update lỗi (D11, ghi lại)
 
 **Catch của Kestra:**
@@ -310,7 +318,11 @@ M6 của C2 final review và phép đo này đồng ý rằng đây là đườn
 - Surface quên id cũ, nên `reserve_id` kế tiếp là id mới.
 - Điểm bên trong `claim::settle`/`persist` nơi có cả trước và sau cần tìm trong PR-2 Task 3.
 
-**Test:** một body `WaitFor` `SetVariables {ids: ["{{ taskrun.id }}"]}` qua ba lần lặp. `deep_merge` chỉ nối các phần tử list mới (`executor/update.rs:169-199`), nên kết quả chứa 3 id sau thay đổi, và 1 trước đó.
+**Test:** một body `WaitFor` `SetVariables {ids: ["{{ taskrun.id }}"]}` qua ba lần lặp. `deep_merge` chỉ nối các phần tử list mới (`executor/update.rs:169-199`), nên kết quả chứa ~~3~~ **4** id sau thay đổi, và 1 trước đó.
+
+**(2026-10-19, đính chính.)** Đoạn trên ghi 3 id; thế là sai. `maxIterations: 3` chạy body bốn lần: lượt đầu cộng ba lần restart. Golden của Kestra cho `valids/waitfor-max-iterations` (`maxIterations: 3`) cho run `WaitFor` đi qua `RUNNING` bốn lần với ba `PAUSED` ở giữa, và `LoopUntil.java:142` đổi id ở mỗi lần restart. Test đã xây `each_loop_until_iteration_has_its_own_task_run_id` (`cargo test -p egret-workflow --test worker`) đọc số lần lặp từ lịch sử của chính loop, assert nó là 4, rồi assert mỗi lần lặp một id riêng và dòng giữ id cuối.
+
+**(2026-10-19, đã xây.)** Việc đổi id nằm trong `claim::drive`, không phải `persist`: `drive` áp dụng `RestartLoop` rồi `renew_restarted_ids` cấp id mới cho mọi run từng có lịch sử mà nay không còn (surface quên id cũ, `Surface::forget_id`). `write_render_side` ghi id mới vào các dòng. Không thể chờ `persist`, vì body `SetVariables` được dựng lại và render ngay trong settle đã restart nó, và lần render đó phải thấy id mới.
 
 ### 4.5 M8: label của Flow trigger (D13, ghi lại)
 
@@ -335,6 +347,30 @@ M6 của C2 final review và phép đo này đồng ý rằng đây là đườn
   - `set_variables_without_variables_fails` assert toàn bộ message.
 - `tests/migration_0196_variables.rs` giữ seed riêng. Dùng chung `seed()` của `worker.rs` sẽ làm test migration phụ thuộc vào một file test của worker; điều này được ghi lại và không đổi.
 
+### 4.7 Công việc được giữ của một lần lặp `LoopUntil` đã bị thay (D15)
+
+D12 cấp cho run của body mỗi lần lặp id mới, nên run id của lần lặp trước không còn dòng nào. Hai thứ treo vào một id như vậy. Cả hai được phát hiện khi xây D12 (PR-2 Task 3b).
+
+**Container và pod được giữ.**
+- Mọi container và pod đã mang sẵn label `egret.io/execution-id` (Docker `labels()` trong `worker/commands.rs`, pod trong `pod_spec.rs`), nên không cần label hay migration mới. Docker sweep đọc nó như thêm một cột của `docker ps`, và pod sweep đọc label của pod. Label vắng hoặc không phải UUID coi như không có, và container được để yên như trước.
+- `run_liveness` nhận các cặp `(run, execution)`. Với các run không còn dòng, nó chạy thêm một query chỉ-đọc, bị chặn bởi các id đã liệt kê: execution nào trong số đó đã terminal (`workflow.state_is_terminal`), và kết thúc lúc nào (`COALESCE(ended_at, updated_at)`, theo đồng hồ của database).
+- **Quy tắc (D15):** container được giữ (`delete: false`) mà run của nó không còn dòng, và execution của nó đã terminal, được coi như container của một run terminal (D3). Nó bị xoá khi execution đã kết thúc quá `workflow.kept_container_retention_days` ngày, và không bao giờ khi đặt `0`. Docker sweep cũng dừng container như vậy nếu nó vẫn đang chạy, như với run terminal. Trường hợp đó bình thường không xảy ra, vì body của lần lặp đã kết thúc trước lúc restart.
+- **Vẫn để yên, như trước:**
+  - container `delete: true` của một run không còn dòng. Thực tế không có cái nào, vì release hoặc cancel đã xoá nó;
+  - container mà run không còn dòng và execution của nó không có trong database này hoặc còn sống. Gồm cả container của egret khác trên cùng daemon dùng chung.
+- **Test:**
+  - unit test `a_superseded_runs_kept_work_gets_the_retention_deadline` (cũng ghim trường hợp `delete: true`) và `the_docker_sweep_parses_the_execution_label` (`cargo test -p egret-workflow --lib -- worker::commands`);
+  - case Docker live `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`--test container_docker_live`): sau một `LoopUntil` hai lần lặp, sweep với hạn một giờ xoá 0 container và còn 2, còn sweep với hạn không xoá 2.
+- **Kubernetes chỉ được phủ bằng unit test.** Pod sweep đi qua cùng `sweep_decision`, nhưng không có cụm nào để chạy, và guard riêng của đường pod cần một `kube::Client` nên không có seam để unit test.
+
+**Block `WorkingDirectory` bên trong `LoopUntil`.**
+- Trước thay đổi này block giữ nguyên phase qua restart, nên nó không được chuẩn bị lại cho lần lặp kế tiếp. Nay `Command::RestartLoop` xoá phase và block được chuẩn bị lại ở mỗi lần lặp. `persist` cũng xoá `working_dir_snapshot` khi phase bị xoá, và `working_dir_swept_at` khi phase thành `PREPARING`, để block được restart không mang theo con trỏ snapshot hay dấu sweep của lần lặp trước (các CHECK của migration 0194 và 0197 áp dụng).
+- **Các prefix cũ.** Run của block có id mới ở mỗi lần lặp, nên prefix `_wd/{id cũ}/` của lần lặp trước sẽ mồ côi. `wd_sweep::delete_superseded` liệt kê `executions/{ex}/_wd/` và xoá mọi prefix mà block id không có dòng `task_runs` nào của execution đó giữ. Nó chạy sau khi lệnh xoá của chính một lần discard thành công, và từ `_wd` sweep cho mỗi block mà sweep xoá. Nếu nó fail thì block không được đánh dấu, nên sweep sẽ quay lại. Vậy lần discard hoặc sweep cuối của một execution xoá mọi prefix của các lần lặp trước.
+- **Vì sao an toàn:** prefix có id mà một dòng đang giữ thì thuộc dòng đó, sống hay không. Prefix không có dòng thì đã xong, vì `RestartLoop` chỉ đổi tên dòng của block sau khi block đã kết thúc.
+- **Đã loại:** đặt khoá dấu sweep theo `(execution_id, run_ix)`, và prefix dùng chung theo `run_ix`. Khi đó một lần discard muộn của lần lặp 1 sẽ tác động lên dòng hay object của lần lặp 2 trong lúc lần lặp 2 đang chuẩn bị.
+- **Test** (`cargo test -p egret-workflow --test working_dir_claims`): `a_block_inside_a_loop_until_is_prepared_again_each_iteration`, `a_block_inside_a_waiting_loop_is_unstamped_when_it_restarts`, `a_block_after_another_task_in_a_loop_restarts_with_no_snapshot`, `a_later_discard_removes_a_superseded_iterations_snapshots`, `the_wd_sweep_removes_a_superseded_iterations_snapshots`. Case live `a_block_inside_a_wait_for_runs_its_docker_child_each_iteration` (`--test working_dir_docker_live`) chạy một child sẽ fail nếu lần lặp 2 dùng lại thư mục của lần lặp 1.
+- **Một lỗ hổng còn lại, được ghi và chưa đóng.** Nếu lệnh xoá của discard một lần lặp trước bị fail, và sau đó không còn discard hay `_wd` sweep nào chạy trong execution đó, `_wd/{id cũ}/` vẫn còn. Hai trường hợp dẫn tới đó: block không bao giờ được chạm tới nữa và execution không có block nào khác; hoặc lần restart đã xoá phase và snapshot, nên sweep không còn chọn dòng đó. Đóng nó cần một bản ghi bền của prefix đã bị thay, tức một migration. Gói này không thêm migration nào.
+
 ## 5. Follow-up của C1 và tài liệu (PR-2)
 
 ### 5.1 Hai chỗ publish từ chối quá tay
@@ -358,6 +394,16 @@ Phép tra cứu đằng sau nó, `FlowRepo::find_by_name` (`repo.rs:892-946`), k
 - Run của một `Subflow` mà target vẫn vắng thì fail như hiện nay, tại `subflow::resolve`.
 - Điều này viết lại bốn test bảo mật trong `tests/publish.rs` (`:62`, `:95`, `:279`, `:308`): "foreign" thành "absent from your workspace, published with the warning, and the run fails not found". User đồng ý ngày 2026-10-19.
 - `VALIDATE_REFUSED` và `LIVE` của oracle census dịch chuyển theo hai entry. Cần đo trong PR-2 Task 5; `baseline.txt` không đổi, vì executor oracle chạy `build_plan`, không chạy publish (`oracle-exec/README.md:13459`).
+
+**(2026-10-19, đã xây.)** Như đề xuất, với các chi tiết sau:
+- `FlowRepo::find_in_workspace(ws, namespace, flow_id)` là phép tra có phạm vi. Publish dùng nó cho `Subflow` và cho `dependsOn` của Flow trigger, và chỉ trong workspace của caller. Flow mà chỉ workspace khác có thì được trả lời y như flow vắng.
+- Target `Subflow` vắng thì publish kèm warning `subflow_not_found`, message `The subflow '<flowId>' not found in namespace '<namespace>'.`, tại path của task. Target `dependsOn` vắng thì publish không kèm warning, như Kestra.
+- Publish luôn ghi đè `flow_ref` bằng câu trả lời của phép tra, nên target vắng xoá `flowRef` mà tác giả viết trong draft.
+- Publish cũng đi qua các list `errors:` lồng nhau. Một `Subflow` ở đó nhận cùng phép tra, warning và `flowRef` bị xoá, còn `database:` ở đó được kiểm như `database:` ở cấp cao nhất. (Task type không biết hoặc không được phục vụ ở đó vốn đã bị validate từ chối.)
+- Phép tra không-phạm-vi đã bị bỏ: `RefKind::Subflow` và `FlowRepo::find_by_name` đã bị xoá, nên lỗi từ chối quá tay xuyên workspace không thể quay lại.
+- **Census, đã đo** (`cargo test -p egret-workflow --test executor`, trên corpus 351 flow): `LIVE` 293 lên **295** và `VALIDATE_REFUSED` 27 xuống **25**. Hai flow là `valids/task-runif` và `valids/trigger-flow-listener-no-inputs`. Số phép tra subflow không-phạm-vi mà publish thực hiện trong census giảm về 0, và nay chúng canh để publish không quay lại port không-phạm-vi.
+- **Ratchet không đổi:** 301 golden entry, 73 mismatching, 73 baselined, 0 broken. `baseline.txt` và `golden.json` không bị sửa.
+- **Test:** trong `tests/publish.rs`, `a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it`, `a_trigger_dependency_absent_from_the_callers_workspace_publishes_whoever_has_it`, `an_authored_flow_ref_does_not_survive_an_absent_target`, và cho `errors:` lồng nhau `a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_authored_flow_ref_cleared` và `a_foreign_database_inside_a_nested_errors_list_cannot_be_published` (`cargo test -p egret-workflow --test publish`); trong `tests/worker.rs`, `a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fails_not_found` (`--test worker -- subflow`), chạy flow đã publish và thấy child fail với `unable to find flow`.
 
 ### 5.2 Sửa tài liệu nhỏ
 
@@ -388,7 +434,7 @@ Chúng có thể chạy song song theo quy tắc autonomy: mỗi bên một work
 - TDD theo từng task; unit test ở chỗ logic thuần (quyết định của sweep, các giới hạn, `compute`).
 - Test DB trên Postgres riêng.
 - Case Docker live trên daemon riêng, không bao giờ trên dev stack dùng chung.
-- Ratchet oracle (`cargo test -p egret-workflow --test executor`, 301 golden, 73 mismatching / 73 baselined, 0 broken, LIVE 293) giữ xanh sau mỗi task. Chỉ §5.1 được kỳ vọng làm dịch chuyển số census.
+- Ratchet oracle (`cargo test -p egret-workflow --test executor`, 301 golden, 73 mismatching / 73 baselined, 0 broken, LIVE 293) giữ xanh sau mỗi task. Chỉ §5.1 được kỳ vọng làm dịch chuyển số census (LIVE 293 lên 295 khi §5.1 được xây; đã đo ở §5.1).
 - Gate cuối là của plan C2, cộng với bộ Docker live cho PR-1.
 
 ## 7. Câu hỏi mở

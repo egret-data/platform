@@ -26,8 +26,13 @@ where each comes from and how to reproduce it.
 2026-10-17 one hashes differently. Trimmed, the new export differs from the
 committed 2026-10-10 file only by the added `Exit` definition and
 `x-kestra-export`'s `kept_definitions` and `raw_sha256` (compared
-definition by definition, 2026-10-17; the 2026-10-18 export hashes differently again and differs from the 2026-10-17 file only by the six group-C definitions `OutputValues`, `Assert`, `PurgeLogs`, `SetVariables`, `UnsetVariables` and `Labels`, plus the same two `x-kestra-export` fields), so the difference is in what
-`trim.py` drops, not in any definition it kept.
+definition by definition, 2026-10-17).
+The 2026-10-18 export hashes differently again. It differs from the
+2026-10-17 file only by the six group-C definitions `OutputValues`,
+`Assert`, `PurgeLogs`, `SetVariables`, `UnsetVariables` and `Labels`,
+plus the same two `x-kestra-export` fields.
+So the difference is in what `trim.py` drops, not in any definition it
+kept.
 
 The raw export is over 5 MB, so it is not committed; `trim.py` reproduces
 `kestra-flow-schema.json` from it byte for byte (the raw file's hash is
@@ -38,11 +43,11 @@ the version from there (`x-egret-kestra-version`).
 ```bash
 # A throwaway container on a free port. Kestra 2.0 asks for a first user
 # before any API answers; any credentials do.
-docker run -d --name w7a-kestra-t1 -p 18093:8080 28f59bf175e1 server local
+docker run -d --name kestra-schema-export -p 18093:8080 28f59bf175e1 server local
 # ... wait until the log says the server is up (about a minute), then:
 curl -s -X POST -H 'Content-Type: application/json' localhost:18093/api/v1/basicAuth \
-  -d '{"username":"admin@w7a.local","password":"W7aAdmin1234","firstName":"a","lastName":"b"}'
-AUTH='admin@w7a.local:W7aAdmin1234'
+  -d '{"username":"admin@egret.local","password":"W7aAdmin1234","firstName":"a","lastName":"b"}'
+AUTH='admin@egret.local:W7aAdmin1234'
 curl -s -u "$AUTH" localhost:18093/api/v1/configs            # records the version
 curl -s -u "$AUTH" -o raw-flow-schema.json localhost:18093/api/v1/plugins/schemas/flow
 
@@ -51,7 +56,7 @@ mkdir -p plugin-docs
 for t in $(python3 -c 'import trim; print(" ".join(trim.KESTRA_TYPES))'); do
   curl -s -u "$AUTH" -o "plugin-docs/$t.json" "localhost:18093/api/v1/plugins/$t"
 done
-docker rm -f w7a-kestra-t1
+docker rm -f kestra-schema-export
 
 python3 trim.py raw-flow-schema.json plugin-docs kestra-flow-schema.json \
   2.0.0-rc13 sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd 2026-10-18

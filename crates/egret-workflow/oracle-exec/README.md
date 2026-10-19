@@ -13452,16 +13452,19 @@ proved by `tests/purge_logs.rs`.
 
 ### Known over-refusals at publish: Fixed 2026-10-19
 
-**Fixed 2026-10-19 (debt spec §5.1, PR-2 Task 2.5).** Publish now resolves a
+**Fixed 2026-10-19 (debt spec §5.1; the user decided on 2026-10-19 that both over-refusals close).** Publish now resolves a
 `Subflow` and a Flow trigger's `dependsOn` pair in the caller's workspace only
 (`FlowRepo::find_in_workspace`), and an absent target no longer refuses the
 flow: it publishes with no frozen id and, for a `Subflow`, Kestra's warning
 `The subflow '<flowId>' not found in namespace '<namespace>'.`
 (`FlowService.java:642`) in the snapshot's `warnings`. A flow only another
 workspace holds is answered exactly as an absent one, so publish still probes
-nothing. Both flows below publish live: `driver.rs`'s `LIVE` 293 → 295 and
-`VALIDATE_REFUSED` 27 → 25, measured. `baseline.txt` is unchanged, because the
-executor oracle runs `build_plan`, not publish. The record as it stood:
+nothing. It walks nested `errors:` lists too, and the unscoped lookup
+(`RefKind::Subflow`, `FlowRepo::find_by_name`) is removed. Both flows below
+publish live: `driver.rs`'s `LIVE` 293 → 295 and `VALIDATE_REFUSED` 27 → 25,
+measured. The ratchet is unchanged: 301 golden entries, 73 mismatching, 73
+baselined, 0 broken. `baseline.txt` is unchanged, because the executor oracle
+runs `build_plan`, not publish. The record as it stood:
 
 
 No tracked list exists for this layer. `PUBLISHED_BUT_REFUSED`
