@@ -29,7 +29,7 @@ import { refusalMessage } from "@/routes/governance/policyWrites";
 import { engineUrl } from "@/routes/governance/engines/engineUrl";
 import {
   CapabilityValueFields,
-  reachedCatalogs,
+  catalogChoices,
   valueProblem,
   valueResources,
 } from "@/routes/governance/engines/tabs/capabilityValues";
@@ -131,7 +131,7 @@ function CheckForm({
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitted, setSubmitted] = useState(false);
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
-  const catalogs = reachedCatalogs(catalogsQ.data?.status === 200 ? catalogsQ.data.data : [], reach);
+  const catalogs = catalogChoices(catalogsQ, reach);
   const explain = usePermExplainCapability<ApiError>();
 
   const resources = valueResources(capability);

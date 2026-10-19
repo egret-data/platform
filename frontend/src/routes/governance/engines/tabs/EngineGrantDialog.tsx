@@ -37,7 +37,7 @@ import { refusalMessage } from "@/routes/governance/policyWrites";
 import { EXTERNAL_SENTENCE } from "@/routes/governance/engines/PageFrame";
 import {
   CapabilityValueFields,
-  reachedCatalogs,
+  catalogChoices,
   valueProblem,
   valueResources,
 } from "@/routes/governance/engines/tabs/capabilityValues";
@@ -146,7 +146,7 @@ function GrantForm({
   useUnsavedChangesWarning(snapshot !== initial);
 
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
-  const catalogs = reachedCatalogs(catalogsQ.data?.status === 200 ? catalogsQ.data.data : [], reach);
+  const catalogs = catalogChoices(catalogsQ, reach);
 
   const queryClient = useQueryClient();
   const onSuccess = (res: { status: number; data: unknown }) => {

@@ -386,3 +386,39 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
   });
 });
+
+describe("Grant dialog: the catalog list's own state (FE-STATE-1)", () => {
+  const NONE = "No catalog is attached to an engine this grant reaches.";
+
+  async function catalogField(over: Record<string, Answer>) {
+    const served = serve(answers(over));
+    openArea(`/governance/engines/${E_TR}`, STEWARD);
+    const dialog = await openGrant();
+    await pickCapability(dialog, "Set catalog session properties");
+    return { served, dialog };
+  }
+
+  it("says the list is loading while it loads, never that no catalog is attached", async () => {
+    const { dialog } = await catalogField({ "/governance/catalogs": "never" });
+    expect(within(dialog).getByText("Loading the catalogs…")).toBeInTheDocument();
+    expect(within(dialog).queryByText(NONE)).not.toBeInTheDocument();
+  });
+
+  it("says the list could not be loaded, with a retry that asks again, never that no catalog is attached", async () => {
+    const { served, dialog } = await catalogField({ "/governance/catalogs": fail(500) });
+    expect(
+      await within(dialog).findByText("The list of catalogs could not be loaded. Retry, or reload the page.", {}, T),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(NONE)).not.toBeInTheDocument();
+    const before = served.asked.filter((a) => a === "GET /governance/catalogs").length;
+    await userEvent.click(within(dialog).getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(served.asked.filter((a) => a === "GET /governance/catalogs").length).toBe(before + 1),
+    );
+  });
+
+  it("says no catalog is attached only for a list that loaded empty", async () => {
+    const { dialog } = await catalogField({ "/governance/catalogs": ok([]) });
+    expect(await within(dialog).findByText(NONE, {}, T)).toBeInTheDocument();
+  });
+});

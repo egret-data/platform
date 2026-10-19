@@ -6,6 +6,7 @@ import {
   CAPABILITIES,
   E_TR,
   engineGrant,
+  fail,
   grantsResponse,
   managedEntry,
   ok,
@@ -198,5 +199,20 @@ describe("Check (spec §6.1)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     // Live check L8: focus returns to the button that opened the dialog, not to the page body.
     await waitFor(() => expect(screen.getByRole("button", { name: "Check" })).toHaveFocus());
+  });
+});
+
+describe("Check: the catalog list's own state", () => {
+  it("says the list could not be loaded, never that no catalog is attached", async () => {
+    serve(answers(explain({}), { "/governance/catalogs": fail(500) }));
+    openArea(`/governance/engines/${E_TR}`, READER);
+    await userEvent.click(await screen.findByRole("button", { name: "Check" }, T));
+    const dialog = await screen.findByRole("dialog", { name: "Check an engine permission" });
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "Capability" }));
+    await userEvent.click(await screen.findByRole("option", { name: /^Set catalog session properties/ }));
+    expect(
+      await within(dialog).findByText("The list of catalogs could not be loaded. Retry, or reload the page.", {}, T),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText("No catalog is attached to an engine this grant reaches.")).not.toBeInTheDocument();
   });
 });

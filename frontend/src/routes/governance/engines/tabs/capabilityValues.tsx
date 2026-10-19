@@ -1,8 +1,11 @@
+import { RotateCw } from "lucide-react";
 import type { CapabilityResource, CapabilityView, GovernanceCatalog, Reach } from "@/api/generated/model";
 import { SubjectUserField } from "@/components/perm/ExplainResult";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { failedText } from "@/routes/governance/tabParts";
 
 /**
  * The value controls of an engine capability, one per `resources[]` entry in
@@ -57,6 +60,29 @@ export function reachedCatalogs(catalogs: GovernanceCatalog[], reach: Reach | nu
     .sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * What a `catalog` control can offer: the list loads and fails on its own
+ * (FE-STATE-1), and only a list that loaded may say no catalog is attached.
+ */
+export type CatalogChoices =
+  | { state: "loading" }
+  | { state: "error"; retry: () => void }
+  | { state: "ready"; names: string[] };
+
+/** The `catalog` control's choices from the governance catalog list query and the grant's reach. */
+export function catalogChoices(
+  q: { data?: { status: number; data: unknown }; isError: boolean; refetch: () => unknown },
+  reach: Reach | null,
+): CatalogChoices {
+  if (q.data?.status === 200) return { state: "ready", names: reachedCatalogs(q.data.data as GovernanceCatalog[], reach) };
+  if (q.isError || q.data) return { state: "error", retry: () => void q.refetch() };
+  return { state: "loading" };
+}
+
+const CATALOGS_LOADING = "Loading the catalogs…";
+const NO_CATALOG = "No catalog is attached to an engine this grant reaches.";
+const SOME_CATALOGS = "The catalogs attached to an engine this grant reaches.";
+
 export function CapabilityValueFields({
   idPrefix,
   capability,
@@ -72,8 +98,8 @@ export function CapabilityValueFields({
   onChange: (key: string, value: string) => void;
   /** By resource key; shown beside the field (FE-FORM-4). */
   errors: Record<string, string | undefined>;
-  /** The catalog names a `catalog` control offers. */
-  catalogs: string[];
+  /** What a `catalog` control offers, or that its list is loading or failed. */
+  catalogs: CatalogChoices;
 }) {
   return (
     <div className="space-y-3">
@@ -125,7 +151,7 @@ export function CapabilityValueFields({
                   <SelectValue placeholder="Choose a catalog" />
                 </SelectTrigger>
                 <SelectContent>
-                  {catalogs.map((c) => (
+                  {(catalogs.state === "ready" ? catalogs.names : []).map((c) => (
                     <SelectItem key={c} value={c}>
                       {c}
                     </SelectItem>
@@ -133,11 +159,25 @@ export function CapabilityValueFields({
                 </SelectContent>
               </Select>
               {errorLine}
-              <p id={helpId} className="text-xs text-muted-foreground">
-                {catalogs.length === 0
-                  ? "No catalog is attached to an engine this grant reaches."
-                  : "The catalogs attached to an engine this grant reaches."}
-              </p>
+              {catalogs.state === "error" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p id={helpId} className="text-xs text-destructive">
+                    {failedText("list of catalogs")}
+                  </p>
+                  <Button type="button" variant="outline" size="sm" onClick={catalogs.retry}>
+                    <RotateCw aria-hidden />
+                    Retry
+                  </Button>
+                </div>
+              ) : (
+                <p id={helpId} className="text-xs text-muted-foreground">
+                  {catalogs.state === "loading"
+                    ? CATALOGS_LOADING
+                    : catalogs.names.length === 0
+                      ? NO_CATALOG
+                      : SOME_CATALOGS}
+                </p>
+              )}
             </div>
           );
         }
