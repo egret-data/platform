@@ -33,6 +33,8 @@ const MARKERS = [
   ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this profile."],
   // The shared-profile banner (EP14).
   ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
+  // The Engine permissions tab on an engine with no profile (spec §6.1).
+  ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind a profile in Control plane."],
 ];
 
 const entry = entryChunkName(DIST);
