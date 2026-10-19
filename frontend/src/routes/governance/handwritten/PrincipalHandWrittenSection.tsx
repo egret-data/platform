@@ -43,6 +43,14 @@ function editHref(p: PrincipalPolicy): string | null {
   return subject ? `${editorUrl(subject, p.policyType, p.id)}${p.inTagService ? "?scope=tag" : ""}` : null;
 }
 
+/**
+ * Whether a naming is Direct on this page: an item naming the username on a
+ * user's page, and, on a group's or role's page, an item naming that group or
+ * role itself (route B reports it as `how: "group"`/`"role"`; live check D3).
+ * Only a user can be reached "through" a group or role.
+ */
+const isDirect = (n: Naming, subject: PrincipalSubject) => n.how === "direct" || subject.kind !== "user";
+
 /** Q1: why a group or role naming reaches nobody, worded for the page it is on. */
 function viaSentence(n: Naming, subject: PrincipalSubject): string | null {
   if (n.how === "direct" || !n.via || n.onEngines) return null;
@@ -91,8 +99,8 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
   const d = q.data.data;
   const wanted = (t: string) => (show === "rules" ? isRuleType(t) : !isRuleType(t));
   const policies = d.policies.filter((p) => wanted(p.policyType)).sort((a, b) => a.service.localeCompare(b.service) || byName(a, b));
-  const direct = policies.filter((p) => p.naming.some((n) => n.how === "direct"));
-  const through = policies.filter((p) => p.naming.some((n) => n.how !== "direct"));
+  const direct = policies.filter((p) => p.naming.some((n) => isDirect(n, subject)));
+  const through = policies.filter((p) => p.naming.some((n) => !isDirect(n, subject)));
   const everyoneEntries = d.everyone.policies.filter((e) => RULE_BUCKETS.includes(e.bucket) === (show === "rules"));
   const everyoneIds = [...new Map(everyoneEntries.map((e) => [`${e.service}/${e.id}`, e])).values()].sort(byName);
 
@@ -143,7 +151,7 @@ function Group({
           <TableBody>
             {rows.map((p) => {
               const href = editHref(p);
-              const namings = p.naming.filter((n) => (only === "direct" ? n.how === "direct" : n.how !== "direct"));
+              const namings = p.naming.filter((n) => (only === "direct") === isDirect(n, subject));
               return (
                 <TableRow key={`${p.service}/${p.id}`}>
                   <TableCell className="whitespace-normal align-top">

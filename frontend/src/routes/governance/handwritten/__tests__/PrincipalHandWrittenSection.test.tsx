@@ -104,7 +104,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     expect(within(everyone).queryByText("all-mask")).not.toBeInTheDocument();
   });
 
-  it("on a group's page, its own name is marked as reaching nobody", async () => {
+  it("on a group's page, an item naming the group is Direct and marked as reaching nobody (live check D3)", async () => {
     open(
       ok(
         answer({
@@ -118,9 +118,10 @@ describe("PrincipalHandWrittenSection (route B)", () => {
       "GET /governance/principals/group/g1/handwritten",
     );
     await screen.findByRole("link", { name: "names-g1" }, T);
-    expect(screen.getByRole("region", { name: "Through a group or role" })).toHaveTextContent(
+    expect(screen.getByRole("region", { name: "Direct" })).toHaveTextContent(
       "Names group g1. Engines resolve no groups, so on the engine it reaches nobody.",
     );
+    expect(screen.queryByRole("region", { name: "Through a group or role" })).not.toBeInTheDocument();
   });
 
   it("states 'reaches nobody' only where the server says the engines do not apply the item", async () => {
