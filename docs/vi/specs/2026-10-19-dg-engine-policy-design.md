@@ -4,8 +4,8 @@
 > lệch nhau thì theo bản tiếng Anh.
 
 Ngày: 2026-10-19. Trạng thái: thiết kế đã được người dùng duyệt ngày 2026-10-19 (U1–U11 bên dưới); các dòng ghi
-"default decision" là quyết định của tài liệu này, còn các dòng ghi **"open — needs the user"** là chỗ thiết kế đã
-duyệt mâu thuẫn với code mà tài liệu này không tự giải quyết. Base: main `3731f0ce` (#3 Overview đã merge là #695,
+"default decision" là quyết định của tài liệu này. Q1–Q4 là chỗ thiết kế đã duyệt mâu thuẫn với code; chúng đã được
+quyết ngày 2026-10-19 (Q1 do người dùng, Q2–Q4 là default decision). Base: main `3731f0ce` (#3 Overview đã merge là #695,
 F11 engine grants là #694). Nhánh `feat/dg-engine-policy`, worktree `egret-dgep`.
 
 Đây là sub-project #4a của spec chương trình `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` (dưới đây gọi
@@ -118,10 +118,10 @@ picker một user là `SubjectUserField` (`frontend/src/components/perm/ExplainR
 | EP19 | Trang engine gate `policy:read`. Không có `engine:read` thì tab Plugin và phiên bản plugin ở header được thay bằng một dòng nêu tên quyền; mọi tab khác vẫn hoạt động | default decision (2026-10-19) |
 | EP20 | People: mục "Engine permissions" nằm cuối tab Permissions của trang principal, không phải tab mới | default decision (2026-10-19) |
 | EP21 | `PrincipalPicker` có thêm prop `includeOnly` (không có danh sách Exclude), theo kiểu cộng thêm; dialog grant dùng nó | default decision (2026-10-19) |
-| Q1 | **Dữ liệu index cho người chỉ có `policy:read`.** Hiện không đọc được origin, loại engine và số policy viết tay của mỗi profile nếu không có `engine:read` (tiền đề 10). Đề xuất: thêm `ProfileEngine.origin` và `.type`, và `ProfileDto.policyCounts {compiler, infra, operator}` (profile cộng tag service của nó), không thêm route; cột plugin chỉ hiện khi có `engine:read`, mỗi engine một lần gọi plugin. Phương án khác: chỉ hiện origin/type khi có `engine:read` (từ `GET /control-plane/engines`) và đếm policy viết tay bằng một `GET /policies` cho mỗi profile | **open — needs the user** |
-| Q2 | **URL editor giữ một segment kind** (tiền đề 7): `…/advanced/policies/:kind/new` và `…/advanced/policies/:kind/:policyId` thay cho `…/policies/new` và `…/policies/:policyId` đã duyệt | **open — needs the user** |
-| Q3 | **`/governance/policies/:service` cho profile bind với nhiều engine** (chia sẻ kiểu cũ): đề xuất engine đầu tiên theo tên (thứ tự `reach`), banner của nó nêu các engine còn lại | **open — needs the user** |
-| Q4 | **Câu chữ kết quả ghi** (tiền đề 3): compile bị từ chối là "Not saved: <lý do của server>" (dialog vẫn mở); grant bị bỏ qua là "Saved, but not compiled: <reason>. It is not on the engine."; grant đã biên dịch là "Saved and compiled into <profile>. The engine applies it at its next policy download." Không có "saved, not yet on the engine" sau một lần compile thất bại | **open — needs the user** |
+| Q1 | **Dữ liệu index cho người chỉ có `policy:read`** (tiền đề 10): response `GET /policies/services` hiện có (vốn đã `policy:read`) được thêm `ProfileEngine.origin`, `ProfileEngine.type` và `ProfileDto.policyCounts {compiler, infra, operator}` (profile cộng tag service của nó), theo kiểu cộng thêm; không thêm route. Cột plugin của index chỉ hiện khi có `engine:read`, mỗi engine một lần gọi plugin | user, 2026-10-19 |
+| Q2 | URL editor giữ segment kind (tiền đề 7): `…/advanced/policies/:kind/new` và `…/advanced/policies/:kind/:policyId` | default decision (2026-10-19) |
+| Q3 | URL cũ `/governance/policies/:service` nêu một profile bind với nhiều engine (chia sẻ kiểu cũ) redirect tới engine đầu tiên theo tên (thứ tự `reach`); banner của nó nêu các engine còn lại | default decision (2026-10-19) |
+| Q4 | Câu chữ kết quả ghi theo code (tiền đề 3): **not saved** cho mọi lời từ chối, kể cả 409 do compile thất bại (lần ghi bị rollback; dialog vẫn mở với lý do của server); **saved but not compiled** khi `compile.skipped` nêu grant ("Saved, but not compiled: <reason>. It is not on the engine."); **compiled** trong các trường hợp còn lại ("Saved and compiled into <profile>. The engine applies it at its next plugin download.") | default decision (2026-10-19) |
 
 ## 1. Những gì đang có
 

@@ -1,8 +1,8 @@
 # Data Governance frontend redesign #4a: Engine & policy — design
 
 Date: 2026-10-19. Status: design approved by the user on 2026-10-19 (U1–U11 below); the rows marked "default decision"
-are this document's, and the rows marked **"open — needs the user"** are conflicts between the approved design and
-the code that this document does not resolve. Base: main `3731f0ce` (#3 Overview merged as #695, F11 engine grants
+are this document's. Q1–Q4 were conflicts between the approved design and the code; they were decided on
+2026-10-19 (Q1 by the user, Q2–Q4 as default decisions). Base: main `3731f0ce` (#3 Overview merged as #695, F11 engine grants
 as #694). Branch `feat/dg-engine-policy`, worktree `egret-dgep`.
 
 This is sub-project #4a of the programme spec `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` ("programme
@@ -116,10 +116,10 @@ picker is `SubjectUserField` (`frontend/src/components/perm/ExplainResult.tsx:10
 | EP19 | The engine page is gated `policy:read`. Without `engine:read` the Plugin tab and the header's plugin version are replaced by one line naming the permission; every other tab works | default decision (2026-10-19) |
 | EP20 | People: the "Engine permissions" section sits at the end of the principal page's Permissions tab, not as a new tab | default decision (2026-10-19) |
 | EP21 | `PrincipalPicker` gains an additive `includeOnly` prop (no Exclude list); the grant dialog uses it | default decision (2026-10-19) |
-| Q1 | **Index data for a `policy:read`-only reader.** Origin, engine type and a hand-written count per profile are not readable today without `engine:read` (premise 10). Proposed: additive `ProfileEngine.origin` and `.type`, and `ProfileDto.policyCounts {compiler, infra, operator}` (profile plus its tag service), no new route; the plugin column shows only with `engine:read`, one plugin call per engine. Alternative: show origin/type only with `engine:read` (from `GET /control-plane/engines`) and count hand-written policies with one `GET /policies` per profile | **open — needs the user** |
-| Q2 | **Editor URLs keep a kind segment** (premise 7): `…/advanced/policies/:kind/new` and `…/advanced/policies/:kind/:policyId` instead of the approved `…/policies/new` and `…/policies/:policyId` | **open — needs the user** |
-| Q3 | **`/governance/policies/:service` for a profile bound to several engines** (legacy shared): proposed, the first engine by name (`reach` order), whose banner names the others | **open — needs the user** |
-| Q4 | **Write outcome wording** (premise 3): a refused compile is "Not saved: <server reason>" (the dialog stays open); a skipped grant is "Saved, but not compiled: <reason>. It is not on the engine."; a compiled grant is "Saved and compiled into <profile>. The engine applies it at its next policy download." There is no "saved, not yet on the engine" after a failed compile | **open — needs the user** |
+| Q1 | **Index data for a `policy:read`-only reader** (premise 10): the existing `GET /policies/services` response (already `policy:read`) gains `ProfileEngine.origin`, `ProfileEngine.type` and `ProfileDto.policyCounts {compiler, infra, operator}` (the profile plus its tag service), additively; no new route. The index's plugin column shows only with `engine:read`, one plugin call per engine | user, 2026-10-19 |
+| Q2 | Editor URLs keep the kind segment (premise 7): `…/advanced/policies/:kind/new` and `…/advanced/policies/:kind/:policyId` | default decision (2026-10-19) |
+| Q3 | An old `/governance/policies/:service` URL naming a profile bound to several engines (legacy shared) redirects to the first engine by name (`reach` order); its banner names the others | default decision (2026-10-19) |
+| Q4 | Write-outcome wording follows the code (premise 3): **not saved** for any refusal, a 409 from a compile failure included (the write rolls back; the dialog stays open with the server's reason); **saved but not compiled** when `compile.skipped` names the grant ("Saved, but not compiled: <reason>. It is not on the engine."); **compiled** otherwise ("Saved and compiled into <profile>. The engine applies it at its next plugin download.") | default decision (2026-10-19) |
 
 ## 1. What exists
 

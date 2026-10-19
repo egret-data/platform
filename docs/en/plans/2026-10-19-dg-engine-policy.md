@@ -18,9 +18,10 @@ vitest + Testing Library, Playwright MCP for the live check.
 code" first) on the programme spec `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` (F1–F12) and F11's
 `docs/en/specs/2026-10-18-perm-engine-grants-design.md`.
 
-**Before Task 4, 5 and 14 start, the controller has the user's answers to Q1–Q4.** Task 4 exists only if Q1 is
-answered "additive fields"; Tasks 5 and 14 take the editor URL shape from Q2; Task 5's resolver takes Q3; Task 9's
-outcome sentences take Q4. The tasks below are written for the spec's proposals.
+**Q1–Q4 are decided (2026-10-19):** Q1 (user): `GET /policies/services` gains `ProfileEngine.origin`,
+`ProfileEngine.type` and `ProfileDto.policyCounts`, no new route (Task 4). Q2: editor URLs keep the kind segment
+(Tasks 5, 14). Q3: a profile bound to several engines redirects to the first engine by name (Task 5). Q4: write
+outcomes are not saved / saved but not compiled / compiled, applies at the next plugin download (Task 9).
 
 ## Global Constraints
 
@@ -66,7 +67,7 @@ Backend:
   (`drift`, `behind` → call it), `lib.rs`.
 - `crates/egret-controlplane/src/governance_engines.rs` (new): the plugin route and DTOs. Modify `lib.rs` (router,
   OpenAPI). Tests: `crates/egret-controlplane/tests/plugin_judgement.rs`, `tests/governance_engine_plugin.rs`.
-- Only if Q1 = additive fields: `crates/egret-policy/src/admin/reader.rs` (`EngineBinding.origin`, `.type`),
+- Q1: `crates/egret-policy/src/admin/reader.rs` (`EngineBinding.origin`, `.type`),
   `admin/mod.rs` (`ProfileEngine`, `ProfileDto.policy_counts`), `crates/egret-bin/src/main.rs`
   (`list_engine_bindings`), the policy store's count query. Tests in `crates/egret-policy/tests/admin_routes.rs`.
 - `openapi.json`, `frontend/src/api/generated/**` (regenerated).
@@ -190,18 +191,23 @@ No product code. Predictions first, then measure, in `docs/en/plans/2026-10-19-d
 
 ---
 
-### Task 4 (only if Q1 = additive fields): origin, type and counts on `ProfileDto`
+### Task 4: origin, type and per-owner counts on `GET /policies/services` (Q1)
 
 **Files:** `crates/egret-policy/src/admin/reader.rs`, `crates/egret-policy/src/admin/mod.rs`, the store's count query
 (`policy_counts`), `crates/egret-bin/src/main.rs` (`list_engine_bindings`), every `EngineBinding { .. }` literal
 (`grep -rn "EngineBinding {" crates`), `crates/egret-policy/tests/admin_routes.rs`, `openapi.json`, generated client.
 
-- [ ] **Step 1: failing tests:** `GET /policies/services` returns each `engines[]` entry with `origin` and `type`; a
-  profile with 2 compiled, 1 seeded and 3 hand-written policies plus 1 hand-written in its tag service returns
-  `policyCounts {compiler: 2, infra: 1, operator: 4}`; `policy_count` unchanged; existing admin route tests green.
+- [ ] **Step 1: failing tests** (red first, real `CedarPdp`, fixtures scoped to their own service ids):
+  `GET /policies/services` returns each `engines[]` entry with `origin` (`provisioned` and `external` fixtures) and
+  `type`; a profile with 2 compiled, 1 seeded and 3 hand-written policies plus 1 hand-written in its tag service
+  returns `policyCounts {compiler: 2, infra: 1, operator: 4}`; a profile with no policy returns all zeros;
+  `policy_count` unchanged; still 403 without `policy:read`; existing admin route tests green and unedited.
 - [ ] **Step 2: run** `cargo test -p egret-policy --test admin_routes` → fails.
 - [ ] **Step 3: implement** additively (no field removed or renamed; `serde` camelCase as the DTO already is).
-- [ ] **Step 4: run** `cargo test -p egret-policy`, `cargo test -p egret-bin` + clippy + fmt; regenerate the client.
+- [ ] **Step 4: run** `cargo test -p egret-policy`, `cargo test -p egret-bin`, `cargo test -p egret-server --lib` +
+  clippy + fmt; regenerate `openapi.json` and the client with `npm run gen:api` (Global Constraints); drop the
+  hand-widened `Profile` type's `tag_service` cast in `api/policies.ts` only if the generated type now covers it;
+  `npx tsc -b` passes.
 - [ ] **Step 5: commit** `feat(policy): engine origin and per-owner counts on profiles`.
 
 ---
@@ -223,7 +229,7 @@ where `subject = {engineId} | {profile}`; `PolicyRedirect` (spec §3).
     static `profiles` segment wins over `:id`); each requires `policy:read`;
   - every row of spec §3's table: `/governance/policies` → index; `/governance/policies/p1` with p1 bound to E →
     `/governance/engines/E?tab=policies`; `?tab=masking` → `&type=masking`; unbound p2 → the profile page; unknown →
-    the index with the notice; a profile bound to engines `b` and `a` → `a` (Q3); `…/migrate` → `tab=migrate`;
+    the index with the notice; a profile bound to engines `b` and `a` → `a` (Q3, first by name); `…/migrate` → `tab=migrate`;
     `…/masking/new?scope=tag` and `…/access/42` → the Advanced editor URLs with `search` kept; `/control-plane/policies/p1`
     reaches the same place; each with `replace` (Back does not return to the old URL);
   - sidebar: the last group is headed "Engine & policy" with one item linking to `/governance/engines`, visible with
@@ -257,7 +263,8 @@ where `subject = {engineId} | {profile}`; `PolicyRedirect` (spec §3).
     type, plugin state from the plugin route (external → "Not judged: external"), engine-grant count per engine from
     `GET /perm/engine-grants`; without `engine:read`: only the bound engines of `ProfileDto.engines`, no plugin column,
     no request to `/control-plane/engines`;
-  - hand-written count per Q1's answer;
+  - hand-written count from `ProfileDto.policyCounts.operator`; origin and type from `ProfileDto.engines[]` for a
+    reader without `engine:read`;
   - "Profiles without an engine": an unbound profile listed; a profile named as another's `tag_service` not listed;
     a bound profile not listed; empty state sentence;
   - Delete: hidden without `policy:delete`; the confirm button stays disabled until the exact profile name is typed;
@@ -327,7 +334,7 @@ where `subject = {engineId} | {profile}`; `PolicyRedirect` (spec §3).
   - create sends `{capability, values: [username], principals}` for an impersonation (no `targetUserId`);
     edit sends the whole body with `PATCH`;
   - a 400/409 shows the server's message inside the dialog, which stays open with every input kept;
-  - success, per Q4: the toast names the profile; when `reach` lists other engines it names them; when
+  - outcomes per Q4: a 409 from a compile failure is "not saved" (dialog open, server reason); success: the toast names the profile; when `reach` lists other engines it names them; when
     `compile.skipped` holds `{sourceKind: "engine_grant", id}` for this grant the tab shows "Saved, but not compiled:
     <reason>. It is not on the engine."; invalidates the engine's grants, all engine grants and the profile's policies;
   - Escape closes the dialog; the first field takes focus on open (FE-A11Y-6);
