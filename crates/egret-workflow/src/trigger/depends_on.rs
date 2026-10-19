@@ -413,8 +413,10 @@ pub struct TriggerRefusal {
 pub fn depends_on_refusals(ft: &FlowTrigger) -> Vec<TriggerRefusal> {
     let mut out = Vec::new();
     // W1's `(namespace, flowId)` checks (whole-branch review finding 2): the
-    // SAME grammar `Subflow` is held to, because `publish::subflow_ref_name`
-    // encodes the pair into one `"{namespace}/{flowId}"` string. Moved here
+    // SAME grammar `Subflow` is held to: Kestra's own namespace and flow id
+    // patterns. (Introduced when publish encoded the pair into one
+    // `"{namespace}/{flowId}"` string; since debt §5.1, 2026-10-19, it looks
+    // the pair up as two columns.) Moved here
     // from `spec::validate` unchanged (W13b Task 3 fix round 1) so a draft
     // with a half-written dependency is refused at run time too.
     for (i, dep) in ft.depends_on.iter().enumerate() {
@@ -429,9 +431,8 @@ pub fn depends_on_refusals(ft: &FlowTrigger) -> Vec<TriggerRefusal> {
                 at: RefusalAt::DependencyField(i, "namespace"),
                 message: format!(
                     "dependsOn[{i}] namespace '{ns}' must match ^[a-z0-9][a-z0-9._-]* and be \
-                     1-150 characters long -- the same grammar `namespace:` itself uses, so a \
-                     dependency can never encode a `/` into `publish::subflow_ref_name`'s \
-                     namespace half"
+                     1-150 characters long -- Kestra's own namespace pattern, the same grammar \
+                     `namespace:` itself uses"
                 ),
             }),
             Some(_) => {}
@@ -447,8 +448,7 @@ pub fn depends_on_refusals(ft: &FlowTrigger) -> Vec<TriggerRefusal> {
                 at: RefusalAt::DependencyField(i, "flowId"),
                 message: format!(
                     "dependsOn[{i}] flowId '{fid}' must match ^[a-zA-Z0-9][a-zA-Z0-9._-]* and \
-                     be 1-100 characters long -- Kestra's own flow id pattern, so a dependency \
-                     can never encode a `/` into `publish::subflow_ref_name`'s flowId half"
+                     be 1-100 characters long -- Kestra's own flow id pattern"
                 ),
             }),
             Some(_) => {}

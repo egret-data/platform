@@ -808,10 +808,13 @@ pub(crate) fn is_valid_namespace(ns: &str) -> bool {
 /// silently narrow what a real Kestra flow id can be.
 ///
 /// Fix round 2 (Task 6), Finding 1: this is what makes
-/// `Subflow::flow_id` -- half of the pair `publish::subflow_ref_name`
-/// encodes into one `name_or_id` as `"{namespace}/{flowId}"` -- unable to
-/// carry a `/`. See `is_valid_namespace`'s use in the `TaskKind::Subflow`
-/// arm below for the other half.
+/// `Subflow::flow_id` unable to carry a `/`. It was introduced because
+/// publish then encoded the pair into one `name_or_id` as
+/// `"{namespace}/{flowId}"`. See `is_valid_namespace`'s use in the
+/// `TaskKind::Subflow` arm below for the other half.
+/// (Debt §5.1, 2026-10-19: publish no longer encodes the pair -- it looks
+/// `namespace` and `flowId` up as two columns, `FlowRepo::find_in_workspace`
+/// -- so the grammar now stands on being Kestra's own, not on a separator.)
 pub(crate) fn is_valid_flow_id(id: &str) -> bool {
     let len = id.chars().count();
     if len == 0 || len > 100 {
@@ -1545,7 +1548,7 @@ fn walk_task(
         // are known to be `Some`.
         //
         // Task 6 fix round 2, Finding 1 (Important): presence alone was not
-        // enough. `publish::subflow_ref_name` encodes this pair into one
+        // enough. Publish then encoded this pair into one
         // string as `"{namespace}/{flowId}"`, and a `namespace` (or
         // `flowId`) containing its OWN `/` decodes back into a DIFFERENT
         // pair than the author wrote -- `namespace: "a/b", flowId: "c"`
@@ -1554,6 +1557,10 @@ fn walk_task(
         // reject anything that could never have been created as a real
         // flow's `namespace`/`id` in the first place, `/` included, so the
         // encoding's separator can never collide with a value it carries.
+        // Debt §5.1 (2026-10-19): publish no longer encodes the pair (it is
+        // looked up as two columns, `FlowRepo::find_in_workspace`); the
+        // checks stay because they are Kestra's own grammar, and the
+        // messages say that.
         TaskKind::Subflow(s) => {
             match &s.namespace {
                 None => report.errors.push(Finding {
@@ -1569,9 +1576,8 @@ fn walk_task(
                     code: "subflow_namespace_invalid",
                     message: format!(
                         "task '{}': subflow namespace '{ns}' must match ^[a-z0-9][a-z0-9._-]* \
-                         and be 1-150 characters long -- the same grammar `namespace:` itself \
-                         uses (see `validate_namespace`), so a subflow can never encode a `/` \
-                         into `publish::subflow_ref_name`'s namespace half",
+                         and be 1-150 characters long -- Kestra's own namespace pattern, the \
+                         same grammar `namespace:` itself uses",
                         task.id
                     ),
                     path: format!("{path}.namespace"),
@@ -1591,8 +1597,7 @@ fn walk_task(
                     message: format!(
                         "task '{}': subflow flowId '{fid}' must match \
                          ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long -- Kestra's \
-                         own flow id pattern (`AbstractFlow.java`'s `id` field), so a subflow \
-                         can never encode a `/` into `publish::subflow_ref_name`'s flowId half",
+                         own flow id pattern (`AbstractFlow.java`'s `id` field)",
                         task.id
                     ),
                     path: format!("{path}.flowId"),
@@ -2032,11 +2037,10 @@ fn check_retry(retry: &Option<Retry>, retry_path: &str, report: &mut ValidationR
 /// finding 2) the `Flow` trigger's `dependsOn` list -- each `Dependency`
 /// names another flow by the SAME `(namespace, flowId)` pair `Subflow` does,
 /// so it is checked against the SAME grammar `is_valid_namespace`/
-/// `is_valid_flow_id`, for the identical reason: `publish::
-/// resolve_trigger_dependencies` encodes the pair into one
-/// `"{namespace}/{flowId}"` string via `publish::subflow_ref_name`, and a
-/// `/` smuggled into either half would decode back into a different pair
-/// than the author wrote. No `self_dependency` check to match `Subflow`'s
+/// `is_valid_flow_id`: Kestra's own. (Introduced because publish then
+/// encoded the pair into one `"{namespace}/{flowId}"` string, where a `/`
+/// smuggled into either half would decode back into a different pair; since
+/// debt §5.1, 2026-10-19, publish looks the pair up as two columns.) No `self_dependency` check to match `Subflow`'s
 /// `self_subflow`, deliberately: a flow trigger depending on its OWN past
 /// executions is a legitimate Kestra pattern (recursive/self-triggering),
 /// not a synchronous call that would deadlock the way a subflow calling
@@ -3746,8 +3750,9 @@ mod tests {
     }
 
     // -- Task 6 fix round 2, Finding 1: presence was not enough. A subflow's
-    // `namespace`/`flowId` are encoded into one `publish::subflow_ref_name`
-    // string, and a value carrying its own `/` collides with the separator.
+    // `namespace`/`flowId` were then encoded into one `"{namespace}/{flowId}"`
+    // string, and a value carrying its own `/` collided with the separator.
+    // (Publish no longer encodes it, debt §5.1; the rule is Kestra's grammar.)
 
     /// The exact collision the reviewer proved live: `namespace: "a/b"`,
     /// `flowId: "c"` used to encode to `"a/b/c"` and decode, via
@@ -4221,8 +4226,9 @@ mod tests {
 
     /// Same encoding hazard `subflow_namespace_containing_a_slash_is_an_error`
     /// closes for `Subflow` -- a `/` inside `Dependency::namespace` would
-    /// otherwise decode ambiguously against `publish::subflow_ref_name`'s
-    /// `"{namespace}/{flowId}"` encoding.
+    /// otherwise have decoded ambiguously against publish's former
+    /// `"{namespace}/{flowId}"` encoding (gone since debt §5.1; the rule is
+    /// Kestra's grammar).
     #[test]
     fn dependency_namespace_containing_a_slash_is_an_error() {
         let f = parse(&flow_with_dependency(

@@ -4639,7 +4639,7 @@ async fn a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fa
     )
     .await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    let version = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, flow, "")
+    let version = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, flow, "")
         .await
         .expect("an absent subflow target publishes, with a warning");
     assert!(
@@ -4679,9 +4679,9 @@ async fn a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fa
 
 /// **A `Subflow` target in ANOTHER workspace does not resolve.**
 ///
-/// `FlowRepo::find_by_name` -- what `publish` resolves a `RefKind::Subflow`
-/// through -- is deliberately unscoped, and its own doc records why it cannot
-/// be: `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
+/// `FlowRepo::find_by_name` -- what `publish` resolved a `RefKind::Subflow`
+/// through until debt §5.1 (2026-10-19) removed both -- was unscoped, because
+/// `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
 /// **This caller has one**, on `ExecutionCtx`, so `worker::subflow::resolve`
 /// uses it.
 ///

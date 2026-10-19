@@ -406,135 +406,168 @@ fn resolve_task<'a>(
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let ws = cx.ws;
-        match &mut task.kind {
-            TaskKind::Sequential(s) => resolve_all(&mut s.tasks, path, cx, warnings).await,
-            TaskKind::Parallel(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
-            TaskKind::If(i) => {
-                resolve_all(&mut i.then, path.clone(), cx, warnings).await?;
-                resolve_all(&mut i.r#else, path, cx, warnings).await
-            }
-            TaskKind::Switch(s) => {
-                for case_tasks in s.cases.values_mut() {
-                    resolve_all(case_tasks, path.clone(), cx, warnings).await?;
+        let errors_path = path.clone();
+        let own: Result<()> = async {
+            match &mut task.kind {
+                TaskKind::Sequential(s) => resolve_all(&mut s.tasks, path, cx, warnings).await,
+                TaskKind::Parallel(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
+                TaskKind::If(i) => {
+                    resolve_all(&mut i.then, path.clone(), cx, warnings).await?;
+                    resolve_all(&mut i.r#else, path, cx, warnings).await
                 }
-                resolve_all(&mut s.defaults, path, cx, warnings).await
-            }
-            TaskKind::Dag(d) => {
-                for node in d.tasks.iter_mut() {
-                    if let Some(t) = node.task.as_mut() {
-                        let child = task_path(&path, &t.id);
-                        resolve_task(t, child, cx, warnings).await?;
+                TaskKind::Switch(s) => {
+                    for case_tasks in s.cases.values_mut() {
+                        resolve_all(case_tasks, path.clone(), cx, warnings).await?;
                     }
+                    resolve_all(&mut s.defaults, path, cx, warnings).await
                 }
-                Ok(())
-            }
-            TaskKind::Loop(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
-            TaskKind::LoopUntil(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
-            TaskKind::AllowFailure(a) => resolve_all(&mut a.tasks, path, cx, warnings).await,
-            TaskKind::WorkingDirectory(w) => resolve_all(&mut w.tasks, path, cx, warnings).await,
-            // `tasks` only, and `errors` deliberately not -- this walk mirrors
-            // `Task::children()`, which is the control-flow walk, and every
-            // other arm here is narrow in exactly the same way.
-            TaskKind::Pause(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
-            // Fix round 1: a subflow spawns a DIFFERENT flow's execution
-            // rather than owning local tasks -- `Task::children()` returns
-            // none for it either, and `registry::known_type` never sees its
-            // type string (it dispatches to this typed variant before ever
-            // reaching a `Leaf`), so it is not subject to step 4's
-            // unknown-type refusal. That is also WHY resolution lives here,
-            // in this typed arm, rather than as a `RefField`/`TASK_TYPES`
-            // entry: `RefField` is read out of a `Leaf`'s opaque `spec` map
-            // by `registry::known_type`, a path a `Subflow` structurally
-            // never reaches (`kind_for` in `task.rs` dispatches
-            // `core.subflow`/its FQCN straight to this variant, before any
-            // `Leaf` match arm exists to consult the registry) -- an entry
-            // in `TASK_TYPES` for `core.subflow` would be dead: no code path
-            // would ever look it up. `spec::validate`'s own Subflow checks
-            // (`subflow_namespace_required`/`subflow_flow_id_required`/
-            // `self_subflow`) already made this same choice, in its own
-            // typed `TaskKind::Subflow` arm rather than a table.
-            //
-            // `namespace`/`flow_id` are `Option<String>` (Task 4's bean-
-            // validation-not-parsing debt), but `validate` (step 3, above)
-            // already refused this flow with `subflow_namespace_required`/
-            // `subflow_flow_id_required` if either were `None` -- so by the
-            // time this arm runs, both are guaranteed `Some` for any
-            // `Subflow` that reaches it. The `let...else` is defensive, not
-            // load-bearing: it cannot actually fire.
-            //
-            // Debt §5.1 (2026-10-19): the pair is looked up in the caller's
-            // workspace ONLY (`FlowRepo::find_in_workspace`), never through
-            // the unscoped `RefKind::Subflow` port, and an absent target is
-            // not refused. Kestra publishes it with a warning
-            // (`FlowService.java:619-648`), and so does egret, with the same
-            // text. A flow only another workspace holds is "absent" here,
-            // byte for byte, so the answer reveals nothing about any other
-            // workspace -- the property `ref_not_found` gave the `Leaf` arm,
-            // kept without the refusal. The run fails later, at
-            // `worker::subflow::resolve`, which looks the target up in the
-            // execution's workspace whatever was frozen.
-            TaskKind::Subflow(s) => {
-                let (Some(namespace), Some(flow_id)) = (&s.namespace, &s.flow_id) else {
-                    return Ok(());
-                };
-                let found = cx.repo.find_in_workspace(ws, namespace, flow_id).await?;
-                if found.is_none() {
-                    warnings.push(subflow_not_found(namespace, flow_id, path));
+                TaskKind::Dag(d) => {
+                    for node in d.tasks.iter_mut() {
+                        if let Some(t) = node.task.as_mut() {
+                            let child = task_path(&path, &t.id);
+                            resolve_task(t, child, cx, warnings).await?;
+                        }
+                    }
+                    Ok(())
                 }
-                // `namespace`/`flow_id` are kept, unlike a `Leaf`'s single
-                // reference field -- see `Subflow::flow_ref`'s own doc
-                // comment in `models/task.rs` for why this is a third field
-                // rather than an overwrite of either existing one. Written
-                // even when `None`: `flowRef` deserialises from a draft, and
-                // an id the AUTHOR wrote must not reach the snapshot.
-                s.flow_ref = found;
-                Ok(())
-            }
-            TaskKind::Leaf { spec } => {
-                let Some(type_spec) = registry::known_type(&task.r#type) else {
-                    // W5b: a catalog plugin type is known too. It names no
-                    // egret object, so there is nothing to resolve; step 3c
-                    // already gated it.
-                    if plugins::lookup(&task.r#type).is_some() {
+                TaskKind::Loop(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
+                TaskKind::LoopUntil(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
+                TaskKind::AllowFailure(a) => resolve_all(&mut a.tasks, path, cx, warnings).await,
+                TaskKind::WorkingDirectory(w) => {
+                    resolve_all(&mut w.tasks, path, cx, warnings).await
+                }
+                // `tasks` only, and `errors` deliberately not -- this walk mirrors
+                // `Task::children()`, which is the control-flow walk, and every
+                // other arm here is narrow in exactly the same way.
+                TaskKind::Pause(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
+                // Fix round 1: a subflow spawns a DIFFERENT flow's execution
+                // rather than owning local tasks -- `Task::children()` returns
+                // none for it either, and `registry::known_type` never sees its
+                // type string (it dispatches to this typed variant before ever
+                // reaching a `Leaf`), so it is not subject to step 4's
+                // unknown-type refusal. That is also WHY resolution lives here,
+                // in this typed arm, rather than as a `RefField`/`TASK_TYPES`
+                // entry: `RefField` is read out of a `Leaf`'s opaque `spec` map
+                // by `registry::known_type`, a path a `Subflow` structurally
+                // never reaches (`kind_for` in `task.rs` dispatches
+                // `core.subflow`/its FQCN straight to this variant, before any
+                // `Leaf` match arm exists to consult the registry) -- an entry
+                // in `TASK_TYPES` for `core.subflow` would be dead: no code path
+                // would ever look it up. `spec::validate`'s own Subflow checks
+                // (`subflow_namespace_required`/`subflow_flow_id_required`/
+                // `self_subflow`) already made this same choice, in its own
+                // typed `TaskKind::Subflow` arm rather than a table.
+                //
+                // `namespace`/`flow_id` are `Option<String>` (Task 4's bean-
+                // validation-not-parsing debt), but `validate` (step 3, above)
+                // already refused this flow with `subflow_namespace_required`/
+                // `subflow_flow_id_required` if either were `None` -- so by the
+                // time this arm runs, both are guaranteed `Some` for any
+                // `Subflow` that reaches it. The `let...else` is defensive, not
+                // load-bearing: it cannot actually fire.
+                //
+                // Debt §5.1 (2026-10-19): the pair is looked up in the caller's
+                // workspace ONLY (`FlowRepo::find_in_workspace`) -- the
+                // unscoped `RefKind::Subflow` port it used is gone -- and an absent target is
+                // not refused. Kestra publishes it with a warning
+                // (`FlowService.java:619-648`), and so does egret, with the same
+                // text. A flow only another workspace holds is "absent" here,
+                // byte for byte, so the answer reveals nothing about any other
+                // workspace -- the property `ref_not_found` gave the `Leaf` arm,
+                // kept without the refusal. The run fails later, at
+                // `worker::subflow::resolve`, which looks the target up in the
+                // execution's workspace whatever was frozen.
+                TaskKind::Subflow(s) => {
+                    let (Some(namespace), Some(flow_id)) = (&s.namespace, &s.flow_id) else {
                         return Ok(());
-                    }
-                    return Err(Error::InvalidInput(format!(
-                        "task '{}' has unknown type '{}'",
-                        task.id, task.r#type
-                    )));
-                };
-                for rf in type_spec.references {
-                    let value = spec
-                        .get(rf.field)
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            Error::InvalidInput(format!(
-                                "task '{}': field '{}' is required to resolve its reference",
-                                task.id, rf.field
-                            ))
-                        })?
-                        .to_string();
-
-                    let resolved = cx.refs.workspace_of(rf.kind, &value).await?;
-                    let id = match resolved {
-                        // Steps 5's whole point: `None` (never heard of it)
-                        // and `Some((_, other_ws))` (heard of it, but it is
-                        // someone else's) take the SAME branch below.
-                        Some((id, owner)) if owner == ws => id,
-                        _ => return Err(ref_not_found()),
                     };
-
-                    if let Some(obj) = spec.as_object_mut() {
-                        obj.insert(
-                            rf.field.to_string(),
-                            serde_json::Value::String(id.to_string()),
-                        );
+                    let found = cx.repo.find_in_workspace(ws, namespace, flow_id).await?;
+                    if found.is_none() {
+                        warnings.push(subflow_not_found(namespace, flow_id, path));
                     }
+                    // `namespace`/`flow_id` are kept, unlike a `Leaf`'s single
+                    // reference field -- see `Subflow::flow_ref`'s own doc
+                    // comment in `models/task.rs` for why this is a third field
+                    // rather than an overwrite of either existing one. Written
+                    // even when `None`: `flowRef` deserialises from a draft, and
+                    // an id the AUTHOR wrote must not reach the snapshot.
+                    s.flow_ref = found;
+                    Ok(())
                 }
-                Ok(())
+                TaskKind::Leaf { spec } => {
+                    let Some(type_spec) = registry::known_type(&task.r#type) else {
+                        // W5b: a catalog plugin type is known too. It names no
+                        // egret object, so there is nothing to resolve; step 3c
+                        // already gated it.
+                        if plugins::lookup(&task.r#type).is_some() {
+                            return Ok(());
+                        }
+                        return Err(Error::InvalidInput(format!(
+                            "task '{}' has unknown type '{}'",
+                            task.id, task.r#type
+                        )));
+                    };
+                    for rf in type_spec.references {
+                        let value = spec
+                            .get(rf.field)
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                Error::InvalidInput(format!(
+                                    "task '{}': field '{}' is required to resolve its reference",
+                                    task.id, rf.field
+                                ))
+                            })?
+                            .to_string();
+
+                        let resolved = cx.refs.workspace_of(rf.kind, &value).await?;
+                        let id = match resolved {
+                            // Steps 5's whole point: `None` (never heard of it)
+                            // and `Some((_, other_ws))` (heard of it, but it is
+                            // someone else's) take the SAME branch below.
+                            Some((id, owner)) if owner == ws => id,
+                            _ => return Err(ref_not_found()),
+                        };
+
+                        if let Some(obj) = spec.as_object_mut() {
+                            obj.insert(
+                                rf.field.to_string(),
+                                serde_json::Value::String(id.to_string()),
+                            );
+                        }
+                    }
+                    Ok(())
+                }
             }
         }
+        .await;
+        own?;
+        // Task 2.5 fix round 1 (review I1): every kind's own `errors:`
+        // lists too -- `Task::error_children()`, which `children()`
+        // deliberately leaves out. Without this, a `Subflow` there kept an
+        // authored `flowRef` and got no warning, and an `egret.sql`
+        // `database:` there reached the snapshot unchecked. After the
+        // control-flow children, in `error_children()`'s order.
+        if let Some(errors) = errors_mut(&mut task.kind) {
+            resolve_all(errors, errors_path, cx, warnings).await?;
+        }
+        Ok(())
     })
+}
+
+/// The mutable twin of [`Task::error_children`]: the same kinds, the
+/// same list. Kept beside it in meaning -- a kind that grows an `errors:`
+/// must be added to both.
+fn errors_mut(kind: &mut TaskKind) -> Option<&mut Vec<Task>> {
+    match kind {
+        TaskKind::Sequential(s) => Some(&mut s.errors),
+        TaskKind::Parallel(p) => Some(&mut p.errors),
+        TaskKind::If(i) => Some(&mut i.errors),
+        TaskKind::Switch(s) => Some(&mut s.errors),
+        TaskKind::Dag(d) => Some(&mut d.errors),
+        TaskKind::Pause(p) => Some(&mut p.errors),
+        TaskKind::AllowFailure(a) => Some(&mut a.errors),
+        _ => None,
+    }
 }
 
 /// Kestra's warning for a `Subflow` whose target the publishing workspace

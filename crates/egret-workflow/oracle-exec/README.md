@@ -3604,7 +3604,10 @@ test rather than a sentence here.
 
 **Neither is a rule to loosen casually, and that is the finding.** Both exist
 because `publish::subflow_ref_name` encodes the pair as `"{namespace}/{flowId}"`
-and a `/` in either half decodes back into a different pair. Skipping the check
+and a `/` in either half decodes back into a different pair. *(2026-10-19, debt
+§5.1: that encoding is gone; publish looks the pair up as two columns with
+`FlowRepo::find_in_workspace`, and `subflow_ref_name` was removed. The checks
+stand on being Kestra's own grammar.)* Skipping the check
 when the value holds `{{` would not fix the flow; it would move the collision to
 render time, where nothing looks for it. The fix is to the **encoding**, and it
 is W1's.
@@ -3672,7 +3675,7 @@ since the null-list fix:
 | flow | egret's code | whose rule |
 |---|---|---|
 | ~~`valids/switch-impossible`~~ | ~~`cannot parse flow`~~ | **fixed.** W1's bare `Vec<Task>` and an explicit `null`. The only one of the three with a golden entry, and the only one the ratchet could see — which is why it is the only one that got fixed |
-| `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding |
+| `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding *(removed 2026-10-19, debt §5.1: the pair is no longer encoded; the check stands on Kestra's grammar)* |
 | `valids/trigger-flow-listener-namespace-condition` | `dependency_namespace_required` / `dependency_flow_id_required` | W1's, same encoding |
 
 **It is written inverted, the way `STILL_OVER_ACCEPTED` is**, and that is the
@@ -11781,7 +11784,8 @@ Sixteen are `invalids/` flows Kestra itself refused with a 422. Three are
 So: **no over-refusal that was not already recorded.** The `task-flow-dynamic`
 row is the one W6 should read twice — egret cannot express a *dynamic* subflow
 target at all, and the fix its row names is to `publish::subflow_ref_name`'s
-encoding, not to the check.
+encoding, not to the check. *(2026-10-19, debt §5.1: that encoding and
+function are gone; see `PUBLISHED_BUT_REFUSED`'s updated cause.)*
 
 ### How much of a sweep this actually is, bounded
 

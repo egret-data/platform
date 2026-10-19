@@ -4249,7 +4249,7 @@ mod tests {
     const PUBLISHED_BUT_REFUSED: &[PublishedButRefused] = &[
         PublishedButRefused {
             id: "valids/task-flow-dynamic",
-            cause: "`namespace: \"{{inputs.namespace}}\"` on a `Subflow`.                     `subflow_namespace_invalid` checks the grammar against the                     UNRENDERED source, so every dynamic subflow reference is                     refused. The check exists because `publish::subflow_ref_name`                     encodes the pair as `\"{namespace}/{flowId}\"` and a `/` in                     either half decodes back into a different pair -- skipping it                     when the value holds `{{` would move the collision to render                     time, where nothing looks for it. The fix is to the encoding,                     and it is W1's",
+            cause: "`namespace: \"{{inputs.namespace}}\"` on a `Subflow`.                     `subflow_namespace_invalid` checks the grammar against the                     UNRENDERED source, so every dynamic subflow reference is                     refused. The check was introduced because publish then encoded                     the pair as `\"{namespace}/{flowId}\"`, where a `/` in either                     half decoded back into a different pair. Since debt 5.1                     (2026-10-19) publish looks the pair up as two columns, so the                     check stands on being Kestra's own grammar; the fix is to                     check a templated target after rendering, at run time, and it                     is W1's",
             codes: &["subflow_namespace_invalid", "subflow_flow_id_invalid"],
         },
         PublishedButRefused {

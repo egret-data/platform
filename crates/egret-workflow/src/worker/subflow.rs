@@ -1007,8 +1007,9 @@ fn fail_run(ctx: &claim::ExecutionCtx, run: RunIx, message: &str) -> Vec<claim::
 /// program.
 ///
 /// It is also the consistent choice today rather than merely the possible one:
-/// `FlowRepo::find_by_name`, which is what `publish` resolves a
-/// `RefKind::Subflow` through, reads the same table and never consults
+/// `FlowRepo::find_in_workspace`, which is what `publish` resolves a
+/// `Subflow` through (since debt §5.1, 2026-10-19; the unscoped
+/// `FlowRepo::find_by_name` before), reads the same table and never consults
 /// `live_version_id`.
 ///
 /// # The deferral this paragraph used to end on has been settled
@@ -1054,8 +1055,10 @@ fn fail_run(ctx: &claim::ExecutionCtx, run: RunIx, message: &str) -> Vec<claim::
 /// `webhook_routes` and in `routes::start_flow_execution` together, for
 /// reason 1.
 ///
-/// **2. It is scoped to `workspace_id`, and `FlowRepo::find_by_name` is not.**
-/// That method's own doc records why it cannot be: `WorkflowRefPort::workspace_of`
+/// **2. It is scoped to `workspace_id`, and `FlowRepo::find_by_name` was not.**
+/// (Removed 2026-10-19, debt §5.1; publish now uses the scoped
+/// `FlowRepo::find_in_workspace` too.) That method's own doc recorded why it
+/// could not be: `WorkflowRefPort::workspace_of`
 /// carries no caller-workspace parameter, so two workspaces naming a flow
 /// `a.b/nightly` resolve nondeterministically by `id`. **This caller has the
 /// workspace** — it is on `ExecutionCtx` — so it uses it, and the alternative

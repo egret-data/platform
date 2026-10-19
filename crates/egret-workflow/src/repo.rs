@@ -849,9 +849,9 @@ impl FlowRepo {
     /// `egret_dataapi::endpoints::EndpointStore::workspace_of`'s own doc --
     /// answer with the object's OWN workspace so the CALLER can compare and
     /// refuse a mismatch as `NotFound`, indistinguishable from "does not
-    /// exist". A `subflow:` reference (spec §8) reaches THIS method only
-    /// after [`Self::find_by_name`] (below) has already turned its
-    /// `namespace`/`flowId` pair into an id.
+    /// exist". (A `subflow:` reference no longer reaches this method: since
+    /// debt spec §5.1, 2026-10-19, publish resolves one with the SCOPED
+    /// [`Self::find_in_workspace`].)
     pub async fn workspace_of(&self, id: Uuid) -> Result<Option<Uuid>> {
         sqlx::query_scalar("SELECT workspace_id FROM workflow.flows WHERE id = $1")
             .bind(id)
@@ -864,7 +864,7 @@ impl FlowRepo {
     /// `Ok(None)`: what a `Subflow` expands to in the topology (W7c spec
     /// §3.4, [`crate::graph::SubflowSource`]).
     ///
-    /// SCOPED by `ws`, unlike [`Self::find_by_name`] below: a `Subflow`
+    /// SCOPED by `ws`: a `Subflow`
     /// resolves within its own workspace (as `worker::subflow::resolve`
     /// does at run time), so a flow of the same name in another workspace
     /// is "no such flow", never its graph. A trashed flow does not resolve;
@@ -889,75 +889,21 @@ impl FlowRepo {
         .map_err(db_err)
     }
 
-    /// `(id, workspace_id)` of the flow named `(namespace, flow_id)`, or
-    /// `Ok(None)` if no such row exists in ANY workspace.
-    ///
-    /// A new bullet on this module's UNSCOPED-exception list (Task 7): a
-    /// `core.subflow` task names its target by the Kestra identity pair, not
-    /// by id (`WorkflowRefPort`'s doc comment on `RefKind::Subflow`'s
-    /// `name_or_id` encoding), so resolving one has to start from a lookup
-    /// that does not yet know an id to give [`Self::workspace_of`].
-    ///
-    /// **Known limitation, inherited from `WorkflowRefPort::workspace_of`'s
-    /// own signature and NOT closeable inside this method.** `UNIQUE
-    /// (workspace_id, namespace, flow_id)` (migration 0132) makes the pair
-    /// unique only WITHIN a workspace -- two different workspaces may each
-    /// independently name a flow `a.b/nightly_rollup`, and `id` (used only to
-    /// break the tie deterministically, not meaningfully) decides which one
-    /// this method answers with. `WorkflowRefPort::workspace_of(kind,
-    /// name_or_id)` carries no caller-workspace parameter (by design: an
-    /// implementation "never filters by a caller-supplied workspace", so
-    /// `publish` is the only place that ever learns the caller's workspace
-    /// and compares), so `refs.rs`'s `WorkflowRefs` -- the only caller of
-    /// this method -- has no workspace to prefer either. Every OTHER
-    /// `RefKind` resolves by globally-unique `Uuid`, where this problem
-    /// cannot arise; `Subflow` is the one kind that resolves by human name,
-    /// and is the one place this trait's blindness to the caller's workspace
-    /// is user-visible: two workspaces racing to name a subflow target the
-    /// same way can make an otherwise-publishable reference resolve to the
-    /// WRONG workspace's flow and be refused as foreign, nondeterministically
-    /// across whichever `id` happens to sort first. Flagged in the Task 7
-    /// report rather than silently worked around; closing it for real needs
-    /// `WorkflowRefPort` to grow a caller-workspace parameter, which is a
-    /// breaking change to a contract `publish.rs`/`tests/publish.rs` already
-    /// depend on and out of scope for this task.
-    ///
-    /// A trashed flow still answers (matches [`Self::workspace_of`]'s own
-    /// choice not to filter on `deleted_at`) -- publishing a subflow
-    /// reference to a trashed target is refused by ITS OWN publish, not by
-    /// this lookup pretending the target does not exist.
-    pub async fn find_by_name(
-        &self,
-        namespace: &str,
-        flow_id: &str,
-    ) -> Result<Option<(Uuid, Uuid)>> {
-        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT id, workspace_id FROM workflow.flows \
-             WHERE namespace = $1 AND flow_id = $2 \
-             ORDER BY id \
-             LIMIT 1",
-        )
-        .bind(namespace)
-        .bind(flow_id)
-        .fetch_optional(&self.db.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(row)
-    }
-
     /// The `id` of the flow named `(namespace, flow_id)` in `ws`, or
     /// `Ok(None)` if `ws` holds no such flow -- whether or not another
     /// workspace does.
     ///
-    /// SCOPED by `ws`, unlike [`Self::find_by_name`] above: this is what
-    /// `publish` resolves a `Subflow` and a Flow trigger's `dependsOn` pair
-    /// through (debt spec §5.1, 2026-10-19), so its answer depends on the
-    /// caller's workspace alone and cannot probe another one, and a name two
-    /// workspaces share resolves to the caller's own. `UNIQUE (workspace_id,
+    /// SCOPED by `ws`: this is what `publish` resolves a `Subflow` and a
+    /// Flow trigger's `dependsOn` pair through (debt spec §5.1, 2026-10-19),
+    /// so its answer depends on the caller's workspace alone and cannot probe
+    /// another one, and a name two workspaces share resolves to the caller's
+    /// own. It replaced the unscoped `find_by_name` (`(id, workspace_id)` from
+    /// ANY workspace, tie broken by `ORDER BY id`), which was removed with
+    /// it. `UNIQUE (workspace_id,
     /// namespace, flow_id)` (migration 0132) makes the row unique.
     ///
-    /// A trashed flow still answers, the same choice [`Self::find_by_name`]
-    /// makes: `deleted_at` is not filtered here. The run-time lookup,
+    /// A trashed flow still answers, the same choice the removed
+    /// `find_by_name` made: `deleted_at` is not filtered here. The run-time lookup,
     /// `worker::subflow::resolve`, is what refuses a trashed or disabled
     /// target.
     pub async fn find_in_workspace(

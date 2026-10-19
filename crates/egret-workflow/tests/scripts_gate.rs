@@ -1131,7 +1131,7 @@ async fn the_ungated_publish_entry_point_refuses_script_tasks() {
     common::enable_feature(&db, ws, "workflow_containers").await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(&repo, ws, user, &flow("w5a.closed", SHELL)).await;
-    let refs = common::workflow_refs(&db);
+    let refs = common::workflow_refs();
     let err = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
         .await
         .unwrap_err();

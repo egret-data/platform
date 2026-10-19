@@ -490,7 +490,7 @@ async fn declared_properties_and_outputs_match_the_artifact() {
     let id = common::seed_flow(&db, ws, user, &source, "draft").await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let published =
-        egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, id, "").await;
+        egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, id, "").await;
     assert!(published.is_ok(), "{published:?}");
 }
 

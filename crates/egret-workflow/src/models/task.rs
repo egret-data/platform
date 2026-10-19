@@ -490,10 +490,14 @@ pub struct Subflow {
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
 
-    // Task 6 fix round 1: `publish::resolve_task` fills this in once
-    // `namespace`/`flow_id` have been checked through `WorkflowRefPort` and
-    // confirmed to name a flow in the PUBLISHING workspace -- `None` on
-    // every draft, `Some` only inside a frozen `FlowVersionRow::snapshot`.
+    // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
+    // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING
+    // workspace only (`FlowRepo::find_in_workspace`): `Some` when that
+    // workspace holds the flow, `None` (with Kestra's warning) when it does
+    // not -- at every depth, a flowable's `errors:` included. Publish always
+    // overwrites it, so a value an author wrote into a draft never reaches a
+    // snapshot. Nothing reads it at run time: `worker::subflow::resolve`
+    // looks the target up by name in the execution's workspace.
     //
     // A `Leaf`'s own reference field (e.g. `egret.sql`'s `database`) is
     // overwritten IN PLACE with the resolved id once resolved, because that

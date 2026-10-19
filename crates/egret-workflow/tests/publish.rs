@@ -276,7 +276,7 @@ async fn a_foreach_cannot_be_published_and_the_error_names_loop() {
 //
 // Debt §5.1 (2026-10-19): a `Subflow`'s `(namespace, flowId)` pair resolves
 // in the CALLER's workspace only, through `FlowRepo::find_in_workspace`, not
-// the unscoped `RefKind::Subflow` port. Found: the id is frozen. Absent from
+// the unscoped `RefKind::Subflow` port (both now removed). Found: the id is frozen. Absent from
 // the caller's workspace -- whether another workspace holds the name or none
 // does -- the flow publishes with Kestra's warning and no frozen id. The two
 // security tests that used to assert `NotFound` for "foreign" and "absent"
@@ -298,10 +298,12 @@ fn subflow_warning(namespace: &str, flow_id: &str) -> String {
 /// exactly as one naming a flow nobody has** -- with Kestra's warning, no
 /// frozen id -- so publish still answers nothing about other workspaces.
 ///
-/// Through the real `WorkflowRefs`: its `RefKind::Subflow` arm is the unscoped
-/// `FlowRepo::find_by_name`, which finds the other workspace's flow. A publish
-/// that still asked it would refuse the foreign case (`NotFound`) and not the
-/// absent one -- the difference that would be the probe.
+/// Through the real `WorkflowRefs`. Its `RefKind::Subflow` arm used to be the
+/// unscoped `FlowRepo::find_by_name`, which found the other workspace's flow:
+/// a publish that asked it refused the foreign case (`NotFound`) and not the
+/// absent one -- the difference that would be the probe. Both are removed
+/// (fix round 1); the mutation that restores an unscoped lookup is in the
+/// task report.
 #[tokio::test]
 async fn a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it() {
     let Some(db) = db().await else { return };
@@ -321,7 +323,7 @@ async fn a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_
     };
     let foreign = common::draft(&repo, ws, user, &src("foreign", "nightly_rollup")).await;
     let absent = common::draft(&repo, ws, user, &src("absent", "nope")).await;
-    let refs = common::workflow_refs(&db);
+    let refs = common::workflow_refs();
 
     let a = egret_workflow::publish(&repo, &refs, ws, user, foreign.id, "")
         .await
@@ -381,7 +383,7 @@ async fn an_authored_flow_ref_does_not_survive_an_absent_target() {
     // Control: the draft really carries the forged id.
     assert!(f.source.contains(&theirs.id.to_string()));
 
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, f.id, "")
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
         .expect("publishes");
     assert_eq!(first_task(&v)["flowId"], "nightly_rollup", "{}", v.snapshot);
@@ -395,7 +397,7 @@ async fn an_authored_flow_ref_does_not_survive_an_absent_target() {
 }
 
 /// Found in the caller's workspace: the id is frozen, and no warning. The
-/// same name in ANOTHER workspace too -- `FlowRepo::find_by_name`'s recorded
+/// same name in ANOTHER workspace too -- the removed `FlowRepo::find_by_name`'s recorded
 /// over-refusal (its doc: "can make an otherwise-publishable reference
 /// resolve to the WRONG workspace's flow and be refused as foreign") -- does
 /// not change which id is frozen.
@@ -414,7 +416,7 @@ async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_free
     )
     .await;
 
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, f.id, "")
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
         .expect("publish");
 
@@ -474,7 +476,7 @@ async fn a_subflow_with_a_legitimate_dotted_namespace_still_publishes() {
     )
     .await;
 
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, f.id, "")
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
         .expect("a legitimate dotted namespace must publish");
     assert_eq!(
@@ -531,7 +533,7 @@ async fn a_trigger_dependency_naming_a_flow_in_the_callers_own_workspace_publish
     )
     .await;
 
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, f.id, "")
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
         .expect("publish");
     assert_eq!(
@@ -569,7 +571,7 @@ async fn a_trigger_dependency_absent_from_the_callers_workspace_publishes_whoeve
     };
     let foreign = common::draft(&repo, ws, user, &src("foreign", "nightly_rollup")).await;
     let absent = common::draft(&repo, ws, user, &src("absent", "nope")).await;
-    let refs = common::workflow_refs(&db);
+    let refs = common::workflow_refs();
 
     let a = egret_workflow::publish(&repo, &refs, ws, user, foreign.id, "")
         .await
@@ -914,6 +916,159 @@ async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_
                 "{m}"
             );
         }
+        other => panic!("{other:?}"),
+    }
+}
+
+// -- Task 2.5 fix round 1 (review I1): a nested flowable's `errors:` list.
+// `resolve_task` walked `Task::children()` only, the control-flow walk, so a
+// task inside a `Sequential`'s (or any of the six kinds') `errors:` never had
+// its references resolved: an authored `flowRef` and an unchecked `database:`
+// both reached the snapshot as written. Each test below puts the task ONLY
+// inside a nested `errors:`, so nothing at the top level can satisfy it.
+
+/// A `Sequential` whose `errors:` holds `handler`, and whose `tasks:` holds a
+/// plain `Log`.
+fn with_nested_errors_handler(id: &str, handler: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: a.b\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    errors:\n{handler}"
+    )
+}
+
+/// An absent `Subflow` target inside a nested `errors:` gets what a top-level
+/// one gets: Kestra's warning at its path, and no `flowRef` -- even one the
+/// author wrote naming another workspace's flow.
+#[tokio::test]
+async fn a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_authored_flow_ref_cleared(
+) {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let theirs = common::draft(
+        &repo, other_ws, other_user,
+        "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n",
+    )
+    .await;
+    let handler = format!(
+        "      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n        flowRef: {}\n",
+        theirs.id
+    );
+    let f = common::draft(&repo, ws, user, &with_nested_errors_handler("f", &handler)).await;
+
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect("publishes");
+    let h = &v.snapshot["plan"]["tasks"][0]["errors"][0];
+    // The path is real, so `flowRef` being absent is not vacuous.
+    assert_eq!(h["flowId"], "nightly_rollup", "{}", v.snapshot);
+    assert!(h["flowRef"].is_null(), "{}", v.snapshot);
+    assert!(
+        !v.snapshot["plan"]
+            .to_string()
+            .contains(&theirs.id.to_string()),
+        "another workspace's id must not reach the plan: {}",
+        v.snapshot
+    );
+    assert_eq!(
+        v.snapshot["warnings"],
+        serde_json::json!([{
+            "code": "subflow_not_found",
+            "message": subflow_warning("company.analytics", "nightly_rollup"),
+            "path": "tasks.seq.h",
+        }]),
+    );
+}
+
+/// A `database:` owned by another workspace inside a nested `errors:` is
+/// refused exactly as `a_flow_referencing_another_workspace_cannot_be_published`
+/// refuses it at the top level: `NotFound`.
+#[tokio::test]
+async fn a_foreign_database_inside_a_nested_errors_list_cannot_be_published() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Database, "trino_prod".into()),
+        (Uuid::new_v4(), Uuid::new_v4()), // owned by SOMEONE ELSE
+    );
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &with_nested_errors_handler(
+            "f",
+            "      - id: h\n        type: egret.sql\n        database: trino_prod\n        sql: SELECT 1\n",
+        ),
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect_err("a foreign database inside errors: must not publish");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+/// The same flow with the `database:` in the caller's workspace publishes and
+/// freezes the id -- the control that the refusal above is the reference.
+#[tokio::test]
+async fn an_own_database_inside_a_nested_errors_list_publishes_and_freezes_its_id() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let db_id = Uuid::new_v4();
+    let mut refs = FakeRefs::default();
+    refs.objects
+        .insert((RefKind::Database, "trino_prod".into()), (db_id, ws));
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &with_nested_errors_handler(
+            "f",
+            "      - id: h\n        type: egret.sql\n        database: trino_prod\n        sql: SELECT 1\n",
+        ),
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect("publish");
+    assert_eq!(
+        v.snapshot["plan"]["tasks"][0]["errors"][0]["database"],
+        serde_json::json!(db_id.to_string()),
+        "{}",
+        v.snapshot
+    );
+}
+
+/// An unknown task type inside a nested `errors:` is refused, as at the top
+/// level (`an_unknown_task_type_cannot_be_published`).
+#[tokio::test]
+async fn an_unknown_task_type_inside_a_nested_errors_list_cannot_be_published() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &with_nested_errors_handler(
+            "f",
+            "      - id: h\n        type: egret.sqll\n        sql: SELECT 1\n",
+        ),
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("an unknown type inside errors: must not publish");
+    match &err {
+        egret_core::Error::InvalidInput(m) => assert!(m.contains("egret.sqll"), "{m}"),
         other => panic!("{other:?}"),
     }
 }
