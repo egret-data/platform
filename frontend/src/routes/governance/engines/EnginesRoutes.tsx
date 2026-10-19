@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
-import { MissingProfileNotice } from "@/routes/governance/engines/MissingProfileNotice";
+import EnginesIndex from "@/routes/governance/engines/EnginesIndex";
 import EnginePage from "@/routes/governance/engines/EnginePage";
 import ProfilePage from "@/routes/governance/engines/ProfilePage";
 import { ENGINES_BASE, profileParam } from "@/routes/governance/engines/engineUrl";
@@ -11,17 +11,8 @@ import { ENGINES_BASE, profileParam } from "@/routes/governance/engines/engineUr
  * policy kind (Q2). A URL naming nothing goes back to the index, by an
  * absolute path (FE-ROUTE-1).
  *
- * The index and the editor are placeholders until their tasks land (plan Tasks 6, 14).
+ * The editor is a placeholder until its task lands (plan Task 14).
  */
-function IndexStub() {
-  return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">Engine & policy</h1>
-      <MissingProfileNotice />
-    </div>
-  );
-}
-
 function EditorStub({ under }: { under: "engine" | "profile" }) {
   const { id = "", service, kind = "", policyId } = useParams();
   const subject = under === "engine" ? `engine ${id}` : `profile ${profileParam(service)}`;
@@ -36,7 +27,7 @@ function EditorStub({ under }: { under: "engine" | "profile" }) {
 export default function EnginesRoutes() {
   return (
     <Routes>
-      <Route index element={<IndexStub />} />
+      <Route index element={<EnginesIndex />} />
       <Route path="profiles" element={<Navigate to={ENGINES_BASE} replace />} />
       <Route path="profiles/:service" element={<ProfilePage />} />
       <Route path="profiles/:service/advanced/policies/:kind/new" element={<EditorStub under="profile" />} />

@@ -37,8 +37,9 @@ export function profile(name: string, engines: { id: string; name: string }[] = 
     origin: "manual",
     policy_version: 1,
     policy_count: 0,
-    engines: engines.map((e) => ({ ...e, status: "running" })),
-  } as ProfileDto;
+    policy_counts: { compiler: 0, infra: 0, operator: 0 },
+    engines: engines.map((e) => ({ ...e, status: "running", origin: "provisioned", type: "trino" })),
+  };
 }
 
 /** `profiles: "error"` answers the profile list with a 500. */
