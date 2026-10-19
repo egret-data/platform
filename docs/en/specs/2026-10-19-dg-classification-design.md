@@ -102,9 +102,19 @@ The brief's survey was checked. Statements that were wrong or incomplete are lis
     resource (`crates/egret-core/src/authz.rs:70`, `:108-124`); there is no batch. `object_ref` reads the object's
     folder and workspace (`crates/egret-bi/src/shares.rs:116-135`) and a folder's gate reads its `entity_type`
     (`shares.rs:81-98`); `read_action` is private (`shares.rs:58-67`). A `WorkspaceContext` is not needed: the PDP is
-    asked about the principal's subject and the object. The cost per object is measured in Task 1 (M4).
+    asked about the principal's subject and the object. The cost per object is measured in Task 1 (M4): about
+    6 ms per object (release build, local Postgres in Docker Desktop at ~1.9 ms per round trip), 3.0–3.3 s for 500;
+    the debug build under load took 5.4–7.1 s. It is round-trip bound, so the 500 cap (CL12) stands; a batch read is
+    the lever if a deployment's database is further away.
 18. **Survey line numbers.** `usable_tag_services_via` is at `store.rs:1407` (not 1404); `resolved_tags_for_resource_via`
     at `store.rs:1696` (not ~1666).
+
+**Measured on real engines (Task 1, `docs/en/plans/2026-10-19-dg-classification-live.md` §1).** Premise 4 (M3: a
+hand-written item naming group `g1` or role `r1` granted nothing on Trino 483 or StarRocks 4.1.6) and premise 6 / Q2
+(M2: `Self_`/`SelfAndAllDescendants` shapes allowed, `Ancestor`-only shapes refused, a column policy allowed only its
+column, on both engines) hold; both engines carry the registry name in the catalog level and fold its case (M1); a
+hand-written tag policy on `PII` does not apply to a tag named `pii` (M7); explain names a hand-written decider by
+name and id with no attribution (M5).
 
 **True as stated** (checked): routes `App.tsx:652-653`; `Classifications.tsx` 443 lines, `TagDetail.tsx` 630; tags API in
 `crates/egret-controlplane/src/tags.rs` (`GET` `tag:read` `:111`; `POST`/`PATCH`/`DELETE` `tag:manage` `:156`/`:191`/`:222`;

@@ -103,9 +103,19 @@ Phần khảo sát trong brief đã được kiểm tra. Các câu sai hoặc th
     subject, action và resource (`crates/egret-core/src/authz.rs:70`, `:108-124`); không có batch. `object_ref` đọc folder
     và workspace của đối tượng (`crates/egret-bi/src/shares.rs:116-135`) và gate của folder đọc `entity_type`
     (`shares.rs:81-98`); `read_action` là private (`shares.rs:58-67`). Không cần `WorkspaceContext`: PDP được hỏi về
-    subject của principal và đối tượng. Chi phí mỗi đối tượng được đo ở Task 1 (M4).
+    subject của principal và đối tượng. Chi phí mỗi đối tượng được đo ở Task 1 (M4): khoảng 6 ms mỗi đối tượng
+    (bản release, Postgres cục bộ trong Docker Desktop, ~1,9 ms mỗi round trip), 3,0–3,3 s cho 500; bản debug khi máy
+    bận mất 5,4–7,1 s. Chi phí do round trip quyết định, nên trần 500 (CL12) giữ nguyên; đọc theo lô là đòn bẩy nếu
+    database của một bản triển khai ở xa hơn.
 18. **Số dòng trong khảo sát.** `usable_tag_services_via` ở `store.rs:1407` (không phải 1404);
     `resolved_tags_for_resource_via` ở `store.rs:1696` (không phải ~1666).
+
+**Đã đo trên engine thật (Task 1, `docs/en/plans/2026-10-19-dg-classification-live.md` §1).** Tiền đề 4 (M3: item
+viết tay nêu group `g1` hoặc role `r1` không cấp gì trên Trino 483 lẫn StarRocks 4.1.6) và tiền đề 6 / Q2 (M2: dạng
+`Self_`/`SelfAndAllDescendants` được phép, dạng chỉ `Ancestor` bị từ chối, policy trên một cột chỉ cho phép cột đó, trên
+cả hai engine) đều đúng; cả hai engine mang tên registry ở cấp catalog và không phân biệt hoa thường (M1); tag policy
+viết tay trên `PII` không áp cho tag tên `pii` (M7); explain nêu policy viết tay quyết định theo tên và id, không có
+attribution (M5).
 
 **Đúng như đã nêu** (đã kiểm): route `App.tsx:652-653`; `Classifications.tsx` 443 dòng, `TagDetail.tsx` 630; API tag trong
 `crates/egret-controlplane/src/tags.rs` (`GET` `tag:read` `:111`; `POST`/`PATCH`/`DELETE` `tag:manage` `:156`/`:191`/`:222`;
