@@ -33,6 +33,8 @@ const MARKERS = [
   ["src/routes/governance/classifications/TagPage.tsx", "No classification with this id."],
   // The header's save toast.
   ["src/routes/governance/classifications/TagHeader.tsx", "Classification saved."],
+  // Where used's Data empty sentence (spec §5.1).
+  ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
 ];
 
 const entry = entryChunkName(DIST);

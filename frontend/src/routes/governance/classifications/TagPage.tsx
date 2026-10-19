@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { TagHeader } from "@/routes/governance/classifications/TagHeader";
+import { WhereUsedTab } from "@/routes/governance/classifications/tabs/WhereUsedTab";
 import { CLASSIFICATIONS_BASE, type TagTab } from "@/routes/governance/classifications/tagUrl";
 
 /** The tabs in order (spec §5); the first is the absence of `?tab=`. */
@@ -34,9 +35,14 @@ function BackLink() {
   );
 }
 
-/** One tab's body. */
-function TabBody({ tab }: { tab: TagTab; tag: Tag }) {
-  return <p className="text-sm text-muted-foreground">{TAG_TAB_LABEL[tab]}</p>;
+/** One tab's body; each owns its loading, empty and error states. */
+function TabBody({ tab, tag }: { tab: TagTab; tag: Tag }) {
+  switch (tab) {
+    case "where-used":
+      return <WhereUsedTab tagId={tag.id} />;
+    default:
+      return <p className="text-sm text-muted-foreground">{TAG_TAB_LABEL[tab]}</p>;
+  }
 }
 
 /**
