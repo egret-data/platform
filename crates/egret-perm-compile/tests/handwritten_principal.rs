@@ -392,10 +392,12 @@ async fn refusals() {
 
 /// egret folds group names (#688), while a hand-written item keeps whatever
 /// case its author typed. This listing is informational (engines resolve no
-/// groups, Q1), so an item naming `G1` is listed on the page of group `g1`
-/// and of its members; roles likewise. The item's own spelling is shown.
+/// groups, Q1), so an item naming `G1` is listed on the page of group `g1` and
+/// of its members; the item's own spelling is shown. Role names are NOT folded
+/// (`roles` is UNIQUE(scope, name), case-sensitive): an item naming `R1` is
+/// not role `r1`.
 #[tokio::test]
-async fn group_and_role_items_match_regardless_of_case() {
+async fn group_items_match_regardless_of_case_role_items_exactly() {
     let e = env().await;
     let p = people(&e, true).await;
     let (sid, _) = profile(&e).await;
@@ -404,6 +406,7 @@ async fn group_and_role_items_match_regardless_of_case() {
     let group_upper = p.group.to_uppercase();
     let role_upper = p.role.to_uppercase();
     assert_ne!(group_upper, p.group, "the fixture name must have a letter");
+    assert_ne!(role_upper, p.role, "the fixture name must have a letter");
     insert(
         &e,
         sid,
@@ -433,18 +436,15 @@ async fn group_and_role_items_match_regardless_of_case() {
         (n[0].how, n[0].via.as_deref(), n[0].on_engines),
         (NamingHow::Group, Some(group_upper.as_str()), false)
     );
-    let n = &row(&out, &r)
-        .expect("role item listed on the holder's page")
-        .naming;
-    assert_eq!(
-        (n[0].how, n[0].via.as_deref(), n[0].on_engines),
-        (NamingHow::Role, Some(role_upper.as_str()), false)
+    assert!(
+        row(&out, &r).is_none(),
+        "a role item of another case is another role"
     );
 
     let out = read(&e, "group", &p.group).await.unwrap();
     assert!(row(&out, &g).is_some(), "listed on the group's own page");
     let out = read(&e, "role", &p.role).await.unwrap();
-    assert!(row(&out, &r).is_some(), "listed on the role's own page");
+    assert!(row(&out, &r).is_none(), "not listed on role r1's page");
 }
 
 /// A body that cannot be read may name anyone, so the page must not say "no

@@ -1236,9 +1236,9 @@ pub async fn handwritten_for_principal_via(
         }
     };
     let no_username = kind == "user" && username.is_none();
-    // Compared folded (see the item loop below).
+    // Group names compare folded (see the item loop below); role names are
+    // case-sensitive in egret (`roles` UNIQUE(scope, name)) and compare exactly.
     let groups: BTreeSet<String> = groups.iter().map(|g| g.to_lowercase()).collect();
-    let roles: BTreeSet<String> = roles.iter().map(|r| r.to_lowercase()).collect();
 
     let services: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, type FROM policy.authz_services ORDER BY name, id")
@@ -1318,11 +1318,7 @@ pub async fn handwritten_for_principal_via(
                             on_engines: false,
                         });
                     }
-                    for r in item
-                        .roles
-                        .iter()
-                        .filter(|r| roles.contains(&r.to_lowercase()))
-                    {
+                    for r in item.roles.iter().filter(|r| roles.contains(r.as_str())) {
                         naming.push(Naming {
                             bucket,
                             how: NamingHow::Role,
