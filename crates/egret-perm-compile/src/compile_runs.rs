@@ -1,4 +1,4 @@
-//! `perm.compile_runs` (DG #3, spec §3.3, migration 0197): the last compile
+//! `perm.compile_runs` (DG #3, spec §3.3, migration 0198): the last compile
 //! of each profile, read by the Governance Overview's `compile_failed`.
 //!
 //! - **Success** is upserted by the compile funnel

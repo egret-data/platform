@@ -64,11 +64,11 @@ Brief đã được đối chiếu với code. Những câu sau trong brief sai 
 | O3 | Sự kiện governance được ghi **trong chính transaction của thao tác ghi** bởi `egret_audit::governance::record_change` mới, vào `audit.audit_log` với `kind = 'mutation'`. Thao tác bị từ chối, rollback, preview hay dry-run không để lại sự kiện. Chúng được ghi bất kể `audit.enabled`; cờ này vẫn điều khiển dòng decision và các sự kiện sink hiện có, và doc comment của nó nói rõ điều đó | user, 2026-10-18 |
 | O4 | Sự kiện role và tag catalog hiện có vẫn đi qua sink (best effort, sau commit); feed đọc chúng và nói rõ chúng là best effort | quyết định mặc định (2026-10-18) |
 | O5 | Không backfill. Việc ghi bắt đầu khi phiên bản này được triển khai; trạng thái rỗng và chú thích của feed nói vậy | user, 2026-10-18 |
-| O6 | `perm.compile_runs` (migration 0197): lần compile gần nhất của mỗi profile. Thành công do phễu compile ghi trong transaction của lần compile; thất bại chỉ do các điểm vào không có thao tác ghi nào chờ (§3.3) | quyết định mặc định (2026-10-18) |
+| O6 | `perm.compile_runs` (migration 0198): lần compile gần nhất của mỗi profile. Thành công do phễu compile ghi trong transaction của lần compile; thất bại chỉ do các điểm vào không có thao tác ghi nào chờ (§3.3) | quyết định mặc định (2026-10-18) |
 | O7 | `GET /api/control-plane/governance/attention`, gate `policy:read` HOẶC `tag:read`; mỗi phát hiện chỉ được tính cho người đọc giữ quyền của nguồn, nếu không thì nằm trong `notChecked` | user, 2026-10-18 |
 | O8 | Mỗi nguồn chạy trong savepoint riêng của một transaction `REPEATABLE READ, READ ONLY` với `statement_timeout` 5 s; nguồn lỗi trở thành phát hiện `source_unavailable` | quyết định mặc định (2026-10-18) |
 | O9 | Độ lệch: `plugin_silent` (critical, không poll trong 24 h), `plugin_behind` (critical, version chưa được xác nhận sau 90 s kể từ khi đặt), và thêm `plugin_quiet` (warning, không poll trong 5 phút) để engine đã dừng không vô hình suốt một ngày | quyết định mặc định (2026-10-18); ngưỡng do Task 1 xác nhận (`2026-10-18-dg-overview-live.md` §1.1), Task 1 cũng làm rõ luật: lần poll mới nhất của mỗi profile, `-1` là "chưa báo", kind không có lần tải gần đây thì không xét (§4.3) |
-| O10 | Số migration 0197 (`perm.compile_runs`) và 0198 (partial index trên mutation của audit). F11 giữ 0195; đánh số lại từ 0196/0197 ngày 2026-10-19 vì workflow C2 (main `78c182ab`) đã lấy 0196 | user, 2026-10-18 |
+| O10 | Số migration 0198 (`perm.compile_runs`) và 0199 (partial index trên mutation của audit). F11 giữ 0195; đánh số lại hai lần ngày 2026-10-19 (từ 0196/0197) vì workflow C2 (#693) lấy 0196 và #696 lấy 0197 | user, 2026-10-18 |
 | O11 | Frontend: khu lazy `routes/governance/overview/`, là index của Governance; catch-all `*` chuyển hướng về `/governance` (Overview); nhóm sidebar tên **"Governance overview"**, mục "Overview", đứng đầu | quyết định mặc định (2026-10-18) |
 | O12 | Không biểu đồ. Dải số đếm, Needs attention (theo mức độ), Recent changes (phân trang, 25 mỗi trang) | user, 2026-10-18 |
 | O13 | Ngoài #3: audit cho CRUD tag, tạo/xoá profile và seed, thành viên workspace; actor hệ thống cho các sweep và sync workspace-assignment; quy plugin về từng engine; cache | quyết định mặc định (2026-10-18) |
@@ -226,7 +226,7 @@ các sweep) không ghi gì (O13).
 | xoá/bật-tắt policy Ranger | `delete_policy_handler`, `set_policy_enabled`, trước commit | `ranger_policy:delete`/`enable`/`disable` |
 | engine grant (F11) tạo/sửa/xoá | `audit_engine_grant_write` trong `routes/engine_grants.rs`, trước commit; summary = audit detail của F11 (`engineId`, `capability`, `values`, `principals`, `services`) làm before/after | `engine_grant:create`/`update`/`delete` |
 
-### 3.3 `perm.compile_runs` (migration 0197)
+### 3.3 `perm.compile_runs` (migration 0198)
 
 Định nghĩa bảng như bản EN (`service_id` PK tham chiếu `policy.authz_services` `ON DELETE CASCADE`, `outcome ∈
 ok|error`, `attempted_at`, `error`, `last_ok_at`, các số đếm, CHECK lỗi phải có lý do).
@@ -245,7 +245,7 @@ ok|error`, `attempted_at`, `error`, `last_ok_at`, các số đếm, CHECK lỗi 
   `{outcome: "error", error}` trong cùng transaction đó.
 - **Không ghi là thất bại**: lần compile thất bại bên trong một thao tác ghi grant, rule, tag, clearance, thành viên,
   policy hay catalog. Thao tác đó bị từ chối kèm lỗi (caller thấy), và engine giữ lần compile trước.
-- Migration 0198: `CREATE INDEX audit_log_mutation_ts_idx ON audit.audit_log (ts DESC, id DESC) WHERE kind = 'mutation'`,
+- Migration 0199: `CREATE INDEX audit_log_mutation_ts_idx ON audit.audit_log (ts DESC, id DESC) WHERE kind = 'mutation'`,
   để feed không quét các dòng decision.
 
 ### 3.4 `GET /api/control-plane/governance/changes`
@@ -260,7 +260,7 @@ ok|error`, `attempted_at`, `error`, `last_ok_at`, các số đếm, CHECK lỗi 
   - Tag: `tag_clearance:*`, và `tag:assign`/`tag:unassign` cũ **chỉ với `resource_type = 'catalog'`** (các dòng
     `object` là tag BI trong workspace, tiền đề 8).
 - SQL: `kind = 'mutation' AND (action, resource_type) IN (các cặp được phép) AND (ts, id) < cursor ORDER BY ts DESC,
-  id DESC LIMIT n`, dùng index 0198. Danh sách cặp lấy từ `egret_audit::governance`, nơi duy nhất F11 thêm chuỗi của nó.
+  id DESC LIMIT n`, dùng index 0199. Danh sách cặp lấy từ `egret_audit::governance`, nơi duy nhất F11 thêm chuỗi của nó.
 - Mỗi entry: `{ id, at, actor: {userId, label} | null, impersonator: {userId, label} | null, action, sentence,
   target: Ref | null, targetExists: bool, detail }`. Nhãn được phân giải lúc đọc: tên hoặc email user, tên role theo
   id (id khi role đã xoá), tên tag, tên catalog từ `registry.catalogs.warehouse_id` cho sự kiện tag catalog cũ, tên

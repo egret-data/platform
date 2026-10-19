@@ -256,7 +256,7 @@ pub struct ChangeRow {
 
 /// Newest first, `kind = 'mutation'`, `(action, resource_type)` in the pairs
 /// `families` allow, strictly before `before = (ts, id)` when given. Served
-/// by `audit_log_mutation_ts_idx` (migration 0198).
+/// by `audit_log_mutation_ts_idx` (migration 0199).
 pub async fn governance_changes_via(
     conn: &mut PgConnection,
     families: &[Family],

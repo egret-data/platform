@@ -22,7 +22,7 @@ contradicts" first) on the programme spec `docs/en/specs/2026-10-16-dg-frontend-
 
 - Base main `4a67321b`; branch `feat/dg-overview`; worktree `egret-dgov`. Never read or touch
   `data-portal/egret` (stale checkout). Rebase on fresh main before the final gate; regenerate the client after it.
-- **Migrations 0197 and 0198 only.** F11 (engine grants) holds 0195 and is in flight in parallel; it also edits
+- **Migrations 0198 and 0199 only.** F11 (engine grants) holds 0195 and is in flight in parallel; it also edits
   `crates/egret-perm-compile/src/routes.rs`. Whichever package merges second rebases and resolves. F11 will call
   `egret_audit::governance::record_change` for engine-grant writes if this package merged first, so the helper's
   name, signature and action strings (spec §3.1) do not change without telling the controller.
@@ -145,8 +145,8 @@ pub async fn governance_changes_via(conn: &mut PgConnection, families: &[Family]
   - `governance_changes_via`: a decision row and a BI `object` tag row are never returned; `[Tag]` returns no
     `perm_grant:*`; newest first; cursor `(ts, id)` of the last row of page 1 gives page 2 with no overlap and no gap
     (three rows with the same `ts`, distinct ids);
-  - migration 0197: inserting `outcome = 'error'` with `error = NULL` fails the CHECK; deleting the profile cascades;
-  - migration 0198: `pg_indexes` has `audit_log_mutation_ts_idx` with predicate `kind = 'mutation'`.
+  - migration 0198: inserting `outcome = 'error'` with `error = NULL` fails the CHECK; deleting the profile cascades;
+  - migration 0199: `pg_indexes` has `audit_log_mutation_ts_idx` with predicate `kind = 'mutation'`.
 - [ ] **Step 2: run** `cargo test -p egret-audit --test governance` → fails (module missing).
 - [ ] **Step 3: implement.** `record_change` is one `INSERT INTO audit.audit_log (kind, actor_user_id,
   impersonator, workspace_id, action, resource_type, resource_id, detail) VALUES ('mutation', …, NULL, …)`. The
