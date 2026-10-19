@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
-import type { GrantView, GroupPrincipal, StandsFor, UserPrincipal } from "@/api/generated/model";
+import type { EngineGrantView, GrantView, GroupPrincipal, RolePrincipal, StandsFor, UserPrincipal } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
@@ -22,7 +22,12 @@ const json = (status: number, body: unknown) =>
  * grants list (`GET …/perm/grants`, answered in order, the last repeating) and
  * a grant delete. Everything else is a 404. Returns the perm calls made.
  */
-function serve(principal: Record<string, Answer>, grants: Answer | Answer[]) {
+function serve(
+  principal: Record<string, Answer>,
+  grants: Answer | Answer[],
+  engineGrants: Answer | Answer[] = { status: 200, body: [] },
+  capabilities: Answer = { status: 200, body: { engines: [] } },
+) {
   const calls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -40,6 +45,11 @@ function serve(principal: Record<string, Answer>, grants: Answer | Answer[]) {
           const asked = calls.filter((c) => c === call).length - 1;
           return reply(Array.isArray(grants) ? grants[Math.min(asked, grants.length - 1)] : grants);
         }
+        if (call === "GET /perm/engine-grants") {
+          const asked = calls.filter((c) => c === call).length - 1;
+          return reply(Array.isArray(engineGrants) ? engineGrants[Math.min(asked, engineGrants.length - 1)] : engineGrants);
+        }
+        if (call === "GET /perm/engine-capabilities") return reply(capabilities);
         if (method === "DELETE") return reply({ status: 200, body: {} });
       }
       return Promise.resolve(json(404, { error: "not found" }));
@@ -150,6 +160,7 @@ describe("a principal's Permissions tab", () => {
       "Everyone",
       "Excluded",
       "Not applied anywhere",
+      "Engine permissions",
     ]);
     expect(rowsOf("Directly")).toEqual([["user ana can read and write ice.sales.*", "Directly · applied on engines", "Allow"]]);
     expect(rowsOf("Through a group")).toEqual([
@@ -198,7 +209,7 @@ describe("a principal's Permissions tab", () => {
     serve({ "users/u-ana": ok(ANA) }, ok([DENY, NOTHING]));
     open("/governance/people/users/u-ana?tab=permissions");
     await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Through a group" });
-    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Through a group"]);
+    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Through a group", "Engine permissions"]);
     expect(rowsOf("Through a group")).toEqual([
       [
         "group analysts cannot read ice.sales.* except role reader",
@@ -226,6 +237,7 @@ describe("a principal's Permissions tab", () => {
     expect(within(panel).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
       "Not applied anywhere",
       "Not applied on engines",
+      "Engine permissions",
     ]);
     expect(rowsOf("Not applied on engines")).toEqual([
       ["group analysts can read ice.hr.* except user ana", "Through group analysts · No: no username yet", "Allow"],
@@ -288,7 +300,7 @@ describe("a principal's Permissions tab", () => {
     serve({ "users/u-ana": ok(ANA) }, ok(GRANTS));
     open("/governance/people/users/u-ana?tab=permissions&action=write");
     await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Directly" });
-    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Directly", "Through a role"]);
+    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Directly", "Through a role", "Engine permissions"]);
 
     await userEvent.click(within(tab()).getByRole("combobox", { name: "Effect" }));
     await userEvent.click(await screen.findByRole("option", { name: "Deny" }));
@@ -388,5 +400,160 @@ describe("Grant access", () => {
     open("/governance/people/users/u-ana");
     await screen.findByRole("tab", { name: "Overview" });
     expect(screen.queryByRole("button", { name: "Grant access" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Engine permissions on a principal page (spec §7)", () => {
+  const eg = (id: string, over: Partial<EngineGrantView> & Pick<EngineGrantView, "principals">): EngineGrantView => ({
+    id,
+    engineId: "e-trino",
+    engineName: "trino-main",
+    capability: "trino.impersonate_user",
+    values: ["bob"],
+    targetUserId: "u-bob",
+    policyName: `perm-engine-${id}`,
+    reach: { engines: [], sharedProfile: false },
+    ...over,
+  });
+  const CAPS = {
+    engines: [
+      {
+        engineType: "trino",
+        capabilities: [
+          { id: "trino.impersonate_user", label: "Impersonate a user", description: "", resources: [], access: "impersonate" },
+          { id: "trino.set_catalog_session_property", label: "Set catalog session properties", description: "", resources: [], access: "alter" },
+        ],
+        notGrantable: [],
+      },
+      {
+        engineType: "starrocks",
+        capabilities: [{ id: "starrocks.impersonate_user", label: "Impersonate a user (StarRocks)", description: "", resources: [], access: "impersonate" }],
+        notGrantable: [],
+      },
+    ],
+  };
+  // Not in the order the section lists them, on purpose.
+  const ENGINE_GRANTS: EngineGrantView[] = [
+    eg("eg-other", { principals: [{ kind: "user", ref: "bob" }], values: ["ana"] }),
+    eg("eg-group", {
+      principals: [{ kind: "group", ref: "analysts" }],
+      capability: "trino.set_catalog_session_property",
+      values: ["ice", "query_max_memory"],
+      targetUserId: null,
+    }),
+    eg("eg-direct", {
+      principals: [{ kind: "user", ref: "ana" }],
+      engineId: "e-sr",
+      engineName: "sr-main",
+      capability: "starrocks.impersonate_user",
+      values: [],
+      targetUserId: "u-nouser",
+    }),
+    eg("eg-role", { principals: [{ kind: "role", ref: "steward" }], engineId: "e-sr", engineName: "sr-main", capability: "starrocks.impersonate_user" }),
+  ];
+  const section = () => within(tab()).getByRole("region", { name: "Engine permissions" });
+  const engineRows = () =>
+    within(within(section()).getByRole("table", { name: "Engine permissions" }))
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+
+  it("a user page lists the engine grants that reach the user, directly or through a group, and not another user's", async () => {
+    serve({ "users/u-ana": ok(ANA) }, ok([]), ok(ENGINE_GRANTS), ok(CAPS));
+    open("/governance/people/users/u-ana?tab=permissions");
+    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Engine permissions" });
+    expect(engineRows()).toEqual([
+      ["sr-main", "Impersonate a user (StarRocks)", "a user with no username", "Directly · applied on engines"],
+      ["sr-main", "Impersonate a user (StarRocks)", "bob", "Through role steward · applied on engines"],
+      ["trino-main", "Set catalog session properties", "ice, query_max_memory", "Through group analysts · applied on engines"],
+    ]);
+    expect(section().textContent).not.toMatch(/eg-other/);
+    expect(within(section()).getAllByRole("link", { name: "sr-main" })[0]).toHaveAttribute(
+      "href",
+      "/governance/engines/e-sr?tab=engine-permissions&grant=eg-direct",
+    );
+    expect(within(section()).getByRole("link", { name: "trino-main" })).toHaveAttribute(
+      "href",
+      "/governance/engines/e-trino?tab=engine-permissions&grant=eg-group",
+    );
+  });
+
+  it("a group page lists the grants naming the group", async () => {
+    const ANALYSTS: GroupPrincipal = {
+      name: "analysts",
+      source: null,
+      isPublic: false,
+      members: [],
+      serviceAccounts: 0,
+      roles: [],
+      workspaces: [],
+      standsFor: [{ kind: "group", ref: "analysts", via: { kind: "itself" }, onEngines: true }],
+      clearances: [],
+    };
+    serve({ "groups/analysts": ok(ANALYSTS) }, ok([]), ok(ENGINE_GRANTS), ok(CAPS));
+    open("/governance/people/groups/analysts?tab=permissions");
+    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Engine permissions" });
+    expect(engineRows()).toEqual([["trino-main", "Set catalog session properties", "ice, query_max_memory", "Directly · applied on engines"]]);
+  });
+
+  it("a role page lists the grants naming the role", async () => {
+    const STEWARD: RolePrincipal = {
+      name: "steward",
+      scopes: [],
+      holders: [],
+      serviceAccounts: 0,
+      holderGroups: [],
+      standsFor: [{ kind: "role", ref: "steward", via: { kind: "itself" }, onEngines: true }],
+      clearances: [],
+    };
+    serve({ "roles/steward": ok(STEWARD) }, ok([]), ok(ENGINE_GRANTS), ok(CAPS));
+    open("/governance/people/roles/steward?tab=permissions");
+    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Engine permissions" });
+    expect(engineRows()).toEqual([["sr-main", "Impersonate a user (StarRocks)", "bob", "Directly · applied on engines"]]);
+  });
+
+  it("the public group's page has no engine permissions section", async () => {
+    const PUBLIC: GroupPrincipal = {
+      name: "public",
+      source: null,
+      isPublic: true,
+      members: [],
+      serviceAccounts: 0,
+      roles: [],
+      workspaces: [],
+      standsFor: [{ kind: "group", ref: "public", via: { kind: "public" }, onEngines: true }],
+      clearances: [],
+    };
+    const calls = serve({ "groups/public": ok(PUBLIC) }, ok([]), ok(ENGINE_GRANTS), ok(CAPS));
+    open("/governance/people/groups/public?tab=permissions");
+    await within(await screen.findByRole("tabpanel")).findByText(/No egret grant reaches/);
+    expect(within(tab()).queryByRole("region", { name: "Engine permissions" })).not.toBeInTheDocument();
+    expect(calls).not.toContain("GET /perm/engine-grants");
+  });
+
+  it("says when no engine permission reaches the principal", async () => {
+    serve({ "users/u-ana": ok(ANA) }, ok([]), ok([ENGINE_GRANTS[0]]), ok(CAPS));
+    open("/governance/people/users/u-ana?tab=permissions");
+    expect(
+      await within(await screen.findByRole("tabpanel")).findByText("No engine permission reaches this user."),
+    ).toBeInTheDocument();
+  });
+
+  it("a failing engine-grants request leaves the data grants rendered, with its own retry", async () => {
+    serve({ "users/u-ana": ok(ANA) }, ok(GRANTS), [{ status: 500, body: { error: "boom" } }, ok(ENGINE_GRANTS)], ok(CAPS));
+    open("/governance/people/users/u-ana?tab=permissions");
+    const panel = await screen.findByRole("tabpanel");
+    expect(await within(panel).findByText("The engine permissions could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(within(panel).getByRole("table", { name: "Directly" })).toBeInTheDocument();
+    await userEvent.click(within(section()).getByRole("button", { name: "Retry" }));
+    expect(await within(panel).findByRole("table", { name: "Engine permissions" })).toBeInTheDocument();
+  });
+
+  it("a failing data-grants request leaves the engine permissions rendered", async () => {
+    serve({ "users/u-ana": ok(ANA) }, { status: 500, body: { error: "boom" } }, ok(ENGINE_GRANTS), ok(CAPS));
+    open("/governance/people/users/u-ana?tab=permissions");
+    const panel = await screen.findByRole("tabpanel");
+    expect(await within(panel).findByText("The grants could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(await within(panel).findByRole("table", { name: "Engine permissions" })).toBeInTheDocument();
   });
 });
