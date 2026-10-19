@@ -1,6 +1,7 @@
 import type { EngineTab } from "@/routes/governance/engines/engineUrl";
 import { TAB_LABEL, type TabContext } from "@/routes/governance/engines/PageFrame";
 import { EnginePermissionsPanel } from "@/routes/governance/engines/tabs/EnginePermissionsPanel";
+import { MigrateTab } from "@/routes/governance/engines/tabs/MigrateTab";
 import { OverlapsTab } from "@/routes/governance/engines/tabs/OverlapsTab";
 import { PoliciesTab } from "@/routes/governance/engines/tabs/PoliciesTab";
 
@@ -13,5 +14,8 @@ export function EngineTabBody({ tab, ctx }: { tab: EngineTab; ctx: TabContext })
   if (tab === "engine-permissions") return <EnginePermissionsPanel ctx={ctx} />;
   if (tab === "policies") return <PoliciesTab ctx={ctx} />;
   if (tab === "overlaps") return <OverlapsTab ctx={ctx} />;
+  if (tab === "migrate" && ctx.profile) {
+    return <MigrateTab service={ctx.profile.name} serviceId={ctx.profile.dto?.id} />;
+  }
   return <p className="text-sm text-muted-foreground">{TAB_LABEL[tab]}</p>;
 }

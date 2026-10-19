@@ -51,6 +51,8 @@ const MARKERS = [
   ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
   // The Overlaps tab's empty state (spec §6.3).
   ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
+  // The Migrate tab's link after a written migration (spec §6.4).
+  ["src/routes/governance/engines/tabs/MigrateTab.tsx", "See it in Recent changes"],
 ];
 
 const entry = entryChunkName(DIST);
