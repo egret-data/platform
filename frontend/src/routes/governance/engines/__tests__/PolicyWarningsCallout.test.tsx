@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, within } from "@testing-library/react";
 import {
@@ -14,6 +15,7 @@ import {
   serve,
   type Answer,
 } from "./engineHarness";
+import { PolicyWarningsCallout } from "@/routes/governance/PolicyWarningsCallout";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -156,5 +158,15 @@ describe("the policy warnings callout on the Policies tab (SP4d-4 B1)", () => {
     const callout = await calloutOf("1 warning on 1 stored policy");
     expect(within(callout).getByText("allow-analysts")).toBeInTheDocument();
     expect(within(callout).queryByRole("link", { name: "allow-analysts" })).toBeNull();
+  });
+});
+
+describe("the callout's editor link", () => {
+  it("has no default URL: every caller names where a warned policy's editor is", () => {
+    // `editorHref` is required, so no link can fall back to the retired
+    // `/governance/policies/...` editor. `tsc -b` fails if this stops erroring.
+    // @ts-expect-error editorHref is required
+    const props: ComponentProps<typeof PolicyWarningsCallout> = { service: "lake-tr", serviceId: 2 };
+    expect(props.service).toBe("lake-tr");
   });
 });
