@@ -78,6 +78,18 @@ Phần khảo sát trong brief đã được kiểm tra. Các câu sai hoặc th
 12. **Ledger tính theo profile, không theo engine.** Khoá của nó là `(service_id, plugin_id, kind)`
     (`migrations/0186_plugin_downloads.sql`). Trên một profile chia sẻ kiểu cũ, tab không thể nói một hàng đến từ engine
     nào; nó nói rõ điều đó (O13 của Overview đã để việc gán theo từng engine ra ngoài).
+13. **Profile đã compile từ chối policy viết tay MỚI** (đo được, Task 1 phát hiện 1,
+    `docs/en/plans/2026-10-19-dg-engine-policy-live.md` §1.1). Lần compile đầu tiên đặt `origin = 'generated'` cho
+    profile (cả tag service); từ đó `POST /policies` và `POST /policies/services/{s}/seed-defaults` trả 409
+    ("profile N is compiled by the SP4a permission model …", `crates/egret-policy/src/store.rs:543-561`, `:701`), còn
+    sửa, bật, tắt và xoá một hàng `operator` có sẵn vẫn thành công (`refuse_if_compiler_owned` chỉ từ chối theo tên,
+    `store.rs:619-640`). Vì vậy mọi engine có profile đã compile một grant, rule, clearance hay engine grant đều là
+    `generated`, và Create policy cùng Seed default policies của §6.6 chỉ áp dụng cho profile `manual`.
+14. **`ProfileDto` dùng snake_case** (đo được, Task 1 phát hiện 2): `GET /policies/services` trả `policy_version`,
+    `policy_count`, `tag_service`, `origin` (không có `rename_all`, `admin/mod.rs:437-461`). Các trường thêm của Q1 theo
+    đúng kiểu viết đó: `ProfileDto.policy_counts {compiler, infra, operator}`; `ProfileEngine.origin`, `.type`.
+15. **Explain capability trả Denied ghi policy là `""`, không phải null** (đo được, M7): `policyName: ""`,
+    `decision.policy_name: ""`, `reason: "no_policy_matched"`. Hộp thoại Check coi `""` là không có policy quyết định.
 
 **Đúng như đã nêu** (đã kiểm): route governance ở `frontend/src/App.tsx:615-623` (policies `:615-621`,
 classifications `:622-623`); `GOVERNANCE_GROUPS` ở `frontend/src/components/layout/Sidebar.tsx:90-129`, nhóm Policies ở
@@ -374,7 +386,9 @@ them, does not check overlaps with grants, and Data and People pages will mark t
 permissions or grants on Data." Bên dưới: các policy viết tay (tên → editor, loại, resource, enabled), "Create policy"
 (menu loại Access/Masking/Row filter, và By tag khi profile có tag service; `policy:create`), và **Seed default
 policies** (chỉ profile Trino, `policy:seed`) với "Adds egret's default Trino set (group `admin`: all access). Existing
-policies are not changed." Editor (`PolicyEditorPage`, chuyển sang `engines/PolicyEditorPage.tsx`, hành vi không đổi)
+policies are not changed." Create policy và Seed default policies chỉ được đưa ra trên profile `manual` (tiền đề
+13); trên profile `generated` tab thay vào đó nói: "egret compiles this profile, so new hand-written policies are
+refused. Existing ones can still be edited, enabled, disabled and deleted." Editor (`PolicyEditorPage`, chuyển sang `engines/PolicyEditorPage.tsx`, hành vi không đổi)
 lấy `service` từ route cha và dựng link quay lại cùng điều hướng sau khi lưu về tab Advanced.
 
 ## 7. People: Engine permissions trên trang principal (EP4, EP20)

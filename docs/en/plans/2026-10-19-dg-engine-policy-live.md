@@ -56,3 +56,104 @@ observing.
 **Stop rules (plan Task 1).** If M1 shows compiler rows outside premise 5's shapes (other than the MV deny), or M3
 shows the two catalog lists differ: record it and tell the controller before Tasks 9/10. If M6 cannot exercise
 impersonation on an engine, Task 17's prediction for that engine becomes "not provable live".
+
+### 1.1 Result (read this first)
+
+**Not blocked.** Neither stop rule fired: every compiler row parses as premise 5 says and its uuid exists (M1), and
+the grant dialog's catalog list equals the server's (M3). Impersonation was exercised live on both engines (M6), so
+Task 17 can prove it on each. Three findings change what the frontend tasks must do:
+
+1. **A compiled profile refuses NEW hand-written policies (new premise 13).** The first compile flips a profile's
+   `origin` to `generated` (tag services too), and from then on `POST /policies` and `POST
+   /policies/services/{s}/seed-defaults` answer 409 "profile N is compiled by the SP4a permission model — edit its
+   grants and rules instead of writing a policy directly …" (`egret-policy/src/store.rs:543-561`, `:701`). Existing
+   hand-written rows stay editable: `PUT /policies/{id}/enabled` on an `operator` row of a generated profile answered
+   204 (`refuse_if_compiler_owned` refuses by name only, `store.rs:619-640`). So the Advanced tab's **Create policy**
+   and **Seed default policies** can succeed only on a `manual` profile (an unbound or never-compiled one); every bound
+   engine reaching a catalog with a grant, rule or engine grant is `generated`. No user decision changes (EP2/EP9 keep
+   today's permissions and today's server behaviour), but Task 14 must gate both controls on
+   `ProfileDto.origin === "manual"` and say why otherwise; recorded in the spec as premise 13.
+2. **`ProfileDto` is snake_case.** `GET /policies/services` returns `policy_version`, `policy_count`, `tag_service`,
+   `origin` (no `rename_all`, `admin/mod.rs:437-461`); the plan's "camelCase as the DTO already is" (Task 4) is wrong.
+   Q1's additive fields must follow the DTO's own casing (`policy_counts {compiler, infra, operator}`, and
+   `origin`/`type` on `ProfileEngine`) or the generated type mixes two casings in one object.
+3. **A Denied explain names no policy with an empty string**, not null: `policyName: ""`, `decision.policy_name: ""`,
+   `reason: "no_policy_matched"`. The Check dialog must treat `""` as "no deciding policy".
+
+Smaller: Trino's refusal reads "Access Denied: Principal ua cannot become user ub" (predicted "User ua cannot
+impersonate user ub"); a catalog-level Trino capability is answered `undecidable` / `tags_unresolved` with
+`tagResolution: declined` once the tag service holds a policy, as the spec says.
+
+### 1.2 Stack and deviations
+
+- **Image** `egret-backend:dgep-1`, built from a `git archive` of `7875cb95` (the predictions commit; no code change
+  since `3731f0ce`), not from the worktree, which other agents were editing. Warm release build, 25 min (parallel
+  builds). Free disk at its lowest: 153 GiB.
+- **DB and containers.** DB `egret_dgep_live` in `dgep-pg` (attached to `dgep-net` for the run): `migrate`, `init`,
+  `serve`; log `kubernetes unavailable; engine provisioning disabled`. On `dgep-net`: `dgep-egret` (host
+  127.0.0.1:18497), `dgep-rustfs` (`rustfs/rustfs:1.0.1`), `dgep-trino` (Trino `db58cc93…` = 483, host
+  `dgtr-coordinator-6d5f7c9b8-ab1cd`, JWT + TLS with a fresh self-signed leaf, 127.0.0.1:18943), `dgep-sr` (allin1
+  `5cbf09c4…` = 4.1.6-6862092, `access_control = ranger`, 127.0.0.1:19497). Ranger poll 5000 ms on both.
+- **Profiles through the API:** `dgtr-tag` (1), `dgtr` (2, `tagService = dgtr-tag`), `dgsr` (3).
+- **DEV-1 (SQL): engine rows** `dgtr` (spec pins Trino 483 by digest, `delegationMode = jwt`, `auth.jwt = {}`,
+  `coordinator_cert` = the leaf) → 2 and `dgsr` (spec pins `starrocks/fe-ubuntu:4.1.6@sha256:d07a…`) → 3, both
+  `provisioned`, `running`. A restart then seeded the per-user baseline (`seeded=1 failed=0`).
+- **DEV-2 (SQL): attachments** `dgtr` and `dgsr` → `ice` (`applied`); `srcat` (tpch, API) → `dgsr` only, for M3.
+  Catalog `ice` itself came from `POST /warehouses`; `lonely` (tpch, API) is attached to nothing.
+- **DEV-3: the warehouse role's grant.** `POST /roles/{id}/grants` with privilege `CATALOG_MANAGE_CONTENT` was
+  accepted (201) but the catalog RBAC knows only `write`/`manage` for writes; the row was set to `manage` by SQL.
+  (`"privilege": "manage"` through the API is the clean way; the stack script says so.)
+- **DEV-4 (SQL): `origin` flipped to `manual` around the hand-written creates** (finding 1): the access, masking and
+  row-filter policies on `dgtr`, the by-tag policy in `dgtr-tag` and an access policy on `dgsr` were written through
+  `POST /policies` with the profiles briefly `manual`, then set back to `generated`. Two hand-written access policies
+  giving `admin` DDL on `ice` were created before the first compile, to create `ice.s.t` through Trino.
+- **DEV-5 (seeding).** The by-tag mask on tag `PII` was refused 409 `rule_overlap` with the compiled tag rule
+  `dgep-pii-mask`; it was written on a second tag `INTERNAL` instead. `seed-defaults` on `dgtr` answered
+  `{"created":0}` (the profile already had policies), so no `all - …` set exists; the `infra` rows are the delegator
+  baseline.
+- **Identity.** Trino was queried directly with JWTs signed by egret's machine-IdP key (from the throwaway DB),
+  claims as `engine_claims`; StarRocks as same-named users created by `root` without a password.
+- **Seeds:** data grant `bce3aa23` (allow read `ice.s.t` to `ua`; the warehouse also produced workspace-assignment
+  grant `aa74e181`), path mask rule `1c1e192b` (`ice.s.t.country`), tag mask rule `c0eddc87` (`pii`), tag `pii`
+  (`f7acd352`) on `ice.s.t.email` with clearance role `dgep_cleared` (user `ur`), eight engine grants (every
+  capability; grantee `ua`, impersonation target `ub`). Every compile reported `skipped: []`.
+
+### 1.3 Every cell
+
+| id | prediction | observed | verdict |
+|---|---|---|---|
+| M1a | every compiler row parses | 20 rows: `perm-grant-<uuid>` ×4, `perm-rule-<uuid>` ×3 (dgtr, dgsr, dgtr-tag) and `perm-rule-<uuid>-ice.s.t.email` (dgsr), `perm-clearance-<tag>` (dgtr-tag), `perm-clearance-<tag>-ice.s.t.email` and `perm-clearance-<tag>-mask-ice.s.t.email` (dgsr), `perm-clearance-mv` (dgsr), `perm-engine-<uuid>` ×8 | as predicted |
+| M1b | uuids exist | grant 4/4, rule 4/4, clearance (tags) 3/3, engine 8/8 | as predicted |
+| M1c | clearance location | Trino's in `dgtr-tag`; StarRocks' in `dgsr`, one access deny and one clearance mask per tagged column | as predicted |
+| M1d | no mismatch | 0 prefixed rows not `compiler`; 0 `compiler` rows without a prefix | as predicted |
+| M2 | valueKinds | Trino {catalog, identifier, username}; StarRocks {fixed, function_signature, username}; `fixed` only `starrocks.manage_blacklist` (`system`) | as predicted |
+| M3 | lists equal | governance catalogs: `ice` [dgsr, dgtr], `srcat` [dgsr], `lonely` []; reached by `dgtr` = {ice}. 400s: "engine dgtr does not reach catalog \"lonely\"; it reaches: ice" and the same for `srcat` | as predicted (equal) |
+| M4a | managed_by on dgtr | `compiler`, `infra`, `operator` | as predicted |
+| M4b | policy_type values | only `access`, `masking`, `rowfilter` in all three lists; tag-service rows typed by kind | as predicted |
+| M4c | compiled clearances | `perm-clearance-<tag>` in `?service=dgtr-tag`; `…-ice.s.t.email` (access) and `…-mask-ice.s.t.email` (masking) in `?service=dgsr` | as predicted |
+| M5a | engines[] fields | `{id, name, status}`; keys snake_case | as predicted (finding 2) |
+| M5b | tag service row | `type: "tag"`, `engines: []`, `tag_service: null`, `origin: "generated"` | as predicted |
+| M5c | engines as policy:read-only | `uc` (role `policy:read` only): `GET /control-plane/engines` 403; `GET /policies/services` 200 | as predicted |
+| M6a | Trino refused | `PERMISSION_DENIED` "Access Denied: Principal ua cannot become user ub" (and for `uc`) | wording wrong, outcome right |
+| M6b | Trino after grant | 15 s after the grant: `ua` as `ub` → `OK [["ub"]]`; `uc` as `ub` still refused | as predicted |
+| M6c | StarRocks refused | `ERROR 5204 (42000): Access denied; you need (at least one of) the IMPERSONATE privilege(s) on USER ub for this operation.` | as predicted |
+| M6d | StarRocks after grant | `ua`: `'ub'@'%'`; `uc`: still ERROR 5204 | as predicted |
+| M7a | Trino Undecidable | `undecidable`, why `policy_construct` of `egret-user-impersonate-self`, `resource_value_expression_marker` `trinouser` = `{USER}`; the same for `uc` | as predicted |
+| M7b | StarRocks | `ua`: `allowed`, `policy_name perm-engine-bbf084b6…`, attribution `{kind: engine_grant, engine_grant_id}`; `uc`: `denied`, `reason no_policy_matched`, `policyName ""` | as predicted (finding 3) |
+| extra | generated profile writes | new policy and seed-defaults 409 on all three profiles; enable toggle of an operator row 204 | finding 1 |
+
+**Recipes for Task 17** (the stack script below rebuilds the stack):
+- Trino: `python3 tq.py ua ub "SELECT current_user"` — a JWT (RS256, egret's machine-IdP key, `preferred_username =
+  ua`, `aud = engine`) as `Authorization: Bearer`, plus `X-Trino-User: ub`, to `https://localhost:18943/v1/statement`.
+- StarRocks: `docker exec dgep-sr mysql -h127.0.0.1 -P9030 -uua -N -e "EXECUTE AS ub WITH NO REVERT; SELECT
+  current_user();"` (users created by `root` with no password).
+- Stack: scratchpad `dgep1/dgep-stack.sh` (`up <tag>`, `sr`, `trino`, `down`, with the manual seeding order as
+  comments), `dgep1/dgep-build.sh <commit> <tag>` (builds from a `git archive`, disk watchdog at 20 GiB), `dgep1/api.sh`,
+  `dgep1/tq.py`.
+
+### 1.4 Left behind
+
+Nothing of the run: containers `dgep-egret`, `dgep-trino`, `dgep-sr`, `dgep-rustfs`; network `dgep-net` (`dgep-pg`
+disconnected first); DB `egret_dgep_live`; image `egret-backend:dgep-1`; the exported source tree, signing key,
+catalog credential, secrets, env file, TLS key/keystore and cookie jars are gone. Kept in the scratchpad: the scripts,
+Trino/StarRocks configs and the self-signed certificate (public). `dgep-pg` and `dgep-valkey` stay for the package.

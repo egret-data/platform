@@ -76,6 +76,18 @@ The brief's survey was checked. Statements that were wrong or incomplete are lis
 12. **The ledger is per profile, not per engine.** Its key is `(service_id, plugin_id, kind)`
     (`migrations/0186_plugin_downloads.sql`). On a legacy shared profile the tab cannot say which engine a row came
     from; it says so (O13 of the Overview kept per-engine attribution out).
+13. **A compiled profile refuses new hand-written policies** (measured, Task 1 finding 1,
+    `docs/en/plans/2026-10-19-dg-engine-policy-live.md` §1.1). A profile's first compile sets `origin = 'generated'`
+    (tag services too); from then on `POST /policies` and `POST /policies/services/{s}/seed-defaults` answer 409
+    ("profile N is compiled by the SP4a permission model …", `crates/egret-policy/src/store.rs:543-561`, `:701`), while
+    editing, enabling, disabling and deleting an existing `operator` row still succeed (`refuse_if_compiler_owned`
+    refuses by name only, `store.rs:619-640`). Every engine whose profile has compiled a grant, rule, clearance or engine
+    grant is therefore `generated`, and §6.6's Create policy and Seed default policies apply to `manual` profiles only.
+14. **`ProfileDto` is snake_case** (measured, Task 1 finding 2): `GET /policies/services` returns `policy_version`,
+    `policy_count`, `tag_service`, `origin` (no `rename_all`, `admin/mod.rs:437-461`). Q1's additive fields follow
+    that casing: `ProfileDto.policy_counts {compiler, infra, operator}`; `ProfileEngine.origin`, `.type`.
+15. **A Denied capability explain names no policy as `""`, not null** (measured, M7): `policyName: ""`,
+    `decision.policy_name: ""`, `reason: "no_policy_matched"`. The Check dialog treats `""` as no deciding policy.
 
 **True as stated** (checked): governance routes at `frontend/src/App.tsx:615-623` (policies `:615-621`,
 classifications `:622-623`); `GOVERNANCE_GROUPS` at `frontend/src/components/layout/Sidebar.tsx:90-129`, the Policies
@@ -374,7 +386,9 @@ them, does not check overlaps with grants, and Data and People pages will mark t
 permissions or grants on Data." Below: the hand-written policies (name → editor, type, resource, enabled), "Create
 policy" (kind menu Access/Masking/Row filter, and By tag when the profile has a tag service; `policy:create`), and
 **Seed default policies** (Trino profiles only, `policy:seed`) with "Adds egret's default Trino set (group `admin`:
-all access). Existing policies are not changed." The editor (`PolicyEditorPage`, moved to
+all access). Existing policies are not changed." Both Create policy and Seed default policies are offered only on a `manual` profile
+(premise 13); on a `generated` profile the tab says instead: "egret compiles this profile, so new hand-written policies
+are refused. Existing ones can still be edited, enabled, disabled and deleted." The editor (`PolicyEditorPage`, moved to
 `engines/PolicyEditorPage.tsx`, behaviour unchanged) takes `service` from its parent route and builds its back link and
 its after-save navigation to the Advanced tab.
 
