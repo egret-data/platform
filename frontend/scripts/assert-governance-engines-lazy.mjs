@@ -45,6 +45,10 @@ const MARKERS = [
   ["src/routes/governance/engines/tabs/CheckCapabilityDialog.tsx", "egret cannot decide impersonation on this engine"],
   // The value controls' fixed-key text.
   ["src/routes/governance/engines/tabs/capabilityValues.tsx", "Applies to all (*)"],
+  // What a compiled policy's source is called (spec §6.2).
+  ["src/routes/governance/engines/compiledSource.ts", "Materialized-view deny"],
+  // The Policies tab's compiled-row sentence (spec §6.2).
+  ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
 ];
 
 const entry = entryChunkName(DIST);
