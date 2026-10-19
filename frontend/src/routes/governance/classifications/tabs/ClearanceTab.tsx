@@ -26,6 +26,10 @@ export const LIST_NEEDS: Record<"role" | "group", string> = {
   group: "Groups are listed with the group:read permission, which this account does not have.",
 };
 
+/** Required groups are stored by id; without the group list they can only be shown by id, and the tab says why. */
+export const GROUPS_BY_ID =
+  "Groups are listed with the group:read permission, which this account does not have, so required groups are shown by id.";
+
 const refused = (e: unknown) => e instanceof ApiError && e.status === 403;
 
 function Warning({ children }: { children: React.ReactNode }) {
@@ -189,6 +193,9 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
             narrowed or untagged back under the limit. Profiles that see fewer are unaffected.
           </p>
         </>
+      ) : null}
+      {requiredGroups.length > 0 && refused(groupsQ.error) ? (
+        <p className="text-sm text-muted-foreground">{GROUPS_BY_ID}</p>
       ) : null}
       <ClearanceTable
         availableRoles={allRoles.filter((r) => !requiredRoles.includes(r.name)).map((r) => ({ value: r.name, label: r.name }))}

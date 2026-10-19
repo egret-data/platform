@@ -155,6 +155,23 @@ describe("Clearance tab: the editor (ported from TagDetail)", () => {
     expect(served.asked).not.toContain("GET /groups");
   });
 
+  it("a reader refused the group list sees required groups by id with the permission sentence (D1 style)", async () => {
+    const served = open(pii({ required_groups: ["0b6c1f9e-group-id"] }), TAG_READER, {
+      "/groups": fail(403, "forbidden: group:read"),
+    });
+    const t = await table();
+    await waitFor(() => expect(served.asked).toContain("GET /groups"));
+    expect(within(t).getByText("0b6c1f9e-group-id")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Groups are listed with the group:read permission, which this account does not have, so required groups are shown by id.",
+        {},
+        T,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+  });
+
   it("a steward refused the role list is told which permission lists roles, not 'No roles found.' (live check D1)", async () => {
     open(pii(), STEWARD, { "/access/roles": fail(403, "forbidden: role:read"), "/groups": fail(403, "forbidden: group:read") });
     await table();
