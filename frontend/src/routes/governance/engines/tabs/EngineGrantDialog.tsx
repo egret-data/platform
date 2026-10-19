@@ -85,6 +85,7 @@ export function EngineGrantDialog({
   capabilities,
   existing,
   onSkipped,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -95,10 +96,12 @@ export function EngineGrantDialog({
   capabilities: CapabilityView[];
   existing?: EngineGrantView | null;
   onSkipped: (reason: string | null) => void;
+  /** Where focus goes when the dialog closes (it has no trigger of its own). */
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto" onCloseAutoFocus={onCloseAutoFocus}>
         {open ? (
           <GrantForm
             engine={engine}

@@ -84,6 +84,7 @@ export function CheckCapabilityDialog({
   reach,
   grants,
   capabilities,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -91,10 +92,12 @@ export function CheckCapabilityDialog({
   reach: Reach | null;
   grants: EngineGrantsResponse;
   capabilities: CapabilityView[];
+  /** Where focus goes when the dialog closes (it has no trigger of its own). */
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto" onCloseAutoFocus={onCloseAutoFocus}>
         {open ? (
           <CheckForm
             engine={engine}

@@ -170,6 +170,8 @@ describe("Grant dialog: controls per valueKind (spec §6.1)", () => {
     await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Capability" })).toHaveFocus());
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Live check L8: focus returns to the button that opened the dialog, not to the page body.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Grant" })).toHaveFocus());
   });
 
   it("username → a user field; catalog → the catalogs a reached engine has; identifier → an input with its rule", async () => {

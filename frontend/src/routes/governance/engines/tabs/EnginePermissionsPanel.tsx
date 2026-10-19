@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Plus, SearchCheck, TriangleAlert } from "lucide-react";
 import type { EngineGrantView } from "@/api/generated/model";
 import { usePermListEngineCapabilities } from "@/api/generated/perm/perm";
@@ -27,6 +27,22 @@ export function EnginePermissionsPanel({ ctx }: { ctx: TabContext }) {
   const [dialog, setDialog] = useState<{ mode: "grant" } | { mode: "edit"; grant: EngineGrantView } | null>(null);
   const [checking, setChecking] = useState(false);
   const [skipped, setSkipped] = useState<string | null>(null);
+  // The dialogs open from state, not from a Radix trigger, so Radix has no
+  // element to return focus to on close: remember what held focus when one
+  // opened (the Grant, Check or a row's Edit button) and focus it again.
+  const opener = useRef<HTMLElement | null>(null);
+  const rememberOpener = () => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  };
+  const returnFocus = (event: Event) => {
+    const element = opener.current?.isConnected ? opener.current : null;
+    opener.current = null;
+    if (element) {
+      event.preventDefault();
+      element.focus();
+    }
+  };
 
   const engine = ctx.engine;
   const grants = ctx.grants;
@@ -39,12 +55,18 @@ export function EnginePermissionsPanel({ ctx }: { ctx: TabContext }) {
   const toolbar = ready ? (
     <div className="flex flex-wrap items-center gap-2">
       {canWrite ? (
-        <Button size="sm" onClick={() => setDialog({ mode: "grant" })}>
+        <Button size="sm" onClick={() => {
+            rememberOpener();
+            setDialog({ mode: "grant" });
+          }}>
           <Plus className="mr-1 h-4 w-4" aria-hidden />
           Grant
         </Button>
       ) : null}
-      <Button size="sm" variant="outline" onClick={() => setChecking(true)}>
+      <Button size="sm" variant="outline" onClick={() => {
+          rememberOpener();
+          setChecking(true);
+        }}>
         <SearchCheck className="mr-1 h-4 w-4" aria-hidden />
         Check
       </Button>
@@ -62,7 +84,14 @@ export function EnginePermissionsPanel({ ctx }: { ctx: TabContext }) {
       <EnginePermissionsTab
         ctx={ctx}
         toolbar={toolbar}
-        onEdit={canWrite && ready ? (grant) => setDialog({ mode: "edit", grant }) : undefined}
+        onEdit={
+          canWrite && ready
+            ? (grant) => {
+                rememberOpener();
+                setDialog({ mode: "edit", grant });
+              }
+            : undefined
+        }
       />
       {ready && engine && grants && profile && catalogue ? (
         <>
@@ -77,6 +106,7 @@ export function EnginePermissionsPanel({ ctx }: { ctx: TabContext }) {
             capabilities={catalogue.capabilities}
             existing={dialog?.mode === "edit" ? dialog.grant : null}
             onSkipped={setSkipped}
+            onCloseAutoFocus={returnFocus}
           />
           <CheckCapabilityDialog
             open={checking}
@@ -85,6 +115,7 @@ export function EnginePermissionsPanel({ ctx }: { ctx: TabContext }) {
             reach={ctx.reach}
             grants={grants}
             capabilities={catalogue.capabilities}
+            onCloseAutoFocus={returnFocus}
           />
         </>
       ) : null}

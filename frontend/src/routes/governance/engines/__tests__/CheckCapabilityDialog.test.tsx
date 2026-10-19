@@ -196,5 +196,7 @@ describe("Check (spec §6.1)", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Live check L8: focus returns to the button that opened the dialog, not to the page body.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Check" })).toHaveFocus());
   });
 });
