@@ -28,7 +28,7 @@ const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent?.repl
 function engineAnswers(over: Record<string, Answer> = {}): Record<string, Answer> {
   return {
     [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse()),
-    "/policies/services": ok([profileDto("lake-tr", { engines: [{ id: E_TR, name: "lake-trino", status: "running" }] })]),
+    "/policies/services": ok([profileDto("lake-tr", { engines: [{ id: E_TR, name: "lake-trino", status: "running", origin: "provisioned", type: "trino" }] })]),
     "/policies?service=lake-tr": ok([policy(1, "compiler"), policy(2, "operator")]),
     [`/governance/engines/${E_TR}/plugin`]: ok(pluginResponse()),
     ...over,
@@ -155,7 +155,7 @@ describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
     serve(
       engineAnswers({
         "/policies/services": ok([
-          profileDto("lake-tr", { tag_service: "lake-tag", engines: [{ id: E_TR, name: "lake-trino", status: "running" }] }),
+          profileDto("lake-tr", { tag_service: "lake-tag", engines: [{ id: E_TR, name: "lake-trino", status: "running", origin: "provisioned", type: "trino" }] }),
           profileDto("lake-tag", { type: "tag" }),
         ]),
         "/policies?service=lake-tr": ok([policy(1, "compiler"), policy(3, "infra")]),
@@ -171,7 +171,7 @@ describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
     serve(
       engineAnswers({
         "/policies/services": ok([
-          profileDto("lake-tr", { tag_service: "lake-tag", engines: [{ id: E_TR, name: "lake-trino", status: "running" }] }),
+          profileDto("lake-tr", { tag_service: "lake-tag", engines: [{ id: E_TR, name: "lake-trino", status: "running", origin: "provisioned", type: "trino" }] }),
           profileDto("lake-tag", { type: "tag" }),
         ]),
         "/policies?service=lake-tr": ok([policy(1, "compiler")]),
@@ -232,8 +232,8 @@ describe("the profile page (EP13, EP15)", () => {
       profileDto("loose", { origin: "manual", type: "starrocks" }),
       profileDto("lake-tr", {
         engines: [
-          { id: E_TR, name: "zz-trino", status: "running" },
-          { id: E_OTHER, name: "aa-trino", status: "running" },
+          { id: E_TR, name: "zz-trino", status: "running", origin: "provisioned", type: "trino" },
+          { id: E_OTHER, name: "aa-trino", status: "running", origin: "provisioned", type: "trino" },
         ],
       }),
     ]),

@@ -408,6 +408,7 @@ export * from './policyAdminListPoliciesParams';
 export * from './policyAdminListPrincipalsParams';
 export * from './policyAdminResourceLookupParams';
 export * from './policyAdminUpdatePolicyBody';
+export * from './policyCounts';
 export * from './policySummary';
 export * from './policyWarning';
 export * from './policyWriteWarning';

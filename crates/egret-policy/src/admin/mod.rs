@@ -465,6 +465,18 @@ pub struct ProfileDto {
     /// field the editor cannot tell an operator which half they are looking
     /// at, and the first thing they learn is the 409 on save.
     pub origin: String,
+    /// Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
+    /// Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
+    /// (hand-written). `policy_count` stays the profile's own total.
+    pub policy_counts: PolicyCounts,
+}
+
+/// Policies of a profile by `managed_by` (DG #4a Q1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct PolicyCounts {
+    pub compiler: i64,
+    pub infra: i64,
+    pub operator: i64,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -472,6 +484,11 @@ pub struct ProfileEngine {
     pub id: uuid::Uuid,
     pub name: String,
     pub status: String,
+    /// `provisioned` or `external` (DG #4a Q1), so a `policy:read` reader
+    /// without `engine:read` can tell them apart.
+    pub origin: String,
+    /// The engine type: `trino`, `starrocks`, … (DG #4a Q1).
+    pub r#type: String,
 }
 
 pub fn router() -> Router<PolicyAdminState> {
@@ -751,6 +768,7 @@ async fn list_profiles(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let engines = st.engines.list_engine_bindings().await?;
     let counts = st.store.policy_counts().await?;
+    let by_owner = st.store.policy_counts_by_owner().await?;
     let services = st.store.list_services().await?;
     // **SP4d debt Task 9 fix round: the `<name>_tag` CONVENTION FALLBACK IS
     // GONE from here, and this reverses a pinned behaviour deliberately.**
@@ -786,6 +804,8 @@ async fn list_profiles(
         .store
         .usable_tag_services(&services.iter().map(|s| s.id).collect::<Vec<_>>())
         .await?;
+    let ids_by_name: std::collections::HashMap<String, i64> =
+        services.iter().map(|s| (s.name.clone(), s.id)).collect();
     let profiles = services
         .into_iter()
         .map(|s| {
@@ -797,6 +817,18 @@ async fn list_profiles(
             } else {
                 None
             };
+            // The profile plus its tag service, whose id `services` holds.
+            let tag_id = tag_service
+                .as_ref()
+                .and_then(|t| ids_by_name.get(t.as_str()).copied());
+            let mut policy_counts = PolicyCounts::default();
+            for id in std::iter::once(s.id).chain(tag_id) {
+                if let Some((c, i, o)) = by_owner.get(&id) {
+                    policy_counts.compiler += c;
+                    policy_counts.infra += i;
+                    policy_counts.operator += o;
+                }
+            }
             ProfileDto {
                 engines: engines
                     .iter()
@@ -805,9 +837,12 @@ async fn list_profiles(
                         id: e.id,
                         name: e.name.clone(),
                         status: e.status.clone(),
+                        origin: e.origin.clone(),
+                        r#type: e.r#type.clone(),
                     })
                     .collect(),
                 policy_count: counts.get(&s.id).copied().unwrap_or(0),
+                policy_counts,
                 id: s.id,
                 name: s.name,
                 r#type: s.r#type,
@@ -2141,6 +2176,7 @@ async fn set_policy_enabled(
         PolicySummary,
         ProfileDto,
         ProfileEngine,
+        PolicyCounts,
         CreateProfileBody,
         CreatedProfile,
         ConfigFile,

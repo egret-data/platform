@@ -47430,6 +47430,29 @@
           }
         }
       },
+      "PolicyCounts": {
+        "type": "object",
+        "description": "Policies of a profile by `managed_by` (DG #4a Q1).",
+        "required": [
+          "compiler",
+          "infra",
+          "operator"
+        ],
+        "properties": {
+          "compiler": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "infra": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "operator": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "PolicySummary": {
         "type": "object",
         "description": "Flattened, UI-facing view of one stored Ranger policy.",
@@ -47759,7 +47782,8 @@
           "policy_version",
           "policy_count",
           "engines",
-          "origin"
+          "origin",
+          "policy_counts"
         ],
         "properties": {
           "id": {
@@ -47796,6 +47820,10 @@
           "origin": {
             "type": "string",
             "description": "`\"manual\"` (hand-authored, fully editable) or `\"generated\"` (compiled\nby the SP4a permission model from its grants and rules).\n\n**Exposed because D4's requirement is that the profile says so BEFORE\nan edit is overwritten, not after** (whole-branch review, Important 4).\nThe raw-JSON policy editor still ships in SP4a and is still the only\npolicy UI, and a `'generated'` profile is now only PARTLY frozen — its\n`perm-*` policies are compiler-owned and refuse an edit with a 409,\nwhile foreign policies in the same profile stay editable. Without this\nfield the editor cannot tell an operator which half they are looking\nat, and the first thing they learn is the 409 on save."
+          },
+          "policy_counts": {
+            "$ref": "#/components/schemas/PolicyCounts",
+            "description": "Policies by owner, the profile's own plus its `tag_service`'s (DG #4a\nQ1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`\n(hand-written). `policy_count` stays the profile's own total."
           }
         }
       },
@@ -47804,7 +47832,9 @@
         "required": [
           "id",
           "name",
-          "status"
+          "status",
+          "origin",
+          "type"
         ],
         "properties": {
           "id": {
@@ -47816,6 +47846,14 @@
           },
           "status": {
             "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` or `external` (DG #4a Q1), so a `policy:read` reader\nwithout `engine:read` can tell them apart."
+          },
+          "type": {
+            "type": "string",
+            "description": "The engine type: `trino`, `starrocks`, … (DG #4a Q1)."
           }
         }
       },

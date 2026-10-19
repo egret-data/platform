@@ -76,10 +76,9 @@ export interface PolicySummary {
 
 // Re-export generated DTOs under the app's existing names.
 export type { CreatedPolicyId, CreatedProfile, ProfileEngine };
-// The backend also returns `tag_service` (the profile's `<name>_tag` policy
-// service, when it exists); the field ships in the JSON but the generated
-// ProfileDto doesn't declare it yet, so widen it here.
-export type Profile = ProfileDto & { tag_service?: string | null };
+// The generated ProfileDto declares `tag_service` (and, since DG #4a Q1,
+// `policy_counts` and each engine's `origin` and `type`).
+export type Profile = ProfileDto;
 
 export async function listProfiles(): Promise<Profile[]> {
   return (await policyAdminListProfiles()).data as Profile[];

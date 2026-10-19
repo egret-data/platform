@@ -10,4 +10,11 @@ export interface ProfileEngine {
   id: string;
   name: string;
   status: string;
+  /**
+     * `provisioned` or `external` (DG #4a Q1), so a `policy:read` reader
+     * without `engine:read` can tell them apart.
+     */
+  origin: string;
+  /** The engine type: `trino`, `starrocks`, … (DG #4a Q1). */
+  type: string;
 }
