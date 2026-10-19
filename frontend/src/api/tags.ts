@@ -36,6 +36,15 @@ export interface Tag {
    * one of these groups. Empty = not group-gated.
    */
   required_groups: string[];
+  /**
+   * Tables of egret catalogs carrying the tag on the table itself (#4b, spec
+   * §4.4). Sent by `GET /control-plane/tags` (zero in a create or update
+   * answer); absent from the workspace object-tag routes, which list BI tags.
+   * Hand-written here because the generated `TagDto` is egret-bi's schema.
+   */
+  catalog_tables?: number;
+  /** Tagged columns of egret catalogs; sent and absent as `catalog_tables`. */
+  catalog_columns?: number;
 }
 
 export const tagsQueryKey = ["tags"] as const;

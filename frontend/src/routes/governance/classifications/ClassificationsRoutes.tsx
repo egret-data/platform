@@ -1,15 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import ClassificationsIndex from "@/routes/governance/classifications/ClassificationsIndex";
 import { CLASSIFICATIONS_BASE } from "@/routes/governance/classifications/tagUrl";
-
-/** Task 9 stub: replaced by the index in Task 10. */
-function ClassificationsIndex() {
-  return (
-    <div>
-      <h1 className="text-2xl font-semibold">Classifications</h1>
-      <p className="text-sm text-muted-foreground">The tag and clearance catalogue.</p>
-    </div>
-  );
-}
 
 /** Task 9 stub: replaced by the tag page in Task 11. */
 function TagPage() {

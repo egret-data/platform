@@ -14,7 +14,11 @@
  * present in some other chunk (a marker found nowhere is stale and would let
  * this pass on any bundle). `tagUrl.ts` is statically imported on purpose
  * (Engine & policy and People link into the area through it) and is not
- * guarded.
+ * guarded. `ClassificationsRoutes.tsx` (the route table) holds no literal of
+ * its own; it imports every page, so it cannot reach the entry chunk without
+ * their markers going with it. `tagParts.tsx` (swatch, counts, the clearance
+ * cell) holds only words other modules also spell; only guarded modules
+ * import it.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -23,8 +27,8 @@ import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 const DIST = "dist";
 const ASSETS = join(DIST, "assets");
 const MARKERS = [
-  // The index stub's line (Task 9; the index module takes over in Task 10).
-  ["src/routes/governance/classifications/ClassificationsRoutes.tsx", "The tag and clearance catalogue."],
+  // The index's empty state (spec §3).
+  ["src/routes/governance/classifications/ClassificationsIndex.tsx", "No classification yet."],
 ];
 
 const entry = entryChunkName(DIST);
