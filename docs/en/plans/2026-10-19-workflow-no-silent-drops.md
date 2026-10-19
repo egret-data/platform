@@ -716,7 +716,7 @@ fn no_message_names_a_w_package_or_a_later_package() {
 
 ---
 
-### Task 8b (only if the controller answers spec Q1 with (b)): a golden `refused` entry also matches a save-time refusal
+### Task 8b (in scope: the user answered spec Q1 with (b) on 2026-10-19): a golden `refused` entry also matches a save-time refusal
 
 **Files:** `tests/executor.rs` (`egret_side`, `executor_matches_golden`, `REFUSAL_GROUPS`, `STILL_OVER_ACCEPTED`, `UNATTRIBUTED`), `oracle-exec/driver.rs` (`publish_corpus`'s return is kept in `Side`), `oracle-exec/baseline.txt` (delete `invalids/invalid-property`), `oracle-exec/README.md`.
 
