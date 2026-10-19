@@ -81,7 +81,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
-use crate::grants::{resource_level_names, validate_grant_shape};
+use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
@@ -2284,7 +2284,7 @@ pub(crate) async fn explain_users(
         // handed, and the tag block's def (which the tag-policy tier check also
         // consults) travels inside the same envelope.
         let service_def = ServiceDef::parse(&artifact.service_def);
-        let resource = request_resource(engine, &catalog_name, target);
+        let resource = crate::handwritten::object_request(engine, &catalog_name, target);
         // `EngineConfig::without_super_users()` records a fact about egret's
         // own provisioning, and an unknown super-user list would make every
         // decision unknowable (`isSuperUser` is checked before any policy and
@@ -2459,7 +2459,7 @@ pub(crate) async fn explain_users(
 /// # 1. A level the target skips
 ///
 /// **Refused, and it has to be refused rather than answered** (whole-branch
-/// review, I-4 — fail-open). `request_resource` stops at the first absent level,
+/// review, I-4 — fail-open). `handwritten::object_request` stops at the first absent level,
 /// so `{schema: None, table: Some(_)}` builds the resource `{catalog}` alone: the
 /// caller asks about a table and the evaluator answers about its catalog. That is
 /// not a harmless approximation — a catalog-wide grant matches `{catalog}` as
@@ -2502,8 +2502,8 @@ pub(crate) async fn explain_users(
 ///
 ///   ⚠ **That comment used to bound the shape by authorship**: *"an empty
 ///   REQUEST level is not something egret sends — `perm_compile`'s
-///   `request_resource` builds concrete values from the target"*. It was wrong,
-///   and this is the function that makes it true: `request_resource` copies
+///   `handwritten::object_request` builds concrete values from the target"*. It was wrong,
+///   and this is the function that makes it true: `handwritten::object_request` copies
 ///   `target.schema`/`table`/`column` through verbatim, so until this guard
 ///   existed any `policy:read` caller sent `""` by putting it in the body.
 ///   `ScopePicker` maps its own empty input to `undefined`, which is why nothing
@@ -2943,49 +2943,6 @@ pub(crate) fn ranger_engine(engine: EngineType) -> egret_ranger_eval::eval::Engi
     }
 }
 
-/// The resource ONE access request names, in the levels the target engine's
-/// service-def declares (`resource_level_names` — Trino's middle level is
-/// `schema`, StarRocks' is `database`).
-///
-/// **A level the target does not name is ABSENT, not `*`.** That is what an
-/// engine's own request looks like: the plugin names exactly the levels the
-/// query touched. It is also not the same thing as the compiler's `*`, which
-/// is a POLICY value meaning "every child at this level" — a policy naming
-/// `catalog/*/*/*` against a request naming only `catalog` is Ranger's
-/// `SELF_AND_ALL_DESCENDANTS`, which matches; a request padded with `*` up to
-/// the leaf would be asking about a different resource.
-fn request_resource(engine: EngineType, catalog_name: &str, target: &Scope) -> RequestResource {
-    let names = resource_level_names(engine);
-    let mut resource = RequestResource::new();
-    resource.insert(names[0], catalog_name);
-    for (name, value) in [
-        (names[1], target.schema.as_deref()),
-        (names[2], target.table.as_deref()),
-        (names[3], target.column.as_deref()),
-    ] {
-        match value {
-            Some(v) => resource.insert(name, v),
-            // Stopping at the first absent level is the shape an engine
-            // request has, and it is only correct because a gap below a named
-            // level cannot reach here: `explain` refuses
-            // `{schema: None, table: Some(_)}` with a 400 at the top of the
-            // handler, and `ScopePicker` narrows progressively so the page
-            // never sends one.
-            //
-            // **The guard is the handler's, not `validate_grant_shape`'s.**
-            // This comment used to cite that function, and the citation was
-            // wrong in a way that mattered: `validate_grant_shape` validates
-            // PRINCIPALS only, and the real level-skip rule is a CHECK on the
-            // stored `perm.grants`/`perm.rules` rows
-            // (`migrations/0154_perm_model.sql`), which an unstored request
-            // body never passes through. Breaking here under a gap answers
-            // about the nearest named ANCESTOR — fail-open, see the handler.
-            None => break,
-        }
-    }
-    resource
-}
-
 /// Assemble the policy download `svc`'s plugin would receive, and read it back
 /// through `egret-ranger-eval`'s own reader.
 ///
@@ -3285,7 +3242,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// |---|---|---|
 /// | `target.catalog_id` | **yes** | scopes both reads, and scopes them identically (`a.warehouse_id = c.warehouse_id` for `c.id = $1`), so a row the gate counts is a row the resolver could return |
 /// | `target.schema` / `target.table` — PRESENCE | **yes** | `None` on either ⇒ `Some(empty)`, argued above. `Some("")` is NOT special-cased, and since migration 0177 that needs no gate to be sound: no stored coordinate CAN have an empty `schema_name` or `table_name`, so an empty request value matches nothing and the empty set is the right answer. ⚠ Before 0177 this row rested on the gate having refused a `('', '')` row; it now rests on the `CHECK`, which is a stronger claim about a smaller surface |
-/// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `request_resource` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
+/// | `target.schema` / `target.table` / `target.column` — the VALUES' CASE | **yes, and ruled on since fix round 1** | the resolver folds both sides, so `SALES` against a row stored `sales` resolves. ⚠ This row did not exist, and its absence was the review's Critical: the values reach `handwritten::object_request` verbatim from `ScopePicker`'s free-text inputs, so differing case is what ORDINARY use produces — more reachable than the empty-string class that was gated |
 /// | `target.*` — the VALUES' SYNTAX | **no, and that is a ruling** | a `*` or `?` the OPERATOR types is a request value, and Ranger matches a request value literally: the wildcard lives on the POLICY side of `getMatchType`, never the request side. So a typed `*` names a resource called `*` and resolves nothing, which is correct — and migration 0177 does NOT constrain the request, only what can be stored, so a steward can still type one. The syntax that matters is the STORED side's, and since 0177 the schema refuses it rather than this function detecting it |
 /// | `target.*` — a [`FOLD_DIVERGENT`] character | **yes, since fix round 2** | ⚠ the divergence is a property of the PAIR, not of the stored side: `("ſ", "s")` is measured disagreeing, so an ASCII stored value and an odd REQUEST value are the same fail-open. Checked with the same `fold_divergent` the stored side uses |
 /// | `target.column` | **yes** | `None` ⇒ `""`, which is migration 0081's "the table itself" convention in the REQUEST position, and is the value `resolved_tags_for_resource_via` is documented against |
@@ -4383,7 +4340,7 @@ mod explain_target_tests {
             target(Some("sales"), Some("orders"), None),
             target(Some("sales"), Some("orders"), Some("amount")),
             // Case is NOT normalised and NOT refused: the tag resolver folds both
-            // sides, and `request_resource` hands the value to a matcher whose
+            // sides, and `handwritten::object_request` hands the value to a matcher whose
             // `ignore_case` comes from the service-def. Refusing it here would be
             // a second, divergent opinion about case.
             target(Some("SALES"), Some("Orders"), Some("AMOUNT")),
@@ -4789,7 +4746,7 @@ mod tag_resolution_tests {
     ///
     /// Gating it instead would have been the obvious extra class and it would be
     /// wrong in a way no fail-open test catches: `ScopePicker` renders the three
-    /// levels as free-text inputs and `request_resource` inserts them verbatim, so
+    /// levels as free-text inputs and `handwritten::object_request` inserts them verbatim, so
     /// differing case is what ORDINARY use produces. A steward who typed `SALES`
     /// would get "cannot decide" for a question egret can answer.
     #[tokio::test]
