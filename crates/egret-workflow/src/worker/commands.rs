@@ -2658,9 +2658,13 @@ pub(crate) struct RunLiveness {
 /// * debt D15, **superseded** and kept: no row holds the run's id, but its
 ///   execution is this database's and terminal ([`RunLiveness::superseded`]),
 ///   so a `LoopUntil` iteration renamed it (debt D12). Judged as the row
-///   before, from the EXECUTION's end. Superseded and not kept: left, as
-///   before D15 (a `delete: true` container is removed by its own `release`
-///   or `cancel`, so the sweep never had a rule for one with no row).
+///   before, from the EXECUTION's end.
+/// * superseded and not kept: removed at once, as a terminal run's (PR-2
+///   final review I1). Its own `release` normally removes it, but egret can
+///   die between the commit and the release, and a failed release is only
+///   logged: the sweep is the backstop `run_one` documents, and the rename
+///   (D12) must not take that backstop away. Safe for D15's reason: the
+///   execution is this database's and terminal.
 pub(crate) fn sweep_decision(
     live: &RunLiveness,
     id: uuid::Uuid,
@@ -2668,15 +2672,14 @@ pub(crate) fn sweep_decision(
     retention: Option<std::time::Duration>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    let ended = if live.terminal.contains(&id) {
+    let ended = if live.terminal.contains(&id) || live.superseded.contains_key(&id) {
+        // Debt D15: a superseded iteration's work is judged as a terminal
+        // run's, from its execution's end. Not kept, it goes at once (PR-2
+        // final review I1: its `release` may never have run).
         if !keep {
             return true;
         }
-        live.ended.get(&id)
-    } else if keep {
-        // Debt D15: a superseded iteration's kept work, from its execution's
-        // end. Not kept, a missing run's work is left, as before D15.
-        live.superseded.get(&id)
+        live.ended.get(&id).or_else(|| live.superseded.get(&id))
     } else {
         return false;
     };
@@ -2760,15 +2763,16 @@ pub(crate) fn docker_sweep_action(
 /// database. A container whose run id is absent from *this* database is far
 /// more likely to be another egret's live work than an orphan of ours, so
 /// only a row this database can see as terminal authorises the removal. The
-/// pod sweep now leaves such a pod alone too
+/// pod sweep leaves such a pod alone too
 /// ([`k8s::sweep_orphans`](super::k8s::sweep_orphans)).
 ///
-/// **Debt D15, the one exception:** a KEPT container whose run has no row but
+/// **Debt D15, the one exception:** a container whose run has no row but
 /// whose `egret.io/execution-id` names an execution this database holds as
 /// terminal. Another egret's execution ids are not in this database, so that
 /// row is the authority the paragraph above asks for; the run is a
 /// superseded `LoopUntil` iteration's (debt D12 renamed its row), and the
-/// container gets a kept one's retention from the execution's end.
+/// container is judged as a terminal run's: removed at once when not kept
+/// (PR-2 final review I1), a kept one's retention from the execution's end.
 #[async_trait::async_trait]
 impl OrphanSweep for DockerRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
@@ -3629,10 +3633,11 @@ mod tests {
     /// **Debt D15: a superseded iteration's kept work gets the retention
     /// deadline, measured from its execution's end.** A run with no row whose
     /// execution is terminal ([`RunLiveness::superseded`]) is judged as a
-    /// kept container of a terminal run: kept until `retention` after the
-    /// execution ended, for ever with `None`, and stopped if it still runs. A
-    /// NOT kept one of a missing run is left, as before D15; so is any work
-    /// of a missing run whose execution is unknown or still live.
+    /// container of a terminal run: kept until `retention` after the
+    /// execution ended, for ever with `None`, and stopped if it still runs.
+    /// A NOT kept one is removed at once, as a terminal run's (PR-2 final
+    /// review I1: its `release` may never have run). Any work of a missing
+    /// run whose execution is unknown or still live is left.
     #[test]
     fn a_superseded_runs_kept_work_gets_the_retention_deadline() {
         use chrono::{Duration as D, Utc};
@@ -3660,8 +3665,16 @@ mod tests {
             "retention 0: kept for ever"
         );
         assert!(
-            !sweep_decision(&l, old, false, week, now),
-            "not kept, missing run: left, as before D15"
+            sweep_decision(&l, old, false, week, now),
+            "superseded, not kept: removed at once, as a terminal run's (PR-2 final review I1)"
+        );
+        assert!(
+            sweep_decision(&l, new, false, week, now),
+            "superseded, not kept: removed at once whatever the execution's age"
+        );
+        assert!(
+            !sweep_decision(&l, unknown, false, week, now),
+            "not kept, execution unknown here or still live: never ours"
         );
         assert!(
             !sweep_decision(&l, unknown, true, week, now),
@@ -3677,9 +3690,11 @@ mod tests {
         assert_eq!(act(new, true, false), DockerSweep::Leave);
         assert_eq!(
             act(old, false, true),
-            DockerSweep::Leave,
-            "not kept: as before"
+            DockerSweep::Remove,
+            "not kept, running: removed at once (rm --force), as a terminal run's"
         );
+        assert_eq!(act(new, false, false), DockerSweep::Remove);
+        assert_eq!(act(unknown, false, true), DockerSweep::Leave);
         assert_eq!(act(unknown, true, true), DockerSweep::Leave);
     }
 

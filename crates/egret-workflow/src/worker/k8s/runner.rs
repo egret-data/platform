@@ -1512,11 +1512,13 @@ impl OrphanSweep for KubernetesRunner {
 /// terminal authorises a delete; an unknown run is logged at debug. The cost,
 /// stated: a pod whose execution was deleted while it ran is not swept.
 ///
-/// **Debt D15, the one exception:** a kept pod whose run has no row, but whose
+/// **Debt D15, the one exception:** a pod whose run has no row, but whose
 /// `egret.io/execution-id` names an execution this database holds as
 /// terminal, is a superseded `LoopUntil` iteration's (debt D12 renamed its
-/// row). That execution is this database's, so the pod is too, and it gets a
-/// kept pod's retention from the execution's end ([`sweep_decision`]).
+/// row). That execution is this database's, so the pod is too, and it is
+/// judged as a terminal run's ([`pod_sweep_deletes`]): deleted at once when
+/// not kept (PR-2 final review I1), a kept pod's retention from the
+/// execution's end.
 pub async fn sweep_orphans(
     client: &kube::Client,
     cfg: &PodConfig,
@@ -1564,11 +1566,10 @@ pub async fn sweep_orphans(
     let now = live.now.unwrap_or_else(Utc::now);
     let mut deleted = 0u64;
     for (name, id, keep, _) in candidates {
-        if live.missing.contains(&id) && !live.superseded.contains_key(&id) {
-            tracing::debug!(pod = %name, "orphan sweep: run {id} is unknown to this database; left alone");
-            continue;
-        }
-        if !sweep_decision(&live, id, keep, kept_retention, now) {
+        if !pod_sweep_deletes(&live, id, keep, kept_retention, now) {
+            if live.missing.contains(&id) && !live.superseded.contains_key(&id) {
+                tracing::debug!(pod = %name, "orphan sweep: run {id} is unknown to this database; left alone");
+            }
             continue;
         }
         match pods
@@ -1581,6 +1582,24 @@ pub async fn sweep_orphans(
         }
     }
     Ok(deleted)
+}
+
+/// **Whether [`sweep_orphans`] deletes one pod**: [`sweep_decision`], and
+/// nothing else. A run this database has no row for, and whose execution it
+/// does not hold as terminal, is never deleted; a superseded `LoopUntil`
+/// iteration's pod (debt D15) is judged as a terminal run's -- at once when
+/// not kept, after the retention when kept.
+pub(crate) fn pod_sweep_deletes(
+    live: &crate::worker::commands::RunLiveness,
+    id: uuid::Uuid,
+    keep: bool,
+    retention: Option<Duration>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if live.missing.contains(&id) && !live.superseded.contains_key(&id) {
+        return false;
+    }
+    sweep_decision(live, id, keep, retention, now)
 }
 
 /// How long the upload may go without a byte moving before it is judged
@@ -2058,6 +2077,43 @@ mod tests {
     use k8s_openapi::api::core::v1::{
         ContainerState, ContainerStateTerminated, ContainerStateWaiting, PodStatus,
     };
+
+    /// **Final review I1 (PR-2): the pod sweep's rule.** A terminal run's
+    /// pod and a superseded `LoopUntil` iteration's pod (debt D12 renamed its
+    /// row; its execution is this database's and terminal) are deleted at
+    /// once when not kept, after the retention when kept; a live run's pod,
+    /// and one whose run and execution are unknown here, are never deleted.
+    #[test]
+    fn the_pod_sweep_deletes_a_superseded_iterations_pod_like_a_terminal_runs() {
+        use crate::worker::commands::RunLiveness;
+        use chrono::Duration as D;
+        let now = Utc::now();
+        let (live_run, done, sup_old, sup_new, unknown) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+            uuid::Uuid::from_u128(4),
+            uuid::Uuid::from_u128(5),
+        );
+        let mut l = RunLiveness::default();
+        l.terminal.insert(done);
+        l.ended.insert(done, now - D::minutes(1));
+        l.missing.extend([sup_old, sup_new, unknown]);
+        l.superseded.insert(sup_old, now - D::days(8));
+        l.superseded.insert(sup_new, now - D::minutes(1));
+        let week = Some(Duration::from_secs(7 * 86_400));
+        let del = |id, keep| pod_sweep_deletes(&l, id, keep, week, now);
+        assert!(!del(live_run, false), "a live run's pod stays");
+        assert!(del(done, false), "terminal, not kept: deleted at once");
+        assert!(
+            del(sup_new, false),
+            "superseded, not kept: deleted at once, as a terminal run's"
+        );
+        assert!(!del(sup_new, true), "superseded, kept, 1 minute: stays");
+        assert!(del(sup_old, true), "superseded, kept, 8 days: deleted");
+        assert!(!del(unknown, false), "unknown here: never ours");
+        assert!(!del(unknown, true), "unknown here: never ours");
+    }
 
     #[test]
     fn a_log_line_loses_its_timestamp_and_keeps_its_spaces() {
