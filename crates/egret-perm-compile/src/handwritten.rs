@@ -37,13 +37,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_perm::EngineType;
+use egret_policy::{
+    catalogs_for_service_via, get_service_by_id_via, get_service_def_via, service_id_by_name_via,
+    usable_tag_services_via, PolicyStoreError,
+};
 use egret_ranger_eval::model::{ItemBucket, PolicyItem, RangerPolicy, ResourceLevel, Unmodelled};
 use egret_ranger_eval::resource::{
     MatchType, PreparedPolicyResources, RequestResource, ResourceMapSource,
 };
+use egret_ranger_eval::servicedef::ServiceDef;
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::grants::resource_level_names;
+use crate::trigger::engine_type_for;
 
 /// The Data object a request names: a catalog, and optionally a schema, a
 /// table and a column, narrowing progressively. The same shape explain's
@@ -119,10 +126,10 @@ fn rank(m: MatchType) -> u8 {
     }
 }
 
-fn resource_map<'p>(
-    policy: &'p RangerPolicy,
+fn resource_map(
+    policy: &RangerPolicy,
     source: ResourceMapSource,
-) -> Option<&'p BTreeMap<String, ResourceLevel>> {
+) -> Option<&BTreeMap<String, ResourceLevel>> {
     match source {
         ResourceMapSource::Primary => Some(&policy.resources),
         ResourceMapSource::Additional(i) => policy.additional_resources.get(i),
@@ -390,6 +397,577 @@ pub fn unmodelled_sentences(policy: &RangerPolicy) -> Vec<String> {
         }
     }
     out
+}
+
+// ── The routes' reads (spec §4.2, §4.3, §4.5) ────────────────────────────
+
+/// Why a read could not answer.
+#[derive(Debug, thiserror::Error)]
+pub enum HandWrittenError {
+    /// The catalog, principal or tag does not exist.
+    #[error("not found")]
+    NotFound,
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("database: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("policy store: {0}")]
+    Store(#[from] PolicyStoreError),
+    #[error("{0}")]
+    Internal(String),
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HandWrittenCatalog {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HandWrittenTarget {
+    pub schema: Option<String>,
+    pub table: Option<String>,
+    pub column: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListedState {
+    Listed,
+    NotDetermined,
+}
+
+/// Why route A cannot say which hand-written policies reach the object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotDeterminedReason {
+    /// No engine attaches the catalog.
+    NoEngineAttached,
+    /// The attached engines bind no Trino or StarRocks profile.
+    NoProfile,
+    /// No profile's engines reach the catalog.
+    CatalogNotInProfile,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HandWrittenEngine {
+    pub id: Uuid,
+    pub name: String,
+    pub r#type: String,
+    /// `provisioned` or `external`. External engines are read from the
+    /// database only; nothing is dialled.
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HandWrittenProfile {
+    pub service_id: i64,
+    pub name: String,
+    pub r#type: String,
+    /// The profile's usable tag service, if any.
+    pub tag_service: Option<String>,
+    pub engines: Vec<HandWrittenEngine>,
+}
+
+/// How a policy reaches the object (Q2), or `unknown` when its body cannot be
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchWord {
+    Applies,
+    Part,
+    Parent,
+    Unknown,
+}
+
+/// Where the tag a tag policy matched sits relative to the object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TagOn {
+    /// On the object itself.
+    This,
+    /// On the table of the column asked about.
+    Parent,
+    /// On something below the object (a column of the table, a table of the
+    /// schema, …).
+    Below,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ViaTag {
+    pub name: String,
+    pub on: TagOn,
+    /// The tagged column, when the tag is on a column.
+    pub column: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HandWrittenPolicy {
+    pub id: i64,
+    pub name: String,
+    /// The profile (or tag service) that stores it.
+    pub service: String,
+    pub in_tag_service: bool,
+    /// `access`, `masking` or `rowfilter`.
+    pub policy_type: String,
+    pub r#match: MatchWord,
+    pub through_pattern: bool,
+    pub via_tag: Option<ViaTag>,
+    pub resource_summary: String,
+    /// `policy.authz_policies.enabled`, never the body's `isEnabled`.
+    pub enabled: bool,
+    pub deny_all_else: bool,
+    pub unmodelled: Vec<String>,
+    pub items: Vec<ItemSummary>,
+    /// Set when the body could not be read; `match` is then `unknown`.
+    pub parse_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SeededCount {
+    pub service: String,
+    pub count: i64,
+}
+
+/// Route A's answer.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectHandWritten {
+    pub catalog: HandWrittenCatalog,
+    pub target: HandWrittenTarget,
+    pub state: ListedState,
+    pub reason: Option<NotDeterminedReason>,
+    pub profiles: Vec<HandWrittenProfile>,
+    pub policies: Vec<HandWrittenPolicy>,
+    /// egret-seeded (`infra`) policies that reach the object, counted per
+    /// profile and never listed.
+    pub seeded: Vec<SeededCount>,
+}
+
+/// One `policy.authz_policies` row a route reads.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct PolicyRow {
+    id: i64,
+    name: String,
+    enabled: bool,
+    managed_by: String,
+    policy_jsonb: serde_json::Value,
+}
+
+async fn policy_rows_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<PolicyRow>, HandWrittenError> {
+    Ok(sqlx::query_as::<_, PolicyRow>(
+        "SELECT id, name, enabled, managed_by, policy_jsonb FROM policy.authz_policies \
+          WHERE service_id = $1 AND managed_by IN ('operator', 'infra') ORDER BY name, id",
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Service-defs by type name, parsed once per request.
+#[derive(Default)]
+struct Defs(BTreeMap<String, ServiceDef>);
+
+impl Defs {
+    async fn get(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        r#type: &str,
+    ) -> Result<&ServiceDef, HandWrittenError> {
+        if !self.0.contains_key(r#type) {
+            let row = get_service_def_via(conn, r#type).await?;
+            self.0
+                .insert(r#type.to_string(), ServiceDef::parse(&row.def_jsonb));
+        }
+        Ok(&self.0[r#type])
+    }
+}
+
+fn parse_policy(row: &PolicyRow) -> Result<RangerPolicy, String> {
+    serde_json::from_value::<RangerPolicy>(row.policy_jsonb.clone()).map_err(|e| e.to_string())
+}
+
+fn policy_row(
+    row: &PolicyRow,
+    service: &str,
+    in_tag_service: bool,
+    policy: Result<&RangerPolicy, &str>,
+    matched: MatchWord,
+    through_pattern: bool,
+    via_tag: Option<ViaTag>,
+) -> HandWrittenPolicy {
+    match policy {
+        Ok(p) => HandWrittenPolicy {
+            id: row.id,
+            name: row.name.clone(),
+            service: service.to_string(),
+            in_tag_service,
+            policy_type: policy_type_word(p.policy_type).to_string(),
+            r#match: matched,
+            through_pattern,
+            via_tag,
+            resource_summary: resource_summary(p),
+            enabled: row.enabled,
+            deny_all_else: p.is_deny_all_else,
+            unmodelled: unmodelled_sentences(p),
+            items: item_summary(p),
+            parse_error: None,
+        },
+        Err(e) => HandWrittenPolicy {
+            id: row.id,
+            name: row.name.clone(),
+            service: service.to_string(),
+            in_tag_service,
+            policy_type: row
+                .policy_jsonb
+                .get("policyType")
+                .and_then(|v| v.as_i64())
+                .map(|c| policy_type_word(c as i32))
+                .unwrap_or("access")
+                .to_string(),
+            r#match: MatchWord::Unknown,
+            through_pattern: false,
+            via_tag: None,
+            resource_summary: String::new(),
+            enabled: row.enabled,
+            deny_all_else: false,
+            unmodelled: Vec::new(),
+            items: Vec::new(),
+            parse_error: Some(e.to_string()),
+        },
+    }
+}
+
+/// The level a request may not name as `""` or `*`: either is Ranger's "every
+/// value" (`requests_all_values`), not an object.
+fn check_target(target: &ObjectTarget) -> Result<(), HandWrittenError> {
+    for (name, v) in [
+        ("schema", &target.schema),
+        ("table", &target.table),
+        ("column", &target.column),
+    ] {
+        if let Some(v) = v {
+            if v.trim().is_empty() || v == "*" {
+                return Err(HandWrittenError::BadRequest(format!(
+                    "{name} must name one object, not {v:?}"
+                )));
+            }
+        }
+    }
+    if target.table.is_some() && target.schema.is_none() {
+        return Err(HandWrittenError::BadRequest(
+            "table needs schema".to_string(),
+        ));
+    }
+    if target.column.is_some() && target.table.is_none() {
+        return Err(HandWrittenError::BadRequest(
+            "column needs table".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Every tag on the object, above it or below it, with where it sits.
+/// Coordinates compare case-folded, as the tag resolver does
+/// (`resolved_tags_for_resource_via`).
+async fn object_tags_via(
+    conn: &mut sqlx::PgConnection,
+    target: &ObjectTarget,
+) -> Result<Vec<ViaTag>, HandWrittenError> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT t.name, a.schema_name, a.table_name, a.column_name \
+           FROM registry.catalogs c \
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id \
+           JOIN tags t ON t.id = a.tag_id \
+          WHERE c.id = $1 \
+          ORDER BY 1, 2, 3, 4",
+    )
+    .bind(target.catalog_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let eq = |a: &str, b: &Option<String>| {
+        b.as_deref()
+            .is_some_and(|b| a.to_lowercase() == b.to_lowercase())
+    };
+    let mut out = Vec::new();
+    for (name, schema, table, column) in rows {
+        let col = (!column.is_empty()).then(|| column.clone());
+        let on = match (&target.schema, &target.table, &target.column) {
+            (None, _, _) => Some(TagOn::Below),
+            (Some(_), None, _) => eq(&schema, &target.schema).then_some(TagOn::Below),
+            (Some(_), Some(_), None) => (eq(&schema, &target.schema) && eq(&table, &target.table))
+                .then_some(if column.is_empty() {
+                    TagOn::This
+                } else {
+                    TagOn::Below
+                }),
+            (Some(_), Some(_), Some(_)) => {
+                if !(eq(&schema, &target.schema) && eq(&table, &target.table)) {
+                    None
+                } else if column.is_empty() {
+                    Some(TagOn::Parent)
+                } else if eq(&column, &target.column) {
+                    Some(TagOn::This)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(on) = on {
+            out.push(ViaTag {
+                name,
+                on,
+                column: col,
+            });
+        }
+    }
+    Ok(out)
+}
+
+async fn engines_of_profile_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<HandWrittenEngine>, HandWrittenError> {
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT id, name, type, origin FROM engine_mgmt.engines \
+          WHERE authz_service_id = $1 ORDER BY name, id",
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, r#type, origin)| HandWrittenEngine {
+            id,
+            name,
+            r#type,
+            origin,
+        })
+        .collect())
+}
+
+fn match_word(m: ObjectMatch) -> Option<(MatchWord, bool)> {
+    match m {
+        ObjectMatch::Applies { through_pattern } => Some((MatchWord::Applies, through_pattern)),
+        ObjectMatch::Part => Some((MatchWord::Part, false)),
+        ObjectMatch::Parent => Some((MatchWord::Parent, false)),
+        ObjectMatch::None => None,
+    }
+}
+
+/// Route A (spec §4.2): every hand-written (`operator`) policy of every
+/// profile reaching `target.catalog_id`, and of each Trino profile's tag
+/// service, that reaches the object. The caller runs it in one read-only
+/// snapshot.
+pub async fn handwritten_for_object_via(
+    conn: &mut sqlx::PgConnection,
+    target: &ObjectTarget,
+) -> Result<ObjectHandWritten, HandWrittenError> {
+    check_target(target)?;
+    let catalog: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE id = $1")
+            .bind(target.catalog_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((catalog_id, catalog_name)) = catalog else {
+        return Err(HandWrittenError::NotFound);
+    };
+    let mut out = ObjectHandWritten {
+        catalog: HandWrittenCatalog {
+            id: catalog_id,
+            name: catalog_name,
+        },
+        target: HandWrittenTarget {
+            schema: target.schema.clone(),
+            table: target.table.clone(),
+            column: target.column.clone(),
+        },
+        state: ListedState::NotDetermined,
+        reason: None,
+        profiles: Vec::new(),
+        policies: Vec::new(),
+        seeded: Vec::new(),
+    };
+
+    let attached: Vec<Option<i64>> = sqlx::query_scalar(
+        "SELECT e.authz_service_id FROM registry.engine_catalog_attachments ea \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE ea.catalog_id = $1",
+    )
+    .bind(catalog_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if attached.is_empty() {
+        out.reason = Some(NotDeterminedReason::NoEngineAttached);
+        return Ok(out);
+    }
+    let service_ids: BTreeSet<i64> = attached.into_iter().flatten().collect();
+    let mut profiles = Vec::new();
+    for sid in service_ids {
+        let svc = get_service_by_id_via(&mut *conn, sid).await?;
+        if let Some(engine) = engine_type_for(&svc.r#type) {
+            profiles.push((svc, engine));
+        }
+    }
+    if profiles.is_empty() {
+        out.reason = Some(NotDeterminedReason::NoProfile);
+        return Ok(out);
+    }
+    // The catalog name each profile's engines carry in a request (M1: the
+    // registry name on both engines).
+    let mut reaching = Vec::new();
+    for (svc, engine) in profiles {
+        if let Some(c) = catalogs_for_service_via(&mut *conn, svc.id)
+            .await?
+            .into_iter()
+            .find(|c| c.id == catalog_id)
+        {
+            reaching.push((svc, engine, c.name));
+        }
+    }
+    if reaching.is_empty() {
+        out.reason = Some(NotDeterminedReason::CatalogNotInProfile);
+        return Ok(out);
+    }
+    out.state = ListedState::Listed;
+
+    let mut defs = Defs::default();
+    let object_tags = object_tags_via(&mut *conn, target).await?;
+    let mut seen_tag_services = BTreeSet::new();
+    for (svc, engine, catalog_name) in reaching {
+        let tag_service = usable_tag_services_via(&mut *conn, &[svc.id])
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, name)| name);
+        out.profiles.push(HandWrittenProfile {
+            service_id: svc.id,
+            name: svc.name.clone(),
+            r#type: svc.r#type.clone(),
+            tag_service: tag_service.clone(),
+            engines: engines_of_profile_via(&mut *conn, svc.id).await?,
+        });
+
+        // Resource policies.
+        let request = object_request(engine, &catalog_name, target);
+        let rows = policy_rows_via(&mut *conn, svc.id).await?;
+        let def = defs.get(&mut *conn, &svc.r#type).await?;
+        let mut seeded = 0i64;
+        for row in &rows {
+            let parsed = parse_policy(row);
+            let found = match &parsed {
+                Ok(p) => {
+                    let prepared = PreparedPolicyResources::new(p, def);
+                    match_word(object_match(&prepared, p, &request))
+                }
+                Err(_) => Some((MatchWord::Unknown, false)),
+            };
+            let Some((word, through)) = found else {
+                continue;
+            };
+            if row.managed_by == "infra" {
+                if word != MatchWord::Unknown {
+                    seeded += 1;
+                }
+                continue;
+            }
+            out.policies.push(policy_row(
+                row,
+                &svc.name,
+                false,
+                parsed.as_ref().map_err(String::as_str),
+                word,
+                through,
+                None,
+            ));
+        }
+        if seeded > 0 {
+            out.seeded.push(SeededCount {
+                service: svc.name.clone(),
+                count: seeded,
+            });
+        }
+
+        // Tag policies, once per tag service.
+        let Some(tag_service) = tag_service else {
+            continue;
+        };
+        if !seen_tag_services.insert(tag_service.clone()) {
+            continue;
+        }
+        let Some(tag_sid) = service_id_by_name_via(&mut *conn, &tag_service).await? else {
+            continue;
+        };
+        let tag_rows = policy_rows_via(&mut *conn, tag_sid).await?;
+        let tag_def = defs.get(&mut *conn, "tag").await?;
+        let mut tag_seeded = 0i64;
+        for row in &tag_rows {
+            let parsed = parse_policy(row);
+            let found: Option<(MatchWord, bool, Option<ViaTag>)> = match &parsed {
+                Ok(p) => {
+                    let prepared = PreparedPolicyResources::new(p, tag_def);
+                    object_tags
+                        .iter()
+                        .filter_map(|t| {
+                            let request = RequestResource::new().with("tag", t.name.as_str());
+                            match object_match(&prepared, p, &request) {
+                                ObjectMatch::Applies { through_pattern } => {
+                                    Some((through_pattern, t))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .min_by_key(|(_, t)| t.on)
+                        .map(|(through, t)| {
+                            let word = if t.on == TagOn::Below {
+                                MatchWord::Part
+                            } else {
+                                MatchWord::Applies
+                            };
+                            (word, through, Some(t.clone()))
+                        })
+                }
+                Err(_) => Some((MatchWord::Unknown, false, None)),
+            };
+            let Some((word, through, via)) = found else {
+                continue;
+            };
+            if row.managed_by == "infra" {
+                if word != MatchWord::Unknown {
+                    tag_seeded += 1;
+                }
+                continue;
+            }
+            out.policies.push(policy_row(
+                row,
+                &tag_service,
+                true,
+                parsed.as_ref().map_err(String::as_str),
+                word,
+                through,
+                via,
+            ));
+        }
+        if tag_seeded > 0 {
+            out.seeded.push(SeededCount {
+                service: tag_service.clone(),
+                count: tag_seeded,
+            });
+        }
+    }
+    out.policies
+        .sort_by(|a, b| (a.r#match, &a.service, &a.name).cmp(&(b.r#match, &b.service, &b.name)));
+    Ok(out)
 }
 
 #[cfg(test)]

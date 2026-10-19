@@ -75,7 +75,7 @@ use egret_ranger_eval::eval::{
     AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
-use egret_ranger_eval::resource::{requests_all_values, RequestResource};
+use egret_ranger_eval::resource::requests_all_values;
 use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
