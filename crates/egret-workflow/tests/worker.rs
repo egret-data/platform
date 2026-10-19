@@ -6136,6 +6136,20 @@ async fn replay_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
     .expect("read the replay")
 }
 
+/// Let `ms` of `execution`'s own clock pass, as the oracle driver's `pass_time`
+/// does: `Tick` is ms since `executions.created_at`.
+async fn pass_clock(pool: &sqlx::PgPool, execution: Uuid, ms: i64) {
+    sqlx::query(
+        "UPDATE workflow.executions SET created_at = created_at - \
+         make_interval(secs => $1::double precision / 1000.0) WHERE id = $2",
+    )
+    .bind(ms)
+    .bind(execution)
+    .execute(pool)
+    .await
+    .expect("pass the clock");
+}
+
 /// `(attempt_number, origin_offset_ms)` — Kestra's `ExecutionMetadata`,
 /// migration 0139.
 async fn metadata_of(pool: &sqlx::PgPool, execution: Uuid) -> (i32, i64) {
@@ -6442,7 +6456,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         &pool,
         ws,
         None,
-        &one_task_replaying("chain", "PT1S", 3),
+        &one_task_replaying("chain", "PT1H", 3),
         serde_json::json!({}),
     )
     .await
@@ -6454,7 +6468,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         "the original execution is attempt 1 and its own creation is the origin"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    pass_clock(&pool, root, 3_600_001).await;
     assert_eq!(
         wake(&pool, 8).await.expect("wake"),
         vec![root],
@@ -6466,17 +6480,17 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
     let (attempt, offset) = metadata_of(&pool, second).await;
     assert_eq!(attempt, 2, "the replacement is attempt 2");
     assert!(
-        offset >= 1_000,
+        offset >= 3_600_000,
         "the offset is how much of the ORIGINAL's clock had run when this one \
-         was created, and the retry was a whole PT1S away, so it cannot be \
-         less than 1000 ms. It is {offset}"
+         was created, and the retry was a whole PT1H away, so it cannot be \
+         less than an hour. It is {offset}"
     );
 
     // **The SECOND increment, which is the one a saturating `max(2)` gets
     // wrong**: it writes the right number for the first replay and the wrong
     // one for every later replay, so a two-long chain cannot see it.
     drain_with(&pool, &reg).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    pass_clock(&pool, second, 3_600_001).await;
     assert_eq!(
         wake(&pool, 8).await.expect("wake"),
         vec![second],
@@ -6493,9 +6507,9 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
          which the ratchet sees minutes later as the driver's step bound"
     );
     assert!(
-        third_offset >= offset + 1_000,
-        "and the origin offset accumulates: {third_offset} must be at least a \
-         second past the second execution's {offset}"
+        third_offset >= offset + 3_600_000,
+        "and the origin offset accumulates: {third_offset} must be at least an \
+         hour past the second execution's {offset}"
     );
 
     // The chain ends here: `attemptNumber >= maxAttempts` is 3 >= 3.
@@ -6515,7 +6529,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         "and no fourth delay is scheduled: `next_retry_at` returned None, so \
          `scan` emitted nothing at all for this run"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    pass_clock(&pool, third, 3_600_001).await;
     assert!(
         wake(&pool, 8).await.expect("wake").is_empty(),
         "nothing is due anywhere: the chain is three executions long"
