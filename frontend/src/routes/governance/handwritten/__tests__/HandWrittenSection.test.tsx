@@ -240,6 +240,37 @@ describe("HandWrittenSection", () => {
     );
   });
 
+  it("links a tag service's seeded count to the engines (or profile) whose tag service it is, never a page named after it", async () => {
+    open(
+      ok(
+        answer({
+          profiles: [
+            ...answer().profiles,
+            { serviceId: 4, name: "spare-tr", type: "trino", tagService: "spare-tr-tag", engines: [] },
+          ],
+          seeded: [
+            { service: "lake-tr-tag", count: 2 },
+            { service: "spare-tr-tag", count: 1 },
+            { service: "lost-tag", count: 1 },
+          ],
+        }),
+      ),
+    );
+    const line = await screen.findByText(/egret-seeded policies also reach this object/, {}, T);
+    expect(line).toHaveTextContent("4 egret-seeded policies also reach this object; see Engine & policy:");
+    expect(within(line).getByRole("link", { name: "lake-trino" })).toHaveAttribute("href", "/governance/engines/e-tr?tab=policies");
+    expect(within(line).getByRole("link", { name: "spare-tr" })).toHaveAttribute(
+      "href",
+      "/governance/engines/profiles/spare-tr?tab=policies",
+    );
+    // A service no listed profile names: its name, no link.
+    expect(line).toHaveTextContent("lost-tag");
+    expect(within(line).queryByRole("link", { name: "lost-tag" })).not.toBeInTheDocument();
+    for (const a of within(line).getAllByRole("link")) {
+      expect(a.getAttribute("href")).not.toMatch(/-tag/);
+    }
+  });
+
   it.each([
     ["no_engine_attached", "No engine is attached to this catalog, so no hand-written policy reaches it."],
     ["no_profile", "The engines attached to this catalog have no policy profile, so no hand-written policy reaches it."],

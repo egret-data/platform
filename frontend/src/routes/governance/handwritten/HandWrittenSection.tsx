@@ -51,6 +51,22 @@ function subjectOf(profile: HandWrittenProfile | undefined): EditorSubject | nul
  * column relative to the page (a schema page says `orders.email`, a catalog
  * page `sales.orders.email`), never "a parent".
  */
+/**
+ * Where a seeded count's policies are listed: the Policies tab of each engine
+ * of the profile that stores them — or, for a tag service, of every profile
+ * naming it as its tag service (a tag service has no page of its own) — or an
+ * unbound profile's own page. None when no listed profile is involved.
+ */
+function seededLinks(service: string, profiles: HandWrittenProfile[]): { to: string; label: string }[] {
+  const links = new Map<string, string>();
+  for (const pr of profiles.filter((p) => p.name === service || p.tagService === service).sort(byName)) {
+    const engines = [...pr.engines].sort(byName);
+    if (engines.length === 0) links.set(profileUrl(pr.name, "policies"), pr.name);
+    for (const e of engines) links.set(engineUrl(e.id, "policies"), e.name);
+  }
+  return [...links].map(([to, label]) => ({ to, label }));
+}
+
 function viaTagText(v: NonNullable<HandWrittenPolicy["viaTag"]>, target: HandWrittenTarget): string {
   const head = `Through tag ${v.name} on`;
   if (v.on === "this") return `${head} this object`;
@@ -177,15 +193,11 @@ function Body({
         <p className="text-sm text-muted-foreground">
           {`${seededTotal} egret-seeded ${seededTotal === 1 ? "policy also reaches" : "policies also reach"} this object; see Engine & policy: `}
           {seeded.map((s, i) => {
-            const profile = d.profiles.find((pr) => pr.name === s.service);
-            const engines = profile ? [...profile.engines].sort(byName) : [];
-            const links =
-              engines.length > 0
-                ? engines.map((e) => ({ to: engineUrl(e.id, "policies"), label: e.name }))
-                : [{ to: profileUrl(s.service, "policies"), label: s.service }];
+            const links = seededLinks(s.service, d.profiles);
             return (
               <Fragment key={s.service}>
                 {i > 0 ? ", " : null}
+                {links.length === 0 ? s.service : null}
                 {links.map((l, j) => (
                   <Fragment key={l.to}>
                     {j > 0 ? ", " : null}
