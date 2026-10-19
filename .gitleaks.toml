@@ -1,0 +1,21 @@
+title = "egret gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures, vendored upstream test keys and documented dev-only values"
+paths = [
+  '''third_party/mysql_async/''',
+  '''crates/egret-workflow/oracle''',
+  '''crates/egret-workflow/src/spec/schema/kestra-flow-schema\.json''',
+  '''\.env\.example$''',
+  '''docs/superpowers/audits/''',
+  '''frontend/src/routes/control-plane/SecretDataFields\.tsx''',
+  '''docs/.*/plans/''',
+  '''frontend/tests/e2e/''',
+  '''frontend/src/.*__tests__/''',
+  '''plugin-host/src/test/''',
+  '''crates/egret-engine-mgmt/src/engines\.rs''',
+  '''crates/egret-config/src/lib\.rs''',
+]
