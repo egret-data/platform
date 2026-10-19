@@ -21,6 +21,7 @@ pub mod engine_images;
 pub mod error;
 pub mod eval;
 pub mod model;
+pub mod plugin_report;
 pub mod store;
 
 pub use actions::{
@@ -38,6 +39,7 @@ pub use engine_images::{
     KnownEngineImage, DEFAULT_ENGINE_IMAGES, KNOWN_ENGINE_IMAGES,
 };
 pub use error::PermError;
+pub use plugin_report::{ranger_plugin_report, PluginReport};
 // **`evaluate` is deliberately NOT re-exported here (SP4d-2a Task 5).** It was
 // the function `/perm/explain` answered with, and `explain` now evaluates the
 // compiled artifact each engine downloads (`egret-ranger-eval`) instead — two

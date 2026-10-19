@@ -352,6 +352,7 @@ fn app_with(
         view_audit_timeout: std::time::Duration::from_secs(15),
         catalog_lister: lister,
         browse_timeout,
+        audit_retention_days: Some(90),
     })
 }
 

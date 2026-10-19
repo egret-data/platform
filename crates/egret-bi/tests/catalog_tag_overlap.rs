@@ -492,7 +492,7 @@ async fn a_clearance_that_completes_an_overlap_on_a_view_column_is_refused() {
         egret_bi::ClassificationPolicyRepo::new(e.db.clone(), egret_events::EventBus::new());
 
     let got = policies
-        .set_policy(b, &[unique("ovl-role")], &[], None)
+        .set_policy(b, &[unique("ovl-role")], &[], &test_actor(&e.db.pool).await)
         .await;
 
     assert!(
@@ -517,4 +517,31 @@ async fn a_clearance_that_completes_an_overlap_on_a_view_column_is_refused() {
             .await
             .unwrap();
     assert_eq!(gated, 0, "the clearance is rolled back");
+}
+
+/// DG #3: the acting principal of a clearance write, for a user that exists.
+fn principal_of(id: uuid::Uuid) -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(id),
+        email: "actor@egret.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
+}
+
+/// DG #3: a clearance write takes its acting principal, stored as
+/// `created_by` (which references `users(id)`), so this is a real user.
+async fn test_actor(pool: &sqlx::PgPool) -> egret_core::Principal {
+    let id: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!(
+                "actor_{}@egret.local",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .fetch_one(pool)
+            .await
+            .expect("insert actor");
+    principal_of(id)
 }

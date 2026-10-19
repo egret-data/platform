@@ -305,12 +305,7 @@ async fn set_access_policy(
     // emits) — the PDP loader reading `classification_policies` stays fresh.
     let skipped = st
         .classification_policies
-        .set_policy(
-            id,
-            &body.required_roles,
-            &required_groups,
-            Some(p.user_id.0),
-        )
+        .set_policy(id, &body.required_roles, &required_groups, &p)
         .await?;
     // Return a JSON body (not a bare 200) so the FE `apiJson` can parse it —
     // an empty 200 body throws "Unexpected end of JSON input" client-side — and
@@ -337,7 +332,7 @@ async fn clear_access_policy(
     Path(id): Path<Uuid>,
 ) -> Result<Json<AccessPolicyWritten>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
-    let skipped = st.classification_policies.clear_policy(id).await?;
+    let skipped = st.classification_policies.clear_policy(id, &p).await?;
     Ok(Json(AccessPolicyWritten::from_skips(skipped)))
 }
 

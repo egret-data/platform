@@ -488,6 +488,58 @@ fn validate_role_name(role: &str) -> Result<(), BiError> {
     Ok(())
 }
 
+/// A clearance as a governance summary (DG #3, spec §3.1): `{tag_key,
+/// required_roles, required_groups}`, groups by NAME as they stand in this
+/// transaction (a group that no longer exists is named by its id). `None`
+/// when the tag has no clearance row.
+async fn clearance_summary_via(
+    conn: &mut sqlx::PgConnection,
+    tag_id: Uuid,
+) -> Result<Option<serde_json::Value>, BiError> {
+    let row: Option<(String, Vec<String>, Vec<String>)> = sqlx::query_as(
+        "SELECT t.key, c.required_roles, \
+                ARRAY(SELECT COALESCE(g.name, gid::text) \
+                        FROM unnest(c.required_groups) WITH ORDINALITY AS u(gid, n) \
+                        LEFT JOIN groups g ON g.id = u.gid \
+                       ORDER BY u.n) \
+           FROM classification_policies c JOIN tags t ON t.id = c.tag_id \
+          WHERE c.tag_id = $1",
+    )
+    .bind(tag_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|(key, roles, groups)| {
+        serde_json::json!({
+            "tag_key": key,
+            "required_roles": roles,
+            "required_groups": groups,
+        })
+    }))
+}
+
+/// Record a `tag_clearance:*` governance event on the write's transaction.
+async fn record_clearance_change(
+    conn: &mut sqlx::PgConnection,
+    action: &'static str,
+    tag_id: Uuid,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+    actor: &egret_core::Principal,
+) -> Result<(), BiError> {
+    egret_audit::governance::record_change(
+        conn,
+        egret_audit::governance::Change {
+            action,
+            resource_type: egret_audit::governance::resource::TAG,
+            resource_id: tag_id.to_string(),
+            summary: serde_json::json!({ "before": before, "after": after }),
+            principal: actor,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 impl ClassificationPolicyRepo {
     pub fn new(db: Db, bus: EventBus) -> Self {
         Self { db, bus }
@@ -516,7 +568,7 @@ impl ClassificationPolicyRepo {
         tag_id: Uuid,
         required_roles: &[String],
         required_groups: &[Uuid],
-        by: Option<Uuid>,
+        actor: &egret_core::Principal,
     ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
         for role in required_roles {
             validate_role_name(role)?;
@@ -542,6 +594,7 @@ impl ClassificationPolicyRepo {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
             egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
         }
+        let before = clearance_summary_via(&mut tx, tag_id).await?;
         sqlx::query(
             "INSERT INTO classification_policies \
                  (tag_id, required_roles, required_groups, created_by, updated_at) \
@@ -554,12 +607,24 @@ impl ClassificationPolicyRepo {
         .bind(tag_id)
         .bind(required_roles)
         .bind(required_groups)
-        .bind(by)
+        .bind(actor.user_id.0)
         .execute(&mut *tx)
         .await?;
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;
+        // DG #3: the governance event, last before the commit, so a refused
+        // set (overlap, compile) takes it with it.
+        let after = clearance_summary_via(&mut tx, tag_id).await?;
+        record_clearance_change(
+            &mut tx,
+            egret_audit::governance::action::CLEARANCE_SET,
+            tag_id,
+            before,
+            after,
+            actor,
+        )
+        .await?;
         tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(skipped)
@@ -572,9 +637,11 @@ impl ClassificationPolicyRepo {
     pub async fn clear_policy(
         &self,
         tag_id: Uuid,
+        actor: &egret_core::Principal,
     ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
         let mut tx = self.db.pool.begin().await?;
         let reach = TagViewReach::of(&mut tx, tag_id).await?;
+        let before = clearance_summary_via(&mut tx, tag_id).await?;
         sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
             .bind(tag_id)
             .execute(&mut *tx)
@@ -582,6 +649,19 @@ impl ClassificationPolicyRepo {
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;
+        // DG #3: clearing a tag with no gate changes nothing, so it records
+        // nothing.
+        if before.is_some() {
+            record_clearance_change(
+                &mut tx,
+                egret_audit::governance::action::CLEARANCE_CLEAR,
+                tag_id,
+                before,
+                None,
+                actor,
+            )
+            .await?;
+        }
         tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(skipped)

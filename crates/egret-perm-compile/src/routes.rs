@@ -28,8 +28,9 @@
 //! 2. A recompile failure propagates with `?` BEFORE `commit()`, so the write
 //!    rolls back with it. There is no state in which a grant exists and its
 //!    policies do not.
-//! 3. `explain` never writes; `compile` is the manual repair trigger and is
-//!    the only route that may use the pool-based `recompile_service`.
+//! 3. `explain` never writes; `compile` is the manual repair trigger. It
+//!    opens its own transaction (there is no write of its own to be atomic
+//!    with) so its governance event commits with the recompile (DG #3).
 //!
 //! Which services a mutation affects is derived in
 //! [`crate::trigger::affected_services_for_grant`] /
@@ -49,6 +50,7 @@ use axum::extract::{FromRef, Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 use egret_auth::principal::Auth;
@@ -84,8 +86,7 @@ use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
-    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SkippedItem,
-    SourceKind,
+    merge_service_ids, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
 };
 
 mod engine_grants;
@@ -1302,13 +1303,38 @@ pub(crate) async fn write_grant(
             // newly-discovered profile would mean taking a lock out of ascending
             // order, which is the deadlock again.
             ensure_grant_still_covered(tx, id, &services).await?;
+            // The row as it stands under the locks, for the governance event.
+            let before = get_grant_via(tx, id).await?;
             if !update_grant_in_tx(tx, id, &g).await? {
                 return Err(PermHttpError::NotFound);
             }
-            id
+            (id, before)
         }
-        None => create_grant_in_tx(tx, &g).await?,
+        None => (create_grant_in_tx(tx, &g).await?, None),
     };
+    let (id, before) = id;
+    // DG #3: the governance event, on this transaction, after the row write and
+    // before the recompile — a recompile that refuses the write (409) takes the
+    // event with it, and `preview` rolls both back.
+    let before = match before {
+        Some(b) => Some(crate::governance_events::grant_summary(tx, &b).await?),
+        None => None,
+    };
+    let action = if before.is_some() {
+        egret_audit::governance::action::GRANT_UPDATE
+    } else {
+        egret_audit::governance::action::GRANT_CREATE
+    };
+    let after = crate::governance_events::grant_summary(tx, &g).await?;
+    crate::governance_events::record(
+        tx,
+        action,
+        egret_audit::governance::resource::PERM_GRANT,
+        id.to_string(),
+        crate::governance_events::before_after(before, Some(after)),
+        p,
+    )
+    .await?;
     let summaries = recompile_services_in_tx(tx, &services).await?;
     Ok(WriteOutcome {
         id,
@@ -1478,10 +1504,12 @@ pub(crate) async fn write_rule(
             // locked set" is a concurrent patch turning a path selector into a
             // tag one or back.
             ensure_rule_still_covered(tx, id, &services).await?;
+            // The row as it stands under the locks, for the governance event.
+            let before = get_rule_via(tx, id).await?;
             if !update_rule_in_tx(tx, id, &r).await? {
                 return Err(PermHttpError::NotFound);
             }
-            id
+            (id, before)
         }
         // `perm.rules.name` is UNIQUE. A taken name is the caller's to fix, so
         // it is a 409 naming it, not a 500 — on the create route and on a
@@ -1495,9 +1523,30 @@ pub(crate) async fn write_rule(
                     r.name
                 )));
             }
-            other => other?,
+            other => (other?, None),
         },
     };
+    let (id, before) = id;
+    // DG #3: as in `write_grant`.
+    let before = match before {
+        Some(b) => Some(crate::governance_events::rule_summary(tx, &b).await?),
+        None => None,
+    };
+    let action = if before.is_some() {
+        egret_audit::governance::action::RULE_UPDATE
+    } else {
+        egret_audit::governance::action::RULE_CREATE
+    };
+    let after = crate::governance_events::rule_summary(tx, &r).await?;
+    crate::governance_events::record(
+        tx,
+        action,
+        egret_audit::governance::resource::PERM_RULE,
+        id.to_string(),
+        crate::governance_events::before_after(before, Some(after)),
+        p,
+    )
+    .await?;
     let summaries = recompile_services_in_tx(tx, &services).await?;
     Ok(WriteOutcome {
         id,
@@ -1684,6 +1733,16 @@ async fn delete_grant(
     if !delete_grant_in_tx(&mut tx, id).await? {
         return Err(PermHttpError::NotFound);
     }
+    let before = crate::governance_events::grant_summary(&mut tx, &g).await?;
+    crate::governance_events::record(
+        &mut tx,
+        egret_audit::governance::action::GRANT_DELETE,
+        egret_audit::governance::resource::PERM_GRANT,
+        id.to_string(),
+        crate::governance_events::before_after(Some(before), None),
+        &p,
+    )
+    .await?;
     let summaries = recompile_services_in_tx(&mut tx, &services).await?;
     let compile = CompileResponse::from_summaries(services, &summaries);
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -1920,6 +1979,16 @@ async fn delete_rule(
     if !delete_rule_in_tx(&mut tx, id).await? {
         return Err(PermHttpError::NotFound);
     }
+    let before = crate::governance_events::rule_summary(&mut tx, &r).await?;
+    crate::governance_events::record(
+        &mut tx,
+        egret_audit::governance::action::RULE_DELETE,
+        egret_audit::governance::resource::PERM_RULE,
+        id.to_string(),
+        crate::governance_events::before_after(Some(before), None),
+        &p,
+    )
+    .await?;
     let summaries = recompile_services_in_tx(&mut tx, &services).await?;
     let compile = CompileResponse::from_summaries(services, &summaries);
     tx.commit().await.map_err(PermHttpError::db)?;
@@ -3762,8 +3831,9 @@ fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<
 // ---------------------------------------------------------------------------
 
 /// The manual/repair trigger. Unlike the mutating routes it has no write of
-/// its own to be atomic with, so it uses the pool-based `recompile_service`,
-/// which opens and commits its own transaction.
+/// its own to be atomic with, so it opens its own transaction around
+/// `recompile_service_in_tx` and the `profile:compile` governance event (DG
+/// #3); a refused compile also records its failure in `perm.compile_runs`.
 ///
 /// It exists because the affected-service sets above are derived from the
 /// mutated ROW, and there are model-adjacent changes no row mutation covers —
@@ -3793,14 +3863,77 @@ async fn compile(
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     // Resolve the profile first so an unknown id is a 404 rather than the
     // 500 a `CompileError::Db("not found: service id …")` would otherwise
-    // render as — `recompile_service` flattens the store's typed NotFound
+    // render as — the compile funnel flattens the store's typed NotFound
     // into its own opaque `Db` variant.
-    st.policy.get_service_by_id(service_id).await?;
-    let summary = recompile_service(&st.perm, &st.policy, service_id).await?;
+    let service = st.policy.get_service_by_id(service_id).await?.name;
+    // DG #3: the recompile, its `perm.compile_runs` row (written by the funnel)
+    // and its governance event commit together. A refused compile rolls back,
+    // then its failure row and its event are written in a transaction of their
+    // own, and the caller gets the compile's error unchanged.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let summary = match crate::trigger::recompile_service_in_tx(&mut tx, service_id).await {
+        Ok(summary) => summary,
+        Err(e) => {
+            drop(tx);
+            record_failed_compile(&st, &p, service_id, &service, &e).await;
+            return Err(e.into());
+        }
+    };
+    crate::governance_events::record(
+        &mut tx,
+        egret_audit::governance::action::PROFILE_COMPILE,
+        egret_audit::governance::resource::POLICY_PROFILE,
+        service_id.to_string(),
+        json!({
+            "service": service,
+            "outcome": "ok",
+            "created": summary.created,
+            "updated": summary.updated,
+            "deleted": summary.deleted,
+            "unchanged": summary.unchanged,
+            "skipped": summary.skipped.len(),
+        }),
+        &p,
+    )
+    .await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(CompileResponse::from_summaries(
         vec![service_id],
         std::slice::from_ref(&summary),
     )))
+}
+
+/// The failed manual compile's `perm.compile_runs` row and `profile:compile`
+/// event, in one transaction of their own. Logged, never returned: the
+/// caller's answer is the compile's error.
+async fn record_failed_compile(
+    st: &PermState,
+    p: &egret_core::Principal,
+    service_id: i64,
+    service: &str,
+    error: &egret_perm::CompileError,
+) {
+    let text = crate::compile_runs::capped(&error.to_string());
+    let result: Result<(), PermHttpError> = async {
+        let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+        crate::compile_runs::record_compile_failure_via(&mut tx, service_id, &text)
+            .await
+            .map_err(PermHttpError::db)?;
+        crate::governance_events::record(
+            &mut tx,
+            egret_audit::governance::action::PROFILE_COMPILE,
+            egret_audit::governance::resource::POLICY_PROFILE,
+            service_id.to_string(),
+            json!({ "service": service, "outcome": "error", "error": text }),
+            p,
+        )
+        .await?;
+        tx.commit().await.map_err(PermHttpError::db)
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(service_id, error = %e, "could not record a failed manual compile");
+    }
 }
 
 /// SP4d-3 Task 5: every policy of one profile, classified — its owner,
@@ -3910,6 +4043,22 @@ async fn migrate_service_policies(
     // THE one place a dry run differs.
     let commit = response.equivalent && !body.dry_run;
     if commit {
+        // DG #3: only a committed migration is a governance change.
+        let service = profile_name_via(&mut tx, service_id).await?;
+        crate::governance_events::record(
+            &mut tx,
+            egret_audit::governance::action::MIGRATION_APPLY,
+            egret_audit::governance::resource::POLICY_PROFILE,
+            service_id.to_string(),
+            json!({
+                "service": service,
+                "policies": response.policies.iter().map(|m| &m.policy_name).collect::<Vec<_>>(),
+                "created_grants": response.policies.iter().flat_map(|m| &m.grant_ids).collect::<Vec<_>>(),
+                "created_rules": response.policies.iter().flat_map(|m| &m.rule_ids).collect::<Vec<_>>(),
+            }),
+            &p,
+        )
+        .await?;
         tx.commit().await.map_err(PermHttpError::db)?;
     } else {
         tx.rollback().await.map_err(PermHttpError::db)?;
@@ -3950,9 +4099,89 @@ async fn undo_service_policy_migration(
 ) -> Result<Json<crate::migrate::UndoResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    // DG #3 (review I2): undo is symmetric with apply, which records one event
+    // per object it creates. Every object a migration of this profile created,
+    // summarised before undo runs; whichever is gone afterwards, undo deleted.
+    let created: Vec<(Vec<Uuid>, Vec<Uuid>)> =
+        sqlx::query_as("SELECT grant_ids, rule_ids FROM perm.migrated_from WHERE service_id = $1")
+            .bind(service_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    let mut grants_before = Vec::new();
+    let mut rules_before = Vec::new();
+    for (grant_ids, rule_ids) in &created {
+        for id in grant_ids {
+            if let Some(g) = get_grant_via(&mut tx, *id).await? {
+                grants_before.push((
+                    *id,
+                    crate::governance_events::grant_summary(&mut tx, &g).await?,
+                ));
+            }
+        }
+        for id in rule_ids {
+            if let Some(r) = get_rule_via(&mut tx, *id).await? {
+                rules_before.push((
+                    *id,
+                    crate::governance_events::rule_summary(&mut tx, &r).await?,
+                ));
+            }
+        }
+    }
     let response = crate::migrate::undo_in_tx(&mut tx, service_id, &body).await?;
+    for (id, before) in grants_before {
+        if get_grant_via(&mut tx, id).await?.is_none() {
+            crate::governance_events::record(
+                &mut tx,
+                egret_audit::governance::action::GRANT_DELETE,
+                egret_audit::governance::resource::PERM_GRANT,
+                id.to_string(),
+                crate::governance_events::before_after(Some(before), None),
+                &p,
+            )
+            .await?;
+        }
+    }
+    for (id, before) in rules_before {
+        if get_rule_via(&mut tx, id).await?.is_none() {
+            crate::governance_events::record(
+                &mut tx,
+                egret_audit::governance::action::RULE_DELETE,
+                egret_audit::governance::resource::PERM_RULE,
+                id.to_string(),
+                crate::governance_events::before_after(Some(before), None),
+                &p,
+            )
+            .await?;
+        }
+    }
+    let service = profile_name_via(&mut tx, service_id).await?;
+    crate::governance_events::record(
+        &mut tx,
+        egret_audit::governance::action::MIGRATION_UNDO,
+        egret_audit::governance::resource::POLICY_PROFILE,
+        service_id.to_string(),
+        json!({
+            "service": service,
+            "policies": response.policies.iter().map(|u| &u.policy_name).collect::<Vec<_>>(),
+        }),
+        &p,
+    )
+    .await?;
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(response))
+}
+
+/// A profile's name on the caller's transaction, for a governance event.
+async fn profile_name_via(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<String, PermHttpError> {
+    sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)
 }
 
 #[cfg(test)]

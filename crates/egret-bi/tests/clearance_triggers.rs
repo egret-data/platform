@@ -254,9 +254,14 @@ async fn setting_a_clearance_compiles_the_deny_with_no_second_write() {
         "nothing may be compiled before the gate is set, or this test proves nothing"
     );
 
-    pol.set_policy(tag.id, std::slice::from_ref(&role_name), &[], None)
-        .await
-        .expect("set the gate");
+    pol.set_policy(
+        tag.id,
+        std::slice::from_ref(&role_name),
+        &[],
+        &test_actor(&db.pool).await,
+    )
+    .await
+    .expect("set the gate");
 
     let compiled = clearance_policies(&db, f.tag_service_id, tag.id).await;
     assert_eq!(
@@ -284,7 +289,9 @@ async fn setting_a_clearance_compiles_the_deny_with_no_second_write() {
     // **The lifting half, in the same test**, because a clearance that cannot be
     // lifted is the one-way door SP4a had to reopen once: the reap must happen on
     // the `clear_policy` write, not on some later unrelated recompile.
-    pol.clear_policy(tag.id).await.expect("lift the gate");
+    pol.clear_policy(tag.id, &test_actor(&db.pool).await)
+        .await
+        .expect("lift the gate");
     assert!(
         clearance_policies(&db, f.tag_service_id, tag.id)
             .await
@@ -311,7 +318,7 @@ async fn tagging_a_column_extends_the_clearance_on_starrocks() {
         .await
         .expect("create tag");
     let (role_name, _username) = new_role_with_holder(&db, "clrtrig-sr-role").await;
-    pol.set_policy(tag.id, &[role_name], &[], None)
+    pol.set_policy(tag.id, &[role_name], &[], &test_actor(&db.pool).await)
         .await
         .expect("set the gate");
 
@@ -381,7 +388,7 @@ async fn renaming_a_gated_tag_recompiles_its_clearance() {
         .await
         .expect("create tag");
     let (role_name, _username) = new_role_with_holder(&db, "clrtrig-ren-role").await;
-    pol.set_policy(tag.id, &[role_name], &[], None)
+    pol.set_policy(tag.id, &[role_name], &[], &test_actor(&db.pool).await)
         .await
         .expect("set the gate");
     assert_eq!(
@@ -424,7 +431,7 @@ async fn deleting_a_gated_tag_reaps_its_clearance() {
         .await
         .expect("create tag");
     let (role_name, _username) = new_role_with_holder(&db, "clrtrig-del-role").await;
-    pol.set_policy(tag.id, &[role_name], &[], None)
+    pol.set_policy(tag.id, &[role_name], &[], &test_actor(&db.pool).await)
         .await
         .expect("set the gate");
     assert_eq!(
@@ -482,7 +489,7 @@ async fn a_group_only_gate_reports_its_skip_to_the_author() {
 
     // A ROLE gate compiles, so it reports NO skip — the discriminating half.
     let skipped = pol
-        .set_policy(tag.id, &[role_name], &[], None)
+        .set_policy(tag.id, &[role_name], &[], &test_actor(&db.pool).await)
         .await
         .expect("set a role gate");
     assert!(
@@ -501,7 +508,7 @@ async fn a_group_only_gate_reports_its_skip_to_the_author() {
     // and the author must be told so on the write itself.
     let group_id = Uuid::new_v4();
     let skipped = pol
-        .set_policy(tag.id, &[], &[group_id], None)
+        .set_policy(tag.id, &[], &[group_id], &test_actor(&db.pool).await)
         .await
         .expect("set a group-only gate");
     let mine: Vec<_> = skipped.iter().filter(|s| s.id == tag.id).collect();
@@ -566,7 +573,8 @@ async fn a_tag_delete_racing_a_clearance_on_the_same_tag_both_commit() {
     let set = {
         let pol = pol.clone();
         let tag_id = tag.id;
-        tokio::spawn(async move { pol.set_policy(tag_id, &[role_name], &[], None).await })
+        let actor = test_actor(&db.pool).await;
+        tokio::spawn(async move { pol.set_policy(tag_id, &[role_name], &[], &actor).await })
     };
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let delete = {
@@ -587,4 +595,31 @@ async fn a_tag_delete_racing_a_clearance_on_the_same_tag_both_commit() {
             .is_empty(),
         "the delete committed last, so the clearance it reaped stays reaped"
     );
+}
+
+/// DG #3: the acting principal of a clearance write, for a user that exists.
+fn principal_of(id: uuid::Uuid) -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(id),
+        email: "actor@egret.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
+}
+
+/// DG #3: a clearance write takes its acting principal, stored as
+/// `created_by` (which references `users(id)`), so this is a real user.
+async fn test_actor(pool: &sqlx::PgPool) -> egret_core::Principal {
+    let id: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!(
+                "actor_{}@egret.local",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .fetch_one(pool)
+            .await
+            .expect("insert actor");
+    principal_of(id)
 }

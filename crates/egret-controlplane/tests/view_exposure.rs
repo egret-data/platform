@@ -208,6 +208,7 @@ fn app_views(
         view_audit_timeout,
         catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
+        audit_retention_days: Some(90),
     })
 }
 

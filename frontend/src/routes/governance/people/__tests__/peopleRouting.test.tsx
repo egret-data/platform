@@ -38,14 +38,15 @@ afterEach(() => {
 });
 
 describe("the People area's route", () => {
-  it("renders the index for a policy:read user, with People & groups after Data in the sidebar", async () => {
+  it("renders the index for a policy:read user, with People & groups after Overview and Data in the sidebar", async () => {
     openApp("/governance/people", me(["policy:read"]));
     expect(await screen.findByRole("heading", { level: 1, name: "People & groups" }, TIMEOUT)).toBeInTheDocument();
     expect(await screen.findByText("No users.", {}, TIMEOUT)).toBeInTheDocument();
     const labels = within(screen.getByTestId("app-sidebar"))
       .getAllByRole("link")
       .map((a) => a.textContent);
-    expect(labels.slice(0, 2)).toEqual(["Data", "People & groups"]);
+    // DG #3 (O11): the Overview leads the Governance sidebar.
+    expect(labels.slice(0, 3)).toEqual(["Overview", "Data", "People & groups"]);
     expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
   }, 15_000);
 

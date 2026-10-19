@@ -1310,3 +1310,90 @@ async fn the_near_root_scan_matches_groups_ignoring_case() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }
+
+/// DG #3 × F11: every engine-grant write records one governance event in its
+/// own transaction (`engine_grant:create|update|delete`, family Policy); a
+/// refused write records none.
+#[tokio::test]
+async fn engine_grant_writes_record_governance_events() {
+    let Some(e) = env().await else { return };
+    let pool = &e.db.pool;
+    let b = bound(&e, "trino").await;
+    let (_, ua) = person(pool).await;
+    let (_, ub) = person(pool).await;
+    let events = |id: String| async move {
+        sqlx::query_as::<_, (String, String, Value)>(
+            "SELECT action, resource_type, detail FROM audit.audit_log \
+              WHERE kind = 'mutation' AND resource_id = $1 ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .expect("events")
+    };
+
+    let (status, body) = call(
+        &e,
+        "POST",
+        &format!("/perm/engines/{}/grants", b.engine),
+        &e.writer,
+        Some(sys_grant(&ua)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let created = json!({
+        "engineId": b.engine, "capability": "trino.set_system_session_property",
+        "values": ["query_max_memory"], "principals": [{"kind": "user", "ref": ua}],
+        "services": [b.profile]
+    });
+    let evs = events(id.clone()).await;
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert_eq!(
+        (evs[0].0.as_str(), evs[0].1.as_str()),
+        ("engine_grant:create", "engine_grant")
+    );
+    assert_eq!(evs[0].2, json!({"before": null, "after": created}));
+
+    let (status, body) = call(
+        &e,
+        "PATCH",
+        &format!("/perm/engine-grants/{id}"),
+        &e.writer,
+        Some(sys_grant(&ub)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut patched = created.clone();
+    patched["principals"] = json!([{"kind": "user", "ref": ub}]);
+    let evs = events(id.clone()).await;
+    assert_eq!(evs.len(), 2, "{evs:?}");
+    assert_eq!(evs[1].0, "engine_grant:update");
+    assert_eq!(evs[1].2, json!({"before": created, "after": patched}));
+
+    // A refused write (unknown capability) records nothing.
+    let (status, _) = call(
+        &e,
+        "PATCH",
+        &format!("/perm/engine-grants/{id}"),
+        &e.writer,
+        Some(json!({"capability": "trino.nope", "principals": [{"kind": "user", "ref": ub}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(events(id.clone()).await.len(), 2);
+
+    let (status, body) = call(
+        &e,
+        "DELETE",
+        &format!("/perm/engine-grants/{id}"),
+        &e.writer,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let evs = events(id.clone()).await;
+    assert_eq!(evs.len(), 3, "{evs:?}");
+    assert_eq!(evs[2].0, "engine_grant:delete");
+    assert_eq!(evs[2].2, json!({"before": patched, "after": null}));
+}

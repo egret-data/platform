@@ -331,49 +331,6 @@ pub(crate) struct EngineDto {
     ranger_plugin_version_note: Option<String>,
 }
 
-/// `(plugin version, modelled, note)` for an engine row.
-fn plugin_report(e: &Engine, image: Option<&str>) -> (Option<String>, bool, Option<String>) {
-    let unmodelled = |version: &str| {
-        format!(
-            "Ranger plugin {version} on a {} engine is not a pair egret's evaluator has been \
-             verified against (it models {}); explain and migrations for its profile refuse",
-            e.r#type,
-            egret_perm::modelled_ranger_plugins_sentence()
-        )
-    };
-    if crate::external::is_external(e) {
-        return match e.ranger_plugin_version.as_deref() {
-            Some(v) if crate::external::plugin_version_is_modelled(&e.r#type, v) => {
-                (Some(v.to_string()), true, None)
-            }
-            Some(v) => (Some(v.to_string()), false, Some(unmodelled(v))),
-            None => (
-                None,
-                false,
-                Some("no Ranger plugin version is declared".into()),
-            ),
-        };
-    }
-    let Some(image) = image else {
-        return (
-            None,
-            false,
-            Some(format!(
-                "the spec pins no image, so egret cannot tell which Ranger plugin it runs; pin \
-                 its image to one of: {}",
-                egret_perm::engine_images::known_image_refs(&e.r#type).join(", ")
-            )),
-        );
-    };
-    match egret_perm::plugin_version_for_image(&e.r#type, image) {
-        Ok(v) if crate::external::plugin_version_is_modelled(&e.r#type, v) => {
-            (Some(v.to_string()), true, None)
-        }
-        Ok(v) => (Some(v.to_string()), false, Some(unmodelled(v))),
-        Err(sentence) => (None, false, Some(sentence)),
-    }
-}
-
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
         let image = if crate::external::is_external(&e) {
@@ -381,7 +338,17 @@ impl From<Engine> for EngineDto {
         } else {
             egret_perm::stored_engine_image(&e.r#type, &e.spec)
         };
-        let (version, modelled, note) = plugin_report(&e, image.as_deref());
+        // DG #3: the one implementation, shared with the Governance Overview.
+        let egret_perm::PluginReport {
+            version,
+            modelled,
+            note,
+        } = egret_perm::ranger_plugin_report(
+            &e.r#type,
+            &e.origin,
+            e.ranger_plugin_version.as_deref(),
+            &e.spec,
+        );
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
         EngineDto {
             id: e.id,

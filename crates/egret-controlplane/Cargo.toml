@@ -42,5 +42,7 @@ utoipa.workspace = true
 egret-test-db.workspace = true
 egret-workspace.workspace = true
 egret-events = { workspace = true }
+# DG #3: the Overview's tests seed the Ranger service-defs.
+egret-policy.workspace = true
 tower.workspace = true
 http-body-util = "0.1"

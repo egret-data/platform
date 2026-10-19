@@ -1400,6 +1400,7 @@ async fn write_policy_checked(
     service_id: i64,
     write: PolicyWrite,
     pol: &RangerPolicy,
+    actor: &egret_core::Principal,
 ) -> Result<(i64, Vec<crate::ambiguous_arbitration::EvalOrderShift>), PolicyHttpError> {
     let mut tx = st.store.begin().await?;
     if is_mask_or_filter(&pol.body) {
@@ -1417,6 +1418,10 @@ async fn write_policy_checked(
     let replacing = match write {
         PolicyWrite::Create => None,
         PolicyWrite::Replace(id) => Some(id),
+    };
+    let before = match replacing {
+        Some(id) => ranger_policy_summary_via(&mut tx, id).await?,
+        None => None,
     };
     // Final review I-3: a data mask written on a StarRocks profile (or one a
     // replace overwrites) changes what the clearance mask folds.
@@ -1475,6 +1480,14 @@ async fn write_policy_checked(
             id
         }
     };
+    // DG #3: the governance event, on this transaction (`before` was read
+    // above, before the write).
+    let after = ranger_policy_summary_via(&mut tx, id).await?;
+    let action = match write {
+        PolicyWrite::Create => egret_audit::governance::action::RANGER_POLICY_CREATE,
+        PolicyWrite::Replace(_) => egret_audit::governance::action::RANGER_POLICY_UPDATE,
+    };
+    record_policy_change(&mut tx, action, id, before, after, actor).await?;
     if refold {
         st.recompiler
             .recompile_in_tx(&mut tx, &[service_id])
@@ -1482,6 +1495,88 @@ async fn write_policy_checked(
     }
     tx.commit().await.map_err(crate::PolicyStoreError::from)?;
     Ok((id, shifts))
+}
+
+/// The longest resource value list a governance summary keeps.
+const SUMMARY_RESOURCE_VALUES: usize = 20;
+
+/// A stored policy as a governance summary (DG #3, spec §3.1): `{service,
+/// name, policy_type, enabled, resources}`, each resource's value list capped
+/// at [`SUMMARY_RESOURCE_VALUES`] (`resources_truncated: true` when one was).
+/// `None` when no such policy exists.
+async fn ranger_policy_summary_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<Option<Value>, PolicyHttpError> {
+    let row: Option<(String, bool, Value, String)> = sqlx::query_as(
+        "SELECT p.name, p.enabled, p.policy_jsonb, s.name \
+           FROM policy.authz_policies p JOIN policy.authz_services s ON s.id = p.service_id \
+          WHERE p.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(crate::PolicyStoreError::from)?;
+    let Some((name, enabled, body, service)) = row else {
+        return Ok(None);
+    };
+    let policy_type = match body.get("policyType").and_then(Value::as_i64).unwrap_or(0) {
+        0 => json!("access"),
+        1 => json!("masking"),
+        2 => json!("rowfilter"),
+        other => json!(other),
+    };
+    let mut truncated = false;
+    let mut resources = serde_json::Map::new();
+    if let Some(res) = body.get("resources").and_then(Value::as_object) {
+        for (key, level) in res {
+            let values: Vec<Value> = level
+                .get("values")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            truncated |= values.len() > SUMMARY_RESOURCE_VALUES;
+            resources.insert(
+                key.clone(),
+                Value::Array(values.into_iter().take(SUMMARY_RESOURCE_VALUES).collect()),
+            );
+        }
+    }
+    let mut summary = json!({
+        "service": service,
+        "name": name,
+        "policy_type": policy_type,
+        "enabled": enabled,
+        "resources": resources,
+    });
+    if truncated {
+        summary["resources_truncated"] = json!(true);
+    }
+    Ok(Some(summary))
+}
+
+/// Record a `ranger_policy:*` governance event on the write's transaction.
+async fn record_policy_change(
+    conn: &mut sqlx::PgConnection,
+    action: &'static str,
+    id: i64,
+    before: Option<Value>,
+    after: Option<Value>,
+    actor: &egret_core::Principal,
+) -> Result<(), PolicyHttpError> {
+    egret_audit::governance::record_change(
+        conn,
+        egret_audit::governance::Change {
+            action,
+            resource_type: egret_audit::governance::resource::RANGER_POLICY,
+            resource_id: id.to_string(),
+            summary: json!({ "before": before, "after": after }),
+            principal: actor,
+        },
+    )
+    .await
+    .map_err(crate::PolicyStoreError::from)?;
+    Ok(())
 }
 
 /// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
@@ -1811,7 +1906,7 @@ async fn create_policy(
         // `generated_profile_guard` caught it.
         st.store.preflight_policy_insert(svc.id, &pol.name).await?;
         guard_tag_policy_authoring(&st, &pol).await?;
-        let (id, _) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
+        let (id, _) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol, &p).await?;
         return Ok(Json(json!({ "id": id })));
     }
 
@@ -1828,7 +1923,7 @@ async fn create_policy(
     st.store.preflight_policy_insert(svc.id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, checked and written under
     // the unit's row locks. See `write_policy_checked`.
-    let (id, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
+    let (id, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol, &p).await?;
     Ok(Json(write_response(id, &pol, &shifts)))
 }
 
@@ -1902,7 +1997,7 @@ async fn update_policy(
         // guards, as `preflight_policy_insert` does on the create path.
         st.store.preflight_policy_update(id, &pol.name).await?;
         guard_tag_policy_authoring(&st, &pol).await?;
-        write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
+        write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol, &p).await?;
         return Ok(Json(json!({ "id": id })));
     }
 
@@ -1920,7 +2015,7 @@ async fn update_policy(
     st.store.preflight_policy_update(id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
     // so the new body is not compared against the row it is replacing.
-    let (_, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
+    let (_, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol, &p).await?;
     Ok(Json(write_response(id, &pol, &shifts)))
 }
 
@@ -1949,7 +2044,17 @@ async fn delete_policy_handler(
     // clearance masks in the same transaction.
     let mut tx = st.store.begin().await?;
     let refold = fold_profile_of_stored(&mut tx, id).await?;
+    let before = ranger_policy_summary_via(&mut tx, id).await?;
     crate::delete_policy_via(&mut tx, id).await?;
+    record_policy_change(
+        &mut tx,
+        egret_audit::governance::action::RANGER_POLICY_DELETE,
+        id,
+        before,
+        None,
+        &p,
+    )
+    .await?;
     if let Some(service_id) = refold {
         st.recompiler
             .recompile_in_tx(&mut tx, &[service_id])
@@ -1990,7 +2095,15 @@ async fn set_policy_enabled(
     // Final review I-3: as delete, for an enabled flag.
     let mut tx = st.store.begin().await?;
     let refold = fold_profile_of_stored(&mut tx, id).await?;
+    let before = ranger_policy_summary_via(&mut tx, id).await?;
     crate::set_policy_enabled_via(&mut tx, id, b.enabled).await?;
+    let after = ranger_policy_summary_via(&mut tx, id).await?;
+    let action = if b.enabled {
+        egret_audit::governance::action::RANGER_POLICY_ENABLE
+    } else {
+        egret_audit::governance::action::RANGER_POLICY_DISABLE
+    };
+    record_policy_change(&mut tx, action, id, before, after, &p).await?;
     if let Some(service_id) = refold {
         st.recompiler
             .recompile_in_tx(&mut tx, &[service_id])
