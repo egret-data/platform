@@ -224,6 +224,7 @@ các sweep) không ghi gì (O13).
 | đặt/xoá clearance | `ClassificationPolicyRepo::set_policy`/`clear_policy`, trước commit; cả hai nhận thêm tham số `actor: &Principal` (thay `by: Option<Uuid>` của `set_policy`, giá trị là `actor.user_id`) | `tag_clearance:set`/`clear` |
 | tạo/sửa policy Ranger | `write_policy_checked`, trước commit (nó nhận thêm principal) | `ranger_policy:create`/`update` |
 | xoá/bật-tắt policy Ranger | `delete_policy_handler`, `set_policy_enabled`, trước commit | `ranger_policy:delete`/`enable`/`disable` |
+| engine grant (F11) tạo/sửa/xoá | `audit_engine_grant_write` trong `routes/engine_grants.rs`, trước commit; summary = audit detail của F11 (`engineId`, `capability`, `values`, `principals`, `services`) làm before/after | `engine_grant:create`/`update`/`delete` |
 
 ### 3.3 `perm.compile_runs` (migration 0196)
 

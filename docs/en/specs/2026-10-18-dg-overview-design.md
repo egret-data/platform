@@ -206,8 +206,10 @@ pub mod action {
     pub const MIGRATION_APPLY: &str = "policy_migration:apply";
     pub const MIGRATION_UNDO: &str = "policy_migration:undo";
     pub const PROFILE_COMPILE: &str = "profile:compile";
-    // F11 (engine-scoped grants) adds, in its own package:
-    // ENGINE_GRANT_CREATE/UPDATE/DELETE = "engine_grant:create|update|delete", family Policy.
+    // F11 (engine-scoped grants, merged first as #694):
+    pub const ENGINE_GRANT_CREATE: &str = "engine_grant:create";   // resource_type "engine_grant", family Policy
+    pub const ENGINE_GRANT_UPDATE: &str = "engine_grant:update";
+    pub const ENGINE_GRANT_DELETE: &str = "engine_grant:delete";
 }
 /// Which permission reads an event in the feed.
 pub enum Family { Policy, Tag }
@@ -259,6 +261,7 @@ sync, sweeps) record nothing (O13).
 | clearance set/clear | `ClassificationPolicyRepo::set_policy`/`clear_policy`, before commit; both gain an `actor: &Principal` parameter (replacing `by: Option<Uuid>` on `set_policy`, whose value is `actor.user_id`) | `tag_clearance:set`/`clear` |
 | Ranger policy create/update | `write_policy_checked`, before commit (it gains the principal) | `ranger_policy:create`/`update` |
 | Ranger policy delete/enabled | `delete_policy_handler`, `set_policy_enabled`, before commit | `ranger_policy:delete`/`enable`/`disable` |
+| engine grant (F11) create/patch/delete | `audit_engine_grant_write` in `routes/engine_grants.rs`, before commit; summary = F11's audit detail (`engineId`, `capability`, `values`, `principals`, `services`) as before/after | `engine_grant:create`/`update`/`delete` |
 
 ### 3.3 `perm.compile_runs` (migration 0196)
 

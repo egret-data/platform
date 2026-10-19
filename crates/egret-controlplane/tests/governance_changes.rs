@@ -756,3 +756,75 @@ async fn a_truncated_event_reads_as_an_honest_generic_sentence() {
     );
     assert_eq!(body["entries"][2]["detail"]["truncated"], true);
 }
+
+/// DG #3 × F11: engine-grant events are Policy-family and read as sentences
+/// naming the capability, the engine and the principals.
+#[tokio::test]
+async fn engine_grant_events_render_in_the_feed() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let ana = user(&f, "Ana").await;
+    let p = principal(ana, None);
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("chg-eng"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let name: String = sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+        .bind(engine)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let detail = json!({
+        "engineId": engine, "capability": "trino.set_system_session_property",
+        "values": ["query_max_memory"], "principals": [{"kind": "user", "ref": "ua"}],
+        "services": [7]
+    });
+    let gid = Uuid::new_v4().to_string();
+    record(
+        &f,
+        &p,
+        action::ENGINE_GRANT_CREATE,
+        "engine_grant",
+        &gid,
+        json!({"before": null, "after": detail}),
+    )
+    .await;
+    record(
+        &f,
+        &p,
+        action::ENGINE_GRANT_DELETE,
+        "engine_grant",
+        &gid,
+        json!({"before": detail, "after": null}),
+    )
+    .await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f, Some(90)).await;
+    let (_, body) = changes(&st, &tag_reader, "").await;
+    assert_eq!(
+        body["entries"],
+        json!([]),
+        "engine grants are Policy-family"
+    );
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e = &body["entries"];
+    assert_eq!(
+        e[1]["sentence"],
+        format!("Ana created an engine grant: trino.set_system_session_property (query_max_memory) on engine {name} to user ua")
+    );
+    assert_eq!(
+        e[0]["sentence"],
+        format!("Ana deleted an engine grant: trino.set_system_session_property (query_max_memory) on engine {name} to user ua")
+    );
+    assert_eq!(
+        e[1]["target"],
+        json!({"type": "engine", "id": engine, "name": name})
+    );
+    assert_eq!(e[1]["targetExists"], false, "the grant row does not exist");
+}

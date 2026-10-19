@@ -267,6 +267,9 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::MIGRATION_APPLY => "migrated policies of a profile",
         action::MIGRATION_UNDO => "undid a migration of a profile",
         action::PROFILE_COMPILE => "compiled a profile",
+        action::ENGINE_GRANT_CREATE => "created an engine grant",
+        action::ENGINE_GRANT_UPDATE => "changed an engine grant",
+        action::ENGINE_GRANT_DELETE => "deleted an engine grant",
         _ => "made a change",
     }
 }
@@ -479,6 +482,59 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                 _ => None,
             };
             let live = target.is_some();
+            (sentence, target, live)
+        }
+        action::ENGINE_GRANT_CREATE | action::ENGINE_GRANT_UPDATE | action::ENGINE_GRANT_DELETE => {
+            let verb = match row.action.as_str() {
+                action::ENGINE_GRANT_CREATE => "created",
+                action::ENGINE_GRANT_UPDATE => "changed",
+                _ => "deleted",
+            };
+            let g = side(d);
+            let engine_id = s(g, "engineId").parse::<Uuid>().ok();
+            let engine: Option<String> = match engine_id {
+                Some(eid) => {
+                    sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+                        .bind(eid)
+                        .fetch_optional(&mut *c)
+                        .await?
+                }
+                None => None,
+            };
+            let values = strings(g, "values");
+            let who: Vec<String> = g
+                .get("principals")
+                .and_then(Value::as_array)
+                .map(|ps| {
+                    ps.iter()
+                        .map(|p| format!("{} {}", s(p, "kind"), s(p, "ref")))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let sentence = format!(
+                "{a} {verb} an engine grant: {}{} on engine {} to {}",
+                s(g, "capability"),
+                if values.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", values.join(", "))
+                },
+                engine
+                    .clone()
+                    .unwrap_or_else(|| "a deleted engine".to_string()),
+                who.join(", ")
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.engine_grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let target = match (engine_id, engine) {
+                (Some(id), Some(name)) => Some(Ref::Engine { id, name }),
+                _ => None,
+            };
+            let live = live && target.is_some();
             (sentence, target, live)
         }
         other => (format!("{a} made a change: {other}"), None, false),
