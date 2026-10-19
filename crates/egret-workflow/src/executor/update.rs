@@ -14,7 +14,7 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::labels::execution_labels;
+use crate::labels::{execution_labels, MAX_LABEL_KEY_CHARS, MAX_LABEL_VALUE_CHARS};
 use crate::models::property::{render_map, Property};
 use crate::models::Label;
 use crate::runners::{render_str, RenderContext};
@@ -22,6 +22,14 @@ use crate::runners::{render_str, RenderContext};
 pub const SET_VARIABLES: &str = "io.kestra.plugin.core.execution.SetVariables";
 pub const UNSET_VARIABLES: &str = "io.kestra.plugin.core.execution.UnsetVariables";
 pub const LABELS: &str = "io.kestra.plugin.core.execution.Labels";
+
+/// Egret's own bound, which Kestra does not have: the most an execution's
+/// `variables` may serialise to (1 MiB, the same budget as a render's output).
+const MAX_VARIABLES_BYTES: usize = crate::runners::env::MAX_OUTPUT_BYTES;
+
+/// Egret's own bound, which Kestra does not have: the most labels one
+/// execution may carry.
+const MAX_EXECUTION_LABELS: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateOp {
@@ -145,7 +153,16 @@ fn set(
             ));
         }
     }
-    Ok(deep_merge(current, &rendered))
+    let merged = deep_merge(current, &rendered);
+    let size = serde_json::to_vec(&merged)
+        .map_err(|e| format!("`variables`: {e}"))?
+        .len();
+    if size > MAX_VARIABLES_BYTES {
+        return Err(format!(
+            "`variables`: the execution's variables would be {size} bytes, over egret's limit of {MAX_VARIABLES_BYTES}"
+        ));
+    }
+    Ok(merged)
 }
 
 fn unset_all(
@@ -274,11 +291,30 @@ fn set_labels(
             "Label values cannot be empty, offending label: {k}"
         ));
     }
+    for (key, value) in &pairs {
+        if key.chars().count() > MAX_LABEL_KEY_CHARS {
+            return Err(format!(
+                "label key `{key}` is longer than {MAX_LABEL_KEY_CHARS} characters"
+            ));
+        }
+        if value.chars().count() > MAX_LABEL_VALUE_CHARS {
+            return Err(format!(
+                "the value of label `{key}` is longer than {MAX_LABEL_VALUE_CHARS} characters"
+            ));
+        }
+    }
     let new: Vec<Label> = pairs
         .into_iter()
         .map(|(key, value)| Label { key, value })
         .collect();
-    Ok(execution_labels(current, &new))
+    let merged = execution_labels(current, &new);
+    if merged.len() > MAX_EXECUTION_LABELS {
+        return Err(format!(
+            "`labels`: the execution would carry {} labels, over egret's limit of {MAX_EXECUTION_LABELS}",
+            merged.len()
+        ));
+    }
+    Ok(merged)
 }
 
 /// A later duplicate key wins, at the first one's position.
@@ -528,6 +564,72 @@ mod tests {
             assert_eq!(UpdateOp::of(op.type_id()), Some(op));
         }
         assert_eq!(UpdateOp::of("io.kestra.plugin.core.log.Log"), None);
+    }
+
+    #[test]
+    fn set_variables_over_the_cap_fails_with_egrets_message() {
+        let big = "x".repeat(MAX_VARIABLES_BYTES);
+        let spec = serde_json::json!({"variables": {"big": big}}).to_string();
+        let err = compute(UpdateOp::Set, &spec, &cx(), &Value::Null, &[]).unwrap_err();
+        assert!(
+            err.starts_with("`variables`: the execution's variables would be ")
+                && err.ends_with(" bytes, over egret's limit of 1048576"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_label_key_or_value_over_the_backfill_caps_fails() {
+        let long_key = "k".repeat(129);
+        let spec = serde_json::json!({"labels": {long_key.clone(): "v"}}).to_string();
+        assert_eq!(
+            compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[]).unwrap_err(),
+            format!("label key `{long_key}` is longer than 128 characters")
+        );
+        let spec = serde_json::json!({"labels": {"k": "v".repeat(1025)}}).to_string();
+        assert_eq!(
+            compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[]).unwrap_err(),
+            "the value of label `k` is longer than 1024 characters"
+        );
+    }
+
+    #[test]
+    fn more_than_a_hundred_execution_labels_fails() {
+        let current: Vec<Label> = (0..100)
+            .map(|i| Label {
+                key: format!("k{i}"),
+                value: "v".into(),
+            })
+            .collect();
+        let err = compute(
+            UpdateOp::Labels,
+            r#"{"labels":{"one":"more"}}"#,
+            &cx(),
+            &Value::Null,
+            &current,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "`labels`: the execution would carry 101 labels, over egret's limit of 100"
+        );
+        // A key that already exists does not count twice.
+        compute(
+            UpdateOp::Labels,
+            r#"{"labels":{"k0":"new"}}"#,
+            &cx(),
+            &Value::Null,
+            &current,
+        )
+        .expect("100 labels, one of them overridden");
+    }
+
+    #[test]
+    fn kestras_label_checks_still_run_first() {
+        let spec = serde_json::json!({"labels": {"system.x": "v".repeat(2000)}}).to_string();
+        assert!(compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[])
+            .unwrap_err()
+            .starts_with("System labels can only be set by Kestra itself"));
     }
 }
 
