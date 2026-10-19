@@ -16,6 +16,7 @@ import {
 } from "@/routes/governance/engines/PageFrame";
 import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
+import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
 
 export const NO_ENGINE_BOUND = "No engine is bound to this profile.";
 
@@ -35,6 +36,7 @@ export default function ProfilePage() {
     profilesQ.data?.status === 200 ? (profilesQ.data.data.find((p) => p.name === name) ?? null) : undefined;
   const tagService = dto?.tag_service ?? null;
   const policies = useProfilePolicies(dto && dto.engines.length === 0 ? name : null, tagService);
+  const overlaps = useProfileOverlaps(dto && dto.engines.length === 0 ? name : null);
 
   if (dto && dto.engines.length > 0) {
     const engineId = landingEngine(dto);
@@ -58,7 +60,13 @@ export default function ProfilePage() {
       policies,
     };
     const tabs = PROFILE_TABS.filter((t) => t !== "migrate" || policies.hasHandWritten);
-    body = <FrameTabs tabs={tabs} render={(tab) => <EngineTabBody tab={tab} ctx={ctx} />} />;
+    body = (
+      <FrameTabs
+        tabs={tabs}
+        badges={overlaps.pairs ? { overlaps: overlaps.pairs.length } : undefined}
+        render={(tab) => <EngineTabBody tab={tab} ctx={ctx} />}
+      />
+    );
   }
 
   return (

@@ -26,6 +26,7 @@ import {
 } from "@/routes/governance/engines/PageFrame";
 import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
+import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
 
 export const NEEDS_ENGINE_READ = "Plugin state needs the engine:read permission.";
 
@@ -54,6 +55,7 @@ export default function EnginePage() {
       : null;
   const tagService = dto?.tag_service ?? null;
   const policies = useProfilePolicies(profileName, tagService);
+  const overlaps = useProfileOverlaps(profileName);
 
   if (grantsQ.isError && (grantsQ.error as unknown as ApiError | null)?.status === 404) {
     return (
@@ -138,7 +140,11 @@ export default function EnginePage() {
         <Banner>{sharedSentence(profileName, others)}</Banner>
       ) : null}
       {engine?.origin === "external" ? <Banner>{EXTERNAL_SENTENCE}</Banner> : null}
-      <FrameTabs tabs={tabs} render={body} />
+      <FrameTabs
+        tabs={tabs}
+        badges={overlaps.pairs ? { overlaps: overlaps.pairs.length } : undefined}
+        render={body}
+      />
     </div>
   );
 }

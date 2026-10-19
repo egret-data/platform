@@ -49,6 +49,8 @@ const MARKERS = [
   ["src/routes/governance/engines/compiledSource.ts", "Materialized-view deny"],
   // The Policies tab's compiled-row sentence (spec §6.2).
   ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
+  // The Overlaps tab's empty state (spec §6.3).
+  ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
 ];
 
 const entry = entryChunkName(DIST);
