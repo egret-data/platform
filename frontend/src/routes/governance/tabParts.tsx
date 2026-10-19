@@ -67,42 +67,6 @@ export const STACKED_TABLE = [
 ].join(" ");
 
 /**
- * I2: the grants a Data page lists are egret's (`GET /perm/grants`) only. Access
- * can also come from hand-written Ranger policies and from the engine policies
- * egret seeds itself (the platform-admin set, the per-user baseline, the
- * delegator's impersonate), which no egret grant row describes. Explain
- * evaluates what the engines load, so the note points at it, when the viewer
- * may run it (`policy:read`).
- */
-export function EgretGrantsOnlyNote({
-  explainLabel,
-  explainTo,
-  subject = "egret grants",
-}: {
-  explainLabel: string | null;
-  /** When set, `explainLabel` is a link there (a People page's Check access tab). */
-  explainTo?: string;
-  /** What the list holds: `egret grants` (the default) or `egret rules` (P10). */
-  subject?: string;
-}) {
-  const lead = `Lists ${subject}. Hand-written and egret-seeded engine policies are not listed here`;
-  if (!explainLabel) return <p className="text-xs text-muted-foreground">{`${lead}.`}</p>;
-  return (
-    <p className="text-xs text-muted-foreground">
-      {`${lead}; `}
-      {explainTo ? (
-        <Link to={explainTo} className="text-primary underline">
-          {explainLabel}
-        </Link>
-      ) : (
-        explainLabel
-      )}
-      {" gives the engines' answer."}
-    </p>
-  );
-}
-
-/**
  * #4b (spec §6): the line between a page's egret grants (or rules) and its
  * hand-written policies section, replacing the I2 note now that hand-written
  * policies are listed. egret-seeded policies are counted in that section.
