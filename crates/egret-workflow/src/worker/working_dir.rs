@@ -980,6 +980,19 @@ pub async fn discard_snapshots(
         );
         return;
     }
+    // Task 2.3b: and a superseded `LoopUntil` iteration's, which no row
+    // selects any more. Unstamped when that fails, so the sweep tries again.
+    if let Err(e) =
+        crate::storage::wd_sweep::delete_superseded(pool, fs, workspace, execution).await
+    {
+        tracing::warn!(
+            %execution,
+            run = %block,
+            "the snapshots of a superseded WorkingDirectory iteration could not be removed (the \
+             `_wd` sweep will remove them): {e}"
+        );
+        return;
+    }
     if let Err(e) = crate::storage::wd_sweep::stamp(pool, block).await {
         tracing::warn!(
             %execution,

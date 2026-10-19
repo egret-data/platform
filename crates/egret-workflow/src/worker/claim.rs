@@ -4844,6 +4844,18 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// `persist`'s write of an EXISTING run, `$1`..`$15` as bound there.
 /// `$14`/`$15` are [`stamps::Entered`]'s two booleans.
 ///
+/// `working_dir_swept_at` goes back to NULL when `working_dir` (`$16`) is NULL
+/// or `PREPARING` (task 2.3b): a `Command::RestartLoop` takes a block back to
+/// no phase so it is prepared again, and a block starting a prepare has no
+/// snapshot removed yet. Measured: the restart and the next prepare usually
+/// land in one settle (`FINISHED` straight to `PREPARING`), and the previous
+/// iteration's stamp then hid the new snapshots from the `_wd` sweep. With no
+/// phase (`$16` NULL: the block is not the body's first task, so the restart
+/// is written before the next prepare), `working_dir_snapshot` goes too:
+/// migrations 0194 and 0197 allow a snapshot and a stamp only beside a phase.
+/// The earlier iteration's `_wd/{old id}/` is then reachable only through
+/// `wd_sweep::delete_superseded`.
+///
 /// A `const` rather than inline for one reader besides `persist`:
 /// `tests/execution_timestamps.rs` drives this exact text against a terminal
 /// row to show that a later write does not move its `ended_at`. It is
@@ -4855,7 +4867,11 @@ pub const RUN_STATE_UPDATE: &str = concat!(
             claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
             ended_seq = $10, \
             created_seq = COALESCE($12, created_seq), \
-            resume_with = $13, working_dir = $16, ",
+            resume_with = $13, working_dir = $16, \
+            working_dir_swept_at = CASE WHEN $16 IS NULL OR $16 = 'PREPARING' THEN NULL \
+                                        ELSE working_dir_swept_at END, \
+            working_dir_snapshot = CASE WHEN $16 IS NULL THEN NULL \
+                                        ELSE working_dir_snapshot END, ",
     stamp_set!("$1", "$2", "$14", "$15"),
     ", updated_at = now() \
       WHERE execution_id = $8 AND run_ix = $9 \

@@ -232,12 +232,21 @@ impl FileStore {
     /// The prefix every snapshot of block run `block` is under, ending with `/`.
     pub fn working_dir_prefix(&self, workspace: Uuid, execution: Uuid, block: Uuid) -> String {
         format!(
-            "s3://{}/{}{}/executions/{}/_wd/{}/",
+            "{}{}/",
+            self.working_dir_root(workspace, execution),
+            block.hyphenated()
+        )
+    }
+
+    /// The prefix every block run's [`working_dir_prefix`](Self::working_dir_prefix)
+    /// of `execution` is under, ending with `/`.
+    pub fn working_dir_root(&self, workspace: Uuid, execution: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/executions/{}/_wd/",
             self.bucket,
             self.prefix,
             workspace.hyphenated(),
             execution.hyphenated(),
-            block.hyphenated()
         )
     }
 

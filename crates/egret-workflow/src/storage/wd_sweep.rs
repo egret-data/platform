@@ -76,6 +76,65 @@ pub(crate) async fn stamp(pool: &PgPool, block: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// **Remove the `_wd/{id}/` of every block run of `execution` that no row
+/// holds any more** (task 2.3b) -- a superseded `LoopUntil` iteration's: debt
+/// D12 gives each iteration's block run a new id, so a discard of an earlier
+/// iteration whose delete failed leaves objects under an id nothing would
+/// ever select again. Answers how many prefixes it removed.
+///
+/// A prefix whose id a row holds is that row's, live or not, and is left: a
+/// sibling block being prepared has its row before it writes. One with no
+/// row is over, because `RestartLoop` renames a block's row only after the
+/// block ended. Called by the discard after its own delete, and by [`sweep`]
+/// for each block it removes, so the last of an execution's discards or
+/// sweeps removes every earlier one. The listing reads folders and keys
+/// both, so a store that lists flat (`MemStore`) answers the same.
+pub(crate) async fn delete_superseded(
+    pool: &PgPool,
+    fs: &FileStore,
+    workspace: Uuid,
+    execution: Uuid,
+) -> Result<u64> {
+    let root = fs.working_dir_root(workspace, execution);
+    let key = root
+        .strip_prefix(&format!("s3://{}/", fs.bucket))
+        .unwrap_or(&root);
+    let listing = fs
+        .store
+        .list(key, Some("/"))
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("listing {root}: {e}")))?;
+    let found: std::collections::BTreeSet<Uuid> = listing
+        .folders
+        .iter()
+        .chain(listing.objects.iter().map(|o| &o.key))
+        .filter_map(|k| k.strip_prefix(key)?.split('/').next())
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect();
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let found: Vec<Uuid> = found.into_iter().collect();
+    let held: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND id = ANY($2)",
+    )
+    .bind(execution)
+    .bind(&found)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut removed = 0;
+    for id in found.into_iter().filter(|id| !held.contains(id)) {
+        let prefix = fs.working_dir_prefix(workspace, execution, id);
+        fs.store
+            .delete_prefix(&prefix)
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!("deleting {prefix}: {e}")))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 /// One pass: every unstamped block run of a terminal execution that ended
 /// more than `cfg.older_than` ago -- its `_wd/{block}/` deleted, then
 /// stamped. Answers how many blocks it swept. A store failure ends the pass
@@ -122,6 +181,10 @@ async fn sweep_locked(pool: &PgPool, fs: &FileStore, cfg: &WdSweepConfig) -> Res
             let prefix = fs.working_dir_prefix(workspace, execution, block);
             if let Err(e) = fs.store.delete_prefix(&prefix).await {
                 tracing::warn!(key = %prefix, error = %e, "the _wd sweep could not delete a block's snapshots; the next pass retries");
+                return Ok(swept);
+            }
+            if let Err(e) = delete_superseded(pool, fs, workspace, execution).await {
+                tracing::warn!(%execution, error = %e, "the _wd sweep could not delete a superseded iteration's snapshots; the next pass retries");
                 return Ok(swept);
             }
             stamp(pool, block).await?;
