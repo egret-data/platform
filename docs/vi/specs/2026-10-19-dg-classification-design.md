@@ -4,9 +4,9 @@
 > lệch nhau thì theo bản tiếng Anh.
 
 Ngày: 2026-10-19. Trạng thái: thiết kế đã được người dùng duyệt ngày 2026-10-19 (C1, các phần 1–3 và phần kiểm thử, bên
-dưới); các dòng ghi "default decision" là quyết định của tài liệu này. **Q1–Q5 còn mở**: mỗi câu là một chỗ thiết kế đã
-duyệt mâu thuẫn với code, tìm thấy khi đối chiếu tiền đề, và cần người dùng quyết trước khi task nó nêu được bắt đầu.
-Mỗi câu kèm một câu trả lời đề xuất mà plan tạm giả định. Base: main `309405b1` (#4a Engine & policy đã merge là #697).
+dưới); các dòng ghi "default decision" là quyết định của tài liệu này. Q1–Q5 là các chỗ thiết kế đã duyệt
+mâu thuẫn với code, tìm thấy khi đối chiếu tiền đề; chúng đã được quyết ngày 2026-10-19 (Q1 và Q5 do người dùng, Q2–Q4
+là default decision). Base: main `309405b1` (#4a Engine & policy đã merge là #697).
 Nhánh `feat/dg-classification`, worktree `egret-dgcl`.
 
 Đây là sub-project #4b của spec chương trình `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` ("spec chương
@@ -141,11 +141,11 @@ nối giá trị đầu của mỗi cấp); hand-written = `managed_by = 'operat
 | CL15 | Không migration. Nếu một thay đổi sau cần, số của nó được chọn bằng `ls migrations \| tail -3` ngay trước khi merge (các PR workflow song song lấy số) | user, 2026-10-19 |
 | CL16 | Một query key cho mỗi danh sách: các trang giữ `useTags` (`["tags"]`); kiểu `Tag` có thêm trường mới; mọi mutation tag (hook cũ và hộp thoại mới) invalidate `["tags"]` **và** key của route C cho tag đó. Route mới A–D dùng hook orval (FE-DATA-2) | default decision (2026-10-19) |
 | CL17 | Tab của trang tag nằm trong `?tab=` (`where-used` mặc định, `clearance`, `rules`, `views`, `handwritten`); link mang nghĩa một tab thì truyền nó: nguồn clearance của Engine & policy và Clearances của People → `?tab=clearance`; RulePage của People → `?tab=rules` | default decision (2026-10-19) |
-| Q1 | **Mở.** "via group X / via role Y" của route B (tiền đề 4). Đề xuất: liệt kê các item đó với dấu "Names group X, which this user is in. Engines resolve no groups, so on the engine it reaches nobody." (role tương tự), trong một nhóm riêng dưới nhóm trực tiếp; phần tóm tắt item của route A đánh dấu mọi principal group và role như vậy; `public` và `{USER}` là "applies to everyone" | cần user quyết |
-| Q2 | **Mở.** Các mức khớp (tiền đề 6). Đề xuất: `Self_` hoặc `SelfAndAllDescendants` → **applies to this object** (kèm "through a pattern" khi một cấp khớp bằng wildcard, exclude hoặc recursive); `Descendant` → **applies to part of it**; `Ancestor` → liệt kê là **set on a parent** với "Names <catalog[.schema]> only; engines do not apply it to this object's data." Với tag policy: tag trên đối tượng hoặc tổ tiên → applies; trên vài cột bên dưới → part | cần user quyết |
-| Q3 | **Mở.** Đường dẫn route C (tiền đề 7). Đề xuất: `GET /api/control-plane/classifications/{id}/usage`, cạnh `…/{id}/view-exposure` | cần user quyết |
-| Q4 | **Mở.** Dữ liệu của tab (5) (tiền đề 8). Đề xuất: route D `GET /api/control-plane/classifications/{id}/handwritten` (`policy:read`): mọi policy `operator` của mọi tag service dùng được mà tài nguyên tag khớp tên tag này qua matcher của service-def tag, kèm các profile và engine tải nó | cần user quyết |
-| Q5 | **Mở.** Đối tượng BI không đọc được "nhóm theo số workspace" làm lộ có bao nhiêu workspace giữ một đối tượng gắn tag mà người xem không đọc được. Đề xuất: giữ (đúng câu đã duyệt), chỉ nói "N objects in M workspaces you cannot read", không bao giờ nêu tên workspace | cần user quyết |
+| Q1 | "via group X / via role Y" của route B (tiền đề 4): liệt kê các item đó với dấu "Names group X, which this user is in. Engines resolve no groups, so on the engine it reaches nobody." (role tương tự), trong một nhóm riêng dưới nhóm trực tiếp; phần tóm tắt item của route A đánh dấu mọi principal group và role như vậy; `public` và `{USER}` là "applies to everyone" | user, 2026-10-19 |
+| Q2 | Các mức khớp (tiền đề 6): `Self_` hoặc `SelfAndAllDescendants` → **applies to this object** (kèm "through a pattern" khi một cấp khớp bằng wildcard, exclude hoặc recursive); `Descendant` → **applies to part of it**; `Ancestor` → liệt kê là **set on a parent** với "Names <catalog[.schema]> only; engines do not apply it to this object's data." Với tag policy: tag trên đối tượng hoặc tổ tiên → applies; trên vài cột bên dưới → part | default decision (2026-10-19) |
+| Q3 | Đường dẫn route C (tiền đề 7): `GET /api/control-plane/classifications/{id}/usage`, cạnh `…/{id}/view-exposure` | default decision (2026-10-19) |
+| Q4 | Dữ liệu của tab (5) (tiền đề 8): route D `GET /api/control-plane/classifications/{id}/handwritten` (`policy:read`): mọi policy `operator` của mọi tag service dùng được mà tài nguyên tag khớp tên tag này qua matcher của service-def tag, kèm các profile và engine tải nó | default decision (2026-10-19) |
+| Q5 | Đối tượng BI không đọc được (tiền đề 17, §4.4): **chỉ đếm**, "N objects you cannot read"; không đếm workspace, không nêu tên workspace. Route C chỉ trả số đối tượng cho phần không đọc được | user, 2026-10-19 |
 
 ## 1. Những gì đang có
 
@@ -290,7 +290,7 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
 
 ### 4.4 Route C và số đếm của `/tags` (CL4, Q3)
 
-`GET /api/control-plane/classifications/{id}/usage` (Q3; nếu không thì đường dẫn đã duyệt), gate `tag:read` HOẶC
+`GET /api/control-plane/classifications/{id}/usage` (Q3), gate `tag:read` HOẶC
 `policy:read` (`require_governance_read`, `governance_browse.rs:337-348`). 404 với tag không biết.
 
 - **Data**: `catalog_tag_assignments` theo `tag_id`, `LEFT` join `registry.catalogs` trên `warehouse_id`. Nhóm theo
@@ -298,7 +298,7 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
   warehouse không catalog nào nêu → đếm `orphaned` (CL11).
 - **BI**: `tag_assignments` theo `tag_id`, sắp `(workspace_id, object_type, object_id)` sau khi phân giải workspace của
   từng đối tượng; với 500 cái đầu: `object_ref` và kind của gate, rồi `Pdp::authorize(subject, read_action, object)`.
-  Đọc được → `{ kind, id, name, workspaceSlug }`; không đọc được → đếm kèm số workspace khác nhau (Q5); đối tượng mất →
+  Đọc được → `{ kind, id, name, workspaceSlug }`; không đọc được → chỉ đếm, không kèm số hay tên workspace (Q5); đối tượng mất →
   đếm `deleted` (CL11); quá 500 → `remaining` (CL12). `egret-bi` thêm `pub fn read_action_for_gate` (chính `read_action`
   private) và `pub async fn object_name` để route không phải chép chúng.
 
@@ -307,7 +307,7 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
   data: { tables: [ { catalogId, catalogName, schema, table, onTable, columns: [string] } ],
           tableCount, columnCount, orphaned },
   bi: { readable: [ { kind, id, name, workspaceSlug } ],
-        unreadable: { count, workspaces }, deleted, checked, remaining } }
+        unreadable: { count }, deleted, checked, remaining } }
 ```
 
 **`GET /control-plane/tags`** thêm hai trường cho mỗi `TagDto`, theo kiểu cộng thêm và snake_case như DTO
@@ -340,8 +340,7 @@ Từ route C. Hai section.
 - **Data**: nhóm theo catalog → schema; mỗi dòng bảng: "Table" khi `onTable`, và "Columns: a, b" khi có cột gắn tag; link
   tới `/governance/data/<catalog>/<schema>/<table>` (và `?column=` cho từng cột). `orphaned` → câu của nó. Rỗng: "No
   table or column carries this classification."
-- **BI**: các đối tượng đọc được (biểu tượng và chữ của kind, tên, workspace, link theo CL13); rồi "N objects in M
-  workspaces you cannot read." (Q5) khi `unreadable.count > 0`; câu `deleted`; `remaining > 0` → "Not all BI objects
+- **BI**: các đối tượng đọc được (biểu tượng và chữ của kind, tên, workspace, link theo CL13); rồi "N objects you cannot read." (Q5) khi `unreadable.count > 0`; câu `deleted`; `remaining > 0` → "Not all BI objects
   were checked: N remain." Rỗng: "No BI object carries this classification."
 - Request lỗi hiện lỗi kèm Retry, không bao giờ hiện các câu rỗng (bài học #4a: tải lỗi không phải là một sự thật).
 

@@ -19,10 +19,11 @@ client, Radix UI, vitest + Testing Library, Playwright MCP for the live check.
 programme spec `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` (F1–F12) and #4a's
 `docs/en/specs/2026-10-19-dg-engine-policy-design.md`.
 
-**Q1–Q5 are open.** Every task below that depends on one says so. The plan is written for the spec's proposed answers;
-if the user decides otherwise, the named task changes and nothing else. **Tasks 3 and 4 (Q2), 5 (Q1), 6 (Q3, Q5) and 7 (Q4)
-must not start before the controller records the user's answer in the spec's decision table**, nor the frontend tasks
-that render those answers (12, 14, 16, 17). Task 1 and
+**Q1–Q5 are decided (2026-10-19):** Q1 (user): group- and role-named items listed in their own group with the
+"reaches nobody on the engine" sentence (Tasks 2, 5, 16, 17). Q2: applies / part / set on a parent (Tasks 2, 3, 4,
+16). Q3: route C is `GET /api/control-plane/classifications/{id}/usage` (Task 6). Q4: route D
+`GET /api/control-plane/classifications/{id}/handwritten` (Task 7). Q5 (user): unreadable BI objects are counted only,
+"N objects you cannot read", no workspace count or name (Tasks 6, 12, 15). Task 1 and
 Task 2 may start at once.
 
 ## Global Constraints
@@ -139,7 +140,7 @@ No product code. Predictions first, then measure, in `docs/en/plans/2026-10-19-d
   - **M8 delete consequences.** Delete a gated tag with a table and a column assignment and no rules: both assignment
     tables empty for it, the clearance deny gone from the next download, 204. With a rule selecting its key: 409, the
     message text.
-- [ ] If M1 shows a spelling other than `registry.catalogs.name`, M2 contradicts Q2's proposed mapping, M3 shows a group
+- [ ] If M1 shows a spelling other than `registry.catalogs.name`, M2 contradicts Q2's mapping, M3 shows a group
   or role item applied, or M4 exceeds 5 s: record it and tell the controller before Tasks 3–6 start.
 - [ ] Tear down (containers, network, DB, image, scratch secrets); write `### 1.1 Result (read this first)`,
   `### 1.2 Stack and deviations`, `### 1.3 Every cell`, `### 1.4 Left behind`; commit
@@ -237,7 +238,7 @@ calls `handwritten::object_request`), `lib.rs`.
 (`catalog_counts`); tests `crates/egret-controlplane/tests/governance_tag_usage.rs`, `tests/tags_counts.rs`.
 
 - [ ] **Step 1: failing tests:** spec §9 "Route C": a user who is a member of workspace W1 but not W2 sees W1's tagged
-  dashboard by name and slug and W2's as `unreadable {count: 1, workspaces: 1}`; a gated tag's BI object is unreadable
+  dashboard by name and slug and W2's as `unreadable {count: 1}` with no workspace field in the JSON; a gated tag's BI object is unreadable
   to an uncleared reader and readable to a cleared one; 501 objects → `checked: 500, remaining: 1`; a deleted object's
   assignment → `deleted: 1`; an assignment in a warehouse whose catalog row was deleted → `orphaned: 1`; Data grouped
   by catalog/schema/table with `onTable` and `columns`; 403 with neither permission; 200 with `tag:read` only and with
@@ -326,7 +327,7 @@ that still describes behaviour; list the others with the reason).
 
 - [ ] **Step 1: failing tests** (fixtures not pre-sorted, FE-TEST-1): Data grouped by catalog then schema; a table row
   with "Table" and "Columns: email" linking to the Data page and `?column=email`; `orphaned` sentence; BI readable rows
-  per kind with links per CL13 (saved query and folder without a link); "N objects in M workspaces you cannot read.";
+  per kind with links per CL13 (saved query and folder without a link); "N objects you cannot read." (no workspace count or name);
   `deleted` sentence; "Not all BI objects were checked: N remain."; both empty sentences; loading skeleton; a 500 shows
   the error and Retry and **neither** empty sentence.
 - [ ] **Step 2–5:** run → implement → run + lint + tsc → commit `feat(governance): where a classification is used`.
@@ -436,8 +437,7 @@ confirming each case is ported (Tasks 10–15) or obsolete (list obsolete ones w
   - L4 People: `ua`'s Permissions lists L1 and L2 as Direct; a policy naming group `g1` (`ua` in it) under "Through a
     group or role" with the Q1 sentence; a `public` item under Applies to everyone;
   - L5 tag a table, a column and a dashboard in W1 and a dashboard in W2 with `PII`: the index shows "1 table · 1
-    column" and 2 BI objects; Where used as admin lists all; as `ua` lists W1's dashboard and "1 object in 1 workspace
-    you cannot read."; as `vt` the page works and Mask & filter / Hand-written show the policy:read explanation;
+    column" and 2 BI objects; Where used as admin lists all; as `ua` lists W1's dashboard and "1 object you cannot read."; as `vt` the page works and Mask & filter / Hand-written show the policy:read explanation;
   - L6 clearance: add role `cleared` (holder `ub`) on `PII`: compile line shown; `ua` refused `email` on both engines,
     `ub` reads it; remove: `ua` reads again after one poll;
   - L7 delete `PII` with a rule selecting it: the dialog states every consequence and the refusal sentence; typing the

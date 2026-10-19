@@ -1,9 +1,8 @@
 # Data Governance frontend redesign #4b: Classification — design
 
 Date: 2026-10-19. Status: design approved by the user on 2026-10-19 (C1 and sections 1–3 and testing, below); the rows
-marked "default decision" are this document's. **Q1–Q5 are open**: each is a conflict between the approved design and
-the code, found while checking the premises, and needs a user decision before the task it names starts. Each carries
-a proposed answer that the plan assumes provisionally. Base: main `309405b1` (#4a Engine & policy merged as #697).
+marked "default decision" are this document's. Q1–Q5 were conflicts between the approved design and the code, found
+while checking the premises; they were decided on 2026-10-19 (Q1 and Q5 by the user, Q2–Q4 as default decisions). Base: main `309405b1` (#4a Engine & policy merged as #697).
 Branch `feat/dg-classification`, worktree `egret-dgcl`.
 
 This is sub-project #4b of the programme spec `docs/en/specs/2026-10-16-dg-frontend-redesign-design.md` ("programme
@@ -141,11 +140,11 @@ seed); `TagDto.assignment_count` counts BI objects only (`crates/egret-bi/src/ta
 | CL15 | No migration. If a later change needs one, its number is chosen with `ls migrations \| tail -3` right before merge (parallel workflow PRs take numbers) | user, 2026-10-19 |
 | CL16 | One query key per list: the pages keep `useTags` (`["tags"]`); the `Tag` type gains the new fields; every tag mutation (legacy hooks and new dialogs) invalidates `["tags"]` **and** route C's key for that tag. New routes A–D use orval hooks (FE-DATA-2) | default decision (2026-10-19) |
 | CL17 | The tag page's tab is in `?tab=` (`where-used` default, `clearance`, `rules`, `views`, `handwritten`); links that mean a tab pass it: Engine & policy's clearance source and People Clearances → `?tab=clearance`; People RulePage → `?tab=rules` | default decision (2026-10-19) |
-| Q1 | **Open.** Route B "via group X / via role Y" (premise 4). Proposed: list such items marked "Names group X, which this user is in. Engines resolve no groups, so on the engine it reaches nobody." (role likewise), in their own group below the direct ones; route A's item summary marks every group and role principal the same way; `public` and `{USER}` are "applies to everyone" | needs user decision |
-| Q2 | **Open.** Match levels (premise 6). Proposed: `Self_` or `SelfAndAllDescendants` → **applies to this object** (with "through a pattern" when a level matched by wildcard, exclude or recursive); `Descendant` → **applies to part of it**; `Ancestor` → listed as **set on a parent** with "Names <catalog[.schema]> only; engines do not apply it to this object's data." For a tag policy: the tag on the object or an ancestor → applies; on some columns below → part | needs user decision |
-| Q3 | **Open.** Route C's path (premise 7). Proposed: `GET /api/control-plane/classifications/{id}/usage`, beside `…/{id}/view-exposure` | needs user decision |
-| Q4 | **Open.** Tab (5)'s data (premise 8). Proposed: route D `GET /api/control-plane/classifications/{id}/handwritten` (`policy:read`): every usable tag service's `operator` policy whose tag resource matches this tag's name through the tag service-def matcher, with the profiles and engines that download it | needs user decision |
-| Q5 | **Open.** Unreadable BI objects "grouped by workspace count" leaks how many workspaces hold a tagged object the viewer cannot read. Proposed: keep it (the approved wording), say only "N objects in M workspaces you cannot read", never a workspace name | needs user decision |
+| Q1 | Route B "via group X / via role Y" (premise 4): list such items marked "Names group X, which this user is in. Engines resolve no groups, so on the engine it reaches nobody." (role likewise), in their own group below the direct ones; route A's item summary marks every group and role principal the same way; `public` and `{USER}` are "applies to everyone" | user, 2026-10-19 |
+| Q2 | Match levels (premise 6): `Self_` or `SelfAndAllDescendants` → **applies to this object** (with "through a pattern" when a level matched by wildcard, exclude or recursive); `Descendant` → **applies to part of it**; `Ancestor` → listed as **set on a parent** with "Names <catalog[.schema]> only; engines do not apply it to this object's data." For a tag policy: the tag on the object or an ancestor → applies; on some columns below → part | default decision (2026-10-19) |
+| Q3 | Route C's path (premise 7): `GET /api/control-plane/classifications/{id}/usage`, beside `…/{id}/view-exposure` | default decision (2026-10-19) |
+| Q4 | Tab (5)'s data (premise 8): route D `GET /api/control-plane/classifications/{id}/handwritten` (`policy:read`): every usable tag service's `operator` policy whose tag resource matches this tag's name through the tag service-def matcher, with the profiles and engines that download it | default decision (2026-10-19) |
+| Q5 | Unreadable BI objects (premise 17, §4.4): **counted only**, "N objects you cannot read"; no workspace count and no workspace name. Route C returns only the object count for unreadable ones | user, 2026-10-19 |
 
 ## 1. What exists
 
@@ -291,7 +290,7 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
 
 ### 4.4 Route C and the `/tags` counts (CL4, Q3)
 
-`GET /api/control-plane/classifications/{id}/usage` (Q3; the approved path otherwise), gated `tag:read` OR
+`GET /api/control-plane/classifications/{id}/usage` (Q3), gated `tag:read` OR
 `policy:read` (`require_governance_read`, `governance_browse.rs:337-348`). 404 for an unknown tag.
 
 - **Data**: `catalog_tag_assignments` by `tag_id`, joined `LEFT` to `registry.catalogs` on `warehouse_id`. Grouped by
@@ -299,7 +298,7 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
   rows whose warehouse no catalog names → `orphaned` count (CL11).
 - **BI**: `tag_assignments` by `tag_id`, ordered `(workspace_id, object_type, object_id)` after resolving each object's
   workspace; for the first 500: `object_ref` and the gate kind, then `Pdp::authorize(subject, read_action, object)`.
-  Readable → `{ kind, id, name, workspaceSlug }`; unreadable → counted with the distinct workspace count (Q5); missing
+  Readable → `{ kind, id, name, workspaceSlug }`; unreadable → counted only, with no workspace count or name (Q5); missing
   object → `deleted` count (CL11); beyond 500 → `remaining` (CL12). `egret-bi` gains a `pub fn read_action_for_gate`
   (the private `read_action`) and a `pub async fn object_name` so the route does not copy them.
 
@@ -308,7 +307,7 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
   data: { tables: [ { catalogId, catalogName, schema, table, onTable, columns: [string] } ],
           tableCount, columnCount, orphaned },
   bi: { readable: [ { kind, id, name, workspaceSlug } ],
-        unreadable: { count, workspaces }, deleted, checked, remaining } }
+        unreadable: { count }, deleted, checked, remaining } }
 ```
 
 **`GET /control-plane/tags`** gains two fields per `TagDto`, additively and snake_case like the DTO
@@ -343,8 +342,7 @@ From route C. Two sections.
 - **Data**: grouped by catalog → schema; each table row: "Table" when `onTable`, and "Columns: a, b" when columns are
   tagged; links to `/governance/data/<catalog>/<schema>/<table>` (and `?column=` per column). `orphaned` → its
   sentence. Empty: "No table or column carries this classification."
-- **BI**: readable objects (kind icon and word, name, workspace, link per CL13); then "N objects in M workspaces you
-  cannot read." (Q5) when `unreadable.count > 0`; `deleted` sentence; `remaining > 0` → "Not all BI objects were
+- **BI**: readable objects (kind icon and word, name, workspace, link per CL13); then "N objects you cannot read." (Q5) when `unreadable.count > 0`; `deleted` sentence; `remaining > 0` → "Not all BI objects were
   checked: N remain." Empty: "No BI object carries this classification."
 - A failed request shows the error with Retry, never the empty sentences (#4a lesson: a load failure is not a fact).
 
