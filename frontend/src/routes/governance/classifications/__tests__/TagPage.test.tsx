@@ -91,6 +91,19 @@ describe("a classification's page: the header", () => {
     expect(served.asked.some((a) => a.startsWith("PATCH"))).toBe(false);
   });
 
+  it("closing the form returns focus to Edit, after Cancel and after Save (live check D5)", async () => {
+    const user = userEvent.setup();
+    serve({ "/tags": ok([PII]), "PATCH /tags/t-pii": ok({ ...PII, description: "Changed" }) });
+    openArea(URL_PII, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "Edit" }, T));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Edit" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.type(screen.getByLabelText("Description"), "Changed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toHaveFocus(), T);
+  });
+
   it("a refused save keeps the form and every edit, with the server's message", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok([PII]), "PATCH /tags/t-pii": fail(400, "name must not be empty") });

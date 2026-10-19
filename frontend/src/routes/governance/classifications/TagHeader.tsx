@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Lock, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { type Tag, useUpdateTag } from "@/api/tags";
@@ -21,12 +21,19 @@ import { DEFAULT_COLOR, TagSwatch, useCanManageTags } from "@/routes/governance/
 export function TagHeader({ tag, actions }: { tag: Tag; actions?: ReactNode }) {
   const canManage = useCanManageTags();
   const [editing, setEditing] = useState(false);
+  // Closing the form unmounts the control that had focus; Edit takes it back
+  // when it mounts again (live check D5), as a dialog returns focus to its opener.
+  const refocusEdit = useRef(false);
+  const closeForm = () => {
+    refocusEdit.current = true;
+    setEditing(false);
+  };
   const gated = tag.required_roles.length + tag.required_groups.length > 0;
 
   return (
     <section aria-label="Classification" className="space-y-3">
       {editing ? (
-        <EditForm tag={tag} onDone={() => setEditing(false)} />
+        <EditForm tag={tag} onDone={closeForm} />
       ) : (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
@@ -49,7 +56,17 @@ export function TagHeader({ tag, actions }: { tag: Tag; actions?: ReactNode }) {
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {canManage ? (
-              <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+              <Button
+                size="sm"
+                variant="outline"
+                ref={(el) => {
+                  if (el && refocusEdit.current) {
+                    refocusEdit.current = false;
+                    el.focus();
+                  }
+                }}
+                onClick={() => setEditing(true)}
+              >
                 <Pencil className="mr-1 h-4 w-4" aria-hidden />
                 Edit
               </Button>
