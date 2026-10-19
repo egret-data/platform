@@ -157,3 +157,44 @@ Nothing of the run: containers `dgep-egret`, `dgep-trino`, `dgep-sr`, `dgep-rust
 disconnected first); DB `egret_dgep_live`; image `egret-backend:dgep-1`; the exported source tree, signing key,
 catalog credential, secrets, env file, TLS key/keystore and cookie jars are gone. Kept in the scratchpad: the scripts,
 Trino/StarRocks configs and the self-signed certificate (public). `dgep-pg` and `dgep-valkey` stay for the package.
+
+## 2. Live browser check (Task 17)
+
+### 2.0 Predictions
+
+Written at `c87bb9c9` (Tasks 1–16 plus a test-only fix) before any container of this run was started; nothing in this
+subsection is edited after observing. A wrong prediction is a finding.
+
+**Setup the predictions are about.** Task 1's stack (§1.2) rebuilt from `c87bb9c9` (image `egret-backend:dgep-2`,
+DB `egret_dgep_live`, `dgep-*` on `dgep-net`): Trino 483 `dgtr` (+ tag service `dgtr-tag`, delegating), StarRocks
+4.1.6 `dgsr`, both `provisioned`/`running` by SQL, catalog `ice` attached to both; one external Trino engine `dgext`
+registered through the API with its own profile `dgext`; one unbound manual Trino profile `dgloose` created through
+the index. Users through the API: `admin` (platform admin), `ua`, `ub`, `uc` (usernames as their names), `uroot`
+(username `root`), a steward `vs` (role: `policy:read`, `policy:update`, no `engine:read`) and a reader `vr` (role:
+`policy:read` only). Seeds as Task 1 (a data grant and a mask rule on `ice.s.t`, hand-written access/masking/row-filter
+on `dgtr` written while the profile was briefly `manual`, DEV-n). Vite dev server from this worktree on 5397,
+proxying `/api`, `/catalog`, `/oauth` to `dgep-egret`. Playwright MCP; logins ≥ 60 s apart.
+
+| id | check | prediction |
+|---|---|---|
+| L0a | index as admin | `h1` "Engine & policy"; Engines table lists `dgtr` (trino, provisioned, profile `dgtr`), `dgsr` (starrocks, provisioned, `dgsr`), `dgext` (trino, external, `dgext`, plugin "Not judged: external"); hand-written counts equal `ProfileDto.policy_counts.operator` of each profile plus its tag service |
+| L0b | "Profiles without an engine" | lists `dgloose` only (not `dgtr-tag`, which `dgtr` names as `tag_service`); Delete asks for the typed name |
+| L0c | index as `vr` (no `engine:read`) | Engines table built from `ProfileDto.engines` (bound engines only, every one of ours is bound) and no plugin column |
+| L1a | grant `trino.impersonate_user` ua → ub through the dialog | toast "Saved and compiled into dgtr."; row under the capability with `ub` linked to its People page; after one poll (≤ 15 s) `tq.py ua ub "SELECT current_user"` → `OK [["ub"]]`, the same as `uc` refused `PERMISSION_DENIED` |
+| L1b | the same with `starrocks.impersonate_user` on `dgsr` | toast compiled into `dgsr`; `EXECUTE AS ub WITH NO REVERT; SELECT current_user()` as `ua` → `'ub'@'%'`; as `uc` ERROR 5204 |
+| L2 | target `root` (user `uroot`), then target `admin` (platform admin) | each refused, the dialog stays open with every input kept and shows the server's reason ("… is reserved …" / "… is a platform admin, whom egret seeds as an engine admin"); no row added |
+| L3a | Check `ua`, `trino.impersonate_user`, target `ub` on `dgtr` | "Cannot be decided ahead of time", a cause naming `{USER}` and the F11 §5.4 impersonation sentence |
+| L3b | Check on `dgsr` | `ua` → "Allowed", deciding policy `perm-engine-<id>`, source "egret engine grant" linked to the row; `uc` → "Denied", no deciding policy shown |
+| L4 | plugin state | Plugin tab on `dgtr`/`dgsr` says `up_to_date` per kind while engines poll; the Overview raises no `plugin_*` for them; external `dgext` shows its `not_judged` sentence. (The 5-min `quiet` stop/start leg: predicted `quiet` on the tab and `plugin_quiet` on the Overview for `dgsr`, then `pending` → `up_to_date` and the finding gone.) |
+| L5 | Policies tab on `dgtr` | count line "N egret-compiled · N egret-seeded · N hand-written" matching the rows; compiled rows locked with "Open source" landing on the grant / rule / engine-permissions row; seeded rows read-only; hand-written rows have enable/disable/delete and Edit, Edit opens `/governance/engines/<dgtr id>/advanced/policies/<kind>/<id>`, Save returns to `?tab=advanced` |
+| L5b | a compiler-owned policy opened by URL in the editor | read-only as before Task 14 (the editor's existing compiler-owned check) |
+| L5c | Overlaps tab | count badge equals rows; empty sentence when none |
+| L5d | Migrate tab | shown on `dgtr` (has hand-written rows), absent on a profile without; dry run lists the planned change without writing; apply writes and the row becomes compiled; Undo restores the hand-written row |
+| L5e | Advanced on `dgtr` (generated) | the fixed warning; the "egret compiles this profile …" sentence instead of Create/Seed (premise 13) |
+| L5f | Advanced on `dgloose` (manual, unbound) | Create policy (Access/Masking/Row filter, no By tag) and Seed default policies; creating an access policy saves and returns to the tab, editing it saves; Seed reports the created count |
+| L6 | every old URL of §3 typed in the address bar | `/governance/policies` → `/governance/engines`; `/governance/policies/dgtr` → `/governance/engines/<dgtr id>?tab=policies`; `?tab=masking` → `…&type=masking`; `/governance/policies/dgloose` → `/governance/engines/profiles/dgloose?tab=policies`; `…/dgtr/migrate` → `?tab=migrate`; `…/dgtr/access/new?scope=tag` → `…/advanced/policies/access/new?scope=tag`; `…/dgtr/access/<id>` → the editor; `/control-plane/policies/dgtr` → same as `/governance/policies/dgtr`; unknown → index with "No policy profile named X"; Back never returns to the old URL |
+| L6b | Overview links | profile refs open the resolver (→ engine page), `plugin_*` → `?tab=plugin`, `policy_warnings` → `?tab=policies`, `rule_overlaps` → `?tab=overlaps`; engine refs stay on Control Plane |
+| L7a | steward `vs` (no `engine:read`) | Plugin tab shows "Plugin state needs the engine:read permission." and no request to `/plugin`; no plugin column on the index; write controls of `policy:update` (enable/disable, Edit/Delete grant) present |
+| L7b | reader `vr` (`policy:read` only) | no Grant, Edit, Delete, enable/disable, New profile, Create policy, Seed, Migrate apply anywhere; Check is present |
+| L8 | keyboard, Escape, widths, themes | every tab and both dialogs reachable by Tab/arrow keys with a visible focus ring; Escape closes each dialog and returns focus to its trigger; at 390 px no horizontal page scroll (tables scroll inside their own container); 1280 px light and dark render with no unreadable text |
+| L9 | People: user `ua` Permissions tab | "Engine permissions" section at the end listing both impersonation grants with engine links and capability labels; `ub`'s page lists none ("No engine permission reaches this user.") |
