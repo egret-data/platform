@@ -204,8 +204,9 @@ describe("Hand-written tab (route D)", () => {
       "/governance/engines/e-1/advanced/policies/masking/51?scope=tag",
     );
     expect(note).toHaveTextContent("invalid type: string");
-    // The empty sentence stays, qualified by the note.
-    expect(screen.getByText("No hand-written tag policy names this classification.")).toBeInTheDocument();
+    // Not "none": the unreadable policy may name this classification.
+    expect(screen.queryByText("No hand-written tag policy names this classification.")).not.toBeInTheDocument();
+    expect(screen.getByText("No readable hand-written tag policy names this classification.")).toBeInTheDocument();
   });
 
   it("says when no profile has a tag service", async () => {

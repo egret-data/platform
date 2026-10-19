@@ -79,7 +79,15 @@ function Body({ tagId }: { tagId: string }) {
         </p>
       ))}
       {policies.length === 0 ? (
-        <EmptyState icon={FileCode2} title="No hand-written tag policy names this classification." />
+        // With unreadable policies a clean "none" would be an overclaim: they may name this tag.
+        <EmptyState
+          icon={FileCode2}
+          title={
+            d.unreadable.length > 0
+              ? "No readable hand-written tag policy names this classification."
+              : "No hand-written tag policy names this classification."
+          }
+        />
       ) : (
         <div className="overflow-x-auto rounded-md border">
           <Table aria-label="Hand-written tag policies" className={STACKED_TABLE}>

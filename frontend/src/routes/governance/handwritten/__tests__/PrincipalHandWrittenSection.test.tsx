@@ -176,7 +176,11 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     );
     expect(note).toHaveTextContent("bad body 7");
     expect(within(note).queryByText("broken-m")).not.toBeInTheDocument();
-    expect(screen.getByText("No hand-written policy names this principal.")).toBeInTheDocument();
+    // Not "none": two policies could not be read and may name this principal.
+    expect(screen.queryByText("No hand-written policy names this principal.")).not.toBeInTheDocument();
+    expect(screen.getByText("No readable hand-written policy names this principal.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Hand-written policies (0)" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Hand-written policies (0 readable, 2 unreadable)" })).toBeInTheDocument();
   });
 
   it("states unreadable policies for a user without a username too", async () => {

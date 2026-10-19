@@ -107,11 +107,27 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
   const unreadable = d.unreadable.filter((u) => wanted(u.policyType));
 
   return (
-    <Section title={d.state === "no_username" ? "Hand-written policies" : `Hand-written policies (${policies.length})`}>
+    <Section
+      title={
+        d.state === "no_username"
+          ? "Hand-written policies"
+          : unreadable.length > 0
+            ? `Hand-written policies (${policies.length} readable, ${unreadable.length} unreadable)`
+            : `Hand-written policies (${policies.length})`
+      }
+    >
       {d.state === "no_username" ? (
         <p className="text-sm text-muted-foreground">{NO_USERNAME_SENTENCE}</p>
       ) : policies.length === 0 ? (
-        <EmptyState icon={FileCode2} title="No hand-written policy names this principal." />
+        // With unreadable policies a clean "none" would be an overclaim: they may name this principal.
+        <EmptyState
+          icon={FileCode2}
+          title={
+            unreadable.length > 0
+              ? "No readable hand-written policy names this principal."
+              : "No hand-written policy names this principal."
+          }
+        />
       ) : (
         <>
           {direct.length > 0 ? (
