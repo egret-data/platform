@@ -4614,6 +4614,69 @@ async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_chi
     );
 }
 
+/// **Debt §5.1: a flow PUBLISHED with an absent `Subflow` target runs, and
+/// its `Subflow` run fails at `subflow::resolve` with the message it always
+/// had.**
+///
+/// Publish now accepts the absent target with Kestra's warning instead of
+/// refusing it (`tests/publish.rs`,
+/// `a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it`),
+/// so the refusal moves to run time, where it was already enforced: this test
+/// starts the execution from the published version's own `source` and pins
+/// the run's not-found message, unchanged.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fails_not_found(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let flow = file_flow(
+        &db,
+        ws,
+        user,
+        &subflow_parent("parent", "nobody-holds-this", ""),
+    )
+    .await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let version = egret_workflow::publish(&repo, &common::workflow_refs(&db), ws, user, flow, "")
+        .await
+        .expect("an absent subflow target publishes, with a warning");
+    assert!(
+        version.snapshot["warnings"]
+            .to_string()
+            .contains("The subflow 'nobody-holds-this' not found in namespace 't'."),
+        "{}",
+        version.snapshot
+    );
+    let source = version.snapshot["source"]
+        .as_str()
+        .expect("the snapshot carries its source")
+        .to_string();
+
+    let parent = start_execution(&pool, ws, Some(flow), &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'nobody-holds-this'".to_string()),
+        ),
+    );
+}
+
 /// **A `Subflow` target in ANOTHER workspace does not resolve.**
 ///
 /// `FlowRepo::find_by_name` -- what `publish` resolves a `RefKind::Subflow`

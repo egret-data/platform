@@ -944,6 +944,39 @@ impl FlowRepo {
         .map_err(db_err)?;
         Ok(row)
     }
+
+    /// The `id` of the flow named `(namespace, flow_id)` in `ws`, or
+    /// `Ok(None)` if `ws` holds no such flow -- whether or not another
+    /// workspace does.
+    ///
+    /// SCOPED by `ws`, unlike [`Self::find_by_name`] above: this is what
+    /// `publish` resolves a `Subflow` and a Flow trigger's `dependsOn` pair
+    /// through (debt spec §5.1, 2026-10-19), so its answer depends on the
+    /// caller's workspace alone and cannot probe another one, and a name two
+    /// workspaces share resolves to the caller's own. `UNIQUE (workspace_id,
+    /// namespace, flow_id)` (migration 0132) makes the row unique.
+    ///
+    /// A trashed flow still answers, the same choice [`Self::find_by_name`]
+    /// makes: `deleted_at` is not filtered here. The run-time lookup,
+    /// `worker::subflow::resolve`, is what refuses a trashed or disabled
+    /// target.
+    pub async fn find_in_workspace(
+        &self,
+        ws: Uuid,
+        namespace: &str,
+        flow_id: &str,
+    ) -> Result<Option<Uuid>> {
+        sqlx::query_scalar(
+            "SELECT id FROM workflow.flows \
+              WHERE workspace_id = $1 AND namespace = $2 AND flow_id = $3",
+        )
+        .bind(ws)
+        .bind(namespace)
+        .bind(flow_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
 }
 
 // ===========================================================================

@@ -13446,7 +13446,19 @@ therefore deletes 0 rows: the four banked entries prove `CREATED → RUNNING →
 SUCCESS`, not which rows were deleted or how many. Deletion and `count` are
 proved by `tests/purge_logs.rs`.
 
-### Known over-refusals at publish
+### Known over-refusals at publish: Fixed 2026-10-19
+
+**Fixed 2026-10-19 (debt spec §5.1, PR-2 Task 2.5).** Publish now resolves a
+`Subflow` and a Flow trigger's `dependsOn` pair in the caller's workspace only
+(`FlowRepo::find_in_workspace`), and an absent target no longer refuses the
+flow: it publishes with no frozen id and, for a `Subflow`, Kestra's warning
+`The subflow '<flowId>' not found in namespace '<namespace>'.`
+(`FlowService.java:642`) in the snapshot's `warnings`. A flow only another
+workspace holds is answered exactly as an absent one, so publish still probes
+nothing. Both flows below publish live: `driver.rs`'s `LIVE` 293 → 295 and
+`VALIDATE_REFUSED` 27 → 25, measured. `baseline.txt` is unchanged, because the
+executor oracle runs `build_plan`, not publish. The record as it stood:
+
 
 No tracked list exists for this layer. `PUBLISHED_BUT_REFUSED`
 (`src/executor/mod.rs`) tracks the flows Kestra published with 200 that
@@ -13465,6 +13477,9 @@ Both are the same shape: publish's reference resolution (`RefKind::Subflow`)
 refuses a reference to a flow that does not exist, and this Kestra does not.
 The census prints both lines by name in every run; neither is asserted as an
 over-refusal anywhere.
+
+(Until 2026-10-19. The census no longer prints either line: neither flow is
+refused.)
 
 ## Group C2 Task 5: `SetVariables`, `UnsetVariables` and `Labels`, eleven entries bank
 
