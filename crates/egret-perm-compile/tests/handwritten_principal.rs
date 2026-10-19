@@ -389,3 +389,60 @@ async fn refusals() {
         Err(HandWrittenError::BadRequest(_))
     ));
 }
+
+/// egret folds group names (#688), while a hand-written item keeps whatever
+/// case its author typed. This listing is informational (engines resolve no
+/// groups, Q1), so an item naming `G1` is listed on the page of group `g1`
+/// and of its members; roles likewise. The item's own spelling is shown.
+#[tokio::test]
+async fn group_and_role_items_match_regardless_of_case() {
+    let e = env().await;
+    let p = people(&e, true).await;
+    let (sid, _) = profile(&e).await;
+    let g = unique("by-group-upper-");
+    let r = unique("by-role-upper-");
+    let group_upper = p.group.to_uppercase();
+    let role_upper = p.role.to_uppercase();
+    assert_ne!(group_upper, p.group, "the fixture name must have a letter");
+    insert(
+        &e,
+        sid,
+        &g,
+        item(&[], &[&group_upper], &[]),
+        "policyItems",
+        true,
+        "operator",
+    )
+    .await;
+    insert(
+        &e,
+        sid,
+        &r,
+        item(&[], &[], &[&role_upper]),
+        "policyItems",
+        true,
+        "operator",
+    )
+    .await;
+
+    let out = read(&e, "user", &p.user.to_string()).await.unwrap();
+    let n = &row(&out, &g)
+        .expect("group item listed on the member's page")
+        .naming;
+    assert_eq!(
+        (n[0].how, n[0].via.as_deref(), n[0].on_engines),
+        (NamingHow::Group, Some(group_upper.as_str()), false)
+    );
+    let n = &row(&out, &r)
+        .expect("role item listed on the holder's page")
+        .naming;
+    assert_eq!(
+        (n[0].how, n[0].via.as_deref(), n[0].on_engines),
+        (NamingHow::Role, Some(role_upper.as_str()), false)
+    );
+
+    let out = read(&e, "group", &p.group).await.unwrap();
+    assert!(row(&out, &g).is_some(), "listed on the group's own page");
+    let out = read(&e, "role", &p.role).await.unwrap();
+    assert!(row(&out, &r).is_some(), "listed on the role's own page");
+}

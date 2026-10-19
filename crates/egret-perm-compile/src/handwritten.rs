@@ -1185,6 +1185,9 @@ pub async fn handwritten_for_principal_via(
         }
     };
     let no_username = kind == "user" && username.is_none();
+    // Compared folded (see the item loop below).
+    let groups: BTreeSet<String> = groups.iter().map(|g| g.to_lowercase()).collect();
+    let roles: BTreeSet<String> = roles.iter().map(|r| r.to_lowercase()).collect();
 
     let services: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, type FROM policy.authz_services ORDER BY name, id")
@@ -1235,10 +1238,13 @@ pub async fn handwritten_for_principal_via(
                             });
                         }
                     }
+                    // Case-insensitive: egret folds group names (#688)
+                    // while an item keeps its author's spelling. The
+                    // listing is informational; engines resolve no groups.
                     for g in item
                         .groups
                         .iter()
-                        .filter(|g| *g != PUBLIC && groups.contains(*g))
+                        .filter(|g| *g != PUBLIC && groups.contains(&g.to_lowercase()))
                     {
                         naming.push(Naming {
                             bucket,
@@ -1247,7 +1253,11 @@ pub async fn handwritten_for_principal_via(
                             on_engines: false,
                         });
                     }
-                    for r in item.roles.iter().filter(|r| roles.contains(*r)) {
+                    for r in item
+                        .roles
+                        .iter()
+                        .filter(|r| roles.contains(&r.to_lowercase()))
+                    {
                         naming.push(Naming {
                             bucket,
                             how: NamingHow::Role,
