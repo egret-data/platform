@@ -45,13 +45,27 @@ describe("the Engine & policy area's routes", () => {
   }, 15_000);
 
   it.each([
-    ["/governance/engines/e1/advanced/policies/access/new", "engine e1, access, new"],
-    ["/governance/engines/e1/advanced/policies/masking/42", "engine e1, masking, 42"],
-    ["/governance/engines/profiles/p2/advanced/policies/rowfilter/new", "profile p2, rowfilter, new"],
-    ["/governance/engines/profiles/p2/advanced/policies/access/9", "profile p2, access, 9"],
-  ])("opens the editor at %s (Q2: the kind stays in the URL)", async (url, said) => {
+    ["/governance/engines/profiles/p2/advanced/policies/rowfilter/new"],
+    ["/governance/engines/profiles/p2/advanced/policies/access/9"],
+  ])("opens an unbound profile's editor at %s (Q2: the kind stays in the URL)", async (url) => {
     openApp(url, POLICY_READER);
-    expect(await screen.findByTestId("editor-stub", {}, TIMEOUT)).toHaveTextContent(said);
+    // The editor's way back is the profile page's Advanced tab (spec §6.6).
+    expect(await screen.findByRole("link", { name: "p2" }, TIMEOUT)).toHaveAttribute(
+      "href",
+      "/governance/engines/profiles/p2?tab=advanced",
+    );
+    expect(currentUrl()).toBe(url);
+  }, 15_000);
+
+  it.each([
+    ["/governance/engines/e1/advanced/policies/access/new"],
+    ["/governance/engines/e1/advanced/policies/masking/42"],
+  ])("opens an engine's editor route at %s, which first asks the engine for its profile", async (url) => {
+    const fetchMock = openApp(url, POLICY_READER);
+    // Every read but the profile list rejects here: the route stops at the engine's error.
+    expect(await screen.findByText("The engine could not be loaded. Retry, or reload the page.", {}, TIMEOUT)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toContain("/api/control-plane/perm/engines/e1/grants");
+    expect(currentUrl()).toBe(url);
   }, 15_000);
 
   it.each([

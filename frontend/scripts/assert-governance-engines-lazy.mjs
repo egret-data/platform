@@ -54,6 +54,12 @@ const MARKERS = [
   ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
   // The Plugin tab's rule for a held version (spec §6.5).
   ["src/routes/governance/engines/tabs/PluginTab.tsx", "confirmation takes two polls, about a minute at the default 30 s poll."],
+  // The Advanced tab's fixed warning (spec §6.6).
+  ["src/routes/governance/engines/tabs/AdvancedTab.tsx", "egret does not recompile them, does not check overlaps with grants"],
+  // The editor route of an engine with no profile.
+  ["src/routes/governance/engines/EditorRoute.tsx", "so it has no policy to edit."],
+  // The policy editor's refusal to edit what it could not load (moved from routes/governance/).
+  ["src/routes/governance/engines/PolicyEditorPage.tsx", "there's nothing safe to edit here"],
   // The Migrate tab's link after a written migration (spec §6.4).
   ["src/routes/governance/engines/tabs/MigrateTab.tsx", "See it in Recent changes"],
 ];
