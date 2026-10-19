@@ -360,7 +360,7 @@ D12 cấp cho run của body mỗi lần lặp id mới, nên run id của lần
   - container mà run không còn dòng và execution của nó không có trong database này hoặc còn sống. Gồm cả container của egret khác trên cùng daemon dùng chung.
 - **Test:**
   - unit test `a_superseded_runs_kept_work_gets_the_retention_deadline` (cũng ghim trường hợp `delete: true`) và `the_docker_sweep_parses_the_execution_label` (`cargo test -p egret-workflow --lib -- worker::commands`);
-  - case Docker live `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`--test container_docker_live`): sau một `LoopUntil` hai lần lặp, sweep với hạn một giờ xoá 0 container và còn 2, còn sweep với hạn không xoá 2.
+  - case Docker live `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`--test container_docker_live`): sau một `LoopUntil` hai lần lặp, sweep với hạn một giờ xoá 0 container và còn 2, còn sweep với hạn giữ dài 0 xoá 2.
 - **Kubernetes chỉ được phủ bằng unit test.** Pod sweep đi qua cùng `sweep_decision`, nhưng không có cụm nào để chạy, và guard riêng của đường pod cần một `kube::Client` nên không có seam để unit test.
 
 **Block `WorkingDirectory` bên trong `LoopUntil`.**
@@ -401,7 +401,7 @@ Phép tra cứu đằng sau nó, `FlowRepo::find_by_name` (`repo.rs:892-946`), k
 - Publish luôn ghi đè `flow_ref` bằng câu trả lời của phép tra, nên target vắng xoá `flowRef` mà tác giả viết trong draft.
 - Publish cũng đi qua các list `errors:` lồng nhau. Một `Subflow` ở đó nhận cùng phép tra, warning và `flowRef` bị xoá, còn `database:` ở đó được kiểm như `database:` ở cấp cao nhất. (Task type không biết hoặc không được phục vụ ở đó vốn đã bị validate từ chối.)
 - Phép tra không-phạm-vi đã bị bỏ: `RefKind::Subflow` và `FlowRepo::find_by_name` đã bị xoá, nên lỗi từ chối quá tay xuyên workspace không thể quay lại.
-- **Census, đã đo** (`cargo test -p egret-workflow --test executor`, trên corpus 351 flow): `LIVE` 293 lên **295** và `VALIDATE_REFUSED` 27 xuống **25**. Hai flow là `valids/task-runif` và `valids/trigger-flow-listener-no-inputs`. Số phép tra subflow không-phạm-vi mà publish thực hiện trong census giảm về 0, và nay chúng canh để publish không quay lại port không-phạm-vi.
+- **Census, đã đo** (`cargo test -p egret-workflow --test executor`, trên corpus 351 flow): `LIVE` 293 lên **295** và `VALIDATE_REFUSED` 27 xuống **25**. Hai flow là `valids/task-runif` và `valids/trigger-flow-listener-no-inputs`. Bộ đếm số phép tra subflow mà publish thực hiện trong census (`SUBFLOW_LOOKUPS_ON_PUBLISHED`/`_ON_REFUSED`) đã bị gỡ cùng `RefKind::Subflow`: publish không còn port subflow nào để đếm.
 - **Ratchet không đổi:** 301 golden entry, 73 mismatching, 73 baselined, 0 broken. `baseline.txt` và `golden.json` không bị sửa.
 - **Test:** trong `tests/publish.rs`, `a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it`, `a_trigger_dependency_absent_from_the_callers_workspace_publishes_whoever_has_it`, `an_authored_flow_ref_does_not_survive_an_absent_target`, và cho `errors:` lồng nhau `a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_authored_flow_ref_cleared` và `a_foreign_database_inside_a_nested_errors_list_cannot_be_published` (`cargo test -p egret-workflow --test publish`); trong `tests/worker.rs`, `a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fails_not_found` (`--test worker -- subflow`), chạy flow đã publish và thấy child fail với `unable to find flow`.
 
