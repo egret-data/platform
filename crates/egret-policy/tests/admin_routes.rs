@@ -1313,6 +1313,10 @@ async fn list_profiles_surfaces_tag_service() {
     };
     let token = session_for(&f, "tagsvc", true).await;
     let (svc_name, svc_id) = seed_service(&f).await;
+    // The `tag` service-def must exist before a `tag` profile can (FK
+    // `authz_services_type_fkey`); without this the test passed only when an
+    // earlier test in the same database had seeded it.
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
     let tag_name = format!("{svc_name}_tag");
     let tag_svc = f
         .store
