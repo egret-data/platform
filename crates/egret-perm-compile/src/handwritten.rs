@@ -1293,6 +1293,186 @@ pub async fn handwritten_for_principal_via(
     })
 }
 
+// ── Route D: hand-written tag policies of a classification (spec §4.5, Q4) ─
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRef {
+    pub id: Uuid,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TagPolicyState {
+    Listed,
+    /// No Trino profile has a usable tag service, so no engine downloads tag
+    /// policies.
+    NoTagService,
+}
+
+/// [`TagPolicyState`] from the number of usable tag services.
+pub fn tag_policy_state(tag_services: usize) -> TagPolicyState {
+    if tag_services == 0 {
+        TagPolicyState::NoTagService
+    } else {
+        TagPolicyState::Listed
+    }
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileRef {
+    pub service_id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagPolicyRow {
+    pub id: i64,
+    pub name: String,
+    /// The tag service that stores it.
+    pub service: String,
+    pub policy_type: String,
+    pub resource_summary: String,
+    /// The tag value matched by `*`/`?` rather than literally.
+    pub through_pattern: bool,
+    pub enabled: bool,
+    pub deny_all_else: bool,
+    pub unmodelled: Vec<String>,
+    pub items: Vec<ItemSummary>,
+    /// The Trino profiles whose tag service this is.
+    pub profiles: Vec<ProfileRef>,
+    /// The engines bound to those profiles.
+    pub engines: Vec<EngineRef>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SameNameTag {
+    pub id: Uuid,
+    pub key: String,
+}
+
+/// Route D's answer.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagHandWritten {
+    pub tag: TagRef,
+    pub state: TagPolicyState,
+    pub policies: Vec<TagPolicyRow>,
+    /// Other tags with this name: engine tag policies on the name apply to
+    /// them too (CL10).
+    pub same_name: Vec<SameNameTag>,
+}
+
+/// Route D (spec §4.5): every usable tag service's hand-written (`operator`)
+/// policies whose tag resource matches this tag's NAME through the tag
+/// service-def's matcher (no case folding: `ignoreCase: false`).
+pub async fn handwritten_for_tag_via(
+    conn: &mut sqlx::PgConnection,
+    tag_id: Uuid,
+) -> Result<TagHandWritten, HandWrittenError> {
+    let tag: Option<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, key, name FROM tags WHERE id = $1")
+            .bind(tag_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((id, key, name)) = tag else {
+        return Err(HandWrittenError::NotFound);
+    };
+    let same: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, key FROM tags WHERE name = $1 AND id <> $2 ORDER BY key")
+            .bind(&name)
+            .bind(id)
+            .fetch_all(&mut *conn)
+            .await?;
+
+    // Every Trino profile and its usable tag service.
+    let trino: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, name FROM policy.authz_services WHERE type = 'trino' ORDER BY name, id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let ids: Vec<i64> = trino.iter().map(|(i, _)| *i).collect();
+    let links = usable_tag_services_via(&mut *conn, &ids).await?;
+    let profile_name: BTreeMap<i64, String> = trino.into_iter().collect();
+    let mut by_tag_service: BTreeMap<String, Vec<ProfileRef>> = BTreeMap::new();
+    for (sid, tag_service) in links {
+        by_tag_service
+            .entry(tag_service)
+            .or_default()
+            .push(ProfileRef {
+                service_id: sid,
+                name: profile_name.get(&sid).cloned().unwrap_or_default(),
+            });
+    }
+
+    let mut out = TagHandWritten {
+        tag: TagRef {
+            id,
+            key,
+            name: name.clone(),
+        },
+        state: tag_policy_state(by_tag_service.len()),
+        policies: Vec::new(),
+        same_name: same
+            .into_iter()
+            .map(|(id, key)| SameNameTag { id, key })
+            .collect(),
+    };
+    let request = RequestResource::new().with("tag", name.as_str());
+    let mut defs = Defs::default();
+    for (tag_service, mut profiles) in by_tag_service {
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        let Some(tsid) = service_id_by_name_via(&mut *conn, &tag_service).await? else {
+            continue;
+        };
+        let mut engines = Vec::new();
+        for p in &profiles {
+            engines.extend(
+                engines_of_profile_via(&mut *conn, p.service_id)
+                    .await?
+                    .into_iter()
+                    .map(|e| EngineRef {
+                        id: e.id,
+                        name: e.name,
+                    }),
+            );
+        }
+        let rows = policy_rows_via(&mut *conn, tsid).await?;
+        let def = defs.get(&mut *conn, "tag").await?;
+        for row in rows.iter().filter(|r| r.managed_by == "operator") {
+            let Ok(policy) = parse_policy(row) else {
+                continue;
+            };
+            let prepared = PreparedPolicyResources::new(&policy, def);
+            let ObjectMatch::Applies { through_pattern } =
+                object_match(&prepared, &policy, &request)
+            else {
+                continue;
+            };
+            out.policies.push(TagPolicyRow {
+                id: row.id,
+                name: row.name.clone(),
+                service: tag_service.clone(),
+                policy_type: policy_type_word(policy.policy_type).to_string(),
+                resource_summary: resource_summary(&policy),
+                through_pattern,
+                enabled: row.enabled,
+                deny_all_else: policy.is_deny_all_else,
+                unmodelled: unmodelled_sentences(&policy),
+                items: item_summary(&policy),
+                profiles: profiles.clone(),
+                engines: engines.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

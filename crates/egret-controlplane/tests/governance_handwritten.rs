@@ -452,3 +452,71 @@ async fn route_b_refusals() {
         assert_eq!(status, want, "{uri}");
     }
 }
+
+// ── route D ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn route_d_needs_policy_read_and_answers_with_it() {
+    let f = setup().await;
+    let (_, prof) = catalog_with_policy(&f).await;
+    let tag_service: String = sqlx::query_scalar(
+        "SELECT config_jsonb ->> 'tagService' FROM policy.authz_services WHERE name = $1",
+    )
+    .bind(&prof)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let tsid: i64 = sqlx::query_scalar("SELECT id FROM policy.authz_services WHERE name = $1")
+        .bind(&tag_service)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let name = unique("PII");
+    let tag: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(unique("hwr-k"))
+        .bind(&name)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let body = json!({
+        "name": "hw-d", "service": tag_service, "serviceType": "tag", "policyType": 0, "isEnabled": true,
+        "resources": { "tag": { "values": [name] } },
+        "denyPolicyItems": [{ "users": ["ua"], "accesses": [{ "type": "select", "isAllowed": true }] }]
+    });
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, 'hw-d', $2, 'operator')",
+    )
+    .bind(tsid)
+    .bind(body)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+    let uri = format!("/classifications/{tag}/handwritten");
+    assert_eq!(get(&st, &tag_reader, &uri).await.0, StatusCode::FORBIDDEN);
+    let (status, body) = get(&st, &reader, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "listed");
+    assert_eq!(body["tag"]["name"], json!(name));
+    assert_eq!(body["sameName"], json!([]));
+    let row = body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "hw-d")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["service"], json!(tag_service));
+    assert_eq!(row["profiles"][0]["name"], json!(prof));
+    assert_eq!(row["items"][0]["bucket"], "deny");
+    let (status, _) = get(
+        &st,
+        &reader,
+        &format!("/classifications/{}/handwritten", Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

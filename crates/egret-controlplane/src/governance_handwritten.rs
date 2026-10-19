@@ -14,7 +14,8 @@ use egret_perm_compile::handwritten::{
     HandWrittenEngine, HandWrittenError, HandWrittenPolicy, HandWrittenProfile, HandWrittenTarget,
     ItemSummary, ListedState, MatchWord, Naming, NamingHow, NotDeterminedReason, ObjectHandWritten,
     ObjectTarget, PrincipalHandWritten, PrincipalMark, PrincipalPolicy, PrincipalRef,
-    PrincipalState, SeededCount, TagOn, ViaTag,
+    PrincipalState, ProfileRef, SameNameTag, SeededCount, TagHandWritten, TagOn, TagPolicyRow,
+    TagPolicyState, TagRef, ViaTag,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -32,11 +33,12 @@ pub(crate) fn router() -> Router<CpState> {
             "/governance/principals/{kind}/{id}/handwritten",
             get(principal_handwritten),
         )
+        .route("/classifications/{id}/handwritten", get(tag_handwritten))
 }
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(object_handwritten, principal_handwritten),
+    paths(object_handwritten, principal_handwritten, tag_handwritten),
     components(schemas(
         ObjectHandWritten,
         HandWrittenCatalog,
@@ -61,7 +63,13 @@ pub(crate) fn router() -> Router<CpState> {
         NamingHow,
         EngineRef,
         EveryoneSummary,
-        EveryonePolicy
+        EveryonePolicy,
+        TagHandWritten,
+        TagRef,
+        TagPolicyState,
+        TagPolicyRow,
+        ProfileRef,
+        SameNameTag
     ))
 )]
 pub(crate) struct ControlPlaneGovernanceHandWrittenApi;
@@ -162,6 +170,38 @@ async fn principal_handwritten(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let mut tx = begin_snapshot(&st).await?;
     let out = handwritten::handwritten_for_principal_via(&mut tx, &kind, &id).await;
+    let _ = tx.rollback().await;
+    Ok(Json(out.map_err(map_err)?))
+}
+
+/// Hand-written tag policies of a classification.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/classifications/{id}/handwritten",
+    tag = "control-plane-governance",
+    params(("id" = Uuid, Path, description = "Tag id")),
+    description = "Every hand-written (operator) policy of every usable tag service whose tag \
+                   resource matches this classification's NAME through the tag service-def's \
+                   matcher (wildcards yes, case folding no), with the Trino profiles and engines \
+                   that download it; `sameName` lists other tags with this name, which those \
+                   policies reach too. `no_tag_service` when no Trino profile has a tag service. \
+                   Requires policy:read.",
+    responses(
+        (status = 200, description = "The hand-written tag policies naming the classification", body = TagHandWritten),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Lacks policy:read", body = ErrorBody),
+        (status = 404, description = "No tag with this id", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    )
+)]
+async fn tag_handwritten(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TagHandWritten>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut tx = begin_snapshot(&st).await?;
+    let out = handwritten::handwritten_for_tag_via(&mut tx, id).await;
     let _ = tx.rollback().await;
     Ok(Json(out.map_err(map_err)?))
 }
