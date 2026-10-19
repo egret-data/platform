@@ -382,3 +382,76 @@ async fn a_declared_output_that_is_a_directory_fails_the_child_by_name(pool: PgP
     .expect("count");
     assert_eq!(runs, 0, "the sibling after the failed child gets no run");
 }
+
+/// **Task 2.3b, live: a block inside a `WaitFor` is prepared again each
+/// iteration, so its Docker child runs in both, each time in a fresh
+/// directory.** The child refuses a directory that already holds `a.txt`,
+/// then writes it: the second iteration passes only if it starts from a new
+/// prepare rather than the first iteration's directory. Before the fix the
+/// second iteration's block ended at once and `child` never ran again (its
+/// last row had no history).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_block_inside_a_wait_for_runs_its_docker_child_each_iteration(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    require_docker();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let reg = registry(&pool);
+    // The block and its child, two levels deeper than `block()` puts them.
+    let inner: String = child("child", &["test ! -e a.txt", "echo once > a.txt"])
+        .lines()
+        .map(|l| format!("    {l}\n"))
+        .collect();
+    let source = format!(
+        "id: wd-loop-live\nnamespace: w6.live\ntasks:\n  - id: until\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"false\"\n    checkFrequency:\n      maxIterations: 1\n      interval: PT0S\n    failOnMaxReached: false\n    tasks:\n      - id: block\n        type: io.kestra.plugin.core.flow.WorkingDirectory\n        tasks:\n{inner}"
+    );
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .unwrap_or_else(|e| panic!("start: {e}\n{source}"));
+    let mut runs = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let end = loop {
+        tick_with(&pool, 1, &reg, WorkerTiming::default())
+            .await
+            .expect("a tick");
+        let row: Option<(uuid::Uuid, String)> = sqlx::query_as(
+            "SELECT id, state FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'child'",
+        )
+        .bind(ex)
+        .fetch_optional(&pool)
+        .await
+        .expect("the child");
+        if let Some((id, state)) = row {
+            if state != "CREATED" && runs.last() != Some(&(id, state.clone())) {
+                runs.push((id, state));
+            }
+        }
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+                .bind(ex)
+                .fetch_one(&pool)
+                .await
+                .expect("the execution");
+        if matches!(state.as_str(), "SUCCESS" | "FAILED" | "WARNING" | "KILLED") {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "not ended within 120 s: {runs:?}"
+        );
+    };
+    let done: Vec<_> = runs.iter().filter(|(_, s)| s == "SUCCESS").collect();
+    let (child, message) = state_of(&pool, ex, "child").await;
+    assert_eq!(end, "SUCCESS", "child {child}: {message:?}; {runs:?}");
+    assert_eq!(
+        done.len(),
+        2,
+        "the child succeeded once per iteration, in a fresh directory: {runs:?}"
+    );
+    assert_ne!(
+        done[0].0, done[1].0,
+        "each iteration's child has its own id"
+    );
+}
