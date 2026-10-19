@@ -7,7 +7,10 @@ import type { Me } from "@/api/hooks";
 import { getControlPlaneTagsListTagsQueryKey } from "@/api/generated/control-plane-tags/control-plane-tags";
 import type { BrowseResponse, ExplainResponse, GrantView, ObjectTags, RuleView, Scope } from "@/api/generated/model";
 import { tagsQueryKey } from "@/api/tags";
-import { getControlPlaneGovernanceTagUsageQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
+import {
+  getControlPlaneGovernanceObjectHandwrittenQueryKey,
+  getControlPlaneGovernanceTagUsageQueryKey,
+} from "@/api/generated/control-plane-governance/control-plane-governance";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
@@ -564,6 +567,9 @@ describe("Add tag", () => {
     expect(keys).toContainEqual(getControlPlaneTagsListTagsQueryKey());
     // CL16: the tag's Where used (route C) is refreshed too.
     expect(keys).toContainEqual(getControlPlaneGovernanceTagUsageQueryKey("t-secret"));
+    // And the Hand-written sections (route A), which match tag policies through the object's tags.
+    const routeA = getControlPlaneGovernanceObjectHandwrittenQueryKey("c-ice", { schema: "sales", table: "orders" });
+    expect(invalidate.mock.calls.some(([f]) => f?.predicate?.({ queryKey: routeA } as never) === true)).toBe(true);
   });
 
   // M5: the URL may differ in case from the source; the tag is written with the listing's spelling.

@@ -9,7 +9,11 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getControlPlaneGovernanceTagUsageQueryKey } from "../generated/control-plane-governance/control-plane-governance";
+import {
+  getControlPlaneGovernanceObjectHandwrittenQueryKey,
+  getControlPlaneGovernanceTagHandwrittenQueryKey,
+  getControlPlaneGovernanceTagUsageQueryKey,
+} from "../generated/control-plane-governance/control-plane-governance";
 import { useAssignResourceTag, useUnassignResourceTag } from "../catalogTags";
 import {
   tagsQueryKey,
@@ -53,6 +57,44 @@ describe("every tag write invalidates the list and the tag's usage", () => {
     result.current.mutate(vars);
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     await waitFor(() => expect(keys()).toEqual(expect.arrayContaining([TAGS, USAGE_T1])));
+  });
+});
+
+/**
+ * Data's Hand-written section (route A) matches tag policies through the
+ * object's tags, by tag NAME: a Data assignment, a rename or a delete changes
+ * it on every object page, whatever its catalog. A tag's Hand-written tab
+ * (route D) matches by the tag's name: a rename or a delete changes it.
+ */
+describe("tag writes that change hand-written reach", () => {
+  const ROUTE_A = getControlPlaneGovernanceObjectHandwrittenQueryKey("c-any", { schema: "s", table: "t" });
+  const ROUTE_D_T1 = JSON.stringify(getControlPlaneGovernanceTagHandwrittenQueryKey("t1"));
+
+  it.each([
+    ["assign to a table", () => useAssignResourceTag("wh1"), { schema: "s", table: "t", tag_id: "t1" }, false],
+    ["unassign from a table", () => useUnassignResourceTag("wh1"), { schema: "s", table: "t", tag_id: "t1" }, false],
+    ["update", () => useUpdateTag(), { id: "t1", name: "x" }, true],
+    ["delete", () => useDeleteTag(), "t1", true],
+  ] as const)("%s", async (_what, hook, vars, byName) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+    const { result } = renderHook(hook as () => { mutate: (v: unknown) => void; isSuccess: boolean }, { wrapper });
+    result.current.mutate(vars);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const filters = () => spy.mock.calls.map((c) => c[0]);
+    await waitFor(() =>
+      expect(filters().some((f) => f?.predicate?.({ queryKey: ROUTE_A } as never) === true)).toBe(true),
+    );
+    // The predicate is route A's family only.
+    const pred = filters().find((f) => f?.predicate)?.predicate;
+    expect(pred?.({ queryKey: getControlPlaneGovernanceTagUsageQueryKey("t1") } as never)).toBe(false);
+    expect(pred?.({ queryKey: tagsQueryKey } as never)).toBe(false);
+    const keys = filters().map((f) => JSON.stringify(f?.queryKey));
+    expect(keys.includes(ROUTE_D_T1)).toBe(byName);
   });
 });
 

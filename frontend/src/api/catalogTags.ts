@@ -14,7 +14,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiJson } from "./client";
-import { invalidateTag, type Tag } from "./tags";
+import { invalidateObjectHandwritten, invalidateTag, type Tag } from "./tags";
 
 export interface ResourceTagAssignment {
   schema: string;
@@ -60,8 +60,10 @@ export function useAssignResourceTag(warehouseId: string) {
       void queryClient.invalidateQueries({
         queryKey: resourceTagsQueryKey(warehouseId, input.schema, input.table),
       });
-      // CL16: the list's Data counts and the tag's usage change too.
+      // CL16: the list's Data counts and the tag's usage change too, and the
+      // hand-written tag policies reaching objects (route A).
       invalidateTag(queryClient, input.tag_id);
+      invalidateObjectHandwritten(queryClient);
     },
   });
 }
@@ -80,8 +82,10 @@ export function useUnassignResourceTag(warehouseId: string) {
       void queryClient.invalidateQueries({
         queryKey: resourceTagsQueryKey(warehouseId, input.schema, input.table),
       });
-      // CL16: the list's Data counts and the tag's usage change too.
+      // CL16: the list's Data counts and the tag's usage change too, and the
+      // hand-written tag policies reaching objects (route A).
       invalidateTag(queryClient, input.tag_id);
+      invalidateObjectHandwritten(queryClient);
     },
   });
 }

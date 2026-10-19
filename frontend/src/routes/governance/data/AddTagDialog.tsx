@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2, Tag as TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import { invalidateTag } from "@/api/tags";
+import { invalidateObjectHandwritten, invalidateTag } from "@/api/tags";
 import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { getControlPlaneGovernanceObjectTagsQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { getControlPlaneTagsListTagsQueryKey, useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
@@ -85,6 +85,8 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
         // The Classification pages, RuleDialog and the rule lists read the catalogue under `["tags"]`;
         // the tag's Where used reads route C (CL16).
         invalidateTag(queryClient, vars.data.tag_id);
+        // The Hand-written sections match tag policies through the object's tags (route A).
+        invalidateObjectHandwritten(queryClient);
         toast.success("Tag added.");
         onDone();
       },
