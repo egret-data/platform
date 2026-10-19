@@ -311,9 +311,10 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
   names this principal" over a policy that may name it. The answer gains
   `unreadable: [ { id, name, service, inTagService, policyType, parseError, engines } ]` (every unparsable `operator` row
   of every Trino, StarRocks and tag service; `parseError` is route A's text), never dropped (§4.2.6). Gate unchanged.
-- *Review fix, item 8.* egret folds group names (#688) while an item keeps its author's spelling, so group and role
-  names are matched case-insensitively for this listing; `via` keeps the item's spelling. It is informational: Q1's
-  sentence stands, engines resolve no groups.
+- *Review fix, item 8.* egret folds group names (#688) while an item keeps its author's spelling, so group names are
+  matched case-insensitively for this listing; `via` keeps the item's spelling. Role names are matched exactly: egret
+  roles are case-sensitive (`roles` UNIQUE(scope, name)), so an item naming `Analyst` is not role `analyst`. It is
+  informational: Q1's sentence stands, engines resolve no groups.
 
 ### 4.4 Route C and the `/tags` counts (CL4, Q3)
 
@@ -419,7 +420,8 @@ filter), enabled, `unmodelled` sentences; `sameName` sentence (CL10). Without `p
 
 **Note (2026-10-20, review fix, item 2).** Route D's `unreadable` rows are stated under the table: "N hand-written tag
 policies could not be read, so this list may be incomplete.", each named with its parse error and an editor link (the
-first downloading engine's; none when no engine downloads it).
+first downloading engine's; none when no engine downloads it). With unreadable rows and no listed policy the empty
+sentence reads "No readable hand-written tag policy names this classification.", never a plain "none".
 
 ### 5.6 Delete (CL2, CL14)
 
@@ -461,7 +463,9 @@ permission, which this account does not have." Error → error with Retry, never
   without a link. A tag service has no page of its own.
 - *Review fix, item 2.* People's section states route B's `unreadable` rows of the shown types (access, or masking and
   row filter): "N hand-written policies could not be read, so this list may be incomplete.", each with its parse error
-  and editor link, also for a user without a username.
+  and editor link, also for a user without a username. With such rows the heading reads "Hand-written policies (N
+  readable, U unreadable)" and the empty sentence "No readable hand-written policy names this principal." Data's
+  section needs neither: its `unknown` rows are listed and counted.
 - *Live check D3.* See §4.3: on a group's or role's page its own naming is Direct.
 
 ## 7. Links

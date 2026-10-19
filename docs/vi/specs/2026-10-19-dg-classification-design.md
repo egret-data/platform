@@ -312,8 +312,9 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
   parse được của mọi service Trino, StarRocks và tag; `parseError` là chữ của route A), không bao giờ bỏ (§4.2.6). Gate
   không đổi.
 - *Sửa sau review, mục 8.* egret gập chữ tên group (#688) còn item giữ cách viết của tác giả, nên với danh sách này tên
-  group và role được so không phân biệt hoa thường; `via` giữ cách viết của item. Đây chỉ là thông tin: câu của Q1 giữ
-  nguyên, engine không phân giải group nào.
+  group được so không phân biệt hoa thường; `via` giữ cách viết của item. Tên role được so chính xác: role của egret
+  phân biệt hoa thường (`roles` UNIQUE(scope, name)), nên item nêu `Analyst` không phải role `analyst`. Đây chỉ là thông
+  tin: câu của Q1 giữ nguyên, engine không phân giải group nào.
 
 ### 4.4 Route C và số đếm của `/tags` (CL4, Q3)
 
@@ -417,7 +418,8 @@ classification."
 
 **Ghi chú (2026-10-20, sửa sau review, mục 2).** Các dòng `unreadable` của route D được nêu dưới bảng: "N hand-written
 tag policies could not be read, so this list may be incomplete.", mỗi dòng kèm lỗi parse và link editor (của engine tải
-đầu tiên; không có link khi không engine nào tải).
+đầu tiên; không có link khi không engine nào tải). Khi có dòng không đọc được mà không có policy nào được liệt kê, câu
+rỗng là "No readable hand-written tag policy names this classification.", không bao giờ là "không có" trơn.
 
 ### 5.6 Xoá (CL2, CL14)
 
@@ -458,7 +460,9 @@ have." Lỗi → lỗi kèm Retry, không bao giờ là "None".
   quan thì nêu tên, không link. Tag service không có trang riêng.
 - *Sửa sau review, mục 2.* Section của People nêu các dòng `unreadable` của route B thuộc loại đang hiện (access, hoặc
   masking và row filter): "N hand-written policies could not be read, so this list may be incomplete.", mỗi dòng kèm lỗi
-  parse và link editor, kể cả với user không có username.
+  parse và link editor, kể cả với user không có username. Khi có các dòng đó, tiêu đề là "Hand-written policies (N
+  readable, U unreadable)" và câu rỗng là "No readable hand-written policy names this principal." Section của Data không
+  cần cả hai: các dòng `unknown` của nó được liệt kê và đếm.
 - *Kiểm sống D3.* Xem §4.3: trên trang group hay role, việc nêu chính nó là Direct.
 
 ## 7. Link
