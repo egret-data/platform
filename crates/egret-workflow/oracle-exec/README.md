@@ -3604,7 +3604,10 @@ test rather than a sentence here.
 
 **Neither is a rule to loosen casually, and that is the finding.** Both exist
 because `publish::subflow_ref_name` encodes the pair as `"{namespace}/{flowId}"`
-and a `/` in either half decodes back into a different pair. Skipping the check
+and a `/` in either half decodes back into a different pair. *(2026-10-19, debt
+§5.1: that encoding is gone; publish looks the pair up as two columns with
+`FlowRepo::find_in_workspace`, and `subflow_ref_name` was removed. The checks
+stand on being Kestra's own grammar.)* Skipping the check
 when the value holds `{{` would not fix the flow; it would move the collision to
 render time, where nothing looks for it. The fix is to the **encoding**, and it
 is W1's.
@@ -3672,7 +3675,7 @@ since the null-list fix:
 | flow | egret's code | whose rule |
 |---|---|---|
 | ~~`valids/switch-impossible`~~ | ~~`cannot parse flow`~~ | **fixed.** W1's bare `Vec<Task>` and an explicit `null`. The only one of the three with a golden entry, and the only one the ratchet could see — which is why it is the only one that got fixed |
-| `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding |
+| `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding *(removed 2026-10-19, debt §5.1: the pair is no longer encoded; the check stands on Kestra's grammar)* |
 | `valids/trigger-flow-listener-namespace-condition` | `dependency_namespace_required` / `dependency_flow_id_required` | W1's, same encoding |
 
 **It is written inverted, the way `STILL_OVER_ACCEPTED` is**, and that is the
@@ -11781,7 +11784,8 @@ Sixteen are `invalids/` flows Kestra itself refused with a 422. Three are
 So: **no over-refusal that was not already recorded.** The `task-flow-dynamic`
 row is the one W6 should read twice — egret cannot express a *dynamic* subflow
 target at all, and the fix its row names is to `publish::subflow_ref_name`'s
-encoding, not to the check.
+encoding, not to the check. *(2026-10-19, debt §5.1: that encoding and
+function are gone; see `PUBLISHED_BUT_REFUSED`'s updated cause.)*
 
 ### How much of a sweep this actually is, bounded
 
@@ -13446,7 +13450,22 @@ therefore deletes 0 rows: the four banked entries prove `CREATED → RUNNING →
 SUCCESS`, not which rows were deleted or how many. Deletion and `count` are
 proved by `tests/purge_logs.rs`.
 
-### Known over-refusals at publish
+### Known over-refusals at publish: Fixed 2026-10-19
+
+**Fixed 2026-10-19 (debt spec §5.1; the user decided on 2026-10-19 that both over-refusals close).** Publish now resolves a
+`Subflow` and a Flow trigger's `dependsOn` pair in the caller's workspace only
+(`FlowRepo::find_in_workspace`), and an absent target no longer refuses the
+flow: it publishes with no frozen id and, for a `Subflow`, Kestra's warning
+`The subflow '<flowId>' not found in namespace '<namespace>'.`
+(`FlowService.java:642`) in the snapshot's `warnings`. A flow only another
+workspace holds is answered exactly as an absent one, so publish still probes
+nothing. It walks nested `errors:` lists too, and the unscoped lookup
+(`RefKind::Subflow`, `FlowRepo::find_by_name`) is removed. Both flows below
+publish live: `driver.rs`'s `LIVE` 293 → 295 and `VALIDATE_REFUSED` 27 → 25,
+measured. The ratchet is unchanged: 301 golden entries, 73 mismatching, 73
+baselined, 0 broken. `baseline.txt` is unchanged, because the executor oracle
+runs `build_plan`, not publish. The record as it stood:
+
 
 No tracked list exists for this layer. `PUBLISHED_BUT_REFUSED`
 (`src/executor/mod.rs`) tracks the flows Kestra published with 200 that
@@ -13465,6 +13484,9 @@ Both are the same shape: publish's reference resolution (`RefKind::Subflow`)
 refuses a reference to a flow that does not exist, and this Kestra does not.
 The census prints both lines by name in every run; neither is asserted as an
 over-refusal anywhere.
+
+(Until 2026-10-19. The census no longer prints either line: neither flow is
+refused.)
 
 ## Group C2 Task 5: `SetVariables`, `UnsetVariables` and `Labels`, eleven entries bank
 

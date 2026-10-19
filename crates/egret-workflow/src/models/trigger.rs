@@ -318,11 +318,13 @@ pub struct Dependency {
     // it is a third field rather than an overwrite of `namespace`/`flow_id`:
     // those are Kestra's own identity pair, plausibly still needed by an
     // error message or an editor after publish, so the resolved id sits
-    // beside them rather than replacing either. `None` on every draft,
-    // `Some` only inside a frozen `FlowVersionRow::snapshot`, filled in by
-    // `publish::resolve_trigger_dependencies` once `namespace`/`flow_id`
-    // have been checked through `WorkflowRefPort` and confirmed to name a
-    // flow in the PUBLISHING workspace.
+    // beside them rather than replacing either. Filled in by
+    // `publish::resolve_trigger_dependencies`, which since debt §5.1
+    // (2026-10-19) looks `namespace`/`flow_id` up in the PUBLISHING
+    // workspace only (`FlowRepo::find_in_workspace`): `Some` when that
+    // workspace holds the flow, `None` (and no warning, as Kestra) when it
+    // does not. Publish always overwrites it, so a value an author wrote
+    // into a draft never reaches a snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_ref: Option<uuid::Uuid>,
 }

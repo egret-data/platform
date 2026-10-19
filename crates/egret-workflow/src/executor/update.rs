@@ -14,7 +14,7 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::labels::execution_labels;
+use crate::labels::{execution_labels, MAX_LABEL_KEY_CHARS, MAX_LABEL_VALUE_CHARS};
 use crate::models::property::{render_map, Property};
 use crate::models::Label;
 use crate::runners::{render_str, RenderContext};
@@ -22,6 +22,14 @@ use crate::runners::{render_str, RenderContext};
 pub const SET_VARIABLES: &str = "io.kestra.plugin.core.execution.SetVariables";
 pub const UNSET_VARIABLES: &str = "io.kestra.plugin.core.execution.UnsetVariables";
 pub const LABELS: &str = "io.kestra.plugin.core.execution.Labels";
+
+/// Egret's own bound, which Kestra does not have: the most an execution's
+/// `variables` may serialise to (1 MiB, the same budget as a render's output).
+const MAX_VARIABLES_BYTES: usize = crate::runners::env::MAX_OUTPUT_BYTES;
+
+/// Egret's own bound, which Kestra does not have: the most labels one
+/// execution may carry.
+const MAX_EXECUTION_LABELS: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateOp {
@@ -91,17 +99,17 @@ pub fn compute(
 ) -> Result<Change, String> {
     let type_id = op.type_id();
     let raw: Value = serde_json::from_str(spec).map_err(|e| format!("{type_id}: {e}"))?;
-    let current = vars.as_object().cloned().unwrap_or_default();
     match op {
         UpdateOp::Set => {
             let spec: SetSpec =
                 serde_json::from_value(raw).map_err(|e| format!("{type_id}: {e}"))?;
-            set(spec, cx, &current).map(Change::Variables)
+            set(spec, cx, &vars.as_object().cloned().unwrap_or_default()).map(Change::Variables)
         }
         UpdateOp::Unset => {
             let spec: UnsetSpec =
                 serde_json::from_value(raw).map_err(|e| format!("{type_id}: {e}"))?;
-            unset_all(spec, cx, current).map(Change::Variables)
+            unset_all(spec, cx, vars.as_object().cloned().unwrap_or_default())
+                .map(Change::Variables)
         }
         UpdateOp::Labels => {
             let spec: LabelsSpec =
@@ -145,7 +153,16 @@ fn set(
             ));
         }
     }
-    Ok(deep_merge(current, &rendered))
+    let merged = deep_merge(current, &rendered);
+    let size = serde_json::to_vec(&merged)
+        .map_err(|e| format!("`variables`: {e}"))?
+        .len();
+    if size > MAX_VARIABLES_BYTES {
+        return Err(format!(
+            "`variables`: the execution's variables would be {size} bytes, over egret's limit of {MAX_VARIABLES_BYTES}"
+        ));
+    }
+    Ok(merged)
 }
 
 fn unset_all(
@@ -274,11 +291,30 @@ fn set_labels(
             "Label values cannot be empty, offending label: {k}"
         ));
     }
+    for (key, value) in &pairs {
+        if key.chars().count() > MAX_LABEL_KEY_CHARS {
+            return Err(format!(
+                "label key `{key}` is longer than {MAX_LABEL_KEY_CHARS} characters"
+            ));
+        }
+        if value.chars().count() > MAX_LABEL_VALUE_CHARS {
+            return Err(format!(
+                "the value of label `{key}` is longer than {MAX_LABEL_VALUE_CHARS} characters"
+            ));
+        }
+    }
     let new: Vec<Label> = pairs
         .into_iter()
         .map(|(key, value)| Label { key, value })
         .collect();
-    Ok(execution_labels(current, &new))
+    let merged = execution_labels(current, &new);
+    if merged.len() > MAX_EXECUTION_LABELS {
+        return Err(format!(
+            "`labels`: the execution would carry {} labels, over egret's limit of {MAX_EXECUTION_LABELS}",
+            merged.len()
+        ));
+    }
+    Ok(merged)
 }
 
 /// A later duplicate key wins, at the first one's position.
@@ -330,6 +366,80 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_expression_that_renders_null_fails_naming_variables() {
+        let err = compute(
+            UpdateOp::Set,
+            r#"{"variables":"{{ null }}"}"#,
+            &cx(),
+            &Value::Null,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("`variables`: the expression rendered `"),
+            "{err}"
+        );
+        assert!(err.ends_with("`, which is not a JSON object"), "{err}");
+    }
+
+    #[test]
+    fn deep_merge_inserts_an_absent_key_whose_new_value_is_null() {
+        let a = obj(json!({"keep": 1}));
+        let b = obj(json!({"new": null}));
+        assert_eq!(
+            Value::Object(deep_merge(&a, &b)),
+            json!({"keep": 1, "new": null})
+        );
+    }
+
+    #[test]
+    fn unset_on_null_variables_is_a_no_op_for_a_missing_leaf() {
+        let change = compute(
+            UpdateOp::Unset,
+            r#"{"variables":["a"]}"#,
+            &cx(),
+            &Value::Null,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(change, Change::Variables(Map::new()));
+    }
+
+    #[test]
+    fn set_variables_without_variables_fails() {
+        assert_eq!(
+            compute(UpdateOp::Set, r#"{}"#, &cx(), &Value::Null, &[]).unwrap_err(),
+            "`variables`: must not be null"
+        );
+    }
+
+    #[test]
+    fn labels_list_and_form_errors_name_their_place() {
+        assert_eq!(
+            compute(
+                UpdateOp::Labels,
+                r#"{"labels":[{"key":"a"}]}"#,
+                &cx(),
+                &Value::Null,
+                &[]
+            )
+            .unwrap_err(),
+            "`labels[0]`: expected a map with `key` and `value`"
+        );
+        assert_eq!(
+            compute(
+                UpdateOp::Labels,
+                r#"{"labels":7}"#,
+                &cx(),
+                &Value::Null,
+                &[]
+            )
+            .unwrap_err(),
+            "`labels`: expected a string, a list or a map"
+        );
+    }
+
+    #[test]
     fn set_variables_on_no_variables_is_the_rendered_map() {
         let change = compute(
             UpdateOp::Set,
@@ -356,13 +466,6 @@ mod tests {
             err,
             "`overwrite` is set to false and the following variables already exist: name,b"
         );
-    }
-
-    #[test]
-    fn set_variables_without_variables_fails() {
-        assert!(compute(UpdateOp::Set, r#"{}"#, &cx(), &Value::Null, &[])
-            .unwrap_err()
-            .contains("variables"));
     }
 
     #[test]
@@ -528,6 +631,72 @@ mod tests {
             assert_eq!(UpdateOp::of(op.type_id()), Some(op));
         }
         assert_eq!(UpdateOp::of("io.kestra.plugin.core.log.Log"), None);
+    }
+
+    #[test]
+    fn set_variables_over_the_cap_fails_with_egrets_message() {
+        let big = "x".repeat(MAX_VARIABLES_BYTES);
+        let spec = serde_json::json!({"variables": {"big": big}}).to_string();
+        let err = compute(UpdateOp::Set, &spec, &cx(), &Value::Null, &[]).unwrap_err();
+        assert!(
+            err.starts_with("`variables`: the execution's variables would be ")
+                && err.ends_with(" bytes, over egret's limit of 1048576"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_label_key_or_value_over_the_backfill_caps_fails() {
+        let long_key = "k".repeat(129);
+        let spec = serde_json::json!({"labels": {long_key.clone(): "v"}}).to_string();
+        assert_eq!(
+            compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[]).unwrap_err(),
+            format!("label key `{long_key}` is longer than 128 characters")
+        );
+        let spec = serde_json::json!({"labels": {"k": "v".repeat(1025)}}).to_string();
+        assert_eq!(
+            compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[]).unwrap_err(),
+            "the value of label `k` is longer than 1024 characters"
+        );
+    }
+
+    #[test]
+    fn more_than_a_hundred_execution_labels_fails() {
+        let current: Vec<Label> = (0..100)
+            .map(|i| Label {
+                key: format!("k{i}"),
+                value: "v".into(),
+            })
+            .collect();
+        let err = compute(
+            UpdateOp::Labels,
+            r#"{"labels":{"one":"more"}}"#,
+            &cx(),
+            &Value::Null,
+            &current,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "`labels`: the execution would carry 101 labels, over egret's limit of 100"
+        );
+        // A key that already exists does not count twice.
+        compute(
+            UpdateOp::Labels,
+            r#"{"labels":{"k0":"new"}}"#,
+            &cx(),
+            &Value::Null,
+            &current,
+        )
+        .expect("100 labels, one of them overridden");
+    }
+
+    #[test]
+    fn kestras_label_checks_still_run_first() {
+        let spec = serde_json::json!({"labels": {"system.x": "v".repeat(2000)}}).to_string();
+        assert!(compute(UpdateOp::Labels, &spec, &cx(), &Value::Null, &[])
+            .unwrap_err()
+            .starts_with("System labels can only be set by Kestra itself"));
     }
 }
 

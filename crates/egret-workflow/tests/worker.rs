@@ -2946,6 +2946,8 @@ async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_
         );
     }
 
+    let first_id = run_id_of(&pool, due, "a").await;
+
     // The delay passes in REAL time. `executions.created_at` is untouched.
     tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
 
@@ -2977,6 +2979,13 @@ async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_
         2,
         "the woken run must open a SECOND attempt rather than reuse the first: {}",
         stuck(&pool, due, "a").await
+    );
+    // Debt D12's negative: a retry is another ATTEMPT of the same task run,
+    // as Kestra's is, so its id is kept. Only `RestartLoop` renews one.
+    assert_eq!(
+        run_id_of(&pool, due, "a").await,
+        first_id,
+        "a retried run keeps its task-run id"
     );
     assert_eq!(
         finished,
@@ -4605,11 +4614,74 @@ async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_chi
     );
 }
 
+/// **Debt §5.1: a flow PUBLISHED with an absent `Subflow` target runs, and
+/// its `Subflow` run fails at `subflow::resolve` with the message it always
+/// had.**
+///
+/// Publish now accepts the absent target with Kestra's warning instead of
+/// refusing it (`tests/publish.rs`,
+/// `a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it`),
+/// so the refusal moves to run time, where it was already enforced: this test
+/// starts the execution from the published version's own `source` and pins
+/// the run's not-found message, unchanged.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fails_not_found(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let flow = file_flow(
+        &db,
+        ws,
+        user,
+        &subflow_parent("parent", "nobody-holds-this", ""),
+    )
+    .await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let version = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, flow, "")
+        .await
+        .expect("an absent subflow target publishes, with a warning");
+    assert!(
+        version.snapshot["warnings"]
+            .to_string()
+            .contains("The subflow 'nobody-holds-this' not found in namespace 't'."),
+        "{}",
+        version.snapshot
+    );
+    let source = version.snapshot["source"]
+        .as_str()
+        .expect("the snapshot carries its source")
+        .to_string();
+
+    let parent = start_execution(&pool, ws, Some(flow), &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'nobody-holds-this'".to_string()),
+        ),
+    );
+}
+
 /// **A `Subflow` target in ANOTHER workspace does not resolve.**
 ///
-/// `FlowRepo::find_by_name` -- what `publish` resolves a `RefKind::Subflow`
-/// through -- is deliberately unscoped, and its own doc records why it cannot
-/// be: `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
+/// `FlowRepo::find_by_name` -- what `publish` resolved a `RefKind::Subflow`
+/// through until debt §5.1 (2026-10-19) removed both -- was unscoped, because
+/// `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
 /// **This caller has one**, on `ExecutionCtx`, so `worker::subflow::resolve`
 /// uses it.
 ///
@@ -6064,6 +6136,20 @@ async fn replay_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
     .expect("read the replay")
 }
 
+/// Let `ms` of `execution`'s own clock pass, as the oracle driver's `pass_time`
+/// does: `Tick` is ms since `executions.created_at`.
+async fn pass_clock(pool: &sqlx::PgPool, execution: Uuid, ms: i64) {
+    sqlx::query(
+        "UPDATE workflow.executions SET created_at = created_at - \
+         make_interval(secs => $1::double precision / 1000.0) WHERE id = $2",
+    )
+    .bind(ms)
+    .bind(execution)
+    .execute(pool)
+    .await
+    .expect("pass the clock");
+}
+
 /// `(attempt_number, origin_offset_ms)` — Kestra's `ExecutionMetadata`,
 /// migration 0139.
 async fn metadata_of(pool: &sqlx::PgPool, execution: Uuid) -> (i32, i64) {
@@ -6370,7 +6456,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         &pool,
         ws,
         None,
-        &one_task_replaying("chain", "PT1S", 3),
+        &one_task_replaying("chain", "PT1H", 3),
         serde_json::json!({}),
     )
     .await
@@ -6382,7 +6468,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         "the original execution is attempt 1 and its own creation is the origin"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    pass_clock(&pool, root, 3_600_001).await;
     assert_eq!(
         wake(&pool, 8).await.expect("wake"),
         vec![root],
@@ -6394,17 +6480,17 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
     let (attempt, offset) = metadata_of(&pool, second).await;
     assert_eq!(attempt, 2, "the replacement is attempt 2");
     assert!(
-        offset >= 1_000,
+        offset >= 3_600_000,
         "the offset is how much of the ORIGINAL's clock had run when this one \
-         was created, and the retry was a whole PT1S away, so it cannot be \
-         less than 1000 ms. It is {offset}"
+         was created, and the retry was a whole PT1H away, so it cannot be \
+         less than an hour. It is {offset}"
     );
 
     // **The SECOND increment, which is the one a saturating `max(2)` gets
     // wrong**: it writes the right number for the first replay and the wrong
     // one for every later replay, so a two-long chain cannot see it.
     drain_with(&pool, &reg).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    pass_clock(&pool, second, 3_600_001).await;
     assert_eq!(
         wake(&pool, 8).await.expect("wake"),
         vec![second],
@@ -6421,9 +6507,9 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
          which the ratchet sees minutes later as the driver's step bound"
     );
     assert!(
-        third_offset >= offset + 1_000,
-        "and the origin offset accumulates: {third_offset} must be at least a \
-         second past the second execution's {offset}"
+        third_offset >= offset + 3_600_000,
+        "and the origin offset accumulates: {third_offset} must be at least an \
+         hour past the second execution's {offset}"
     );
 
     // The chain ends here: `attemptNumber >= maxAttempts` is 3 >= 3.
@@ -6443,7 +6529,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         "and no fourth delay is scheduled: `next_retry_at` returned None, so \
          `scan` emitted nothing at all for this run"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    pass_clock(&pool, third, 3_600_001).await;
     assert!(
         wake(&pool, 8).await.expect("wake").is_empty(),
         "nothing is due anywhere: the chain is three executions long"
@@ -11529,18 +11615,20 @@ async fn labels_can_read_its_own_taskrun_id(pool: sqlx::PgPool) {
     );
 }
 
-/// Two `SetVariables` in one `Parallel` apply in run order: the second's `x`
-/// wins, every time -- five executions, so it does not depend on timing. And
-/// the second renders against the surface the first changed IN THE SAME
-/// settle (`y` reads the first's `x`), which no later task's render can show:
-/// the `OutputValues` renders in a later settle, from the column.
+/// Two `SetVariables` in one `Parallel` merge in run order: the second's `x`
+/// wins, every time -- five executions, so it does not depend on timing. But
+/// the second RENDERS against the execution as the render pass began (`y`
+/// reads the flow's `x: 0`, not the first's `1`), as Kestra's
+/// `handleWorkerTasks` freezes every `RunContext` before
+/// `handleExecutionUpdatingTasks` applies any update (debt D10). The flow
+/// declares `x` because Kestra's strict Pebble fails `two` without it.
 #[sqlx::test(migrations = "../../migrations")]
-async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
+async fn two_updates_in_one_parallel_render_the_start_and_merge_in_run_order(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     // Arrange
     let (_db, ws) = seed(&pool).await;
     let flow = String::from(
-        "id: par-updates\nnamespace: t\ntasks:\n\
+        "id: par-updates\nnamespace: t\nvariables:\n  x: 0\ntasks:\n\
          \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
          \x20     - id: one\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
          variables:\n          x: 1\n\
@@ -11566,8 +11654,9 @@ async fn two_updates_in_one_parallel_apply_in_run_order(pool: sqlx::PgPool) {
         );
         assert_eq!(
             execution_variables(&pool, ex).await,
-            Some(serde_json::json!({"x": 2, "y": "1"})),
-            "`two` read `one`'s `x` in the same settle"
+            Some(serde_json::json!({"x": 2, "y": "0"})),
+            "`two` renders the execution as the pass began (Kestra's frozen RunContext) \
+             and merges onto `one`'s result (debt D10)"
         );
     }
 }
@@ -11755,5 +11844,57 @@ async fn an_update_beside_a_waiting_pause_computes_before_the_resume(pool: sqlx:
     assert_eq!(
         execution_variables(&pool, ex).await,
         Some(serde_json::json!({"v": 1}))
+    );
+}
+
+/// **Debt D12 (M7): each `WaitFor` iteration recreates its body runs with new
+/// ids, as Kestra's `retryWaitFor` + `TaskRun.of` do.** `deep_merge` appends
+/// only list items that are new, so `ids` holds one id per iteration only if
+/// the id changes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn each_loop_until_iteration_has_its_own_task_run_id(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let (_db, ws) = seed(&pool).await;
+    let flow = String::from(
+        "id: m7\nnamespace: t\ntasks:\n\
+         \x20 - id: until\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"false\"\n    \
+         checkFrequency:\n      maxIterations: 3\n      interval: PT0S\n    failOnMaxReached: false\n    tasks:\n\
+         \x20     - id: collect\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+         variables:\n          ids:\n            - \"{{ taskrun.id }}\"\n",
+    );
+    let ex = start_updates(&pool, ws, &flow).await;
+    // Act
+    drain(&pool, &core_handlers()).await;
+    // Assert
+    let vars = execution_variables(&pool, ex)
+        .await
+        .expect("variables written");
+    let ids = vars["ids"].as_array().expect("a list");
+    // **4, not 3**: `maxIterations: 3` runs the body four times -- the first
+    // pass and three restarts -- which is what Kestra's golden for
+    // `valids/waitfor-max-iterations` records (`RUNNING` four times on the
+    // `WaitFor` run, between three `PAUSED`). The loop's own history says how
+    // many iterations egret ran, so the count is read from it, not assumed.
+    let history = run_history(&pool, ex, "until").await;
+    let iterations = history
+        .as_array()
+        .expect("a history")
+        .iter()
+        .filter(|s| *s == "RUNNING")
+        .count();
+    assert_eq!(iterations, 4, "the loop's history: {history}");
+    assert_eq!(
+        ids.len(),
+        iterations,
+        "one distinct id per iteration: {ids:?}"
+    );
+    let distinct: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(distinct.len(), iterations);
+    // And the row holds the last iteration's id, the one its logs and files
+    // were keyed on.
+    assert_eq!(
+        ids.last().and_then(|v| v.as_str()),
+        Some(run_id_of(&pool, ex, "collect").await.to_string().as_str()),
     );
 }

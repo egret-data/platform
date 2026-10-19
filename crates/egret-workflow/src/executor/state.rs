@@ -1000,6 +1000,11 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 r.rendered_run_if = None;
                 r.not_before = None;
                 r.resume_with = None;
+                // A `WorkingDirectory` block is prepared again: Kestra's new
+                // task run has no working directory yet. Left at `FINISHED`,
+                // the next iteration's block took its aggregate at once and
+                // its children never ran (task 2.3b).
+                r.working_dir = None;
             }
             let r = &mut state.runs[*run];
             // `RUNNING` on the run and NOT on the attempt -- the same

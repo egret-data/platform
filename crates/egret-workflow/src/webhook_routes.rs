@@ -83,10 +83,10 @@
 //!    hold `io.kestra.tests/webhook` — that is not an edge case, it is what the
 //!    corpus looks like when two people import it.
 //!
-//!    **`FlowRepo::find_by_name` must not be used here**, and its own doc says
-//!    why: it is `WHERE namespace = $1 AND flow_id = $2 ORDER BY id LIMIT 1`,
-//!    with no workspace predicate at all, because `WorkflowRefPort` has no
-//!    caller-workspace parameter. `worker::subflow::resolve` already refused it
+//!    **`FlowRepo::find_by_name` was never used here** (removed 2026-10-19,
+//!    debt spec §5.1): it was `WHERE namespace = $1 AND flow_id = $2 ORDER BY
+//!    id LIMIT 1`, with no workspace predicate at all, because
+//!    `WorkflowRefPort` has no caller-workspace parameter. `worker::subflow::resolve` already refused it
 //!    for the same reason and recorded that **nothing in the schema is a second
 //!    line of defence** — that module's own mutation showed a cross-workspace
 //!    resolve producing a child execution with no constraint anywhere objecting.
@@ -523,7 +523,7 @@ async fn handle(
 
     // --- 2. the flow, scoped to THAT workspace -------------------------------
     //
-    // Not `FlowRepo::find_by_name` -- see the module doc. `deleted_at IS NULL`
+    // Scoped by workspace -- see the module doc. `deleted_at IS NULL`
     // for the same reason `subflow::resolve` has it; `state` is read rather
     // than filtered, because a disabled flow still has to be told apart from an
     // absent one AFTER the key matches.

@@ -282,8 +282,9 @@ pub enum Filed {
 ///
 /// [`run`] hands `start_execution` a flow *source* and `None` for the flow id.
 /// Nothing about that ever wrote a row to `workflow.flows`, so
-/// `FlowRepo::find_by_name` — the one lookup a `core.subflow` task's
-/// `(namespace, flowId)` pair can go through — had nothing to find, and egret
+/// the lookup a `core.subflow` task's `(namespace, flowId)` pair goes through
+/// (`FlowRepo::find_by_name` then; `FlowRepo::find_in_workspace` since debt
+/// §5.1, 2026-10-19) had nothing to find, and egret
 /// could not execute a `Subflow` at all. 25 corpus flows declare one.
 ///
 /// # Two passes, and the order is `harvest.py`'s, not the alphabet's
@@ -415,22 +416,19 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
         }
     }
 
-    name_contest_won_by_the_right_file(&repo, &drafts).await;
+    name_contest_won_by_the_right_file(&repo, ws, &drafts).await;
 
     // Pass 2 — the version. `routes::publish_flow`, minus the HTTP, through the
-    // real `WorkflowRefs`: `RefKind::Subflow` resolves through the same
-    // `FlowRepo::find_by_name` the product uses, over the table pass 1 has just
-    // finished filling.
-    let refs = CountingRefs {
-        inner: WorkflowRefs {
-            flows: FlowRepo::new(Db { pool: pool.clone() }),
-            dataapi_endpoints: Arc::new(NoDataApi),
-        },
-        subflow_lookups: std::sync::atomic::AtomicUsize::new(0),
+    // real `WorkflowRefs`. A `Subflow` or `dependsOn` pair resolves through
+    // `FlowRepo::find_in_workspace` (debt §5.1, 2026-10-19), as in the product,
+    // over the table pass 1 has just finished filling. The port has no
+    // `RefKind::Subflow` any more, so the lookup census that counted it
+    // (`SUBFLOW_LOOKUPS_ON_PUBLISHED`/`_ON_REFUSED`, 45/3 until 2026-10-19,
+    // then 0/0) was removed with it: a publish cannot go back to the port.
+    let refs = WorkflowRefs {
+        dataapi_endpoints: Arc::new(NoDataApi),
     };
-    let (mut on_published, mut on_refused) = (0usize, 0usize);
     for (corpus_id, flow) in &drafts {
-        let before = refs.count();
         let outcome = match egret_workflow::publish::publish_gated(
             &repo,
             &refs,
@@ -445,16 +443,8 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
             Ok(_) => Filed::Live,
             Err(e) => Filed::DraftOnly(format!("{e}")),
         };
-        // Attributed to the publish that made them, because a lookup on a flow
-        // that goes on to be refused proves nothing about a flow that ships.
-        let made = refs.count() - before;
-        match outcome {
-            Filed::Live => on_published += made,
-            _ => on_refused += made,
-        }
         filed.insert(corpus_id.clone(), outcome);
     }
-    lookup_census(on_published, on_refused);
 
     census(&filed);
     target_census(&filed, &targets, &holder);
@@ -462,8 +452,9 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
 }
 
 /// Every `(namespace, flowId)` a `core.subflow` in `flow` names, as
-/// `"{namespace}/{flowId}"` — the exact key `publish::subflow_ref_name` builds
-/// and `FlowRepo::find_by_name` splits back apart.
+/// `"{namespace}/{flowId}"` (publish encoded the pair that way for the port
+/// until 2026-10-19, debt §5.1; it now looks it up as two columns with
+/// `FlowRepo::find_in_workspace`, and the string is only this census's key).
 ///
 /// # This walk is deliberately WIDER than the product's, and the corpus cannot
 /// tell
@@ -510,106 +501,6 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
     }
 }
 
-/// **`RefKind::Subflow` resolutions `publish` made inside a publish that
-/// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
-///
-/// Two sources, both through the `RefKind::Subflow` seam, in the [`LIVE`]
-/// flows that reach a live version: one per `core.subflow` task, **and** one
-/// per `dependsOn` entry of a `core.trigger.Flow` trigger, which
-/// `resolve_trigger_dependencies` (there since W1, `228173f9`) resolves the
-/// same way. No corpus flow declares an `egret.*` type, so no other `RefKind`
-/// is reachable at all. The split between the two sources is not measured
-/// here; the constant has counted both since it was set at W10 (`48f91c03`).
-/// (Corrected in the W13b final-review fix wave: this paragraph used to say
-/// no corpus flow declares a flow trigger, which was false when written.)
-///
-/// **18 through W8 Task 2, 19 through W10 Task 6, 47 now**, and the pair must
-/// still be read as one measurement — but the arithmetic that held them
-/// together has changed, and pretending otherwise would be the error this file
-/// keeps warning about.
-///
-/// Through W8 Task 3 the total was **conserved** at 22: a flow that stopped
-/// being refused moved its lookup from [`SUBFLOW_LOOKUPS_ON_REFUSED`] to here.
-/// W10 Task 6 fix round 1 is different: the total went **22 → 49**, because a
-/// publish that used to abort at the first unported `Leaf` now walks the whole
-/// flow and resolves every `Subflow` behind it. The lookups did not move — they
-/// had never been made at all. `resolve_all` reaching further is the surface
-/// this constant measures, and it is now more than twice the size it was.
-///
-/// **47 → 45 at W13b Task 2**, and this time nothing about `Subflow` moved:
-/// the two were the `dependsOn` pair of
-/// `valids/flow-trigger-fire-once-true-flow-listen`, resolved through the
-/// same `RefKind::Subflow` seam by `resolve_trigger_dependencies`. That flow
-/// no longer parses -- `models::Window` refuses `fireOnce`,
-/// as the pinned artifact does with 422 -- so it never reaches publish. See
-/// [`PARSE_REFUSED`] and [`LIVE`], which moved with it.
-const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 45;
-
-/// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
-/// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
-/// refused the flow. Counted apart because a lookup on a flow nobody can
-/// publish is not evidence the reference resolution shipped.
-///
-/// **4 through W8 Task 2, 3 through W10 Task 6, 2 now** — see
-/// [`SUBFLOW_LOOKUPS_ON_PUBLISHED`], which is where the flows that stopped
-/// being refused went, and why this one falling by one while that one rose by
-/// 28 is not a contradiction.
-///
-/// **2 -> 3 at group C1 Task 2 (2026-10-18)**, and nothing left the published
-/// side: `valids/task-runif` used to be refused at its `OutputValues` before
-/// publish resolved anything, and now reaches its `notexecutedflowable`
-/// `Subflow` (`dummy_namespace/dummy_flow`, which no corpus flow defines) and
-/// is refused there. A lookup that had never been made, as at W10 Task 6.
-const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 3;
-
-/// Count and assert the reference lookups, so the claim about how big this
-/// task's genuinely-new surface is has a running program behind it rather than
-/// a sentence.
-fn lookup_census(on_published: usize, on_refused: usize) {
-    eprintln!(
-        "[publish_corpus] {on_published} `RefKind::Subflow` lookup(s) inside a publish that \
-         succeeded, {on_refused} inside one that failed"
-    );
-    assert_eq!(
-        on_published, SUBFLOW_LOOKUPS_ON_PUBLISHED,
-        "Subflow lookups on a flow that reached a live version"
-    );
-    assert_eq!(
-        on_refused, SUBFLOW_LOOKUPS_ON_REFUSED,
-        "Subflow lookups on a flow publish then refused"
-    );
-}
-
-/// The real [`WorkflowRefs`], wrapped so the lookups it is asked for can be
-/// counted. It delegates every call unchanged — the port under test is still
-/// the product's.
-struct CountingRefs {
-    inner: WorkflowRefs,
-    subflow_lookups: std::sync::atomic::AtomicUsize,
-}
-
-impl CountingRefs {
-    fn count(&self) -> usize {
-        self.subflow_lookups
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-#[async_trait::async_trait]
-impl egret_workflow::WorkflowRefPort for CountingRefs {
-    async fn workspace_of(
-        &self,
-        kind: egret_workflow::RefKind,
-        name_or_id: &str,
-    ) -> Result<Option<(Uuid, Uuid)>, egret_core::Error> {
-        if matches!(kind, egret_workflow::RefKind::Subflow) {
-            self.subflow_lookups
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.inner.workspace_of(kind, name_or_id).await
-    }
-}
-
 /// Every distinct string a corpus `core.subflow` names as its target, including
 /// the one that is not a name at all — see [`SUBFLOW_TARGETS_UNRENDERED`].
 const SUBFLOW_TARGETS: usize = 21;
@@ -629,7 +520,7 @@ const SUBFLOW_TARGETS_LIVE: usize = 18;
 
 /// Targets whose corpus flow has a draft row and no version — reachable only by
 /// a resolver that reads `workflow.flows`, which is what
-/// `FlowRepo::find_by_name` does. **17 through W10 Task 6, 1 now**; the 16 that
+/// `FlowRepo::find_in_workspace` (then `FlowRepo::find_by_name`) does. **17 through W10 Task 6, 1 now**; the 16 that
 /// left went to [`SUBFLOW_TARGETS_LIVE`], not out of the population.
 const SUBFLOW_TARGETS_DRAFT_ONLY: usize = 1;
 
@@ -761,22 +652,24 @@ const NAME_CONTESTED: &[(&str, &str)] = &[
 ];
 
 /// Every contested `(namespace, flowId)` resolves — through the product's own
-/// `FlowRepo::find_by_name`, the lookup a `core.subflow` actually goes through —
-/// to the file [`NAME_CONTESTED`] names, and to no other.
+/// `FlowRepo::find_in_workspace` in the corpus's workspace, the lookup a
+/// `core.subflow` actually goes through at publish (since debt §5.1,
+/// 2026-10-19; `FlowRepo::find_by_name` before) — to the file
+/// [`NAME_CONTESTED`] names, and to no other.
 ///
 /// Asserted against the table rather than against the loop that filled it: the
 /// question is what a `Subflow` will find, and only the table can answer that.
-async fn name_contest_won_by_the_right_file(repo: &FlowRepo, drafts: &[(String, Uuid)]) {
+async fn name_contest_won_by_the_right_file(repo: &FlowRepo, ws: Uuid, drafts: &[(String, Uuid)]) {
     for (name, winner) in NAME_CONTESTED {
         let (namespace, flow_id) = name.split_once('/').expect("a contested name is ns/id");
         let found = repo
-            .find_by_name(namespace, flow_id)
+            .find_in_workspace(ws, namespace, flow_id)
             .await
             .expect("resolve a contested name")
             .unwrap_or_else(|| panic!("{name} resolves to nothing at all"));
         let drafted = drafts
             .iter()
-            .find(|(_, id)| *id == found.0)
+            .find(|(_, id)| *id == found)
             .map(|(corpus_id, _)| corpus_id.as_str())
             .unwrap_or("a row this function did not write");
         assert_eq!(
@@ -948,7 +841,16 @@ const CREATE_REFUSED: usize = 4;
 /// seven `valids/*labels*` flows, `valids/set-variables`,
 /// `-set-variables-duplicate`, `-unset-variables`,
 /// `-task-runif-executionupdating` and `-task-runif-taskswithstate`.
-const LIVE: usize = 293;
+///
+/// **293 -> 295 on 2026-10-19 (debt spec §5.1, PR-2 Task 2.5)**: publish
+/// resolves a `Subflow` and a `dependsOn` pair in the caller's workspace only
+/// and accepts an absent one (a `Subflow` with Kestra's warning), as this
+/// Kestra published both with 200. `valids/task-runif` (its `Subflow` to
+/// `dummy_namespace/dummy_flow`) and `valids/trigger-flow-listener-no-inputs`
+/// (its `dependsOn` to `io.kestra.tests.trigger/other-flow`) leave
+/// [`VALIDATE_REFUSED`]. Measured, not assumed: the census line read `295 live,
+/// 46 draft-only (21 unported task type, 25 egret's own validate)`.
+const LIVE: usize = 295;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -1063,13 +965,18 @@ const UNKNOWN_TYPE_REFUSED: usize = 21;
 ///
 /// **26 -> 27 at group C1 Task 2 (2026-10-18)**: `valids/task-runif`, which
 /// used to stop at its `OutputValues`, is now refused at its `Subflow`'s
-/// reference (see [`LIVE`] and `SUBFLOW_LOOKUPS_ON_REFUSED`).
+/// reference (see [`LIVE`] and `SUBFLOW_LOOKUPS_ON_REFUSED`, removed 2026-10-19).
 ///
 /// **27, unchanged at group C2 Task 5 (2026-10-18)**: SetVariables,
 /// UnsetVariables and Labels have `TASK_TYPES` rows and are `EXECUTOR_LEVEL`;
 /// the 12 flows that leave [`UNKNOWN_TYPE_REFUSED`] all publish live, so none
 /// arrives here.
-const VALIDATE_REFUSED: usize = 27;
+///
+/// **27 -> 25 on 2026-10-19 (debt spec §5.1, PR-2 Task 2.5)**: the two
+/// reference over-refusals, `valids/task-runif` and
+/// `valids/trigger-flow-listener-no-inputs`, publish live (see [`LIVE`]); no
+/// corpus flow is refused for a reference any more.
+const VALIDATE_REFUSED: usize = 25;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.

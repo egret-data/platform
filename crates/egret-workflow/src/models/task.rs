@@ -173,9 +173,9 @@ impl Task {
     /// defect rather than an oracle one: nothing but the oracle had ever run a
     /// flow with a nested `errors:` through a worker.
     ///
-    /// Five kinds carry one — `Sequential`, `Parallel`, `If`, `Switch`, `Dag`
-    /// — which is `AbstractBranch`'s `errors` in Kestra plus the two branching
-    /// kinds that extend it.
+    /// Seven kinds carry one — `Sequential`, `Parallel`, `If`, `Switch`, `Dag`
+    /// (`AbstractBranch`'s `errors` in Kestra plus the two branching kinds
+    /// that extend it), then `Pause` and `AllowFailure`.
     pub fn error_children(&self) -> Vec<&Task> {
         match &self.kind {
             TaskKind::Sequential(s) => s.errors.iter().collect(),
@@ -183,13 +183,66 @@ impl Task {
             TaskKind::If(i) => i.errors.iter().collect(),
             TaskKind::Switch(s) => s.errors.iter().collect(),
             TaskKind::Dag(d) => d.errors.iter().collect(),
-            // Six kinds now. `Pause.errors` is real -- `valids/pause-errors-
+            // `Pause.errors` is real -- `valids/pause-errors-
             // finally-after-execution` declares one -- and it is read for the
             // same reason `children()` reads `Pause.tasks`: a handler nested
             // in it must be findable by `worker::claim::leaf_spec`.
             TaskKind::Pause(p) => p.errors.iter().collect(),
             TaskKind::AllowFailure(a) => a.errors.iter().collect(),
-            _ => Vec::new(),
+            // Every kind with no `errors:` is named, not `_` (PR-2 final
+            // review): a kind that grows one, or a new kind, fails to compile
+            // here AND in `error_children_mut` until both say what it walks.
+            TaskKind::Loop(_)
+            | TaskKind::LoopUntil(_)
+            | TaskKind::WorkingDirectory(_)
+            | TaskKind::Subflow(_)
+            | TaskKind::Leaf { .. } => Vec::new(),
+        }
+    }
+
+    /// The mutable twin of [`children`](Task::children): the same lists, in
+    /// the same order. `publish` walks it to rewrite every reference in place
+    /// (PR-2 final review M1: its own hand-written walk had dropped
+    /// `AllowFailure.finally`). No `_` arm, so a new kind cannot be added to
+    /// one walk and forgotten in the other without a compile error here;
+    /// `children_mut_walks_exactly_what_children_walks` pins the contents.
+    pub fn children_mut(&mut self) -> Vec<&mut Task> {
+        match &mut self.kind {
+            TaskKind::Sequential(s) => s.tasks.iter_mut().collect(),
+            TaskKind::Parallel(p) => p.tasks.iter_mut().collect(),
+            TaskKind::If(i) => i.then.iter_mut().chain(i.r#else.iter_mut()).collect(),
+            TaskKind::Switch(s) => s
+                .cases
+                .values_mut()
+                .flatten()
+                .chain(s.defaults.iter_mut())
+                .collect(),
+            TaskKind::Dag(d) => d.tasks.iter_mut().filter_map(|n| n.task.as_mut()).collect(),
+            TaskKind::Loop(l) => l.tasks.iter_mut().collect(),
+            TaskKind::LoopUntil(l) => l.tasks.iter_mut().collect(),
+            TaskKind::AllowFailure(a) => a.tasks.iter_mut().chain(a.finally.iter_mut()).collect(),
+            TaskKind::WorkingDirectory(w) => w.tasks.iter_mut().collect(),
+            TaskKind::Pause(p) => p.tasks.iter_mut().collect(),
+            TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
+        }
+    }
+
+    /// The mutable twin of [`error_children`](Task::error_children): the same
+    /// kinds, the same list, and no `_` arm either.
+    pub fn error_children_mut(&mut self) -> Vec<&mut Task> {
+        match &mut self.kind {
+            TaskKind::Sequential(s) => s.errors.iter_mut().collect(),
+            TaskKind::Parallel(p) => p.errors.iter_mut().collect(),
+            TaskKind::If(i) => i.errors.iter_mut().collect(),
+            TaskKind::Switch(s) => s.errors.iter_mut().collect(),
+            TaskKind::Dag(d) => d.errors.iter_mut().collect(),
+            TaskKind::Pause(p) => p.errors.iter_mut().collect(),
+            TaskKind::AllowFailure(a) => a.errors.iter_mut().collect(),
+            TaskKind::Loop(_)
+            | TaskKind::LoopUntil(_)
+            | TaskKind::WorkingDirectory(_)
+            | TaskKind::Subflow(_)
+            | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
 }
@@ -490,10 +543,14 @@ pub struct Subflow {
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
 
-    // Task 6 fix round 1: `publish::resolve_task` fills this in once
-    // `namespace`/`flow_id` have been checked through `WorkflowRefPort` and
-    // confirmed to name a flow in the PUBLISHING workspace -- `None` on
-    // every draft, `Some` only inside a frozen `FlowVersionRow::snapshot`.
+    // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
+    // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING
+    // workspace only (`FlowRepo::find_in_workspace`): `Some` when that
+    // workspace holds the flow, `None` (with Kestra's warning) when it does
+    // not -- at every depth, a flowable's `errors:` included. Publish always
+    // overwrites it, so a value an author wrote into a draft never reaches a
+    // snapshot. Nothing reads it at run time: `worker::subflow::resolve`
+    // looks the target up by name in the execution's workspace.
     //
     // A `Leaf`'s own reference field (e.g. `egret.sql`'s `database`) is
     // overwritten IN PLACE with the resolved id once resolved, because that
@@ -974,6 +1031,87 @@ sql: SELECT 1
 
     /// `children()` is what W3's advance() walks. A Leaf owning children would
     /// make the state machine descend into a task it must not understand.
+    /// **PR-2 final review M1: the mutable walks are the read-only walks.**
+    /// `publish` rewrites references through `children_mut` and
+    /// `error_children_mut`; `spec::validate` and the worker read through
+    /// `children` and `error_children`. A flow holding every kind, each with
+    /// every child list it has, must give the same ids in the same order on
+    /// both sides at every node -- and the walk must meet every kind, so the
+    /// fixture cannot quietly lose one.
+    #[test]
+    fn children_mut_walks_exactly_what_children_walks() {
+        fn leaf(id: &str) -> String {
+            format!("{{id: {id}, type: io.kestra.plugin.core.log.Log, message: x}}")
+        }
+        let (a, b, e) = (leaf("a"), leaf("b"), leaf("e"));
+        let yaml = format!(
+            "id: root\ntype: core.sequential\ntasks:\n\
+             \x20 - {{id: seq, type: core.sequential, tasks: [{a}], errors: [{e}]}}\n\
+             \x20 - {{id: par, type: core.parallel, tasks: [{a}, {b}], errors: [{e}]}}\n\
+             \x20 - {{id: if, type: core.if, condition: x, then: [{a}], else: [{b}], errors: [{e}]}}\n\
+             \x20 - {{id: sw, type: core.switch, value: x, cases: {{k1: [{a}], k2: [{b}]}}, defaults: [{leaf_d}], errors: [{e}]}}\n\
+             \x20 - {{id: dag, type: core.dag, tasks: [{{task: {a}}}, {{task: {b}, dependsOn: [a]}}], errors: [{e}]}}\n\
+             \x20 - {{id: lp, type: core.loop, values: [1], tasks: [{a}]}}\n\
+             \x20 - {{id: lu, type: core.loopuntil, condition: x, tasks: [{a}]}}\n\
+             \x20 - {{id: af, type: core.allowfailure, tasks: [{a}], finally: [{b}], errors: [{e}]}}\n\
+             \x20 - {{id: wd, type: core.workingdirectory, tasks: [{a}]}}\n\
+             \x20 - {{id: pz, type: core.pause, tasks: [{a}], errors: [{e}]}}\n\
+             \x20 - {{id: sf, type: core.subflow, namespace: n, flowId: f}}\n\
+             errors: [{e}]\n",
+            leaf_d = leaf("d"),
+        );
+        let mut root: Task = serde_norway::from_str(&yaml).unwrap();
+        fn kind(t: &Task) -> &'static str {
+            match &t.kind {
+                TaskKind::Sequential(_) => "Sequential",
+                TaskKind::Parallel(_) => "Parallel",
+                TaskKind::If(_) => "If",
+                TaskKind::Switch(_) => "Switch",
+                TaskKind::Dag(_) => "Dag",
+                TaskKind::Loop(_) => "Loop",
+                TaskKind::LoopUntil(_) => "LoopUntil",
+                TaskKind::Subflow(_) => "Subflow",
+                TaskKind::AllowFailure(_) => "AllowFailure",
+                TaskKind::WorkingDirectory(_) => "WorkingDirectory",
+                TaskKind::Pause(_) => "Pause",
+                TaskKind::Leaf { .. } => "Leaf",
+            }
+        }
+        fn check(t: &mut Task, seen: &mut std::collections::BTreeSet<&'static str>) {
+            seen.insert(kind(t));
+            let ids = |v: Vec<&Task>| v.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            let read = ids(t.children());
+            let read_err = ids(t.error_children());
+            let id = t.id.clone();
+            let mutable: Vec<String> = t.children_mut().iter().map(|c| c.id.clone()).collect();
+            let mutable_err: Vec<String> = t
+                .error_children_mut()
+                .iter()
+                .map(|c| c.id.clone())
+                .collect();
+            assert_eq!(read, mutable, "children of {id}");
+            assert_eq!(read_err, mutable_err, "error children of {id}");
+            for c in t.children_mut() {
+                check(c, seen);
+            }
+            for c in t.error_children_mut() {
+                check(c, seen);
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        check(&mut root, &mut seen);
+        assert_eq!(seen.len(), 12, "every TaskKind is met: {seen:?}");
+        let af = &root.children()[7];
+        assert_eq!(
+            af.children()
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "AllowFailure walks `tasks` then `finally`"
+        );
+    }
+
     #[test]
     fn children_are_the_control_flow_nodes_only() {
         let yaml = r#"

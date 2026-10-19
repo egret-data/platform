@@ -1362,13 +1362,17 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         }
         // Group C2 Task 3. The three update types are registered leaf types to
         // `models` and `spec`, and executor-level tasks here, as `Exit` is.
-        (ModelKind::Leaf { spec }, _) if super::update::UpdateOp::of(&task.r#type).is_some() => {
-            let op = super::update::UpdateOp::of(&task.r#type)
-                .expect("the guard above matched this type");
-            out[ix].kind = TaskKind::ExecutionUpdate {
-                op,
-                spec: spec.to_string(),
-            };
+        // Every other leaf keeps the kind `out[ix]` was pushed with, as the
+        // `_` arm below leaves it. A nested `if let`, not an `if let` match
+        // guard: that guard needs a newer compiler than the crate's declared
+        // `rust-version` (PR-2 final review M3).
+        (ModelKind::Leaf { spec }, _) => {
+            if let Some(op) = super::update::UpdateOp::of(&task.r#type) {
+                out[ix].kind = TaskKind::ExecutionUpdate {
+                    op,
+                    spec: spec.to_string(),
+                };
+            }
         }
         (ModelKind::Subflow(_), Some(SUBFLOW_TYPE)) => {
             out[ix].kind = TaskKind::Executable {

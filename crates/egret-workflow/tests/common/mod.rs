@@ -424,7 +424,6 @@ fn app_with_dbs_and_pdp(
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
-            flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
         }),
         sessions: sessions.clone(),
@@ -479,9 +478,8 @@ pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Va
 
 /// A `WorkflowRefs` whose data-API port must never be asked -- for a direct
 /// `publish` of a flow that does not name one.
-pub fn workflow_refs(db: &Db) -> egret_workflow::WorkflowRefs {
+pub fn workflow_refs() -> egret_workflow::WorkflowRefs {
     egret_workflow::WorkflowRefs {
-        flows: egret_workflow::FlowRepo::new(db.clone()),
         dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
     }
 }
@@ -821,7 +819,6 @@ pub async fn webhook_app_with_guard(
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
-            flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
         }),
         sessions,

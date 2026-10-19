@@ -201,7 +201,7 @@ const RECURSION_LIMIT: usize = 64;
 /// so they refuse above this budget instead of allocating and then failing —
 /// see `runners::filters::apply_indent`. That is deliberately a bound Kestra
 /// does not have, for the same reason `rewrite::MAX_NESTING_DEPTH` is.
-pub(super) const MAX_OUTPUT_BYTES: usize = 1 << 20;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 1 << 20;
 
 /// The stack every render gets, whoever called it.
 ///

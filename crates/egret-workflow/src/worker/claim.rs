@@ -4658,8 +4658,10 @@ fn write_render_side(
         }
         // Group C2 Task 4 (spec §3.3): the execution's new variables and
         // labels -- each the WHOLE value after this settle's last update --
-        // and the `taskrun.id` an update rendered with, onto the row `persist`
-        // has just inserted with the column default.
+        // and each reserved `taskrun.id`: the one an update rendered with,
+        // onto the row `persist` has just inserted with the column default,
+        // and (debt D12) the new id of a run `RestartLoop` threw away, onto
+        // its existing row (`renew_restarted_ids`).
         if let Some(vars) = side.variables {
             sqlx::query("UPDATE workflow.executions SET variables = $2 WHERE id = $1")
                 .bind(execution)
@@ -4714,7 +4716,12 @@ fn drive(
             for cmd in &cmds {
                 spawns.extend(Requested::of(cmd));
                 subflows.extend(subflow::Requested::of(cmd));
+                let alive: Option<Vec<bool>> = matches!(cmd, Command::RestartLoop { .. })
+                    .then(|| state.runs.iter().map(|r| !r.history.is_empty()).collect());
                 apply(state, cmd);
+                if let Some(alive) = alive {
+                    renew_restarted_ids(surface, state, &alive, side);
+                }
             }
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -4750,6 +4757,39 @@ fn drive(
         return Ok((spawns, subflows, exit_killed));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// **Debt D12 (M7): a run `Command::RestartLoop` threw away gets a new
+/// task-run id**, as Kestra's `ExecutionService.retryWaitFor` removes every
+/// descendant task run and `LoopUntil.resolveNexts` recreates each through
+/// `TaskRun.of` with `IdUtils.create()`.
+///
+/// `alive[ix]` is whether run `ix` had a history before the command; a run
+/// that had one and has none now is the one thrown away. A run already empty
+/// (an earlier iteration threw it away and this one never reached it) was
+/// renewed then and has not run since.
+///
+/// **Here, at the command, and not in `persist`**, for two measurements of
+/// the same settle: a `SetVariables` body is rebuilt and rendered in the
+/// settle that restarts it (`render_updates`), so the surface must hold the
+/// new id before that render; and its rebuilt history (`CREATED RUNNING
+/// SUCCESS`) is as long as the thrown-away one, so `persist`'s before/after
+/// cannot tell a restart from an ordinary write. The new id rides
+/// `RenderSide::run_ids` onto the row after `persist` writes it; a run
+/// restarted twice in one settle pushes two, and the later write wins.
+fn renew_restarted_ids(
+    surface: &mut Surface,
+    state: &ExecutionState,
+    alive: &[bool],
+    side: &mut render::RenderSide,
+) {
+    for (ix, run) in state.runs.iter().enumerate() {
+        if alive.get(ix).copied().unwrap_or(false) && run.history.is_empty() {
+            surface.forget_id(ix);
+            let (id, _) = surface.reserve_id(ix);
+            side.run_ids.push((ix, id));
+        }
+    }
 }
 
 /// **This round is an `Exit` with `state: KILLED` deciding** (`exit::kill`):
@@ -4804,6 +4844,18 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// `persist`'s write of an EXISTING run, `$1`..`$15` as bound there.
 /// `$14`/`$15` are [`stamps::Entered`]'s two booleans.
 ///
+/// `working_dir_swept_at` goes back to NULL when `working_dir` (`$16`) is NULL
+/// or `PREPARING` (task 2.3b): a `Command::RestartLoop` takes a block back to
+/// no phase so it is prepared again, and a block starting a prepare has no
+/// snapshot removed yet. Measured: the restart and the next prepare usually
+/// land in one settle (`FINISHED` straight to `PREPARING`), and the previous
+/// iteration's stamp then hid the new snapshots from the `_wd` sweep. With no
+/// phase (`$16` NULL: the block is not the body's first task, so the restart
+/// is written before the next prepare), `working_dir_snapshot` goes too:
+/// migrations 0194 and 0197 allow a snapshot and a stamp only beside a phase.
+/// The earlier iteration's `_wd/{old id}/` is then reachable only through
+/// `wd_sweep::delete_superseded`.
+///
 /// A `const` rather than inline for one reader besides `persist`:
 /// `tests/execution_timestamps.rs` drives this exact text against a terminal
 /// row to show that a later write does not move its `ended_at`. It is
@@ -4815,7 +4867,11 @@ pub const RUN_STATE_UPDATE: &str = concat!(
             claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
             ended_seq = $10, \
             created_seq = COALESCE($12, created_seq), \
-            resume_with = $13, working_dir = $16, ",
+            resume_with = $13, working_dir = $16, \
+            working_dir_swept_at = CASE WHEN $16 IS NULL OR $16 = 'PREPARING' THEN NULL \
+                                        ELSE working_dir_swept_at END, \
+            working_dir_snapshot = CASE WHEN $16 IS NULL THEN NULL \
+                                        ELSE working_dir_snapshot END, ",
     stamp_set!("$1", "$2", "$14", "$15"),
     ", updated_at = now() \
       WHERE execution_id = $8 AND run_ix = $9 \

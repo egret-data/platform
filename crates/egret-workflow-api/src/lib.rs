@@ -26,5 +26,7 @@ pub enum RefKind {
     Dataset,
     Chart,
     DataApiEndpoint,
-    Subflow,
+    // No `Subflow`: a flow reference is resolved inside `egret-workflow`,
+    // scoped to the caller's workspace (debt spec §5.1, 2026-10-19). See
+    // `WorkflowRefPort`'s doc.
 }

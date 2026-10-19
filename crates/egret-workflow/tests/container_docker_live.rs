@@ -2183,6 +2183,9 @@ struct KillSpy {
     inner: egret_workflow::worker::Handlers,
     ran: Mutex<Vec<(Uuid, usize)>>,
     cancels: Mutex<Vec<(Uuid, usize)>>,
+    /// Every `release` is lost, as when egret dies between the commit and
+    /// the release, or `docker rm` fails and is only logged.
+    loses_releases: bool,
 }
 
 impl KillSpy {
@@ -2212,7 +2215,14 @@ impl KillSpy {
             inner,
             ran: Mutex::default(),
             cancels: Mutex::default(),
+            loses_releases: false,
         })
+    }
+    /// A spy whose `release` never reaches the runner.
+    fn losing_releases() -> Arc<Self> {
+        let mut spy = Arc::into_inner(Self::new()).expect("a fresh spy");
+        spy.loses_releases = true;
+        Arc::new(spy)
     }
     fn ran(&self) -> Vec<(Uuid, usize)> {
         self.ran.lock().unwrap().clone()
@@ -2236,6 +2246,9 @@ impl egret_workflow::worker::Registry for KillSpy {
         egret_workflow::worker::Registry::cancel(&self.inner, task).await
     }
     async fn release(&self, task: &TaskInput) -> egret_core::Result<()> {
+        if self.loses_releases {
+            return Ok(());
+        }
         egret_workflow::worker::Registry::release(&self.inner, task).await
     }
 }
@@ -2819,6 +2832,231 @@ async fn a_kill_survives_the_worker_dying() {
     );
 }
 
+/// `docker logs` of one container, stdout and stderr together.
+fn container_logs(name: &str) -> String {
+    let out = std::process::Command::new("docker")
+        .args(["logs", name])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker logs");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// The value of `label` on container `name`.
+fn container_label(name: &str, label: &str) -> String {
+    let out = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            &format!("{{{{index .Config.Labels \"{label}\"}}}}"),
+            name,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker inspect");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Runs the `WaitFor` flow of the D12 live cases to its end: the body echoes
+/// `{{ taskrun.id }}` with `delete: {delete}`, and runs twice
+/// (`maxIterations: 1`). Returns the execution and its end state.
+async fn run_a_two_iteration_wait_for(
+    w: &KillWorld,
+    flow: &str,
+    delete: bool,
+    reg: &KillSpy,
+) -> (Uuid, String) {
+    let source = format!(
+        "id: {flow}\nnamespace: {NS}\ntasks:\n\
+         \x20 - id: until\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"false\"\n    \
+         checkFrequency:\n      maxIterations: 1\n      interval: PT0S\n    failOnMaxReached: false\n    \
+         tasks:\n\
+         \x20     - id: echo\n        type: {}\n        containerImage: {SHELL_IMAGE}\n        \
+         commands:\n          - echo \"id={{{{ taskrun.id }}}}\"\n        \
+         taskRunner:\n          type: {}\n          delete: {delete}\n",
+        egret_workflow::scripts::SHELL_COMMANDS,
+        egret_workflow::scripts::DOCKER_RUNNER,
+    );
+    let ex = egret_workflow::worker::start_execution(
+        &w.pool,
+        w.ws,
+        None,
+        &source,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("start: {e}\n{source}"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let terminal = ["SUCCESS", "WARNING", "FAILED", "KILLED", "CANCELLED"];
+    let end = loop {
+        egret_workflow::worker::tick_with(&w.pool, 1, reg, live_timing(KILL_POLL))
+            .await
+            .expect("tick");
+        let state = w.execution_state(ex).await;
+        if terminal.contains(&state.as_str()) {
+            break state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "execution {ex} not terminal within 120s: {state}"
+        );
+    };
+    (ex, end)
+}
+
+/// **Debt D12 (M7), live: each `WaitFor` iteration runs its `delete: false`
+/// body in a container of its own.** The body echoes `{{ taskrun.id }}`; with
+/// `maxIterations: 1` the body runs twice (the first pass and one restart, as
+/// Kestra's golden for `valids/waitfor-max-iterations` counts them).
+///
+/// Before D12 the restarted body kept its task-run id and restarted its
+/// attempts at 1, so its container name `egret-run-{run}-{attempt}` repeated
+/// and `find` took the first iteration's EXITED container as `Started`: the
+/// second iteration re-attached to it instead of running (spec §2.1's
+/// consequence). Now: two kept containers, two names, two ids, each echoed id
+/// the container's own `egret.io/taskrun-id` label.
+///
+/// Debt D15: once the execution is over, the superseded (first) iteration's
+/// kept container, whose run id no row holds, gets the same retention
+/// deadline as the last one's: kept inside one hour, removed at zero.
+///
+/// Every observation is captured before the case removes its containers;
+/// `KillWorld`'s `Drop` is the second net.
+async fn a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration() {
+    let w = KillWorld::new().await;
+    let reg = KillSpy::new();
+    let (ex, end) = run_a_two_iteration_wait_for(&w, "m7-kept", false, &reg).await;
+    let mut names = containers_of_workspace(w.ws);
+    names.sort();
+    let seen: Vec<(String, String, String)> = names
+        .iter()
+        .map(|n| {
+            (
+                n.clone(),
+                container_label(n, "egret.io/taskrun-id"),
+                container_logs(n),
+            )
+        })
+        .collect();
+    let row_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'echo'",
+    )
+    .bind(ex)
+    .fetch_one(&w.pool)
+    .await
+    .expect("read the body run");
+    // Debt D15: the first iteration's run id has no row any more, but its
+    // execution is over, so its kept container gets the same deadline as the
+    // last one's: inside a one-hour retention both stay, and a zero retention
+    // (both are due) removes both.
+    let hour = Some(std::time::Duration::from_secs(3600));
+    let swept_in_hour = sweep_this_world(&w, hour).await;
+    let left_in_hour = containers_of_workspace(w.ws).len();
+    let swept = sweep_this_world(&w, Some(std::time::Duration::ZERO)).await;
+    let left = containers_of_workspace(w.ws);
+    eprintln!(
+        "    m7: end {end}; ran {:?}; containers {seen:?}; row id {row_id}; \
+         a one-hour sweep removed {swept_in_hour}; a zero-retention sweep removed {swept}, \
+         left {left:?}",
+        reg.ran()
+    );
+    for n in &names {
+        force_remove(n);
+    }
+
+    assert_eq!(end, "SUCCESS");
+    let ran = reg.ran();
+    assert_eq!(ran.len(), 2, "the body ran once per iteration: {ran:?}");
+    assert_ne!(ran[0].0, ran[1].0, "each iteration has its own run id");
+    assert_eq!(
+        seen.len(),
+        2,
+        "two kept containers, one per iteration: {seen:?}"
+    );
+    assert_ne!(seen[0].0, seen[1].0);
+    for (name, label, logs) in &seen {
+        assert!(
+            logs.contains(&format!("id={label}")),
+            "{name} echoed its own task-run id {label}: {logs:?}"
+        );
+    }
+    assert!(
+        seen.iter()
+            .any(|(_, label, _)| *label == row_id.to_string()),
+        "the row holds the last iteration's id {row_id}: {seen:?}"
+    );
+    assert_eq!(
+        (swept_in_hour, left_in_hour),
+        (0, 2),
+        "both kept containers are inside a one-hour deadline"
+    );
+    assert_eq!(
+        swept, 2,
+        "a zero retention removes the superseded iteration's kept container too (D15): \
+         left {left:?}"
+    );
+    assert!(left.is_empty(), "left {left:?}");
+}
+
+/// **PR-2 final review I1, live: a superseded iteration's `delete: true`
+/// container whose release was lost is removed by the sweep at once.** The
+/// spy loses every `release` (egret died between the commit and the release,
+/// or `docker rm` failed and was only logged), so both iterations'
+/// containers outlive the execution. D12 renamed the first iteration's row,
+/// so its run id has no row; its execution is this database's and over.
+/// One sweep with a one-hour retention removes both containers, as it does a
+/// terminal run's not-kept one: before the fix it removed only the last
+/// iteration's and left the superseded one for ever.
+async fn a_superseded_iterations_delete_true_container_is_swept_at_once() {
+    let w = KillWorld::new().await;
+    let reg = KillSpy::losing_releases();
+    let (ex, end) = run_a_two_iteration_wait_for(&w, "m7-lost", true, &reg).await;
+    let mut names = containers_of_workspace(w.ws);
+    names.sort();
+    let labels: Vec<String> = names
+        .iter()
+        .map(|n| container_label(n, "egret.io/taskrun-id"))
+        .collect();
+    let row_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'echo'",
+    )
+    .bind(ex)
+    .fetch_one(&w.pool)
+    .await
+    .expect("read the body run");
+    let swept = sweep_this_world(&w, Some(std::time::Duration::from_secs(3600))).await;
+    let left = containers_of_workspace(w.ws);
+    eprintln!(
+        "    i1: end {end}; containers {names:?}; labels {labels:?}; row id {row_id}; \
+         a one-hour sweep removed {swept}, left {left:?}"
+    );
+    for n in &names {
+        force_remove(n);
+    }
+
+    assert_eq!(end, "SUCCESS");
+    assert_eq!(
+        names.len(),
+        2,
+        "the lost releases leave both iterations' containers: {names:?}"
+    );
+    assert!(
+        labels.iter().any(|l| *l != row_id.to_string()),
+        "one container is the superseded iteration's, whose id no row holds: \
+         {labels:?} vs {row_id}"
+    );
+    assert_eq!(
+        swept, 2,
+        "not kept: the terminal run's AND the superseded run's container go at once; \
+         left {left:?}"
+    );
+    assert!(left.is_empty(), "left {left:?}");
+}
+
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 macro_rules! case {
@@ -2858,6 +3096,8 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_kept_container_is_swept_after_its_deadline),
         case!(a_force_closed_kept_container_is_stopped_by_the_sweep),
         case!(a_kill_survives_the_worker_dying),
+        case!(a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration),
+        case!(a_superseded_iterations_delete_true_container_is_swept_at_once),
     ]
 }
 

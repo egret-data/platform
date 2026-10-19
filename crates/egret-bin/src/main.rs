@@ -2490,8 +2490,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // Workflow management surface (W1 Task 7). `refs` is the real
-    // `WorkflowRefPort`: `RefKind::Subflow` resolves through this crate's own
-    // `FlowRepo`, `RefKind::DataApiEndpoint`/`Notebook` through the two ports
+    // `WorkflowRefPort`: `RefKind::DataApiEndpoint`/`Notebook` through the two ports
     // already wired above for `automation`/`dataapi`, and
     // `RefKind::Database`/`Dataset`/`Chart` resolve to `None` always -- no
     // port for any of the three exists anywhere in the workspace yet, and
@@ -2509,7 +2508,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
-            flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         }),
         sessions: sessions.clone(),

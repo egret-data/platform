@@ -6,11 +6,15 @@
 //!
 //! | `RefKind` | Resolves? | Through | Port that would close the gap |
 //! |---|---|---|---|
-//! | [`RefKind::Subflow`] | Yes | [`crate::repo::FlowRepo::find_by_name`] + [`crate::repo::FlowRepo::workspace_of`] | (this crate — no gap) |
 //! | [`RefKind::DataApiEndpoint`] | Yes | `egret_dataapi_api::DataApiEndpointPort::workspace_of` | already exists |
 //! | [`RefKind::Database`] | **No — `None`, always** | nothing | a `query.databases`-owning port; `QueryExecPort` *executes* SQL, it does not answer "which workspace owns this database id" |
 //! | [`RefKind::Dataset`] | **No — `None`, always** | nothing | an `analytics.datasets`-owning port (none exists in the workspace) |
 //! | [`RefKind::Chart`] | **No — `None`, always** | nothing | an `analytics.charts`-owning port (none exists in the workspace) |
+//!
+//! A flow reference (`Subflow`, `dependsOn`) is not a `RefKind` any more:
+//! since debt spec §5.1 (2026-10-19) `publish` resolves it itself, in the
+//! caller's workspace only (`FlowRepo::find_in_workspace`), and the unscoped
+//! `FlowRepo::find_by_name` this port used for it is gone.
 //!
 //! **`None` is the correct, deliberate answer for the three unresolved
 //! kinds — not a placeholder to widen later without a port.** `publish`
@@ -51,16 +55,13 @@ use uuid::Uuid;
 
 use egret_workflow_api::{RefKind, WorkflowRefPort};
 
-use crate::repo::FlowRepo;
-
 /// The real [`WorkflowRefPort`]: dispatches each [`RefKind`] to whichever
 /// port (if any — see the module doc's table) can answer for it.
 pub struct WorkflowRefs {
-    pub flows: FlowRepo,
     pub dataapi_endpoints: Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
 }
 
-/// `name_or_id` for every `RefKind` except [`RefKind::Subflow`] is a plain
+/// `name_or_id` for every `RefKind` is a plain
 /// `Uuid` in string form (the leaf spec's opaque field carries the object's
 /// own id, not a human name — `spec::registry::TASK_TYPES` names the field,
 /// never a lookup-by-name). A value that does not parse as a `Uuid` cannot
@@ -80,15 +81,6 @@ impl WorkflowRefPort for WorkflowRefs {
         name_or_id: &str,
     ) -> Result<Option<(Uuid, Uuid)>, Error> {
         match kind {
-            RefKind::Subflow => {
-                // `name_or_id` is "{namespace}/{flowId}" — see
-                // `WorkflowRefPort`'s own doc comment for the encoding and
-                // why the FIRST `/` is always the separator.
-                let Some((namespace, flow_id)) = name_or_id.split_once('/') else {
-                    return Ok(None);
-                };
-                self.flows.find_by_name(namespace, flow_id).await
-            }
             RefKind::DataApiEndpoint => {
                 let Some(id) = as_uuid(name_or_id) else {
                     return Ok(None);
@@ -135,10 +127,6 @@ mod tests {
     #[tokio::test]
     async fn an_unresolvable_kind_refuses_rather_than_resolving_vacuously() {
         let refs = WorkflowRefs {
-            flows: FlowRepo::new(
-                egret_metastore::Db::connect_lazy("postgres://unused/unused")
-                    .expect("parse a lazy, never-connected pool"),
-            ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
         };
         for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
@@ -165,10 +153,6 @@ mod tests {
     #[tokio::test]
     async fn a_kind_with_no_port_refuses_even_a_well_formed_reference() {
         let refs = WorkflowRefs {
-            flows: FlowRepo::new(
-                egret_metastore::Db::connect_lazy("postgres://unused/unused")
-                    .expect("parse a lazy, never-connected pool"),
-            ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
         };
         let well_formed = Uuid::new_v4().to_string();
@@ -188,10 +172,6 @@ mod tests {
     #[tokio::test]
     async fn a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port() {
         let refs = WorkflowRefs {
-            flows: FlowRepo::new(
-                egret_metastore::Db::connect_lazy("postgres://unused/unused")
-                    .expect("parse a lazy, never-connected pool"),
-            ),
             dataapi_endpoints: Arc::new(UnreachableDataApi),
         };
         for kind in [RefKind::DataApiEndpoint] {

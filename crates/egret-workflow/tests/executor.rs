@@ -1991,6 +1991,19 @@ fn baseline() -> BTreeSet<String> {
 // the ratchet
 // --------------------------------------------------------------------------
 
+/// Serialises every test that DRIVES executions after `egret_side()`.
+/// `worker::tick` is global: its `wake` resumes any due execution and its
+/// `claim` leases any claimable run on this process's one clone. Two drivers
+/// at once run each other's tasks, and a driver whose run the other holds sees
+/// `tick -> 0`, nothing ahead and nothing due, and stops with the run RUNNING.
+static DRIVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `egret_side()` first, for its TRUNCATE, then the driving lock.
+async fn drive_alone() -> tokio::sync::MutexGuard<'static, ()> {
+    let _ = egret_side().await;
+    DRIVING.lock().await
+}
+
 /// The ratchet. See this module's doc for the two directions it fails in.
 #[tokio::test(flavor = "multi_thread")]
 async fn executor_matches_golden() {
@@ -8920,7 +8933,7 @@ async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
 /// test then seeds its own workspace and drives its own executions.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_did_not_drive() {
-    let _ = egret_side().await;
+    let _driving = drive_alone().await;
 
     let db = common::db()
         .await
@@ -9004,7 +9017,7 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
 #[tokio::test(flavor = "multi_thread")]
 async fn the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time() {
     const ID: &str = "valids/waitfor-multiple-tasks";
-    let _ = egret_side().await;
+    let _driving = drive_alone().await;
 
     let db = common::db()
         .await

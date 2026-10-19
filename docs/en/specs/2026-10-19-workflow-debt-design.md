@@ -1,6 +1,6 @@
 # Workflow debt package: what groups B, C1, C2 and WorkingDirectory left open
 
-**Status:** designed 2026-10-19. PR-1 built and verified 2026-10-19 on branch `feat/workflow-debt-kill-wd` (PR-1); PR-2 not built. The user's order of 2026-10-18 puts this package after C2 merges and before the Kestra-parity roadmap (`docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` row 1 waits for it).
+**Status:** designed 2026-10-19. PR-1 built and verified 2026-10-19 on branch `feat/workflow-debt-kill-wd` (PR-1); PR-2 built and verified 2026-10-19. The user's order of 2026-10-18 puts this package after C2 merges and before the Kestra-parity roadmap (`docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md` row 1 waits for it).
 
 **Where the claims come from:** every claim about egret's code was checked in the worktree `egret-coretasks` at `481d9101` (branch `feat/workflow-kestra-executor-tasks`, C2 at HEAD, which is what main looks like once C2 merges). Code is cited `path:line` relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, and its paths are relative to it. A claim that could not be checked statically says "to measure in Task N" and names the plan task that measures it. Where the debt notes said something the code no longer shows, the item is reported as stale, not planned.
 
@@ -38,6 +38,7 @@
 - **D13. (M8) Flow-trigger `executionLabels` are recorded as a divergence, not fixed** (§4.5).
 
 - **D14. The oracle driver resumes a run whose short deadline passed under load.** This is a fix in the oracle driver (test harness), not in production code, added 2026-10-19 after the ratchet-flake investigation (§3.2). It is PR-1 Task 1.6b.
+- **D15. A kept container whose run id has no row, because a `LoopUntil` iteration superseded it, is swept once its execution is terminal.** It gets the retention deadline of D3, measured from the execution's end, through the container's `egret.io/execution-id` label. ~~A `delete: true` container is left alone by this rule.~~ **Corrected 2026-10-19 (PR-2 final review I1):** a `delete: true` container or pod of a superseded iteration is removed at once, as a terminal run's, because its release may never have run (§4.7). A `WorkingDirectory` block inside a `LoopUntil` is prepared again each iteration, and the `_wd` cleanup removes the old ids' prefixes (§4.7). Added 2026-10-19 while building D12 (PR-2 Task 3b).
 
 ## 1. Every debt item, verified
 
@@ -93,6 +94,8 @@
 - Config: `WorkflowConfig::kept_container_retention_days: u32`, default 7, documented like `storage_retention_days`, with env `EGRET_WORKFLOW__KEPT_CONTAINER_RETENTION_DAYS`. It is not a chart value, by the rule at `deploy/helm/egret/templates/configmap-env.yaml:44-51`.
 
 **A consequence to state:** a `LoopUntil` body run reuses its task-run id and restarts its attempts at 0 (§4.4), so its container name `egret-run-{run}-{attempt}` (`worker/commands.rs:793-795`) repeats across iterations. `find` treats an exited container as `Started` (`:1717-1719`), so with `delete: false` a second iteration could re-attach to the first one's exited container instead of running. This is believed to happen today; to measure in PR-2 Task 3. D12 removes it.
+
+**(2026-10-19, measured and built.)** The live Docker case `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`cargo test -p egret-workflow --test container_docker_live`) shows one new container per iteration, named from that iteration's new run id. D15 (§4.7) covers what a superseded iteration's kept container does afterwards.
 
 ### 2.2 Force-close
 
@@ -269,6 +272,11 @@ These are egret's own bounds; Kestra has none. No golden flow comes near them; t
 
 The C2 spec §3.1 bullet "Each one sees the result of the one before it" is corrected.
 
+**(2026-10-19, built.)**
+- The test is `two_updates_in_one_parallel_render_the_start_and_merge_in_run_order` (`cargo test -p egret-workflow --test worker`). It was red against the old code (`y` was `"1"`) and is green now.
+- **Measured (the "to measure" above):** `{{ vars.x }}` with no `vars` fails in egret, as it does in Kestra. The renderer answers `undefined value` for a missing `vars` key, for `vars: null` and for `vars: {}`. It never renders empty, because the renderer is strict about undefined values.
+- So there is **no M5 divergence** to list. The only change is D10's run-order rule.
+
 ### 4.3 M6: a failed update (D11, record)
 
 **Kestra's catch:**
@@ -308,7 +316,11 @@ The C2 final review's M6 and this measurement agree that this is a fallback path
 - The surface forgets the old id, so the next `reserve_id` is fresh.
 - The point inside `claim::settle`/`persist` where before and after are both in hand is to find in PR-2 Task 3.
 
-**The test:** a `WaitFor` body `SetVariables {ids: ["{{ taskrun.id }}"]}` over three iterations. `deep_merge` appends only new list items (`executor/update.rs:169-199`), so the result holds 3 ids after the change, and 1 before it.
+**The test:** a `WaitFor` body `SetVariables {ids: ["{{ taskrun.id }}"]}` over three iterations. `deep_merge` appends only new list items (`executor/update.rs:169-199`), so the result holds ~~3~~ **4** ids after the change, and 1 before it.
+
+**(2026-10-19, correction.)** The text above said 3 ids; that was wrong. `maxIterations: 3` runs the body four times: the first pass plus three restarts. Kestra's golden for `valids/waitfor-max-iterations` (`maxIterations: 3`) has the `WaitFor` run go `RUNNING` four times with three `PAUSED` between them, and `LoopUntil.java:142` renews the ids on each restart. The built test `each_loop_until_iteration_has_its_own_task_run_id` (`cargo test -p egret-workflow --test worker`) reads the iteration count from the loop's own history, asserts it is 4, and asserts one distinct id per iteration and that the row holds the last one.
+
+**(2026-10-19, built.)** The renewal is in `claim::drive`, not in `persist`: `drive` applies a `RestartLoop` and then `renew_restarted_ids` gives every run that had a history and now has none a fresh id (the surface forgets the old one, `Surface::forget_id`). `write_render_side` writes the new ids to the rows. It cannot wait for `persist`, because a `SetVariables` body is rebuilt and rendered in the same settle that restarts it, and its render must already see the new id.
 
 ### 4.5 M8: Flow-trigger labels (D13, record)
 
@@ -333,6 +345,31 @@ The C2 final review's M6 and this measurement agree that this is a fallback path
   - `set_variables_without_variables_fails` asserting the whole message.
 - `tests/migration_0196_variables.rs` keeps its own seed. Sharing `worker.rs`'s `seed()` would make a migration test depend on a worker test file; this is recorded and not changed.
 
+### 4.7 A superseded `LoopUntil` iteration's kept work (D15)
+
+D12 gives each iteration's body runs new ids, so the previous iteration's run id has no row. Two things hang on such an id. Both were found while building D12 (PR-2 Task 3b).
+
+**Kept containers and pods.**
+- Every container and pod already carries the label `egret.io/execution-id` (Docker `labels()` in `worker/commands.rs`, pods in `pod_spec.rs`), so no new label or migration was needed. The Docker sweep reads it as one more `docker ps` column, and the pod sweep reads the pod label. A label that is absent or not a UUID counts as none, and the container is left alone as before.
+- `run_liveness` takes `(run, execution)` pairs. For the runs with no row it runs one more read-only query, bounded by the listed ids: which of those executions are terminal (`workflow.state_is_terminal`), and when they ended (`COALESCE(ended_at, updated_at)`, on the database's clock).
+- **The rule (D15):** a kept (`delete: false`) container whose run has no row, and whose execution is terminal, is treated as the container of a terminal run (D3). It is removed once the execution ended more than `workflow.kept_container_retention_days` ago, and never with `0`. The Docker sweep also stops such a container if it is still running, as it does for a terminal run. That case does not arise normally, because an iteration's body has ended before the restart.
+- **`delete: true` (corrected 2026-10-19, PR-2 final review I1).** This section first said such a container of a run with no row is left alone, and that "in practice none exists, because release or cancel removes it". That was wrong. Egret can die between committing the body run and `Registry::release`, and a failed release is only logged: `run_one` names the orphan sweep as the backstop for both. Once D12 renames the row, the sweep no longer saw the run as terminal and left the container (or pod) for ever. Now a superseded, not-kept container or pod is removed at once, exactly as a terminal run's (`sweep_decision`). It is safe for the reason the kept rule is: the execution is this database's and terminal.
+- **Left alone, as before:** a container whose run has no row and whose execution is unknown to this database or still live. That includes another egret's containers on a shared daemon.
+- **Tests:**
+  - unit tests `a_superseded_runs_kept_work_gets_the_retention_deadline` (it also pins the `delete: true` case: removed at once since the 2026-10-19 correction) and `the_docker_sweep_parses_the_execution_label` (`cargo test -p egret-workflow --lib -- worker::commands`);
+  - the pod rule's unit test `the_pod_sweep_deletes_a_superseded_iterations_pod_like_a_terminal_runs` (`cargo test -p egret-workflow --lib -- worker::k8s`);
+  - the live Docker case `a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration` (`--test container_docker_live`): after a `LoopUntil` with two iterations, a one-hour sweep removes 0 containers and leaves 2, and a sweep with a zero-length retention removes 2;
+  - the live Docker case `a_superseded_iterations_delete_true_container_is_swept_at_once` (added 2026-10-19, PR-2 final review I1): every `release` is lost, so both `delete: true` containers outlive the execution, and one one-hour sweep removes both. On the old rule it removed 1 and left the superseded one.
+- **Kubernetes is covered by unit tests only.** The pod sweep goes through the same `sweep_decision`, but no cluster was available. The pod path's own guard needed a `kube::Client` and had no unit seam; since 2026-10-19 (PR-2 final review I1) the guard and `sweep_decision` are one pure function, `pod_sweep_deletes`, which the unit test above pins.
+
+**A `WorkingDirectory` block inside a `LoopUntil`.**
+- Before this change the block kept its phase across a restart, so it was not prepared again for the next iteration. Now `Command::RestartLoop` clears the phase and the block is prepared again each iteration. `persist` also clears `working_dir_snapshot` when the phase is cleared, and `working_dir_swept_at` when the phase becomes `PREPARING`, so a restarted block does not carry the previous iteration's snapshot pointer or sweep stamp (the CHECKs of migrations 0194 and 0197 apply).
+- **The old prefixes.** The block's run has a new id each iteration, so the `_wd/{old id}/` prefix of an earlier iteration would be orphaned. `wd_sweep::delete_superseded` lists `executions/{ex}/_wd/` and deletes every prefix whose block id no `task_runs` row of that execution holds. It runs after a discard's own delete succeeds, and from the `_wd` sweep for each block it removes. If it fails, the block is not stamped, so the sweep comes back to it. So an execution's last discard or sweep removes every earlier iteration's prefix.
+- **Why that is safe:** a prefix whose id a row holds is that row's, live or not. A prefix with no row is over, because `RestartLoop` renames a block's row only after the block ended.
+- **Rejected:** re-keying the stamp on `(execution_id, run_ix)`, and a shared per-`run_ix` prefix. A late discard of iteration 1 would then act on iteration 2's row or objects while iteration 2 prepares.
+- **Tests** (`cargo test -p egret-workflow --test working_dir_claims`): `a_block_inside_a_loop_until_is_prepared_again_each_iteration`, `a_block_inside_a_waiting_loop_is_unstamped_when_it_restarts`, `a_block_after_another_task_in_a_loop_restarts_with_no_snapshot`, `a_later_discard_removes_a_superseded_iterations_snapshots`, `the_wd_sweep_removes_a_superseded_iterations_snapshots`. The live case `a_block_inside_a_wait_for_runs_its_docker_child_each_iteration` (`--test working_dir_docker_live`) runs a child that fails if iteration 2 reuses iteration 1's directory.
+- **A residual hole, recorded and not closed.** If an earlier iteration's discard delete failed, and afterwards no later discard or `_wd` sweep runs in that execution, `_wd/{old id}/` stays. Two cases lead there: the block is never reached again and the execution has no other block; or the restart cleared the phase and the snapshot, so the row is no longer selected by the sweep. Closing it needs a durable record of the superseded prefix, which means a migration. This package adds none.
+
 ## 5. C1 follow-ups and docs (PR-2)
 
 ### 5.1 The two publish over-refusals
@@ -356,6 +393,16 @@ The lookup behind it, `FlowRepo::find_by_name` (`repo.rs:892-946`), is not scope
 - A run of a `Subflow` whose target is still absent fails as today, at `subflow::resolve`.
 - This rewrites four security tests in `tests/publish.rs` (`:62`, `:95`, `:279`, `:308`): "foreign" becomes "absent from your workspace, published with the warning, and the run fails not found". The user agreed on 2026-10-19.
 - The oracle census's `VALIDATE_REFUSED` and `LIVE` move by the two entries. To measure in PR-2 Task 5; `baseline.txt` is unchanged, because the executor oracle runs `build_plan`, not publish (`oracle-exec/README.md:13459`).
+
+**(2026-10-19, built.)** As proposed, with these details:
+- `FlowRepo::find_in_workspace(ws, namespace, flow_id)` is the scoped lookup. Publish uses it for a `Subflow` and for a Flow trigger's `dependsOn`, and only in the caller's workspace. A flow that only another workspace holds is answered exactly as an absent one.
+- An absent `Subflow` target publishes with the warning `subflow_not_found`, message `The subflow '<flowId>' not found in namespace '<namespace>'.`, at the task's path. An absent `dependsOn` target publishes with no warning, as in Kestra.
+- Publish always overwrites `flow_ref` with the lookup's answer, so an absent target clears a `flowRef` the author wrote in the draft.
+- Publish also walks the nested `errors:` lists. A `Subflow` there gets the same lookup, warning and cleared `flowRef`, and a `database:` there is checked like a top-level one. (Unknown or unserved task types there were already refused by validate.)
+- The unscoped lookup is gone: `RefKind::Subflow` and `FlowRepo::find_by_name` were removed, so the cross-workspace over-refusal cannot return.
+- **Census, measured** (`cargo test -p egret-workflow --test executor`, over the 351-flow corpus): `LIVE` 293 to **295** and `VALIDATE_REFUSED` 27 to **25**. The two flows are `valids/task-runif` and `valids/trigger-flow-listener-no-inputs`. The census's count of subflow lookups made by publish (`SUBFLOW_LOOKUPS_ON_PUBLISHED`/`_ON_REFUSED`) was removed with `RefKind::Subflow`: publish has no subflow port left to count.
+- **The ratchet is unchanged:** 301 golden entries, 73 mismatching, 73 baselined, 0 broken. `baseline.txt` and `golden.json` are untouched.
+- **Tests:** in `tests/publish.rs`, `a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_whoever_has_it`, `a_trigger_dependency_absent_from_the_callers_workspace_publishes_whoever_has_it`, `an_authored_flow_ref_does_not_survive_an_absent_target`, and for nested `errors:` `a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_authored_flow_ref_cleared` and `a_foreign_database_inside_a_nested_errors_list_cannot_be_published` (`cargo test -p egret-workflow --test publish`); in `tests/worker.rs`, `a_published_flow_whose_subflow_target_is_absent_runs_and_the_subflow_fails_not_found` (`--test worker -- subflow`), which runs the published flow and sees the child fail with `unable to find flow`.
 
 ### 5.2 Small doc fixes
 
@@ -386,7 +433,7 @@ They may run in parallel under the autonomy rules: one worktree, Postgres and ta
 - TDD per task; unit tests where the logic is pure (the sweep decision, the caps, `compute`).
 - DB tests on a private Postgres.
 - Docker live cases on a private daemon, never the shared dev stack.
-- The oracle ratchet (`cargo test -p egret-workflow --test executor`, 301 golden, 73 mismatching / 73 baselined, 0 broken, LIVE 293) stays green after every task. Only §5.1 is expected to move census counts.
+- The oracle ratchet (`cargo test -p egret-workflow --test executor`, 301 golden, 73 mismatching / 73 baselined, 0 broken, LIVE 293) stays green after every task. Only §5.1 is expected to move census counts (LIVE 293 to 295 once §5.1 is built; measured in §5.1).
 - The final gate is the C2 plan's, plus the Docker live suite for PR-1.
 
 ## 7. Open questions

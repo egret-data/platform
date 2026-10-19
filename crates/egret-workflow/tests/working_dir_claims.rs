@@ -751,3 +751,319 @@ async fn the_wd_sweep_removes_a_force_closed_blocks_snapshots(pool: PgPool) {
     assert_eq!(objects_under(&fs, &key).await, 0);
     assert!(swept_at(&pool, block).await.is_some());
 }
+
+// ── Task 2.3b: a block inside a `LoopUntil` ─────────────────────────────────
+
+/// A `WaitFor` of two iterations (`maxIterations: 1`, as Kestra counts them)
+/// over a block with an input file, whose one child `a` returns its own
+/// `taskrun.id`.
+const LOOPED_BLOCK: &str = "id: wd-loop\nnamespace: w6.claims\ntasks:\n  - id: until\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"false\"\n    checkFrequency:\n      maxIterations: 1\n      interval: PT0S\n    failOnMaxReached: false\n    tasks:\n      - id: block\n        type: io.kestra.plugin.core.flow.WorkingDirectory\n        inputFiles:\n          a.txt: one\n        tasks:\n          - id: a\n            type: io.kestra.plugin.core.debug.Return\n            format: \"{{ taskrun.id }}\"\n";
+
+/// The child `a`'s row: `(id, state, history)`, or `None` before it exists.
+async fn a_row(pool: &PgPool, ex: uuid::Uuid) -> Option<(uuid::Uuid, String, serde_json::Value)> {
+    sqlx::query_as(
+        "SELECT id, state, history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .fetch_optional(pool)
+    .await
+    .expect("the child a")
+}
+
+async fn execution_state(pool: &PgPool, ex: uuid::Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("the execution")
+}
+
+/// Drive `LOOPED_BLOCK` one claim at a time until the execution ends,
+/// calling `each` after every tick with the block's current run id. Answers
+/// every id `a` had while `SUCCESS`, in order, without repeats.
+async fn drive_looped_block(
+    pool: &PgPool,
+    ex: uuid::Uuid,
+    mut each: impl FnMut(uuid::Uuid) -> Option<uuid::Uuid>,
+    fs: &egret_workflow::storage::FileStore,
+    ws: uuid::Uuid,
+) -> Vec<uuid::Uuid> {
+    let reg = registry();
+    let mut done = Vec::new();
+    for _ in 0..200 {
+        let claimed = tick_with(pool, 1, &reg, WorkerTiming::default())
+            .await
+            .expect("a tick");
+        // A loop with an `interval:` waits `PAUSED` until it is due, and the
+        // waker resumes it, as the runtime's tick does.
+        if claimed == 0 {
+            egret_workflow::worker::wake(pool, 8).await.expect("wake");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if let Some(stale) = each(block_id(pool, ex).await) {
+            // The caller asked for an object under `_wd/{stale}/`, as a
+            // discard whose delete failed would leave it.
+            let uri = format!("{}left-behind", fs.working_dir_prefix(ws, ex, stale));
+            fs.store.put(&uri, b"x".to_vec()).await.expect("put");
+        }
+        if let Some((id, state, _)) = a_row(pool, ex).await {
+            if state == "SUCCESS" && done.last() != Some(&id) {
+                done.push(id);
+            }
+        }
+        if matches!(
+            execution_state(pool, ex).await.as_str(),
+            "SUCCESS" | "FAILED" | "WARNING" | "KILLED"
+        ) {
+            return done;
+        }
+    }
+    panic!("the execution did not end in 200 ticks");
+}
+
+/// **A block inside a `LoopUntil` is prepared again each iteration, and its
+/// child runs in both.** `Command::RestartLoop` left the block's
+/// `working_dir` phase at `FINISHED`, so iteration 2's block took its
+/// aggregate at once and `a` never ran (found by task 2.3, item (b)).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_block_inside_a_loop_until_is_prepared_again_each_iteration(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        LOOPED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    // Act
+    let ran = drive_looped_block(&pool, ex, |_| None, &fs, ws).await;
+    // Assert
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    assert_eq!(
+        ran.len(),
+        2,
+        "`a` ran in both iterations, with its own id each: {ran:?}"
+    );
+    let (_, state, history) = a_row(&pool, ex).await.expect("a");
+    assert_eq!(state, "SUCCESS", "the last iteration's `a` ran: {history}");
+    let block = block_id(&pool, ex).await;
+    let (bstate, phase, snapshot) = block_row(&pool, ex).await;
+    assert_eq!(
+        (bstate.as_str(), phase.as_deref()),
+        ("SUCCESS", Some("FINISHED"))
+    );
+    assert!(
+        snapshot
+            .as_deref()
+            .is_some_and(|s| s.contains(&block.to_string())),
+        "the last iteration prepared its own snapshot: {snapshot:?}"
+    );
+    assert_eq!(
+        objects_under(&fs, &wd_key(&fs, ws, ex, block)).await,
+        0,
+        "discarded"
+    );
+    assert!(
+        swept_at(&pool, block).await.is_some(),
+        "the discard stamped it"
+    );
+}
+
+/// **The same with an `interval:`, so the first iteration's discard stamps
+/// its row before the restart.** The restart takes the block back to no
+/// phase, and `working_dir_swept_at` must go back to NULL with it. Measured:
+/// the restart and the next `BeginWorkingDirectory` land in one settle, so
+/// the row goes from `FINISHED` to `PREPARING` and 0197's CHECK never sees
+/// the NULL phase; without the reset the first iteration's stamp is carried
+/// onto the second, which then reads as swept before its own discard ran (a
+/// failed delete there would never be swept).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_block_inside_a_waiting_loop_is_unstamped_when_it_restarts(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = LOOPED_BLOCK.replace("interval: PT0S", "interval: PT0.2S");
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .expect("start");
+    // Act
+    let ran = drive_looped_block(&pool, ex, |_| None, &fs, ws).await;
+    // Assert
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    assert_eq!(ran.len(), 2, "`a` ran in both iterations: {ran:?}");
+    let block = block_id(&pool, ex).await;
+    let ended: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT ended_at FROM workflow.task_runs WHERE id = $1")
+            .bind(block)
+            .fetch_one(&pool)
+            .await
+            .expect("the block's end");
+    let stamp = swept_at(&pool, block).await.expect("stamped");
+    assert!(
+        stamp >= ended,
+        "the stamp is the last discard's, after the last block ended ({ended}), not the \
+         first iteration's carried over ({stamp})"
+    );
+}
+
+/// **A superseded iteration's `_wd/{old id}/` is removed by a later
+/// discard.** Debt D12 renames the block's row each iteration, so a discard
+/// whose delete failed leaves objects under an id no row holds; nothing
+/// would sweep them. The next discard in the execution removes every `_wd/`
+/// prefix whose block id has no row.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_later_discard_removes_a_superseded_iterations_snapshots(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange: once the row is renamed, an object is put back under the
+    // first iteration's prefix, as its failed delete would have left it.
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        LOOPED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let mut first: Option<uuid::Uuid> = None;
+    let mut planted: Option<uuid::Uuid> = None;
+    // Act
+    drive_looped_block(
+        &pool,
+        ex,
+        |id| match first {
+            None => {
+                first = Some(id);
+                None
+            }
+            Some(f) if f != id && planted.is_none() => {
+                planted = Some(f);
+                Some(f)
+            }
+            _ => None,
+        },
+        &fs,
+        ws,
+    )
+    .await;
+    // Assert
+    let stale = planted.expect("the row was renamed, and the object planted");
+    assert_eq!(
+        objects_under(&fs, &wd_key(&fs, ws, ex, stale)).await,
+        0,
+        "the superseded iteration's prefix was removed"
+    );
+}
+
+/// **The `_wd` sweep removes a superseded iteration's prefix too**, for the
+/// case where the last discard also failed: its block row is unstamped, and
+/// the sweep, 24 h after the end, removes that row's prefix and every
+/// superseded one of the execution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_wd_sweep_removes_a_superseded_iterations_snapshots(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange: a finished loop; then objects left under the first
+    // iteration's prefix and the last one's, the last row unstamped.
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        LOOPED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let mut ids = Vec::new();
+    drive_looped_block(
+        &pool,
+        ex,
+        |id| {
+            if ids.last() != Some(&id) {
+                ids.push(id);
+            }
+            None
+        },
+        &fs,
+        ws,
+    )
+    .await;
+    let (stale, block) = (ids[0], *ids.last().unwrap());
+    assert_ne!(stale, block, "the fixture: the row was renamed");
+    for id in [stale, block] {
+        let uri = format!("{}left-behind", fs.working_dir_prefix(ws, ex, id));
+        fs.store.put(&uri, b"x".to_vec()).await.expect("put");
+    }
+    sqlx::query("UPDATE workflow.task_runs SET working_dir_swept_at = NULL WHERE id = $1")
+        .bind(block)
+        .execute(&pool)
+        .await
+        .expect("unstamp");
+    ended_hours_ago(&pool, block, 25).await;
+    // Act
+    let cfg = egret_workflow::storage::wd_sweep::WdSweepConfig::default();
+    let swept = egret_workflow::storage::wd_sweep::sweep(&pool, &fs, &cfg)
+        .await
+        .unwrap();
+    // Assert
+    assert_eq!(swept, 1);
+    assert_eq!(objects_under(&fs, &wd_key(&fs, ws, ex, block)).await, 0);
+    assert_eq!(
+        objects_under(&fs, &wd_key(&fs, ws, ex, stale)).await,
+        0,
+        "the superseded prefix went with it"
+    );
+    assert!(swept_at(&pool, block).await.is_some());
+}
+
+/// **A block that is not the body's first task is restarted with no phase
+/// and no snapshot.** Here the restart persists the block before the next
+/// prepare (`pre` runs first), so the row is written with no phase, and
+/// migration 0194's CHECK (a snapshot only beside a phase) and 0197's (a
+/// stamp only beside a phase) both apply: the restart clears the previous
+/// iteration's snapshot pointer and stamp with the phase.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_block_after_another_task_in_a_loop_restarts_with_no_snapshot(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = LOOPED_BLOCK.replace(
+        "      - id: block\n",
+        "      - id: pre\n        type: io.kestra.plugin.core.debug.Return\n        format: p\n      - id: block\n",
+    );
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .expect("start");
+    // Act
+    let ran = drive_looped_block(&pool, ex, |_| None, &fs, ws).await;
+    // Assert
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    assert_eq!(ran.len(), 2, "`a` ran in both iterations: {ran:?}");
+    let block = block_id(&pool, ex).await;
+    let (_, phase, snapshot) = block_row(&pool, ex).await;
+    assert_eq!(phase.as_deref(), Some("FINISHED"));
+    assert!(
+        snapshot
+            .as_deref()
+            .is_some_and(|s| s.contains(&block.to_string())),
+        "the last iteration prepared its own snapshot: {snapshot:?}"
+    );
+    assert!(swept_at(&pool, block).await.is_some());
+}
