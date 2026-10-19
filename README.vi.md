@@ -393,3 +393,9 @@ docs/        # en/ (canonical) + vi/ (tham khảo): architecture/, adr/, plans/,
 ## License
 
 TBD.
+
+---
+
+## Đóng góp & giấy phép
+
+Xem [CONTRIBUTING.md](CONTRIBUTING.md) (thay đổi người dùng thấy được phải kèm docs) và [SECURITY.md](SECURITY.md). Giấy phép [Apache 2.0](LICENSE).

@@ -1,5 +1,9 @@
 # Egret
 
+[![CI](https://github.com/egret-data/platform/actions/workflows/ci.yml/badge.svg)](https://github.com/egret-data/platform/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[Docs](https://egret-data.github.io/docs/) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
 > 🇻🇳 Vietnamese reference: [`README.vi.md`](README.vi.md)
 
 **Egret is an enterprise data platform that lets many teams work on a single, unified data
@@ -389,3 +393,10 @@ docs/        # en/ (canonical) + vi/ (reference): architecture/, adr/, plans/, s
 ## License
 
 TBD.
+
+---
+
+## Contributing & license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) (user-visible changes must ship with docs) and
+[SECURITY.md](SECURITY.md). Licensed under the [Apache License 2.0](LICENSE).

@@ -1,0 +1,38 @@
+name: oss-hygiene
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --log-opts="origin/${{ github.base_ref || 'main' }}..HEAD" || ./gitleaks detect --source . --no-git --config .gitleaks.toml --redact
+  licenses:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+  docs-reminder:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Warn when user-visible code changes without a docs mention
+        run: |
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          if echo "$changed" | grep -qE '^(frontend/src|crates/.*/src)/' && ! grep -qi "docs" <<<"${{ github.event.pull_request.body }}"; then
+            echo "::warning::This PR changes frontend/crates but the description never mentions docs. Link the egret-data/docs PR or state 'docs: not applicable'."
+          fi
