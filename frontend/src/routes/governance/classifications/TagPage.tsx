@@ -1,12 +1,15 @@
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Trash2 } from "lucide-react";
 import { type Tag, useTags } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
+import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
 import { TagHeader } from "@/routes/governance/classifications/TagHeader";
+import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { ClearanceTab } from "@/routes/governance/classifications/tabs/ClearanceTab";
 import { HandWrittenTagTab } from "@/routes/governance/classifications/tabs/HandWrittenTagTab";
 import { RulesTab } from "@/routes/governance/classifications/tabs/RulesTab";
@@ -36,6 +39,29 @@ function BackLink() {
       <ArrowLeft className="h-4 w-4" aria-hidden />
       Classifications
     </Link>
+  );
+}
+
+/** Delete, for `tag:manage` or platform admin, through the consequence dialog (CL14). */
+function DeleteControl({ tag }: { tag: Tag }) {
+  const canManage = useCanManageTags();
+  const [open, setOpen] = useState(false);
+  const opener = useRef<HTMLButtonElement | null>(null);
+  if (!canManage) return null;
+  return (
+    <>
+      <Button
+        ref={opener}
+        size="sm"
+        variant="outline"
+        className="text-destructive hover:text-destructive"
+        onClick={() => setOpen(true)}
+      >
+        <Trash2 className="mr-1 h-4 w-4" aria-hidden />
+        Delete
+      </Button>
+      <DeleteTagDialog tag={tag} open={open} onOpenChange={setOpen} where="this page" opener={opener} />
+    </>
   );
 }
 
@@ -102,7 +128,7 @@ export default function TagPage() {
         });
       content = (
         <>
-          <TagHeader tag={tag} />
+          <TagHeader tag={tag} actions={<DeleteControl tag={tag} />} />
           <Tabs value={value} onValueChange={select} className="min-w-0">
             {/* Wraps, so every tab is in view at 390 px. */}
             <TabsList className="h-auto max-w-full flex-wrap justify-start">

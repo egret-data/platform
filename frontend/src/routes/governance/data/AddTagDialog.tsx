@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2, Tag as TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import { tagsQueryKey } from "@/api/tags";
+import { invalidateTag } from "@/api/tags";
 import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { getControlPlaneGovernanceObjectTagsQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { getControlPlaneTagsListTagsQueryKey, useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
@@ -79,11 +79,12 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
   const queryClient = useQueryClient();
   const assign = useControlPlaneCatalogAssignResourceTag<ApiError>({
     mutation: {
-      onSuccess: () => {
+      onSuccess: (_data, vars) => {
         void queryClient.invalidateQueries({ queryKey: [getControlPlaneGovernanceObjectTagsQueryKey(target.catalogId)[0]] });
         void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
-        // Classifications, TagDetail, RuleDialog and the rule lists read the catalogue under this key.
-        void queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+        // The Classification pages, RuleDialog and the rule lists read the catalogue under `["tags"]`;
+        // the tag's Where used reads route C (CL16).
+        invalidateTag(queryClient, vars.data.tag_id);
         toast.success("Tag added.");
         onDone();
       },

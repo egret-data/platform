@@ -34,6 +34,8 @@ const MARKERS = [
   ["src/routes/governance/classifications/TagPage.tsx", "No classification with this id."],
   // The header's save toast.
   ["src/routes/governance/classifications/TagHeader.tsx", "Classification saved."],
+  // The delete dialog's rules line without policy:read (CL14).
+  ["src/routes/governance/classifications/DeleteTagDialog.tsx", "Rules: needs policy:read to count."],
   // Where used's Data empty sentence (spec §5.1).
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
   // The Clearance tab's compile line (spec §5.2).

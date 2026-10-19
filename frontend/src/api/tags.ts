@@ -12,9 +12,10 @@
  * WITHOUT the `/api` prefix — mirroring `useWorkspaceRoleCatalog` in
  * `./workspaceAccess.ts`.
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiJson } from "./client";
+import { apiFetch, apiJson } from "./client";
+import { getControlPlaneGovernanceTagUsageQueryKey } from "./generated/control-plane-governance/control-plane-governance";
 
 export interface Tag {
   id: string;
@@ -48,6 +49,16 @@ export interface Tag {
 }
 
 export const tagsQueryKey = ["tags"] as const;
+
+/**
+ * CL16: what a write to tag `tagId` (or to where it is assigned) changes: the
+ * one list key (`["tags"]`, its counts and clearance) and the tag's usage
+ * (route C, Where used and the delete dialog).
+ */
+export function invalidateTag(queryClient: QueryClient, tagId: string) {
+  void queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+  void queryClient.invalidateQueries({ queryKey: getControlPlaneGovernanceTagUsageQueryKey(tagId) });
+}
 
 export function objectTagsQueryKey(ws: string, kind: string, id: string) {
   return ["ws", ws, "object-tags", kind, id] as const;
@@ -89,7 +100,7 @@ export function useUpdateTag() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+    onSuccess: (_data, { id }) => invalidateTag(queryClient, id),
   });
 }
 
@@ -97,9 +108,10 @@ export function useDeleteTag() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: async (id) => {
-      await apiJson<void>(`/control-plane/tags/${id}`, { method: "DELETE" });
+      // 204 with no body: read nothing (`apiJson` would fail parsing an empty body).
+      await apiFetch(`/control-plane/tags/${id}`, { method: "DELETE" });
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+    onSuccess: (_data, id) => invalidateTag(queryClient, id),
   });
 }
 
@@ -138,7 +150,7 @@ export function useSetTagAccessPolicy() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ required_roles, required_groups }),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+    onSuccess: (_data, { id }) => invalidateTag(queryClient, id),
   });
 }
 
@@ -148,7 +160,7 @@ export function useClearTagAccessPolicy() {
   return useMutation<AccessPolicyWritten, Error, string>({
     mutationFn: (id) =>
       apiJson<AccessPolicyWritten>(`/control-plane/tags/${id}/access-policy`, { method: "DELETE" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+    onSuccess: (_data, id) => invalidateTag(queryClient, id),
   });
 }
 
@@ -170,9 +182,9 @@ export function useAssignTag(ws: string, kind: string, id: string) {
       apiJson<{ ok: true }>(`/ws/${ws}/objects/${kind}/${id}/tags/${tagId}`, {
         method: "PUT",
       }),
-    onSuccess: () => {
+    onSuccess: (_data, tagId) => {
       queryClient.invalidateQueries({ queryKey: objectTagsQueryKey(ws, kind, id) });
-      queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+      invalidateTag(queryClient, tagId);
     },
   });
 }
@@ -184,9 +196,9 @@ export function useUnassignTag(ws: string, kind: string, id: string) {
       apiJson<{ ok: true }>(`/ws/${ws}/objects/${kind}/${id}/tags/${tagId}`, {
         method: "DELETE",
       }),
-    onSuccess: () => {
+    onSuccess: (_data, tagId) => {
       queryClient.invalidateQueries({ queryKey: objectTagsQueryKey(ws, kind, id) });
-      queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+      invalidateTag(queryClient, tagId);
     },
   });
 }

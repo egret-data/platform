@@ -1,6 +1,6 @@
-import { useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Plus, SearchX, Tags } from "lucide-react";
+import { MoreHorizontal, Plus, SearchX, Tags, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import { type Tag, useCreateTag, useTags } from "@/api/tags";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -18,10 +18,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { TabError } from "@/routes/governance/tabParts";
+import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import {
   ClearanceCell,
@@ -53,6 +60,9 @@ export default function ClassificationsIndex() {
   const [search, setSearch] = useSearchParams();
   const q = search.get("q") ?? "";
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<Tag | null>(null);
+  // The row's Actions button that opened the menu: the delete dialog returns focus to it.
+  const menuOpener = useRef<HTMLButtonElement | null>(null);
   const searchId = useId();
 
   const setQ = (next: string) =>
@@ -133,6 +143,39 @@ export default function ClassificationsIndex() {
       value: (t) => t.required_roles.length + t.required_groups.length,
       cell: (t) => <ClearanceCell tag={t} />,
     },
+    ...(canManage
+      ? [
+          {
+            key: "actions",
+            label: "",
+            className: "text-right",
+            cell: (t: Tag) => (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Actions for ${t.name}`}
+                    onPointerDown={(e) => (menuOpener.current = e.currentTarget)}
+                    onKeyDown={(e) => (menuOpener.current = e.currentTarget)}
+                  >
+                    <MoreHorizontal className="h-4 w-4" aria-hidden />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive"
+                    onSelect={() => setDeleting(t)}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" aria-hidden />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ),
+          } satisfies Column<Tag>,
+        ]
+      : []),
   ];
 
   let body: ReactNode;
@@ -203,6 +246,17 @@ export default function ClassificationsIndex() {
         {body}
       </div>
       <NewClassificationDialog open={creating} onOpenChange={setCreating} />
+      {deleting ? (
+        <DeleteTagDialog
+          tag={deleting}
+          open
+          onOpenChange={(o) => {
+            if (!o) setDeleting(null);
+          }}
+          where="the tag's page"
+          opener={menuOpener}
+        />
+      ) : null}
     </ListPageShell>
   );
 }

@@ -7,6 +7,7 @@ import type { Me } from "@/api/hooks";
 import { getControlPlaneTagsListTagsQueryKey } from "@/api/generated/control-plane-tags/control-plane-tags";
 import type { BrowseResponse, ExplainResponse, GrantView, ObjectTags, RuleView, Scope } from "@/api/generated/model";
 import { tagsQueryKey } from "@/api/tags";
+import { getControlPlaneGovernanceTagUsageQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
@@ -543,7 +544,7 @@ describe("Add tag", () => {
     await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
   });
 
-  // M4: Classifications, TagDetail, RuleDialog and the rule lists read the catalogue under `tagsQueryKey`.
+  // M4: the Classification pages, RuleDialog and the rule lists read the catalogue under `tagsQueryKey`.
   it("refetches the tag catalogue under both keys it is cached by", async () => {
     serveData(fixture());
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -560,6 +561,8 @@ describe("Add tag", () => {
     const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
     expect(keys).toContainEqual(tagsQueryKey);
     expect(keys).toContainEqual(getControlPlaneTagsListTagsQueryKey());
+    // CL16: the tag's Where used (route C) is refreshed too.
+    expect(keys).toContainEqual(getControlPlaneGovernanceTagUsageQueryKey("t-secret"));
   });
 
   // M5: the URL may differ in case from the source; the tag is written with the listing's spelling.
