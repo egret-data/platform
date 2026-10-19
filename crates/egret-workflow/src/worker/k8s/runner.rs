@@ -77,10 +77,10 @@ use crate::scripts::RunnerSpec;
 use crate::storage::transfer::{write_tar, TarError, TarSource};
 use crate::worker::commands::{
     collection_target, expand_outputs, listing_too_big, output_problem, pattern_dirs, run_liveness,
-    staged_name_problem, staging_error, stream_replayed_line, CommandsResult, LineObserver,
-    OrphanSweep, StreamState, TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES,
-    MAX_OUTPUT_NAMES, MAX_VARS_BYTES, OUTPUT_DIR, OUTPUT_DIR_REL, RUN_NAME_PREFIX, TASKRUN_LABEL,
-    WORKING_DIR,
+    staged_name_problem, staging_error, stream_replayed_line, sweep_decision, CommandsResult,
+    LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner, CANCEL_WAIT_MARGIN,
+    MAX_LISTING_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES, OUTPUT_DIR, OUTPUT_DIR_REL,
+    RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -126,6 +126,12 @@ pub struct KubernetesRunner {
     /// Internal storage, which stored inputs are streamed from (W9a Task 5)
     /// and output files into (Task 6).
     files: Option<std::sync::Arc<crate::storage::FileStore>>,
+    /// How long a kept (`delete: false`) pod outlives its run before the
+    /// orphan sweep deletes it (workflow debt D3). `None`: kept for ever.
+    /// [`DockerRunner::with_kept_retention`]'s field.
+    ///
+    /// [`DockerRunner::with_kept_retention`]: crate::worker::commands::DockerRunner::with_kept_retention
+    kept_retention: Option<Duration>,
 }
 
 impl std::fmt::Debug for KubernetesRunner {
@@ -148,7 +154,18 @@ impl KubernetesRunner {
             poll: Duration::from_millis(500),
             exec_forbidden_logged: Default::default(),
             files: None,
+            kept_retention: None,
         }
+    }
+
+    /// The same runner, whose orphan sweep deletes a kept (`delete: false`)
+    /// pod once its run has been terminal longer than `retention`; `None`
+    /// keeps them for ever ([`DockerRunner::with_kept_retention`]).
+    ///
+    /// [`DockerRunner::with_kept_retention`]: crate::worker::commands::DockerRunner::with_kept_retention
+    pub fn with_kept_retention(mut self, retention: Option<Duration>) -> Self {
+        self.kept_retention = retention;
+        self
     }
 
     /// The same runner, streaming stored inputs from `files` -- what
@@ -1414,7 +1431,13 @@ impl TaskRunner for KubernetesRunner {
     /// there then (or an API server that never answered) is a WARN and
     /// `Ok(())`, since the outcome is the budget's either way (`cancel.rs`
     /// fact 2). [`release`](TaskRunner::release) then deletes with grace 0.
-    async fn cancel(&self, task: &TaskInput, grace: Duration) -> Result<()> {
+    ///
+    /// **`delete: false` is deleted too** (debt D2, 2026-10-19): a pod cannot
+    /// be stopped without being deleted; `spec.delete` is not read here. The
+    /// only other way, an exec of `kill` inside the author's image, is
+    /// fragile; the divergence from Docker's kept container (D1) is written
+    /// in the workflow kill spec §4.2.
+    async fn cancel(&self, task: &TaskInput, grace: Duration, _spec: &RunnerSpec) -> Result<()> {
         let name = pod_name(task.run_id, attempt_of(task));
         if grace.is_zero() {
             return self.delete_pod(&name).await;
@@ -1465,13 +1488,19 @@ fn kept_on_internal(task: &TaskInput, name: &str, outcome: &Result<CommandsResul
 #[async_trait::async_trait]
 impl OrphanSweep for KubernetesRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
-        sweep_orphans(&self.client, &self.cfg, pool).await
+        sweep_orphans(&self.client, &self.cfg, pool, self.kept_retention).await
+    }
+
+    fn kept_retention(&self) -> Option<Duration> {
+        self.kept_retention
     }
 }
 
 /// **The pod half of the orphan sweep** (spec §5, *Orphans*): delete every
-/// task pod in the task namespace whose run is **terminal**, unless the author
-/// asked to keep it (`delete: false`).
+/// task pod in the task namespace whose run is **terminal**; one the author
+/// asked to keep (`delete: false`) only once its run has been terminal longer
+/// than `kept_retention`, never with `None` (workflow debt D3). The rule is
+/// [`sweep_decision`], shared with the Docker half.
 ///
 /// # A pod whose run has no row is left alone, exactly as in the Docker half
 ///
@@ -1486,6 +1515,7 @@ pub async fn sweep_orphans(
     client: &kube::Client,
     cfg: &PodConfig,
     pool: &sqlx::PgPool,
+    kept_retention: Option<Duration>,
 ) -> Result<u64> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), &cfg.namespace);
     let listed = pods
@@ -1506,9 +1536,6 @@ pub async fn sweep_orphans(
             .as_ref()
             .and_then(|a| a.get(DELETE_ANNOTATION))
             .is_some_and(|v| v == "false");
-        if keep {
-            continue;
-        }
         let Some(id) = p
             .metadata
             .labels
@@ -1518,20 +1545,21 @@ pub async fn sweep_orphans(
         else {
             continue;
         };
-        candidates.push((name, id));
+        candidates.push((name, id, keep));
     }
     if candidates.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<uuid::Uuid> = candidates.iter().map(|(_, id)| *id).collect();
+    let ids: Vec<uuid::Uuid> = candidates.iter().map(|(_, id, _)| *id).collect();
     let live = run_liveness(pool, &ids).await?;
+    let now = live.now.unwrap_or_else(Utc::now);
     let mut deleted = 0u64;
-    for (name, id) in candidates {
+    for (name, id, keep) in candidates {
         if live.missing.contains(&id) {
             tracing::debug!(pod = %name, "orphan sweep: run {id} is unknown to this database; left alone");
             continue;
         }
-        if !live.terminal.contains(&id) {
+        if !sweep_decision(&live, id, keep, kept_retention, now) {
             continue;
         }
         match pods
@@ -2292,9 +2320,16 @@ mod tests {
         let task = crate::worker::handlers::testing::input("t", serde_json::Value::Null);
         let grace = Duration::from_secs(1);
         let started = tokio::time::Instant::now();
-        let out = tokio::time::timeout(Duration::from_secs(30), runner.cancel(&task, grace))
-            .await
-            .expect("cancel returned: it is bounded, not the kube client's 295 s");
+        let out = tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.cancel(
+                &task,
+                grace,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Kubernetes),
+            ),
+        )
+        .await
+        .expect("cancel returned: it is bounded, not the kube client's 295 s");
         let took = started.elapsed();
         assert!(out.is_ok(), "past the bound it is a WARN and Ok: {out:?}");
         assert!(

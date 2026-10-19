@@ -89,6 +89,15 @@
 //! `subflow::on_child_terminal`), which locks child-then-parent, the reverse
 //! of a kill. Postgres detects it and aborts one side; [`kill_execution`]
 //! runs its transaction again when it is the one aborted.
+//!
+//! # An execution that cannot be loaded is closed by force (debt D4)
+//!
+//! When `claim::load` fails for a reason in the row's own content
+//! (`claim::row_content_fault`), the execution -- the one named, or one
+//! descendant of a cascade -- is closed by `worker::force_close` instead of
+//! failing the kill: retrying cannot change the answer, and a kill is the
+//! operator's way out. [`kill_execution_reporting`] says whether that
+//! happened, for the route's audit. Any other error is returned as before.
 
 use std::collections::HashSet;
 
@@ -97,6 +106,7 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::claim::{self, ExecutionCtx, Frame, Job, Stack};
+use super::force_close;
 use super::from_wire;
 use super::txn::{transaction, InTxn, Txn};
 use crate::executor::{apply, ExecutionState, RunState};
@@ -128,6 +138,22 @@ pub async fn kill_execution(
     execution: Uuid,
     cascade: bool,
 ) -> Result<KillOutcome> {
+    Ok(
+        kill_execution_reporting(pool, workspace, execution, cascade)
+            .await?
+            .0,
+    )
+}
+
+/// [`kill_execution`], and whether this transaction closed the execution or
+/// one of its descendants by force (module doc, "An execution that cannot be
+/// loaded"): the route audits it.
+pub async fn kill_execution_reporting(
+    pool: &PgPool,
+    workspace: Uuid,
+    execution: Uuid,
+    cascade: bool,
+) -> Result<(KillOutcome, bool)> {
     let mut retries = 0;
     loop {
         let killed = transaction!(pool, |at| {
@@ -148,35 +174,84 @@ async fn kill_in(
     workspace: Uuid,
     execution: Uuid,
     cascade: bool,
-) -> Result<KillOutcome> {
+) -> Result<(KillOutcome, bool)> {
     let (conn, gate) = at.parts();
-    let (ctx, state, now) = claim::load(conn, execution, Stack::Fresh(gate.clone())).await?;
-    if ctx.workspace_id != workspace {
-        return Err(Error::NotFound("execution".into()));
+    let mut forced = false;
+    let mut reported = Vec::new();
+    match claim::load(conn, execution, Stack::Fresh(gate.clone())).await {
+        Ok((ctx, state, now)) => {
+            if ctx.workspace_id != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            if let Some(&last) = state.history.last().filter(|s| s.is_terminal()) {
+                return Ok((KillOutcome::Terminated(last), false));
+            }
+            let (before, state) = kill_loaded(conn, &ctx, state).await?;
+            claim::settle(conn, &ctx, &before, state, now, None).await?;
+        }
+        Err(e) if claim::row_content_fault(&e) => {
+            // Debt D4. The row exists (the fault is in its content), and the
+            // two checks the loaded arm makes are made here, off the row
+            // `load` has already locked.
+            let (ws, state): (Uuid, String) =
+                sqlx::query_as("SELECT workspace_id, state FROM workflow.executions WHERE id = $1")
+                    .bind(execution)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(db_err)?;
+            if ws != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            if let Some(last) = from_wire(&state).filter(|s| s.is_terminal()) {
+                return Ok((KillOutcome::Terminated(last), false));
+            }
+            let why = force_close::reason(&e);
+            let closed = force_close::close(
+                conn,
+                execution,
+                &why,
+                None,
+                Stack::Fresh(gate.clone()).caller(),
+            )
+            .await?;
+            tracing::warn!(
+                %execution,
+                error = %why,
+                outcome = closed.state.wire(),
+                "a kill could not load this execution, so it was closed by force"
+            );
+            forced = true;
+            reported = closed.reported;
+        }
+        Err(e) => return Err(e),
     }
-    if let Some(&last) = state.history.last().filter(|s| s.is_terminal()) {
-        return Ok(KillOutcome::Terminated(last));
-    }
-    let (before, state) = kill_loaded(conn, &ctx, state).await?;
-    claim::settle(conn, &ctx, &before, state, now, None).await?;
     if cascade {
         // Each one settled on its own, in lock order, after its parent's
         // settle: a child that ends `KILLED` reports to a parent whose run is
         // already terminal, which is a no-op.
-        for frame in descendants(conn, execution, || Stack::Fresh(gate.clone())).await? {
-            claim::run_frame(conn, frame).await?;
+        let found = descendants(conn, execution, || Stack::Fresh(gate.clone())).await?;
+        forced |= found.forced;
+        for job in found.jobs {
+            claim::run_job(conn, job).await?;
         }
+    }
+    // The root's own report last: its parent is outside the tree.
+    for job in reported {
+        claim::run_job(conn, job).await?;
     }
     let after: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
         .bind(execution)
         .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
-    Ok(if from_wire(&after) == Some(RunState::Killed) {
-        KillOutcome::Killed
-    } else {
-        KillOutcome::Killing
-    })
+    Ok((
+        if from_wire(&after) == Some(RunState::Killed) {
+            KillOutcome::Killed
+        } else {
+            KillOutcome::Killing
+        },
+        forced,
+    ))
 }
 
 /// **The kill of an `Exit` with `state: KILLED`** (kill-and-exit Task 6,
@@ -188,20 +263,35 @@ async fn kill_in(
 pub(super) async fn cascade(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Vec<Job>> {
     Ok(descendants(conn, ctx.id, || Stack::Nested(ctx.caller()))
         .await?
-        .into_iter()
-        .map(|frame| Job::Settle(Box::new(frame)))
-        .collect())
+        .jobs)
+}
+
+/// What [`descendants`] found.
+struct Descendants {
+    /// The settles not yet run, in lock order, then the reports of the
+    /// descendants closed by force.
+    jobs: Vec<Job>,
+    /// Whether any descendant was closed by force.
+    forced: bool,
 }
 
 /// Every live descendant of `root`, locked in the module doc's order and with
 /// the kill applied, as settles not yet run.
+///
+/// **A descendant that cannot be loaded is closed by force** (debt D4) and
+/// the walk goes on. Its report to its parent comes after every settle: the
+/// parent may be a descendant whose kill is one of those settles, and the
+/// report must read the parent as that settle leaves it
+/// (`worker::force_close`'s module doc).
 async fn descendants(
     conn: &mut PgConnection,
     root: Uuid,
     stack: impl Fn() -> Stack,
-) -> Result<Vec<Frame<'static>>> {
+) -> Result<Descendants> {
     let mut seen = HashSet::new();
-    let mut frames = Vec::new();
+    let mut jobs = Vec::new();
+    let mut reported = Vec::new();
+    let mut forced = false;
     loop {
         let found: Vec<Uuid> = sqlx::query_scalar(DESCENDANTS)
             .bind(root)
@@ -210,16 +300,36 @@ async fn descendants(
             .map_err(db_err)?;
         let new: Vec<Uuid> = found.into_iter().filter(|id| seen.insert(*id)).collect();
         if new.is_empty() {
-            return Ok(frames);
+            jobs.append(&mut reported);
+            return Ok(Descendants { jobs, forced });
         }
         for id in new {
-            let (ctx, state, now) = claim::load(conn, id, stack()).await?;
+            let (ctx, state, now) = match claim::load(conn, id, stack()).await {
+                Ok(loaded) => loaded,
+                Err(e) if claim::row_content_fault(&e) => {
+                    let why = force_close::reason(&e);
+                    let closed = force_close::close(conn, id, &why, None, stack().caller()).await?;
+                    tracing::warn!(
+                        execution = %id,
+                        root = %root,
+                        error = %why,
+                        outcome = closed.state.wire(),
+                        "a cascading kill could not load this descendant, so it was closed by force"
+                    );
+                    forced = true;
+                    reported.extend(closed.reported);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             // It ended between the read and the lock.
             if state.history.last().is_some_and(|s| s.is_terminal()) {
                 continue;
             }
             let (before, state) = kill_loaded(conn, &ctx, state).await?;
-            frames.push(Frame::loaded(ctx, before, state, now));
+            jobs.push(Job::Settle(Box::new(Frame::loaded(
+                ctx, before, state, now,
+            ))));
         }
     }
 }

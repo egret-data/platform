@@ -47,6 +47,7 @@ pub mod routes;
 pub mod scope;
 pub mod transfer;
 pub mod uri;
+pub mod wd_sweep;
 
 use std::sync::{Arc, OnceLock};
 

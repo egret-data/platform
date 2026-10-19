@@ -83,7 +83,7 @@ use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
 use egret_workflow::scripts::{RunnerKind, RunnerSpec};
 use egret_workflow::storage::FileStore;
 use egret_workflow::worker::commands::{
-    container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
+    container_name, DockerRunner, NoObserver, OrphanSweep, TaskCommands, TaskRunner,
 };
 use egret_workflow::worker::handlers::script::{FixedFeatureState, Script, ScriptRuntime};
 use egret_workflow::worker::handlers::{container, python, LogSink};
@@ -872,7 +872,7 @@ async fn docker_cancel_with_grace_lets_a_sigterm_trap_run() {
 
     let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
     let name = container_name(&t);
-    r.cancel(&t, std::time::Duration::from_secs(10))
+    r.cancel(&t, std::time::Duration::from_secs(10), &docker_spec())
         .await
         .expect("cancel with a grace");
     assert!(
@@ -885,12 +885,12 @@ async fn docker_cancel_with_grace_lets_a_sigterm_trap_run() {
         "SIGTERM reached PID 1's trap within the grace: {:?}",
         rec.lines()
     );
-    r.cancel(&t, std::time::Duration::from_secs(10))
+    r.cancel(&t, std::time::Duration::from_secs(10), &docker_spec())
         .await
         .expect("stopping a container that is not there is Ok, as `rm` is");
 
     let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
-    r.cancel(&t, std::time::Duration::ZERO)
+    r.cancel(&t, std::time::Duration::ZERO, &docker_spec())
         .await
         .expect("cancel with grace 0");
     assert!(!container_exists(&container_name(&t)));
@@ -911,7 +911,7 @@ async fn docker_cancel_returns_only_after_the_container_stopped() {
 
     let (t, rec, running) = start_running(&r, trapping("sleep 3; echo slow-term; exit 0")).await;
     let started = std::time::Instant::now();
-    r.cancel(&t, std::time::Duration::from_secs(20))
+    r.cancel(&t, std::time::Duration::from_secs(20), &docker_spec())
         .await
         .expect("cancel");
     let took = started.elapsed();
@@ -936,7 +936,7 @@ async fn docker_cancel_returns_only_after_the_container_stopped() {
     // then -- within grace + CANCEL_WAIT_MARGIN.
     let (t, _rec, running) = start_running(&r, trapping("")).await;
     let started = std::time::Instant::now();
-    r.cancel(&t, std::time::Duration::from_secs(2))
+    r.cancel(&t, std::time::Duration::from_secs(2), &docker_spec())
         .await
         .expect("cancel");
     let took = started.elapsed();
@@ -2151,17 +2151,19 @@ async fn namespace_files_are_staged_into_the_container_as_the_artifact_does() {
 //
 // With `taskRunner.delete: false` release keeps the container, so the only
 // call left that can stop it is the kill's `cancel` (`DockerRunner::cancel`
-// with the script handler's zero grace: `rm --force`). The case asserts the
-// container is not running and not there; without the cancel it is still
-// running `sleep 600` (measured: with `end_kill`'s cancel removed, this case
-// fails on "still running", and the other two pass their daemon assertions
-// and fail only on the worker's own record of the cancel).
+// with the script handler's zero grace and the task's own spec: `docker stop
+// -t 0`, debt D1). The case asserts the container is not running and is
+// still there, exited; without the cancel it is still running `sleep 600`
+// (measured before D1: with `end_kill`'s cancel removed, this case fails on
+// "still running", and the other two pass their daemon assertions and fail
+// only on the worker's own record of the cancel).
 //
 // The other direction does not exist on Docker: the kill's release cannot
-// be seen from the daemon, because the cancel has already removed the
-// container and `rm --force` of an absent name succeeds (measured: with
-// `end_kill`'s release removed, all three cases pass). That the kill path
-// releases is pinned without a daemon (`tests/worker.rs`, `KillRecorder`).
+// be seen from the daemon, because the cancel has already removed a `delete:
+// true` container (`rm --force` of an absent name succeeds) and release
+// leaves a kept one alone (measured before D1: with `end_kill`'s release
+// removed, all three cases pass). That the kill path releases is pinned
+// without a daemon (`tests/worker.rs`, `KillRecorder`).
 
 /// How often the live worker checks its run for a kill.
 const KILL_POLL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -2497,12 +2499,14 @@ async fn kill_stops_a_running_container() {
     killed.assert_the_worker_cancelled_once();
 }
 
-/// **The cancel, not the release, is what stops a killed container.** With
-/// `taskRunner.delete: false` release keeps the container, so only the
-/// kill's `cancel` can stop it -- see this section's doc. After the kill it
-/// is not running, and is gone: the Docker runner's zero-grace cancel is
-/// `rm --force` (`DockerRunner::cancel`).
-async fn a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false() {
+/// **A killed `delete: false` container is stopped and kept** (debt D1,
+/// decided 2026-10-18). With `taskRunner.delete: false` release keeps the
+/// container, so only the kill's `cancel` can stop it -- see this section's
+/// doc. After the kill it is not running, and is still there, exited: the
+/// Docker runner's cancel of a kept container is `docker stop -t <grace>`
+/// only, as Kestra's `Docker.cleanupContainer` removes only when `delete`
+/// (`DockerRunner::cancel`).
+async fn a_killed_delete_false_container_is_stopped_and_kept() {
     let w = KillWorld::new().await;
     let runner = format!(
         "      type: {}\n      delete: false\n",
@@ -2510,15 +2514,201 @@ async fn a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false()
     );
     let killed = kill_a_running_sleeper(&w, "kill-kept", Some(&runner)).await;
     let name = &killed.name;
+    // Capture, remove, THEN assert: the case removes what it kept before any
+    // assert can fail, so a red run leaves no `sleep 600` behind. `KillWorld`'s
+    // `Drop` (every container labelled with its workspace) is the second net.
+    let (running, exists) = (container_running(name), container_exists(name));
+    force_remove(name);
+    assert!(!running, "{name} is still running after its run was KILLED");
     assert!(
-        !container_running(name),
-        "{name} is still running after its run was KILLED: nothing stopped it"
-    );
-    assert!(
-        !container_exists(name),
-        "{name} remains after the kill's cancel"
+        exists,
+        "{name} was removed: `delete: false` keeps a killed container (debt D1)"
     );
     killed.assert_the_worker_cancelled_once();
+}
+
+/// Backdate run `run`'s end to `ago` before now, as if it had been terminal
+/// that long. `started_at` moves with it, for the `ended_at >= started_at`
+/// CHECK (migration 0183).
+async fn backdate_the_end(w: &KillWorld, run: Uuid, ago: &'static str) {
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+         SET started_at = CASE WHEN started_at IS NULL THEN NULL \
+                               ELSE now() - $2::interval - interval '1 minute' END, \
+             ended_at = now() - $2::interval \
+         WHERE id = $1",
+    )
+    .bind(run)
+    .bind(ago)
+    .execute(&w.pool)
+    .await
+    .expect("backdate the run's end");
+}
+
+/// The Docker orphan sweep as production builds it, with `retention`, but
+/// scoped to `w`'s workspace label so it can never reach a container this
+/// case did not create (the daemon is shared).
+async fn sweep_this_world(w: &KillWorld, retention: Option<std::time::Duration>) -> u64 {
+    DockerRunner::new()
+        .with_kept_retention(retention)
+        .with_sweep_label(format!("egret.io/workspace-id={}", w.ws))
+        .sweep_orphans(&w.pool)
+        .await
+        .expect("sweep")
+}
+
+/// **A kept container is swept after its deadline** (debt D3, decided
+/// 2026-10-19: every kept container whose run is terminal, whatever the end
+/// state). A killed `delete: false` sleeper is kept (Task 1.1):
+///
+/// * the sweep with a one-hour retention leaves it while its run ended just
+///   now, and removes it once its end is backdated two hours;
+/// * with `None` (the setting `0`) a second one, a day past its end, is kept
+///   -- and the one-hour sweep then removes it, so the backdate is shown to
+///   have made it eligible (the `None` pass is not vacuous).
+///
+/// Every observation is captured before the case's own cleanup; `KillWorld`'s
+/// `Drop` removes whatever is left, by its workspace label.
+async fn a_kept_container_is_swept_after_its_deadline() {
+    let w = KillWorld::new().await;
+    let runner = format!(
+        "      type: {}\n      delete: false\n",
+        egret_workflow::scripts::DOCKER_RUNNER
+    );
+    let hour = Some(std::time::Duration::from_secs(3600));
+
+    let first = kill_a_running_sleeper(&w, "kept-deadline", Some(&runner)).await;
+    let kept_after_kill = container_exists(&first.name);
+    let n_fresh = sweep_this_world(&w, hour).await;
+    let kept_while_fresh = container_exists(&first.name);
+    backdate_the_end(&w, first.run, "2 hours").await;
+    let n_late = sweep_this_world(&w, hour).await;
+    let kept_when_late = container_exists(&first.name);
+    // Gone before the second sleeper starts: its wait asserts the workspace
+    // holds one container.
+    force_remove(&first.name);
+
+    let second = kill_a_running_sleeper(&w, "kept-for-ever", Some(&runner)).await;
+    backdate_the_end(&w, second.run, "1 day").await;
+    let n_for_ever = sweep_this_world(&w, None).await;
+    let kept_for_ever = container_exists(&second.name);
+    let n_control = sweep_this_world(&w, hour).await;
+    let kept_after_control = container_exists(&second.name);
+    force_remove(&second.name);
+
+    assert!(
+        kept_after_kill,
+        "{}: the kill keeps a `delete: false` container",
+        first.name
+    );
+    assert_eq!(
+        n_fresh, 0,
+        "a run that ended just now is inside a one-hour deadline"
+    );
+    assert!(
+        kept_while_fresh,
+        "{} was swept before its deadline",
+        first.name
+    );
+    assert_eq!(n_late, 1, "two hours past a one-hour deadline: swept");
+    assert!(!kept_when_late, "{} outlived its deadline", first.name);
+    assert_eq!(
+        n_for_ever, 0,
+        "retention `None` (the setting 0) removes nothing"
+    );
+    assert!(kept_for_ever, "{} was swept with retention 0", second.name);
+    assert_eq!(
+        n_control, 1,
+        "the control: a day past its end IS past a one-hour deadline"
+    );
+    assert!(
+        !kept_after_control,
+        "{} survived the control sweep",
+        second.name
+    );
+}
+
+/// **A kept container a force-close left running is stopped by the sweep,
+/// and kept** (final review I3). The worker running a `delete: false`
+/// sleeper dies after the kill is written; once its lease is reaped the
+/// execution's source is corrupted, so the next worker's kill-only claim
+/// cannot build a handler and commits `KILLED` without a `cancel` (debt D4,
+/// spec §2.2 rule 3). The container is still running then. One sweep with a
+/// one-hour retention stops it, removes nothing, and the container is still
+/// there, exited, for the author -- what D1's `cancel` would have left.
+async fn a_force_closed_kept_container_is_stopped_by_the_sweep() {
+    let w = KillWorld::new().await;
+    let runner = format!(
+        "      type: {}\n      delete: false\n",
+        egret_workflow::scripts::DOCKER_RUNNER
+    );
+    let ex = w.start_sleeper("kept-forced", Some(&runner)).await;
+    let first = KillSpy::new();
+    let worker = spawn_worker(
+        &w.pool,
+        first.clone(),
+        live_timing(std::time::Duration::from_secs(3600)),
+    );
+    let (run, _attempt, name) = w.wait_for_running_container(ex).await;
+    egret_workflow::worker::kill_execution(&w.pool, w.ws, ex, true)
+        .await
+        .expect("kill");
+    worker.abort();
+    let _ = worker.await;
+    let reap_after = std::time::Duration::from_secs(2);
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let reaped = loop {
+        let n = egret_workflow::worker::reap(&w.pool, reap_after)
+            .await
+            .expect("reap");
+        if n != 0 || std::time::Instant::now() >= reap_deadline {
+            break n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    sqlx::query("UPDATE workflow.executions SET source = 'tasks: [' WHERE id = $1")
+        .bind(ex)
+        .execute(&w.pool)
+        .await
+        .expect("corrupt the source");
+    let second = KillSpy::new();
+    egret_workflow::worker::tick_with(&w.pool, 8, &*second, live_timing(KILL_POLL))
+        .await
+        .expect("the second worker's tick");
+    let run_after_close = w.run_state(run).await;
+    let execution_after_close = w.execution_state(ex).await;
+    let running_after_close = container_running(&name);
+    let hour = Some(std::time::Duration::from_secs(3600));
+    let removed = sweep_this_world(&w, hour).await;
+    let (running_after_sweep, exists_after_sweep) =
+        (container_running(&name), container_exists(&name));
+    // Capture, remove, THEN assert (see `a_killed_delete_false_container_is_stopped_and_kept`).
+    force_remove(&name);
+
+    assert_eq!(reaped, 1, "the dead worker's KILLING lease is reaped");
+    assert_eq!(run_after_close, ("KILLED".to_string(), None));
+    assert_eq!(execution_after_close, "KILLED");
+    assert!(
+        second.cancels().is_empty(),
+        "the premise: no handler could be built, so nothing was cancelled: {:?}",
+        second.cancels()
+    );
+    assert!(
+        running_after_close,
+        "the premise: {name} still runs after its run was closed by force"
+    );
+    assert_eq!(
+        removed, 0,
+        "inside its retention a kept container is not removed"
+    );
+    assert!(
+        !running_after_sweep,
+        "{name} still runs after the sweep: a kept container of a terminal run is stopped"
+    );
+    assert!(
+        exists_after_sweep,
+        "{name} was removed: the sweep's stop keeps it until its retention"
+    );
 }
 
 /// **Spec §8 and §4.3 (live): a kill survives the worker dying.** The first
@@ -2664,7 +2854,9 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_reattached_container_is_collected_under_the_same_uris),
         case!(namespace_files_are_staged_into_the_container_as_the_artifact_does),
         case!(kill_stops_a_running_container),
-        case!(a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false),
+        case!(a_killed_delete_false_container_is_stopped_and_kept),
+        case!(a_kept_container_is_swept_after_its_deadline),
+        case!(a_force_closed_kept_container_is_stopped_by_the_sweep),
         case!(a_kill_survives_the_worker_dying),
     ]
 }

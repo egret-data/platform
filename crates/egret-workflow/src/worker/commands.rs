@@ -638,7 +638,22 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// plugin host's `kill()` short (spec §7.1). A container still running at
     /// the bound is a WARN and `Ok(())`: the outcome is the budget's either
     /// way (`cancel.rs` fact 2).
-    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()>;
+    ///
+    /// # `spec` (debt D1, 2026-10-19)
+    ///
+    /// The task's own `taskRunner:` spec, as [`release`](Self::release) gets
+    /// it. A runner that can stop its work without removing it keeps it for
+    /// `spec.delete == false`, as Kestra's `Docker.cleanupContainer` does
+    /// (`kill()`, then `removeContainerCmd` only when `delete`): the Docker
+    /// runner stops a kept container and leaves it, exited. A runner that
+    /// cannot -- the Kubernetes runner, whose pod cannot be stopped without
+    /// being deleted (D2) -- removes it whatever `spec` says.
+    async fn cancel(
+        &self,
+        task: &TaskInput,
+        grace: std::time::Duration,
+        spec: &RunnerSpec,
+    ) -> Result<()>;
 
     /// Free `task`'s container or pod once its outcome has **committed**
     /// (`TaskHandler::release`): delete it when `spec.delete` (the default),
@@ -1232,6 +1247,15 @@ pub struct DockerRunner {
     /// and output files into (Task 6). `None`: either fails the task naming
     /// `[storage]`.
     files: Option<std::sync::Arc<crate::storage::FileStore>>,
+    /// How long a kept (`delete: false`) container outlives its run before the
+    /// orphan sweep removes it (workflow debt D3). `None`: kept for ever,
+    /// which is what a runner nobody configured does; production passes
+    /// `workflow.kept_container_retention_days` (`runtime::handlers_for`).
+    kept_retention: Option<std::time::Duration>,
+    /// One more `label=` filter on the orphan sweep's listing, ANDed with
+    /// [`TASKRUN_LABEL`]'s. `None` in production: the sweep sees every egret
+    /// task container on the daemon. See [`DockerRunner::with_sweep_label`].
+    sweep_label: Option<String>,
 }
 
 impl Default for DockerRunner {
@@ -1250,7 +1274,28 @@ impl DockerRunner {
             max_diff_bytes: MAX_DIFF_BYTES,
             logs: None,
             files: None,
+            kept_retention: None,
+            sweep_label: None,
         }
+    }
+
+    /// The same runner, whose orphan sweep lists only containers that ALSO
+    /// carry `label` (`key=value`, e.g. `egret.io/workspace-id=<ws>`).
+    ///
+    /// For a live test on a shared daemon: the sweep removes containers, so a
+    /// test that drives it must not be able to reach a container it did not
+    /// create (another suite's, or the dev stack's). Production never sets it.
+    pub fn with_sweep_label(mut self, label: impl Into<String>) -> Self {
+        self.sweep_label = Some(label.into());
+        self
+    }
+
+    /// The same runner, whose orphan sweep removes a kept (`delete: false`)
+    /// container once its run has been terminal longer than `retention`
+    /// ([`sweep_decision`]). `None` keeps them for ever (the setting `0`).
+    pub fn with_kept_retention(mut self, retention: Option<std::time::Duration>) -> Self {
+        self.kept_retention = retention;
+        self
     }
 
     /// The same runner, streaming stored inputs from `files` -- what
@@ -1614,8 +1659,26 @@ impl TaskRunner for DockerRunner {
     /// return only then. Its wait is bounded by `grace` +
     /// [`CANCEL_WAIT_MARGIN`] in case the daemon never answers. Then W5a's
     /// `rm --force`, unchanged. A grace of zero is W5a's path exactly.
-    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
+    ///
+    /// # With `delete: false` (debt D1): `docker stop -t <grace>` only
+    ///
+    /// The container is stopped and kept, exited, for the author to inspect
+    /// -- Kestra's `Docker.cleanupContainer` kills, then removes only when
+    /// `delete` is true. A grace of zero is `docker stop -t 0`, an immediate
+    /// SIGKILL. An absent or already-stopped container is `Ok(())` (measured,
+    /// task 1.1 report): `docker stop` of an exited container exits 0, and of
+    /// an absent one exits 1, which [`stop`](Self::stop)'s probe turns into
+    /// `Ok(())`. Any other failure is the daemon's, surfaced as `rm`'s is.
+    async fn cancel(
+        &self,
+        task: &TaskInput,
+        grace: std::time::Duration,
+        spec: &RunnerSpec,
+    ) -> Result<()> {
         let name = container_name(task);
+        if !spec.delete {
+            return self.stop(task, &name, grace).await;
+        }
         if !grace.is_zero() {
             // A stop that failed must not leave the container running: log
             // it and remove anyway. `rm --force` surfaces its own error if
@@ -1644,14 +1707,18 @@ impl TaskRunner for DockerRunner {
 
     /// `docker rm --force` when `spec.delete` (the default); with
     /// `delete: false` the container is kept, exited -- measured on the
-    /// artifact -- and the orphan sweep leaves it too (its label).
+    /// artifact -- and the orphan sweep removes it only after its retention
+    /// (its label; debt D3). After a
+    /// kill the container is already stopped and kept by
+    /// [`cancel`](TaskRunner::cancel) (debt D1), so this has nothing to do
+    /// for it either.
     async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()> {
         if !spec.delete {
             return Ok(());
         }
         // Grace 0: the outcome has committed, so there is nothing left to
         // let finish.
-        self.cancel(task, std::time::Duration::ZERO).await
+        self.cancel(task, std::time::Duration::ZERO, spec).await
     }
 }
 
@@ -1669,7 +1736,7 @@ impl DockerRunner {
             tracing::warn!(
                 run = %task.run_id,
                 container = %name,
-                "the task container did not stop within {bound:?} of its SIGTERM; removing it"
+                "the task container did not stop within {bound:?} of its SIGTERM; going on"
             );
             return Ok(());
         };
@@ -2445,10 +2512,21 @@ pub const RUN_NAME_PREFIX: &str = "egret-run-";
 #[async_trait::async_trait]
 pub trait OrphanSweep: Send + Sync {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64>;
+
+    /// How long a kept (`delete: false`) container or pod outlives its run
+    /// before this sweep removes it; `None` is for ever (workflow debt D3).
+    /// Required, not defaulted, so a runner cannot forget to answer, and so
+    /// the deployment's wiring (`runtime::handlers_for`) is observable.
+    fn kept_retention(&self) -> Option<std::time::Duration>;
 }
 
-/// Of `ids`, which `task_runs` rows are terminal, and which have no row at
-/// all — the one question both halves of [`OrphanSweep`] ask the database.
+/// Of `ids`, which `task_runs` rows are terminal (and since when), and which
+/// have no row at all — the one question both halves of [`OrphanSweep`] ask
+/// the database.
+///
+/// A terminal run's end is `COALESCE(ended_at, updated_at)`: a row written
+/// before migration 0183, or by a writer that left `ended_at` NULL, has only
+/// `updated_at`, which is no earlier than its end.
 ///
 /// Terminal is [`RunState::is_terminal`](crate::executor::RunState::is_terminal),
 /// Kestra's `isTerminated()`, spelled here by the enum rather than a copied
@@ -2459,23 +2537,33 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
         .filter(|s| s.is_terminal())
         .map(|s| s.wire())
         .collect();
-    let rows: Vec<(uuid::Uuid, bool)> =
-        sqlx::query_as("SELECT id, state = ANY($2) FROM workflow.task_runs WHERE id = ANY($1)")
-            .bind(ids)
-            .bind(&terminal)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| {
-                Error::Internal(anyhow::anyhow!(
-                    "reading run states for the orphan sweep: {e}"
-                ))
-            })?;
+    type Row = (
+        uuid::Uuid,
+        bool,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, state = ANY($2), COALESCE(ended_at, updated_at), now() \
+         FROM workflow.task_runs WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(&terminal)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "reading run states for the orphan sweep: {e}"
+        ))
+    })?;
     let mut out = RunLiveness::default();
     let mut seen = std::collections::HashSet::new();
-    for (id, is_terminal) in rows {
+    for (id, is_terminal, ended, now) in rows {
         seen.insert(id);
+        out.now = Some(now);
         if is_terminal {
             out.terminal.insert(id);
+            out.ended.insert(id, ended);
         }
     }
     for id in ids {
@@ -2491,15 +2579,115 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
 pub(crate) struct RunLiveness {
     /// A row exists and its state is terminal.
     pub terminal: std::collections::HashSet<uuid::Uuid>,
+    /// When each [`terminal`](Self::terminal) run ended:
+    /// `COALESCE(ended_at, updated_at)`.
+    pub ended: std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>,
+    /// The database's `now()` when it answered: the clock a deadline is
+    /// measured on, so [`ended`](Self::ended) and "now" come from ONE clock
+    /// and a skewed worker clock cannot sweep early. `None` only when no row
+    /// matched, and then nothing is terminal and nothing is compared.
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
     /// No row at all (the execution was deleted, cascading its runs — or the
     /// work belongs to ANOTHER egret sharing the backend).
     pub missing: std::collections::HashSet<uuid::Uuid>,
 }
 
+/// **Whether the orphan sweep removes one container or pod** (workflow debt
+/// D3) -- the one rule both halves of [`OrphanSweep`] apply, and nothing else
+/// decides:
+///
+/// * the run is not terminal (live, or no row here at all): keep. A run this
+///   database has no row for is never ours to remove (see the two sweeps'
+///   docs);
+/// * terminal and not kept: remove (the sweep's rule since W5a);
+/// * terminal and kept (`delete: false`): remove once the run ended more than
+///   `retention` before `now`; `None` (the setting `0`) keeps it for ever.
+///   This holds whatever the end state, kill and timeout included.
+pub(crate) fn sweep_decision(
+    live: &RunLiveness,
+    id: uuid::Uuid,
+    keep: bool,
+    retention: Option<std::time::Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !live.terminal.contains(&id) {
+        return false;
+    }
+    if !keep {
+        return true;
+    }
+    let (Some(retention), Some(ended)) = (retention, live.ended.get(&id)) else {
+        return false;
+    };
+    // A retention too large for chrono is "for ever" in practice.
+    let Ok(retention) = chrono::Duration::from_std(retention) else {
+        return false;
+    };
+    now - *ended > retention
+}
+
+/// What the Docker half of the sweep does to one listed container
+/// ([`docker_sweep_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockerSweep {
+    /// Not ours to touch, or not yet.
+    Leave,
+    /// `docker rm --force`: [`sweep_decision`] says the container goes.
+    Remove,
+    /// `docker stop -t 0`, the container kept.
+    Stop,
+}
+
+/// **The Docker sweep's rule for one container**: [`sweep_decision`]'s
+/// removal, plus one case it has no word for (final review I3).
+///
+/// A kept (`delete: false`) container that is **still running** while its run
+/// is terminal is stopped -- `docker stop -t 0`, the container kept, exactly
+/// what debt D1's `cancel` does to a kept container -- and its removal is
+/// left to the retention as before. This is how a run closed without a
+/// `cancel` gets one: the force-close (debt D4) of an unleased leaf, and
+/// `finish_claimed_kill` when no handler can be built, both commit `KILLED`
+/// with nobody to stop the container, and a kept one would otherwise run on
+/// for the whole retention (for ever with the setting `0`).
+///
+/// A container that is not running (exited, created, dead) has nothing to
+/// stop. A live run's, or one with no row here, is left, as
+/// [`sweep_decision`] leaves it.
+pub(crate) fn docker_sweep_action(
+    live: &RunLiveness,
+    id: uuid::Uuid,
+    keep: bool,
+    running: bool,
+    retention: Option<std::time::Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> DockerSweep {
+    if sweep_decision(live, id, keep, retention, now) {
+        return DockerSweep::Remove;
+    }
+    if keep && running && live.terminal.contains(&id) {
+        return DockerSweep::Stop;
+    }
+    DockerSweep::Leave
+}
+
 /// **The Docker half of the sweep.**
 ///
 /// Lists every container carrying [`TASKRUN_LABEL`] whose name starts with
-/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal**.
+/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal** --
+/// a kept (`delete: false`) one only after its deadline ([`sweep_decision`],
+/// [`DockerRunner::with_kept_retention`]). A kept one that is still running
+/// before its deadline is stopped and kept ([`docker_sweep_action`]).
+///
+/// # The stop is `-t 0`
+///
+/// The run is already terminal, so no worker waits on a clean shutdown and
+/// no outcome can still be written: a grace would only let author code run
+/// on. It is also what D1's keep path does in practice -- only script tasks
+/// honour `delete`, and their `cancel` passes grace 0. And the sweep runs
+/// inside the reaper's tick, one container after another, so a grace per
+/// container would hold the tick. The wait is bounded by
+/// [`CANCEL_WAIT_MARGIN`]; a stop that fails or times out is logged, and the
+/// next tick tries again, since the container still lists as running.
 ///
 /// # A container whose run has NO row is left alone, unlike a pod
 ///
@@ -2515,18 +2703,15 @@ impl OrphanSweep for DockerRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
         let label_filter = format!("label={TASKRUN_LABEL}");
         let format = format!(
-            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}"
+            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}\t{{{{.State}}}}"
         );
-        let out = self
-            .cli(&[
-                "ps",
-                "--all",
-                "--filter",
-                &label_filter,
-                "--format",
-                &format,
-            ])
-            .await?;
+        let mut args = vec!["ps", "--all", "--filter", &label_filter];
+        let scope = self.sweep_label.as_ref().map(|l| format!("label={l}"));
+        if let Some(scope) = &scope {
+            args.extend(["--filter", scope.as_str()]);
+        }
+        args.extend(["--format", &format]);
+        let out = self.cli(&args).await?;
         if !out.status.success() {
             return Err(self
                 .classify("ps", &String::from_utf8_lossy(&out.stderr))
@@ -2536,12 +2721,19 @@ impl OrphanSweep for DockerRunner {
         if listed.is_empty() {
             return Ok(0);
         }
-        let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id)| *id).collect();
+        let ids: Vec<uuid::Uuid> = listed.iter().map(|c| c.run).collect();
         let live = run_liveness(pool, &ids).await?;
+        let now = live.now.unwrap_or_else(chrono::Utc::now);
         let mut removed = 0u64;
-        for (name, id) in &listed {
-            if !live.terminal.contains(id) {
-                continue;
+        for c in &listed {
+            let name = &c.name;
+            match docker_sweep_action(&live, c.run, c.keep, c.running, self.kept_retention, now) {
+                DockerSweep::Leave => continue,
+                DockerSweep::Stop => {
+                    self.sweep_stop(name).await;
+                    continue;
+                }
+                DockerSweep::Remove => {}
             }
             match self.cli(&["rm", "--force", name]).await {
                 Ok(o) if o.status.success() => removed += 1,
@@ -2555,13 +2747,59 @@ impl OrphanSweep for DockerRunner {
         }
         Ok(removed)
     }
+
+    fn kept_retention(&self) -> Option<std::time::Duration> {
+        self.kept_retention
+    }
 }
 
-/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}'`,
+impl DockerRunner {
+    /// The sweep's stop of a kept container ([`DockerSweep::Stop`]): `docker
+    /// stop -t 0`, bounded by [`CANCEL_WAIT_MARGIN`]. Never fails the sweep:
+    /// a container that is gone has nothing to stop, and one that would not
+    /// stop still lists as running, so the next tick stops it.
+    async fn sweep_stop(&self, name: &str) {
+        match tokio::time::timeout(CANCEL_WAIT_MARGIN, self.cli(&["stop", "-t", "0", name])).await {
+            Ok(Ok(o)) if o.status.success() => tracing::info!(
+                container = %name,
+                "orphan sweep stopped a kept container whose run had ended; it is kept until \
+                 its retention"
+            ),
+            Ok(Ok(o)) => tracing::warn!(
+                container = %name,
+                "orphan sweep could not stop the kept container: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Ok(Err(e)) => tracing::warn!(container = %name, "orphan sweep: {e}"),
+            Err(_) => tracing::warn!(
+                container = %name,
+                "orphan sweep: the kept container did not stop within {CANCEL_WAIT_MARGIN:?}; \
+                 the next tick tries again"
+            ),
+        }
+    }
+}
+
+/// One egret task container in the Docker sweep's listing
+/// ([`parse_docker_ps`]).
+#[derive(Debug, PartialEq, Eq)]
+struct ListedContainer {
+    name: String,
+    /// Its [`TASKRUN_LABEL`]: the `task_runs.id` it belongs to.
+    run: uuid::Uuid,
+    /// The author asked to keep it (`delete: false`, the [`DELETE_LABEL`]).
+    keep: bool,
+    /// `docker ps`'s `{{.State}}` is `running`, `paused` or `restarting`:
+    /// a process that `docker stop` would end.
+    running: bool,
+}
+
+/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}\t{{.State}}'`,
 /// parsed: the egret task containers only (name prefix AND a label that is a
-/// UUID), **minus those the author asked to keep** (`delete: false`, the
-/// [`DELETE_LABEL`] -- the pod sweep's rule, W5a Task 5).
-fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
+/// UUID), each with whether the author asked to keep it and whether it still
+/// runs. What the sweep does with each is [`docker_sweep_action`]'s (debt D3,
+/// final review I3).
+fn parse_docker_ps(stdout: &str) -> Vec<ListedContainer> {
     stdout
         .lines()
         .filter_map(|l| {
@@ -2569,10 +2807,18 @@ fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
             let name = cols.next()?;
             let id = cols.next()?;
             let keep = cols.next().is_some_and(|d| d.trim() == "false");
-            if !name.starts_with(RUN_NAME_PREFIX) || keep {
+            let running = cols
+                .next()
+                .is_some_and(|s| matches!(s.trim(), "running" | "paused" | "restarting"));
+            if !name.starts_with(RUN_NAME_PREFIX) {
                 return None;
             }
-            Some((name.to_string(), uuid::Uuid::parse_str(id.trim()).ok()?))
+            Some(ListedContainer {
+                name: name.to_string(),
+                run: uuid::Uuid::parse_str(id.trim()).ok()?,
+                keep,
+                running,
+            })
         })
         .collect()
 }
@@ -3146,18 +3392,140 @@ mod tests {
         );
     }
 
-    /// The sweep's parser keeps only egret task containers and drops the ones
-    /// the author asked to keep.
+    /// The parser keeps every egret task container and REPORTS the keep flag
+    /// and whether it runs; the decision is `docker_sweep_action`'s (debt D3,
+    /// final review I3).
     #[test]
-    fn the_docker_sweep_parses_names_and_leaves_delete_false_alone() {
+    fn the_docker_sweep_parses_names_and_the_keep_flag() {
         let a = uuid::Uuid::from_u128(1);
         let b = uuid::Uuid::from_u128(2);
         let out = format!(
-            "egret-run-x-1\t{a}\t\negret-run-y-1\t{b}\tfalse\nsomething-else\t{a}\t\negret-run-z-1\tnot-a-uuid\t\n"
+            "egret-run-x-1\t{a}\t\texited\negret-run-y-1\t{b}\tfalse\trunning\n\
+             something-else\t{a}\t\trunning\negret-run-z-1\tnot-a-uuid\t\trunning\n\
+             egret-run-p-1\t{b}\tfalse\tpaused\n"
         );
+        let c = |name: &str, run, keep, running| ListedContainer {
+            name: name.to_string(),
+            run,
+            keep,
+            running,
+        };
         assert_eq!(
             parse_docker_ps(&out),
-            vec![("egret-run-x-1".to_string(), a)]
+            vec![
+                c("egret-run-x-1", a, false, false),
+                c("egret-run-y-1", b, true, true),
+                c("egret-run-p-1", b, true, true),
+            ]
+        );
+    }
+
+    /// **One decision for both sweeps** (debt D3): a live run's work is never
+    /// touched; an ended run's is removed at once unless kept; a kept one goes
+    /// once its run ended more than `retention` ago, never with `None`; an
+    /// unknown run is left alone.
+    #[test]
+    fn sweep_decision_removes_kept_work_only_after_the_deadline() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let (live, done_old, done_new, unknown) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+            uuid::Uuid::from_u128(4),
+        );
+        let mut l = RunLiveness::default();
+        l.terminal.extend([done_old, done_new]);
+        l.ended.insert(done_old, now - D::days(8));
+        l.ended.insert(done_new, now - D::days(6));
+        l.missing.insert(unknown);
+        let week = Some(std::time::Duration::from_secs(7 * 86_400));
+        assert!(
+            !sweep_decision(&l, live, false, week, now),
+            "a live run's work stays"
+        );
+        assert!(
+            sweep_decision(&l, done_new, false, week, now),
+            "not kept: removed at once"
+        );
+        assert!(
+            !sweep_decision(&l, done_new, true, week, now),
+            "kept, 6 days: stays"
+        );
+        assert!(
+            sweep_decision(&l, done_old, true, week, now),
+            "kept, 8 days: removed"
+        );
+        assert!(
+            !sweep_decision(&l, done_old, true, None, now),
+            "retention 0: kept for ever"
+        );
+        assert!(
+            !sweep_decision(&l, unknown, false, week, now),
+            "no row here: never ours to remove"
+        );
+    }
+
+    /// **Final review I3: a kept container still running for a terminal run
+    /// is stopped, and kept.** The force-close path and the
+    /// unbuildable-handler path commit `KILLED` without a `cancel`, so a
+    /// `delete: false` container can outlive its run running. The Docker
+    /// sweep stops it at once (D1's stop, not removed) and leaves its removal
+    /// to the retention; a stopped one, a live run's and an unknown run's are
+    /// left; a kept one past its deadline is removed, running or not.
+    #[test]
+    fn the_docker_sweep_stops_a_running_kept_container_of_a_terminal_run() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let (live, done_new, done_old, unknown) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+            uuid::Uuid::from_u128(4),
+        );
+        let mut l = RunLiveness::default();
+        l.terminal.extend([done_new, done_old]);
+        l.ended.insert(done_new, now - D::minutes(1));
+        l.ended.insert(done_old, now - D::days(8));
+        l.missing.insert(unknown);
+        let week = Some(std::time::Duration::from_secs(7 * 86_400));
+        let act = |id, keep, running, retention| {
+            docker_sweep_action(&l, id, keep, running, retention, now)
+        };
+        assert_eq!(
+            act(done_new, true, true, week),
+            DockerSweep::Stop,
+            "kept, running, run ended: stopped"
+        );
+        assert_eq!(
+            act(done_new, true, true, None),
+            DockerSweep::Stop,
+            "retention 0 keeps it for ever, but not running"
+        );
+        assert_eq!(
+            act(done_new, true, false, week),
+            DockerSweep::Leave,
+            "kept and already stopped: nothing to do"
+        );
+        assert_eq!(
+            act(live, true, true, week),
+            DockerSweep::Leave,
+            "a live run's container runs on"
+        );
+        assert_eq!(
+            act(unknown, true, true, week),
+            DockerSweep::Leave,
+            "no row here: never ours to touch"
+        );
+        assert_eq!(
+            act(done_old, true, true, week),
+            DockerSweep::Remove,
+            "past its deadline: removed, running or not"
+        );
+        assert_eq!(
+            act(done_new, false, true, week),
+            DockerSweep::Remove,
+            "not kept: removed at once, as before"
         );
     }
 
@@ -4320,7 +4688,11 @@ mod tests {
         let runner = DockerRunner::with_binary(shim.display().to_string());
         let task = leased(1_700_000_000);
         runner
-            .cancel(&task, std::time::Duration::from_secs(1))
+            .cancel(
+                &task,
+                std::time::Duration::from_secs(1),
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            )
             .await
             .expect("rm --force succeeded, so the cancel did");
         let argv = std::fs::read_to_string(&log).expect("the shim logged");
@@ -4337,6 +4709,81 @@ mod tests {
                 panic!("the container was removed after the failed stop: {calls:?}")
             });
         assert!(stop < rm, "{calls:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A `delete: false` container is stopped by `cancel`, not removed**
+    /// (debt D1): `docker stop -t <grace>` and no `rm`, as Kestra's
+    /// `Docker.cleanupContainer` removes only when `delete`. Grace zero is
+    /// `stop -t 0`, not a skipped stop. A stop the daemon refuses for a
+    /// container that is still there is an error, not a silent keep.
+    #[tokio::test]
+    async fn a_kept_container_is_stopped_by_cancel_and_not_removed() {
+        // Arrange: a shim whose `stop` succeeds unless STOP_FAILS is set.
+        let dir = staging("stop-keeps");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        let fails = dir.join("stop-fails");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> {log}\n\
+                 case \"$1\" in\n\
+                 \x20 stop) if [ -e {fails} ]; then echo 'Error response from daemon: boom' >&2; exit 1; fi ;;\n\
+                 \x20 inspect) echo running ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display(),
+                fails = fails.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let task = leased(1_700_000_000);
+        let name = container_name(&task);
+        let kept = RunnerSpec {
+            delete: false,
+            ..RunnerSpec::defaults(crate::scripts::RunnerKind::Docker)
+        };
+
+        // Act
+        runner
+            .cancel(&task, std::time::Duration::ZERO, &kept)
+            .await
+            .expect("the kept container stopped");
+        runner
+            .cancel(&task, std::time::Duration::from_secs(2), &kept)
+            .await
+            .expect("the kept container stopped with a grace");
+        std::fs::write(&fails, b"").expect("arm the failing stop");
+        let refused = runner.cancel(&task, std::time::Duration::ZERO, &kept).await;
+
+        // Assert
+        let argv = std::fs::read_to_string(&log).expect("the shim logged");
+        let calls: Vec<&str> = argv.lines().collect();
+        assert!(
+            calls.contains(&format!("stop -t 0 {name}").as_str()),
+            "grace zero is `stop -t 0`: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("stop -t 2 {name}").as_str()),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|l| l.starts_with("rm ")),
+            "a `delete: false` container is never removed by cancel: {calls:?}"
+        );
+        assert!(
+            refused.is_err(),
+            "a stop refused for a running container surfaces: {refused:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

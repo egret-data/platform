@@ -937,6 +937,7 @@ impl egret_workflow::worker::commands::TaskRunner for ArchiveRunner {
         &self,
         _: &egret_workflow::worker::TaskInput,
         _: std::time::Duration,
+        _: &egret_workflow::scripts::RunnerSpec,
     ) -> egret_core::Result<()> {
         Ok(())
     }
@@ -1109,6 +1110,7 @@ impl egret_workflow::worker::commands::TaskRunner for Collecting {
         &self,
         _: &egret_workflow::worker::TaskInput,
         _: std::time::Duration,
+        _: &egret_workflow::scripts::RunnerSpec,
     ) -> egret_core::Result<()> {
         Ok(())
     }

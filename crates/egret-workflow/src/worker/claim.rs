@@ -1734,8 +1734,9 @@ async fn finish_claimed_kill(
 }
 
 /// Whether `e` is a [`WorkerError`] about the row's own content rather than
-/// I/O. A downcast, for [`no_handler_type`]'s reason.
-fn row_content_fault(e: &Error) -> bool {
+/// I/O. A downcast, for [`no_handler_type`]'s reason. Also `worker::kill`'s,
+/// for the force-close (debt §2.2).
+pub(super) fn row_content_fault(e: &Error) -> bool {
     matches!(e, Error::Internal(a) if a.downcast_ref::<WorkerError>().is_some_and(WorkerError::is_row_content))
 }
 
@@ -1783,7 +1784,7 @@ async fn run_block_claim(
     let done = async {
         match &render {
             None => {
-                working_dir::discard(c).await;
+                working_dir::discard(pool, c).await;
                 BlockDone::Discarded
             }
             Some(render) => working_dir::run_claim(pool, c, render).await,
@@ -1826,7 +1827,7 @@ async fn run_block_claim(
         apply_block_claim_with(at, &renewed, &done).await
     })?;
     if matches!(done, BlockDone::Finished { .. }) {
-        working_dir::discard(c).await;
+        working_dir::discard(pool, c).await;
     }
     Ok(Committed::Yes)
 }
@@ -1850,8 +1851,42 @@ async fn apply_block_claim_on(
     claimed: &Claimed,
     done: &BlockDone,
 ) -> Result<()> {
-    let (ctx, mut state, now) =
-        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
+    let (ctx, mut state, now) = match load(conn, claimed.execution_id, Stack::Fresh(gate.clone()))
+        .await
+    {
+        Ok(loaded) => loaded,
+        // **A discard-only finish of an execution that cannot be loaded
+        // closes it by force** (debt D4, fix round 1), as
+        // `commit_kill_with` does for a leaf: the block is `KILLING`
+        // under this lease, its snapshots are already discarded, and
+        // returning the error would roll back, lapse, be reaped and be
+        // claimed again for ever. Any other claim's fault is returned:
+        // that is no kill.
+        Err(e) if matches!(done, BlockDone::Discarded) && row_content_fault(&e) => {
+            let why = super::force_close::reason(&e);
+            let closed = super::force_close::close(
+                conn,
+                claimed.execution_id,
+                &why,
+                Some((claimed.id, claimed.claimed_at)),
+                Stack::Fresh(gate.clone()).caller(),
+            )
+            .await?;
+            tracing::warn!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                task_id = %claimed.task_id,
+                error = %why,
+                outcome = closed.state.wire(),
+                "the execution of this killed block could not be loaded, so it was closed by force"
+            );
+            for job in closed.reported {
+                run_job(conn, job).await?;
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let before = state.clone();
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -1939,7 +1974,9 @@ async fn apply_block_claim_on(
 enum Committed {
     /// Its result committed.
     Yes,
-    /// A renewal found the fence moved; nothing was recorded.
+    /// A renewal found the fence moved; nothing was recorded for this run.
+    /// (A `commit_kill` that closed its execution by force may still have
+    /// closed OTHER runs: see [`commit_kill`].)
     LeaseLost,
 }
 
@@ -2343,17 +2380,19 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 /// committed outcome (`run_one`'s "released AFTER the commit"). A kill whose
 /// commit is `LeaseLost` releases nothing: the run is someone else's.
 ///
-/// **On the runners egret has, the cancel already removed the container or
-/// pod, `taskRunner.delete: false` included** (W5a's cancel, unchanged). The
-/// Docker runner's `cancel` ends in `docker rm --force` (after `docker stop
-/// -t <grace>` when the grace is not zero), and the Kubernetes runner's
-/// deletes the pod; `delete: false` is read only by `release`. So a killed
-/// `delete: false` container is not kept for inspection, and the release that
-/// follows finds nothing left there (`rm --force` of an absent name exits 0).
-/// The release is still made: after a cancel that failed it is a second try
-/// at removing a `delete: true` container or pod. It is pinned by the worker
-/// tests' `KillRecorder`, not by the Docker live suite, which cannot observe
-/// it (workflow kill spec §4.2).
+/// **What the cancel left depends on the runner and on `taskRunner.delete`**
+/// (debt D1 and D2, decided 2026-10-18). On Docker, the cancel removes a
+/// `delete: true` container (`docker rm --force`, after `docker stop -t
+/// <grace>` when the grace is not zero) and only stops a `delete: false` one
+/// (`docker stop -t <grace>`), which is then kept, exited, for inspection, as
+/// Kestra's `Docker.cleanupContainer` keeps it. On Kubernetes the cancel
+/// deletes the pod, `delete: false` included: a pod cannot be stopped without
+/// being deleted. The release that follows therefore finds nothing to do on
+/// either path: `rm --force` of an absent name exits 0, and a kept container
+/// is left by `release` too. The release is still made: after a cancel that
+/// failed it is a second try at removing a `delete: true` container or pod.
+/// It is pinned by the worker tests' `KillRecorder`, not by the Docker live
+/// suite, which cannot observe it (workflow kill spec §4.2).
 async fn finish_kill(
     pool: &PgPool,
     claimed: &Claimed,
@@ -2405,7 +2444,10 @@ async fn end_kill(
 /// Record a `KILLING` run `KILLED` under the lease `held`, and settle its
 /// execution in the same transaction: [`finish_kill`] without the handler.
 /// [`Committed::LeaseLost`] when the run is not `KILLING` under `held` any
-/// more, and then nothing is written.
+/// more, and then nothing is written -- **except on the force-close path**
+/// (debt D4, [`commit_kill_with`]): an execution that cannot be loaded has
+/// every live run no worker holds closed `KILLED` whether or not this run
+/// was still this lease's, and that commits with the `LeaseLost`.
 async fn commit_kill(pool: &PgPool, claimed: &Claimed, held: DateTime<Utc>) -> Result<Committed> {
     let renewed = Claimed {
         claimed_at: held,
@@ -2447,10 +2489,45 @@ async fn commit_kill(pool: &PgPool, claimed: &Claimed, held: DateTime<Utc>) -> R
 /// attempt's end by `stamp_attempt_ends`, `claimed_at` cleared as the lease's
 /// release -- and runs `advance()`, which closes a `KILLING` execution whose
 /// last live run this was.
+///
+/// **An execution that cannot be loaded is closed by force** (debt D4,
+/// `worker::force_close`): the run is closed `KILLED` there when it is still
+/// this lease's, which is the answer, and so is every other live run no
+/// worker holds. Before, the load's error rolled the commit back, the lease
+/// lapsed and the reaper handed the run to the next kill-only claim, which
+/// failed the same way, every `working_timeout`, for ever. The route already
+/// audited the kill, so this side only logs.
 async fn commit_kill_with(at: &mut Txn, claimed: &Claimed) -> Result<bool> {
     let (conn, gate) = at.parts();
-    let (ctx, mut state, now) =
-        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
+    let (ctx, mut state, now) = match load(conn, claimed.execution_id, Stack::Fresh(gate.clone()))
+        .await
+    {
+        Ok(loaded) => loaded,
+        Err(e) if row_content_fault(&e) => {
+            let why = super::force_close::reason(&e);
+            let closed = super::force_close::close(
+                conn,
+                claimed.execution_id,
+                &why,
+                Some((claimed.id, claimed.claimed_at)),
+                Stack::Fresh(gate.clone()).caller(),
+            )
+            .await?;
+            tracing::warn!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                task_id = %claimed.task_id,
+                error = %why,
+                outcome = closed.state.wire(),
+                "the execution of this killed run could not be loaded, so it was closed by force"
+            );
+            for job in closed.reported {
+                run_job(conn, job).await?;
+            }
+            return Ok(closed.own);
+        }
+        Err(e) => return Err(e),
+    };
     let fenced: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM workflow.task_runs \
           WHERE id = $1 AND claimed_at = $2 AND state = 'KILLING' FOR UPDATE",
@@ -2842,11 +2919,21 @@ pub(super) async fn settle(
     .await
 }
 
-/// [`settle`] of a frame its caller built: the kill route's settle of each
+/// [`settle`] of a job its caller built: the kill route's settle of each
 /// descendant it has loaded and killed (`worker::kill`), each at the top of
-/// its own walk, in lock order.
-pub(super) async fn run_frame(conn: &mut PgConnection, frame: Frame<'static>) -> Result<()> {
-    walk(conn, frame).await
+/// its own walk, in lock order, and a force-close's report to its parent
+/// (`worker::force_close`, debt §2.2 rule 5).
+pub(super) async fn run_job(conn: &mut PgConnection, job: Job) -> Result<()> {
+    match job {
+        Job::Settle(frame) => walk(conn, *frame).await,
+        Job::Complete(completion) => {
+            match Box::pin(subflow::open_completion(conn, completion)).await? {
+                Some(frame) => walk(conn, frame).await,
+                None => Ok(()),
+            }
+        }
+        Job::Report(settled) => walk_tail(conn, settled).await,
+    }
 }
 
 /// The context a [`Frame`] settles: the owner's own, for the settle an owner
@@ -2948,6 +3035,26 @@ pub(super) enum Job {
     /// message, apply the states, and settle -- opened when the walk reaches
     /// it, which is where the call used to run.
     Complete(subflow::Completion),
+    /// A settle's tail with no head: tell the parent of an execution that
+    /// `worker::force_close` closed without a plan (debt §2.2 rule 5). The
+    /// parent is loaded when the walk reaches it, not when the job is made,
+    /// so a parent whose own kill settles earlier in the same walk is read
+    /// as that settle left it.
+    Report(Settled),
+}
+
+impl Job {
+    /// [`Job::Report`]: `execution` reached `terminal` outside any settle,
+    /// and a load nested in its report sits inside `caller`'s frame.
+    pub(super) fn report(execution: Uuid, terminal: RunState, caller: Caller) -> Self {
+        Job::Report(Settled {
+            id: execution,
+            terminal: notifies_parent(terminal).then_some(terminal),
+            caller,
+            outage: None,
+            forced: true,
+        })
+    }
 }
 
 /// Where a [`Frame`]'s head has got to: steps 1-3 of the settle and the
@@ -2993,6 +3100,11 @@ pub(super) struct Settled {
     caller: Caller,
     /// The store outage a render of this settle met (spec §11).
     outage: Option<String>,
+    /// A [`Job::Report`] of an execution closed by force (debt D4, fix
+    /// round 1): its report is skipped when the parent is already terminal,
+    /// and a parent that cannot be loaded either hears nothing
+    /// ([`forced_report`]).
+    forced: bool,
 }
 
 /// One step of [`walk`].
@@ -3025,11 +3137,19 @@ enum Step<'a> {
 ///
 /// An `Err` returns at once, as the `?` of the recursion did.
 ///
-/// Private, and called only by [`settle`] and [`run_frame`], which only the
+/// Private, and called only by [`settle`] and [`run_job`], which only the
 /// transaction owners call: no other function can run a settle, so nothing a
 /// settle calls can nest one.
 async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
-    let mut steps: Vec<Step<'a>> = vec![Step::Frame(Box::new(top))];
+    walk_from(conn, vec![Step::Frame(Box::new(top))]).await
+}
+
+/// [`walk`] of a settle's tail alone: [`Job::Report`].
+async fn walk_tail(conn: &mut PgConnection, settled: Settled) -> Result<()> {
+    walk_from(conn, vec![Step::Loop(settled)]).await
+}
+
+async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Result<()> {
     while let Some(step) = steps.pop() {
         match step {
             Step::Frame(mut frame) => {
@@ -3044,6 +3164,7 @@ async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
                 }
             }
             Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
+            Step::Job(Job::Report(settled)) => steps.push(Step::Loop(settled)),
             Step::Job(Job::Complete(completion)) => {
                 if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
                     steps.push(Step::Frame(Box::new(frame)));
@@ -3051,14 +3172,16 @@ async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
             }
             Step::Loop(s) => {
                 let started = match s.terminal {
+                    Some(_) if s.forced && parent_is_terminal(conn, s.id).await? => None,
                     Some(terminal) => {
-                        Box::pin(spawn::on_execution_terminal(
+                        let told = Box::pin(spawn::on_execution_terminal(
                             conn,
                             s.id,
                             terminal,
                             s.caller.clone(),
                         ))
-                        .await?
+                        .await;
+                        forced_report(&s, told)?
                     }
                     None => None,
                 };
@@ -3084,14 +3207,16 @@ async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
                 // divergence in `oracle-exec/README.md`'s coverage statement,
                 // item 16.
                 let started = match s.terminal {
+                    Some(_) if s.forced && parent_is_terminal(conn, s.id).await? => None,
                     Some(terminal) => {
-                        Box::pin(subflow::on_child_terminal(
+                        let told = Box::pin(subflow::on_child_terminal(
                             conn,
                             s.id,
                             terminal,
                             s.caller.clone(),
                         ))
-                        .await?
+                        .await;
+                        forced_report(&s, told)?
                     }
                     None => None,
                 };
@@ -3117,6 +3242,59 @@ async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the parent `execution` reports to -- its loop's or its `Subflow`
+/// run's execution -- is already terminal, read in plain SQL, without
+/// loading it. A forced report to a terminal parent is a no-op anyway (both
+/// report calls refuse a terminal parent run), and a parent closed by force
+/// cannot be loaded at all: the cascade closes the root first, so this is
+/// what keeps an unloadable `Loop` parent's iterations from failing its kill
+/// (debt D4, fix round 1, I1).
+async fn parent_is_terminal(conn: &mut PgConnection, execution: Uuid) -> Result<bool> {
+    let terminal: Option<bool> = sqlx::query_scalar(
+        "SELECT workflow.state_is_terminal(p.state) \
+           FROM workflow.executions c \
+           JOIN workflow.executions p \
+             ON (p.id = c.parent_execution_id AND c.parent_run_ix IS NOT NULL) \
+             OR (p.id = c.trigger_execution_id AND c.trigger_run_ix IS NOT NULL) \
+          WHERE c.id = $1",
+    )
+    .bind(execution)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(terminal == Some(true))
+}
+
+/// A report's answer, for a [`Settled`] of an execution closed by force:
+/// **any** row-content fault the report raises is dropped, wherever in the
+/// report it was met -- loading the parent, or anything the report loads
+/// after it (a grandparent the parent's own settle reports to, say). The
+/// usual cause is the parent: it cannot be loaded either, so it hears
+/// nothing -- its own kill closes it by force -- and the warning says so.
+/// Every other error is returned, as from any report: only what retrying
+/// cannot change is dropped.
+///
+/// **What dropping does not undo.** The report runs inside the kill's
+/// transaction, and a row-content fault is egret's own error, not a
+/// Postgres one, so the transaction is not aborted: writes the report made
+/// before the fault (a parent's settle, say) commit with the kill, while
+/// what came after it never runs (the grandparent is never told). That is
+/// accepted: what could not be loaded is closed by its own kill.
+fn forced_report(s: &Settled, told: Result<Option<Job>>) -> Result<Option<Job>> {
+    match told {
+        Err(e) if s.forced && row_content_fault(&e) => {
+            tracing::warn!(
+                execution = %s.id,
+                error = %e,
+                "an execution closed by force could not report to its parent, which cannot be \
+                 loaded either; the parent's own kill closes it"
+            );
+            Ok(None)
+        }
+        other => other,
+    }
 }
 
 /// Run one phase of `frame`'s head: the settle's tail when the head is done,
@@ -3242,6 +3420,7 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
                 terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
                 caller: ctx.caller(),
                 outage: surface.files_outage(),
+                forced: false,
             }));
         }
     }
@@ -3991,6 +4170,16 @@ pub(super) enum Stack {
 }
 
 impl Stack {
+    /// The [`Caller`] a load nested inside the execution this stack loads
+    /// would pass: [`ExecutionCtx::caller`] of the context it would build.
+    /// For `worker::force_close`, which builds no context.
+    pub(super) fn caller(&self) -> Caller {
+        Caller {
+            depth: self.depth(),
+            gate: self.gate(),
+        }
+    }
+
     /// [`ExecutionCtx::depth`] for the context this load is building.
     fn depth(&self) -> usize {
         match self {

@@ -362,7 +362,7 @@ url.workspace = true
 # dependency, so no new crate.
 tracing-subscriber.workspace = true
 
-# `tests/k8s_runner_live.rs` ONLY: kube's TLS client needs a rustls crypto
+# `tests/k8s_runner_live.rs` and `runtime::tests` (debt D3 wiring test): kube's TLS client needs a rustls crypto
 # provider, and this tree enables both ring and aws-lc-rs, so none is chosen
 # automatically (a runtime panic). `egret-bin` installs ring at startup with
 # this same pin (`crates/egret-bin/Cargo.toml`); the test's `main` does the

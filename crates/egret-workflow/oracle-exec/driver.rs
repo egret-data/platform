@@ -1236,6 +1236,28 @@ pub async fn run(
     source: &str,
     inputs: serde_json::Value,
 ) -> Ran {
+    run_with(pool, workspace, reg, source, inputs, Duration::ZERO).await
+}
+
+/// [`run`], with a sleep of `before_pass_time` between a tick that committed
+/// nothing and the [`pass_time`] that follows it.
+///
+/// **A test-only seam (debt D14, 2026-10-19).** It makes the window a loaded
+/// machine opens by accident a window of known width: a deadline a few hundred
+/// milliseconds out (a `WaitFor` `checkFrequency` of 0.2 s, a retry interval of
+/// 0-0.25 s) can pass inside it, so the tick's `wake` did not see it due yet
+/// and `pass_time`, which only moves deadlines still AHEAD, does not see it at
+/// all. The ratchet passes [`Duration::ZERO`] through [`run`]; only
+/// `the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time`
+/// passes anything else.
+pub async fn run_with(
+    pool: &PgPool,
+    workspace: Uuid,
+    reg: &Handlers,
+    source: &str,
+    inputs: serde_json::Value,
+    before_pass_time: Duration,
+) -> Ran {
     // `build_plan` first, and separately, so that a flow egret refuses is
     // reported as a refusal rather than as a driver failure. It is the same
     // call `start_execution` makes; making it here costs one plan build and
@@ -1282,9 +1304,25 @@ pub async fn run(
                 false => continue,
             },
         }
+        if !before_pass_time.is_zero() {
+            tokio::time::sleep(before_pass_time).await;
+        }
         match pass_time(pool, id).await {
             Ok(true) => continue,
-            Ok(false) => break,
+            // Debt D14 (2026-10-19): "nothing ahead to move" is not "nothing
+            // left to do". A short deadline (a 0.2 s `checkFrequency`, a
+            // 0-0.25 s retry) can pass between the tick's `wake` and this
+            // query on a loaded machine; `pass_time` then sees nothing ahead
+            // and the driver used to stop with the run still PAUSED or
+            // RETRYING. Such a run is due NOW, so the next tick's `wake`
+            // resumes it. Only this root's tree counts: an earlier entry's
+            // stalled execution must not keep this loop spinning. The loop
+            // stays bounded by `STEP_BOUND`.
+            Ok(false) => match due_in_tree(pool, id).await {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => return Ran::Broken(format!("due_in_tree: {e}")),
+            },
             Err(e) => return Ran::Broken(format!("pass_time: {e}")),
         }
     }
@@ -1368,6 +1406,29 @@ async fn pass_time(pool: &PgPool, root: Uuid) -> Result<bool, sqlx::Error> {
         .await
         .map_err(|e| sqlx::Error::Protocol(format!("resume: {e}")))?;
     Ok(true)
+}
+
+/// Whether a run in `root`'s tree is due now, by the worker's own selection
+/// ([`worker::due_retries`], the query `wake` runs), so the next tick resumes it.
+///
+/// The tree is walked over `parent_execution_id`, as [`pass_time`] walks it.
+async fn due_in_tree(pool: &PgPool, root: Uuid) -> Result<bool, sqlx::Error> {
+    let tree: Vec<Uuid> = sqlx::query_scalar(
+        "WITH RECURSIVE tree AS ( \
+             SELECT id FROM workflow.executions WHERE id = $1 \
+             UNION ALL \
+             SELECT e.id FROM workflow.executions e \
+               JOIN tree t ON e.parent_execution_id = t.id \
+         ) \
+         SELECT id FROM tree",
+    )
+    .bind(root)
+    .fetch_all(pool)
+    .await?;
+    let due = worker::due_retries(pool, i64::MAX)
+        .await
+        .map_err(|e| sqlx::Error::Protocol(format!("due_retries: {e}")))?;
+    Ok(due.iter().any(|d| tree.contains(d)))
 }
 
 /// Read one execution and everything under it back out of Postgres, in the

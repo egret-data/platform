@@ -3071,8 +3071,9 @@ async fn kill_execution(
         return Err(KillError::Terminated(id, before.execution.state));
     }
     let cascade = q.cascade.unwrap_or(true);
-    let outcome =
-        crate::worker::kill_execution(&st.db.pool, ctx.workspace_id.0, id, cascade).await?;
+    let (outcome, forced) =
+        crate::worker::kill_execution_reporting(&st.db.pool, ctx.workspace_id.0, id, cascade)
+            .await?;
     let outcome = match outcome {
         crate::worker::KillOutcome::Killing => RunState::Killing,
         crate::worker::KillOutcome::Killed => RunState::Killed,
@@ -3080,17 +3081,23 @@ async fn kill_execution(
             return Err(KillError::Terminated(id, s.wire().to_string()));
         }
     };
+    let mut audited = serde_json::json!({
+        "from_state": before.execution.state,
+        "cascade": cascade,
+        "outcome": outcome.wire(),
+    });
+    // Debt D4: only when the kill closed an execution it could not load by
+    // force, so every other record keeps its shape.
+    if forced {
+        audited["forced"] = serde_json::Value::Bool(true);
+    }
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
         "workflow_execution:kill",
         "workflow_execution",
         Some(id.to_string()),
-        serde_json::json!({
-            "from_state": before.execution.state,
-            "cascade": cascade,
-            "outcome": outcome.wire(),
-        }),
+        audited,
     ));
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
     Ok((StatusCode::ACCEPTED, Json(ExecutionDto::new(detail, true))))

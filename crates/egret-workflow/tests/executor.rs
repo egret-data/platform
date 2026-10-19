@@ -1466,10 +1466,16 @@ async fn egret_side() -> &'static Side {
              is dropped when the process exits. A shared database would not flake under a \
              concurrent run — it would lose rows that run had written."
         );
-        sqlx::query("TRUNCATE workflow.executions CASCADE")
+        // Debt D7 (2026-10-19): `flows` too. A `get_or_init` whose init panics
+        // stores nothing, so every later caller runs this again on the SAME clone;
+        // without emptying `flows` each one failed "workflow.flows must be empty,
+        // left 335" instead of the census assert that really failed (the flake of
+        // a7270435: 335 = one pass over the 345-flow corpus). `CASCADE` empties the
+        // tables that reference `flows`, executions included.
+        sqlx::query("TRUNCATE workflow.flows, workflow.executions CASCADE")
             .execute(&db.pool)
             .await
-            .expect("empty the execution tables");
+            .expect("empty the flow and execution tables");
         let (ws, user) = common::seed_workspace(&db).await;
         // W6 Task 1: the corpus goes into `workflow.flows` BEFORE any entry
         // runs, because ten corpus flows name a target that sorts later than
@@ -8980,6 +8986,73 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
          implementation that violated every assertion unconditionally would \
          produce the golden's CANCELLED for all three of these:\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+/// Debt D14 (2026-10-19): the driver does not stop on a run whose short
+/// deadline passed between the tick's `wake` and `pass_time`.
+///
+/// `pass_time` only moves deadlines still AHEAD of the execution's clock. On a
+/// loaded machine a 0.2 s `WaitFor` `checkFrequency` can expire in the gap
+/// after a tick that committed nothing, so `pass_time` found nothing to move
+/// and the driver broke out with the execution still `PAUSED` -- an ordinary
+/// mismatch on an entry that is otherwise green, i.e. a ratchet flake.
+/// `driver::run_with` makes that gap 300 ms wide every time, which no
+/// `checkFrequency` in the corpus survives.
+///
+/// `egret_side()` is awaited first for the reason the test above gives.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time() {
+    const ID: &str = "valids/waitfor-multiple-tasks";
+    let _ = egret_side().await;
+
+    let db = common::db()
+        .await
+        .expect("this drives a REAL executor and needs DATABASE_URL");
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = driver::registry(&db.pool);
+    let golden = golden()
+        .into_iter()
+        .find(|e| e.id == ID)
+        .expect("the golden holds the entry this test pins");
+
+    let t = match driver::run_with(
+        &db.pool,
+        ws,
+        &reg,
+        &corpus_source(ID),
+        corpus_inputs(ID),
+        std::time::Duration::from_millis(300),
+    )
+    .await
+    {
+        driver::Ran::Trace(t) => *t,
+        driver::Ran::Refused(msg) => panic!("egret REFUSED {ID}: {msg}"),
+        driver::Ran::Broken(msg) => panic!("the driver broke on {ID}: {msg}"),
+    };
+
+    assert_eq!(
+        t.execution.last().map(String::as_str),
+        Some("SUCCESS"),
+        "{ID} stalled under a 300 ms gap before `pass_time`; execution {:?}, runs {:?}",
+        t.execution,
+        t.runs
+            .iter()
+            .map(|r| (&r.task, &r.state))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(t.execution, golden.execution, "{ID}: the execution history");
+    assert_eq!(
+        t.runs
+            .iter()
+            .map(|r| (r.task.clone(), r.state.clone()))
+            .collect::<Vec<_>>(),
+        golden
+            .runs
+            .iter()
+            .map(|r| (r.task.clone(), r.state.clone()))
+            .collect::<Vec<_>>(),
+        "{ID}: the run histories"
     );
 }
 

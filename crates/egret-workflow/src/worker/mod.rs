@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+mod force_close;
 pub mod handlers;
 pub mod k8s;
 mod kill;
@@ -130,7 +131,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
-pub use kill::{kill_execution, KillOutcome};
+pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
@@ -141,6 +142,10 @@ pub use render::execution_render_context;
 /// Exported so `tests/worker.rs`'s positive control asserts against the bound
 /// itself rather than against a copy of the number.
 pub use subflow::MAX_SPAWN_CHAIN;
+/// Test-only (`test-util`; debt D6): a block's discard on a store the test
+/// gives, so `tests/working_dir_claims.rs` can make its delete fail.
+#[cfg(any(test, feature = "test-util"))]
+pub use working_dir::discard_snapshots;
 
 use crate::executor::RunState;
 use crate::runners::RenderContext;
