@@ -25,8 +25,6 @@ const ASSETS = join(DIST, "assets");
 const MARKERS = [
   // The editor route of an unbound profile (Q2: the kind stays in the URL).
   ["src/routes/governance/engines/EnginesRoutes.tsx", "profiles/:service/advanced/policies/:kind/:policyId"],
-  // The index's empty Engines section (spec §5).
-  ["src/routes/governance/engines/EnginesIndex.tsx", "No engine is recorded. Engines are created in Control plane."],
   // The index's notice after an old URL named no profile.
   ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
   // The engine page's line for a reader without engine:read (EP19).
@@ -37,6 +35,14 @@ const MARKERS = [
   ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
   // The Engine permissions tab on an engine with no profile (spec §6.1).
   ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind a profile in Control plane."],
+  // The Engine permissions tab's skipped-compile report (Q4).
+  ["src/routes/governance/engines/tabs/EnginePermissionsPanel.tsx", "Saved, but not compiled: "],
+  // The grant dialog's principal check.
+  ["src/routes/governance/engines/tabs/EngineGrantDialog.tsx", "Add at least one user, group or role."],
+  // Check's Trino impersonation sentence (F11 §5.4).
+  ["src/routes/governance/engines/tabs/CheckCapabilityDialog.tsx", "egret cannot decide impersonation on this engine"],
+  // The value controls' fixed-key text.
+  ["src/routes/governance/engines/tabs/capabilityValues.tsx", "Applies to all (*)"],
 ];
 
 const entry = entryChunkName(DIST);

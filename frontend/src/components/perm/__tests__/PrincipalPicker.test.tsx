@@ -126,6 +126,23 @@ describe("PrincipalPicker", () => {
     expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
   });
 
+  test("includeOnly renders no Exclude list and still offers user, group and role; without it Exclude is there", async () => {
+    const user = userEvent.setup();
+    renderPicker({ includeOnly: true });
+
+    expect(screen.queryByText("Exclude")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Exclude kind" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Include kind" }));
+    expect(await screen.findByRole("option", { name: "user" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "group" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "role" })).toBeInTheDocument();
+  });
+
+  test("without includeOnly the Exclude list is rendered", () => {
+    renderPicker();
+    expect(screen.getByRole("combobox", { name: "Exclude kind" })).toBeInTheDocument();
+  });
+
   test("exempt mode renders no Exclude section, and Include offers no role kind", async () => {
     const user = userEvent.setup();
     renderPicker({ exempt: true });
