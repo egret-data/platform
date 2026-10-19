@@ -1362,9 +1362,9 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         }
         // Group C2 Task 3. The three update types are registered leaf types to
         // `models` and `spec`, and executor-level tasks here, as `Exit` is.
-        (ModelKind::Leaf { spec }, _) if super::update::UpdateOp::of(&task.r#type).is_some() => {
-            let op = super::update::UpdateOp::of(&task.r#type)
-                .expect("the guard above matched this type");
+        (ModelKind::Leaf { spec }, _)
+            if let Some(op) = super::update::UpdateOp::of(&task.r#type) =>
+        {
             out[ix].kind = TaskKind::ExecutionUpdate {
                 op,
                 spec: spec.to_string(),

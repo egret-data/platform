@@ -99,17 +99,17 @@ pub fn compute(
 ) -> Result<Change, String> {
     let type_id = op.type_id();
     let raw: Value = serde_json::from_str(spec).map_err(|e| format!("{type_id}: {e}"))?;
-    let current = vars.as_object().cloned().unwrap_or_default();
     match op {
         UpdateOp::Set => {
             let spec: SetSpec =
                 serde_json::from_value(raw).map_err(|e| format!("{type_id}: {e}"))?;
-            set(spec, cx, &current).map(Change::Variables)
+            set(spec, cx, &vars.as_object().cloned().unwrap_or_default()).map(Change::Variables)
         }
         UpdateOp::Unset => {
             let spec: UnsetSpec =
                 serde_json::from_value(raw).map_err(|e| format!("{type_id}: {e}"))?;
-            unset_all(spec, cx, current).map(Change::Variables)
+            unset_all(spec, cx, vars.as_object().cloned().unwrap_or_default())
+                .map(Change::Variables)
         }
         UpdateOp::Labels => {
             let spec: LabelsSpec =
@@ -366,6 +366,80 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_expression_that_renders_null_fails_naming_variables() {
+        let err = compute(
+            UpdateOp::Set,
+            r#"{"variables":"{{ null }}"}"#,
+            &cx(),
+            &Value::Null,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("`variables`: the expression rendered `"),
+            "{err}"
+        );
+        assert!(err.ends_with("`, which is not a JSON object"), "{err}");
+    }
+
+    #[test]
+    fn deep_merge_inserts_an_absent_key_whose_new_value_is_null() {
+        let a = obj(json!({"keep": 1}));
+        let b = obj(json!({"new": null}));
+        assert_eq!(
+            Value::Object(deep_merge(&a, &b)),
+            json!({"keep": 1, "new": null})
+        );
+    }
+
+    #[test]
+    fn unset_on_null_variables_is_a_no_op_for_a_missing_leaf() {
+        let change = compute(
+            UpdateOp::Unset,
+            r#"{"variables":["a"]}"#,
+            &cx(),
+            &Value::Null,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(change, Change::Variables(Map::new()));
+    }
+
+    #[test]
+    fn set_variables_without_variables_fails() {
+        assert_eq!(
+            compute(UpdateOp::Set, r#"{}"#, &cx(), &Value::Null, &[]).unwrap_err(),
+            "`variables`: must not be null"
+        );
+    }
+
+    #[test]
+    fn labels_list_and_form_errors_name_their_place() {
+        assert_eq!(
+            compute(
+                UpdateOp::Labels,
+                r#"{"labels":[{"key":"a"}]}"#,
+                &cx(),
+                &Value::Null,
+                &[]
+            )
+            .unwrap_err(),
+            "`labels[0]`: expected a map with `key` and `value`"
+        );
+        assert_eq!(
+            compute(
+                UpdateOp::Labels,
+                r#"{"labels":7}"#,
+                &cx(),
+                &Value::Null,
+                &[]
+            )
+            .unwrap_err(),
+            "`labels`: expected a string, a list or a map"
+        );
+    }
+
+    #[test]
     fn set_variables_on_no_variables_is_the_rendered_map() {
         let change = compute(
             UpdateOp::Set,
@@ -392,13 +466,6 @@ mod tests {
             err,
             "`overwrite` is set to false and the following variables already exist: name,b"
         );
-    }
-
-    #[test]
-    fn set_variables_without_variables_fails() {
-        assert!(compute(UpdateOp::Set, r#"{}"#, &cx(), &Value::Null, &[])
-            .unwrap_err()
-            .contains("variables"));
     }
 
     #[test]

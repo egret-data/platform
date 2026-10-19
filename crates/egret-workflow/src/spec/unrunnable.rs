@@ -141,7 +141,7 @@ finally:
     /// `validate_for_run` is the rest of publish's static gate; the `Log`
     /// control shows the empty set does refuse a handler type.
     #[test]
-    fn the_executor_level_types_publish_on_a_deployment_with_no_handlers() {
+    fn the_executor_level_types_pass_the_serve_gate_on_a_deployment_with_no_handlers() {
         // Arrange
         let bare = Served::from_type_ids(Vec::<String>::new());
         let flow = parse(
