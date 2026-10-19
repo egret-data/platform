@@ -25,6 +25,8 @@ const ASSETS = join(DIST, "assets");
 const MARKERS = [
   // The editor route of an unbound profile (Q2: the kind stays in the URL).
   ["src/routes/governance/engines/EnginesRoutes.tsx", "profiles/:service/advanced/policies/:kind/:policyId"],
+  // The index's empty Engines section (spec §5).
+  ["src/routes/governance/engines/EnginesIndex.tsx", "No engine is recorded. Engines are created in Control plane."],
   // The index's notice after an old URL named no profile.
   ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
   // The engine page's line for a reader without engine:read (EP19).
