@@ -22,6 +22,9 @@ pub mod governance_overview;
 pub use governance_changes::{ChangeEntry, ChangesPage, Party};
 mod governance_tags;
 mod lineage_sweep;
+/// DG #4a: one judging function for the plugin ledger (the Overview and the
+/// engine page's Plugin tab).
+mod plugin_judgement;
 mod secrets;
 mod storage;
 mod tags;
