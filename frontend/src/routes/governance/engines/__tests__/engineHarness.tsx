@@ -32,6 +32,8 @@ const json = (status: number, body: unknown) =>
   });
 
 export const ok = (body: unknown): Answer => ({ status: 200, body });
+/** A create route's success (`201 Created`, as the server answers). */
+export const created = (body: unknown): Answer => ({ status: 201, body });
 export const fail = (status: number, error = "boom"): Answer => ({ status, body: { error } });
 
 export interface Served {

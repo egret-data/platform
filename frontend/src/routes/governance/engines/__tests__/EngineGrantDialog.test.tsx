@@ -11,6 +11,7 @@ import {
   engineGrant,
   fail,
   grantsResponse,
+  created,
   ok,
   openArea,
   policy,
@@ -244,7 +245,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
   }
 
   it("creates with the target as a username and no targetUserId; compiled → toast naming the profile", async () => {
-    const { bodies, asked } = serve(answers({ [`POST /perm/engines/${E_TR}/grants`]: ok(writeResponse()) }));
+    const { bodies, asked } = serve(answers({ [`POST /perm/engines/${E_TR}/grants`]: created(writeResponse()) }));
     openArea(`/governance/engines/${E_TR}`, STEWARD);
     const dialog = await openGrant();
     await fillImpersonation(dialog);
@@ -271,7 +272,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
   it("names the other engines the grant reaches", async () => {
     serve(
       answers({
-        [`POST /perm/engines/${E_TR}/grants`]: ok(
+        [`POST /perm/engines/${E_TR}/grants`]: created(
           writeResponse({
             reach: {
               engines: [
@@ -298,7 +299,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
   it("saved but not compiled: the tab says so, and no success toast claims it", async () => {
     serve(
       answers({
-        [`POST /perm/engines/${E_TR}/grants`]: ok(
+        [`POST /perm/engines/${E_TR}/grants`]: created(
           writeResponse({
             compile: {
               services: [2],

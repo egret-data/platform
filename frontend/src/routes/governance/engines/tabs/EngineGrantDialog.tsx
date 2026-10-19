@@ -147,7 +147,8 @@ function GrantForm({
 
   const queryClient = useQueryClient();
   const onSuccess = (res: { status: number; data: unknown }) => {
-    if (res.status !== 200) return;
+    // Create answers 201, edit 200: every 2xx is a write that happened.
+    if (res.status < 200 || res.status >= 300) return;
     const body = res.data as EngineGrantWriteResponse;
     void queryClient.invalidateQueries({ queryKey: getPermListEngineGrantsQueryKey(engine.id) });
     void queryClient.invalidateQueries({ queryKey: getPermListAllEngineGrantsQueryKey() });
