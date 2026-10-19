@@ -26,6 +26,8 @@ mod governance_lineage;
 pub mod governance_overview;
 pub use governance_changes::{ChangeEntry, ChangesPage, Party};
 pub use governance_engines::EnginePluginResponse;
+/// DG #4b route C: where a classification is used.
+mod governance_tag_usage;
 mod governance_tags;
 mod lineage_sweep;
 /// DG #4a: one judging function for the plugin ledger (the Overview and the
@@ -163,6 +165,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(governance_changes::router())
         .merge(governance_engines::router())
         .merge(governance_handwritten::router())
+        .merge(governance_tag_usage::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -185,5 +188,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(governance_changes::ControlPlaneGovernanceChangesApi::openapi());
     doc.merge(governance_engines::ControlPlaneGovernanceEnginesApi::openapi());
     doc.merge(governance_handwritten::ControlPlaneGovernanceHandWrittenApi::openapi());
+    doc.merge(governance_tag_usage::ControlPlaneTagUsageApi::openapi());
     doc
 }
