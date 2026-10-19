@@ -2520,9 +2520,13 @@ pub trait OrphanSweep: Send + Sync {
     fn kept_retention(&self) -> Option<std::time::Duration>;
 }
 
-/// Of `ids`, which `task_runs` rows are terminal (and since when), and which
-/// have no row at all — the one question both halves of [`OrphanSweep`] ask
-/// the database.
+/// Of `work`'s runs, which `task_runs` rows are terminal (and since when), and
+/// which have no row at all — the one question both halves of [`OrphanSweep`]
+/// ask the database. Each run comes with the execution its container or pod is
+/// labelled with (`egret.io/execution-id`, `None` when the label is absent or
+/// not a UUID): of the runs with no row, those whose execution has a row here
+/// and is terminal are [`RunLiveness::superseded`] (debt D15), with the
+/// execution's `COALESCE(ended_at, updated_at)`.
 ///
 /// A terminal run's end is `COALESCE(ended_at, updated_at)`: a row written
 /// before migration 0183, or by a writer that left `ended_at` NULL, has only
@@ -2531,7 +2535,11 @@ pub trait OrphanSweep: Send + Sync {
 /// Terminal is [`RunState::is_terminal`](crate::executor::RunState::is_terminal),
 /// Kestra's `isTerminated()`, spelled here by the enum rather than a copied
 /// list so the two cannot drift.
-pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Result<RunLiveness> {
+pub(crate) async fn run_liveness(
+    pool: &sqlx::PgPool,
+    work: &[(uuid::Uuid, Option<uuid::Uuid>)],
+) -> Result<RunLiveness> {
+    let ids: Vec<uuid::Uuid> = work.iter().map(|(run, _)| *run).collect();
     let terminal: Vec<&str> = crate::executor::RunState::ALL
         .iter()
         .filter(|s| s.is_terminal())
@@ -2547,7 +2555,7 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
         "SELECT id, state = ANY($2), COALESCE(ended_at, updated_at), now() \
          FROM workflow.task_runs WHERE id = ANY($1)",
     )
-    .bind(ids)
+    .bind(&ids)
     .bind(&terminal)
     .fetch_all(pool)
     .await
@@ -2566,9 +2574,46 @@ pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Res
             out.ended.insert(id, ended);
         }
     }
-    for id in ids {
+    for id in &ids {
         if !seen.contains(id) {
             out.missing.insert(*id);
+        }
+    }
+    let orphans: Vec<(uuid::Uuid, uuid::Uuid)> = work
+        .iter()
+        .filter(|(run, _)| out.missing.contains(run))
+        .filter_map(|(run, ex)| ex.map(|ex| (*run, ex)))
+        .collect();
+    if orphans.is_empty() {
+        return Ok(out);
+    }
+    let executions: Vec<uuid::Uuid> = orphans.iter().map(|(_, ex)| *ex).collect();
+    let ended: Vec<(
+        uuid::Uuid,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT id, COALESCE(ended_at, updated_at), now() FROM workflow.executions \
+              WHERE id = ANY($1) AND workflow.state_is_terminal(state)",
+    )
+    .bind(&executions)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "reading execution states for the orphan sweep: {e}"
+        ))
+    })?;
+    let ended: std::collections::HashMap<_, _> = ended
+        .into_iter()
+        .map(|(ex, at, now)| {
+            out.now = Some(now);
+            (ex, at)
+        })
+        .collect();
+    for (run, ex) in orphans {
+        if let Some(at) = ended.get(&ex) {
+            out.superseded.insert(run, *at);
         }
     }
     Ok(out)
@@ -2590,6 +2635,13 @@ pub(crate) struct RunLiveness {
     /// No row at all (the execution was deleted, cascading its runs — or the
     /// work belongs to ANOTHER egret sharing the backend).
     pub missing: std::collections::HashSet<uuid::Uuid>,
+    /// Debt D15: of the [`missing`](Self::missing) runs, those whose
+    /// execution (the work's `egret.io/execution-id` label) has a row here and
+    /// is terminal, with the execution's end, `COALESCE(ended_at,
+    /// updated_at)`. Such a run was **superseded**: a `LoopUntil` iteration
+    /// renamed its row (debt D12), so no row holds its id any more, but the
+    /// execution it belonged to is this database's and is over.
+    pub superseded: std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>,
 }
 
 /// **Whether the orphan sweep removes one container or pod** (workflow debt
@@ -2598,11 +2650,17 @@ pub(crate) struct RunLiveness {
 ///
 /// * the run is not terminal (live, or no row here at all): keep. A run this
 ///   database has no row for is never ours to remove (see the two sweeps'
-///   docs);
+///   docs) -- with the one exception below;
 /// * terminal and not kept: remove (the sweep's rule since W5a);
 /// * terminal and kept (`delete: false`): remove once the run ended more than
 ///   `retention` before `now`; `None` (the setting `0`) keeps it for ever.
-///   This holds whatever the end state, kill and timeout included.
+///   This holds whatever the end state, kill and timeout included;
+/// * debt D15, **superseded** and kept: no row holds the run's id, but its
+///   execution is this database's and terminal ([`RunLiveness::superseded`]),
+///   so a `LoopUntil` iteration renamed it (debt D12). Judged as the row
+///   before, from the EXECUTION's end. Superseded and not kept: left, as
+///   before D15 (a `delete: true` container is removed by its own `release`
+///   or `cancel`, so the sweep never had a rule for one with no row).
 pub(crate) fn sweep_decision(
     live: &RunLiveness,
     id: uuid::Uuid,
@@ -2610,13 +2668,19 @@ pub(crate) fn sweep_decision(
     retention: Option<std::time::Duration>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    if !live.terminal.contains(&id) {
+    let ended = if live.terminal.contains(&id) {
+        if !keep {
+            return true;
+        }
+        live.ended.get(&id)
+    } else if keep {
+        // Debt D15: a superseded iteration's kept work, from its execution's
+        // end. Not kept, a missing run's work is left, as before D15.
+        live.superseded.get(&id)
+    } else {
         return false;
-    }
-    if !keep {
-        return true;
-    }
-    let (Some(retention), Some(ended)) = (retention, live.ended.get(&id)) else {
+    };
+    let (Some(retention), Some(ended)) = (retention, ended) else {
         return false;
     };
     // A retention too large for chrono is "for ever" in practice.
@@ -2664,7 +2728,7 @@ pub(crate) fn docker_sweep_action(
     if sweep_decision(live, id, keep, retention, now) {
         return DockerSweep::Remove;
     }
-    if keep && running && live.terminal.contains(&id) {
+    if keep && running && (live.terminal.contains(&id) || live.superseded.contains_key(&id)) {
         return DockerSweep::Stop;
     }
     DockerSweep::Leave
@@ -2696,14 +2760,22 @@ pub(crate) fn docker_sweep_action(
 /// database. A container whose run id is absent from *this* database is far
 /// more likely to be another egret's live work than an orphan of ours, so
 /// only a row this database can see as terminal authorises the removal. The
-/// pod sweep differs on purpose: the task namespace is egret's alone
+/// pod sweep now leaves such a pod alone too
 /// ([`k8s::sweep_orphans`](super::k8s::sweep_orphans)).
+///
+/// **Debt D15, the one exception:** a KEPT container whose run has no row but
+/// whose `egret.io/execution-id` names an execution this database holds as
+/// terminal. Another egret's execution ids are not in this database, so that
+/// row is the authority the paragraph above asks for; the run is a
+/// superseded `LoopUntil` iteration's (debt D12 renamed its row), and the
+/// container gets a kept one's retention from the execution's end.
 #[async_trait::async_trait]
 impl OrphanSweep for DockerRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
+        use super::k8s::pod_spec::EXECUTION_LABEL;
         let label_filter = format!("label={TASKRUN_LABEL}");
         let format = format!(
-            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}\t{{{{.State}}}}"
+            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}\t{{{{.State}}}}\t{{{{.Label \"{EXECUTION_LABEL}\"}}}}"
         );
         let mut args = vec!["ps", "--all", "--filter", &label_filter];
         let scope = self.sweep_label.as_ref().map(|l| format!("label={l}"));
@@ -2721,8 +2793,8 @@ impl OrphanSweep for DockerRunner {
         if listed.is_empty() {
             return Ok(0);
         }
-        let ids: Vec<uuid::Uuid> = listed.iter().map(|c| c.run).collect();
-        let live = run_liveness(pool, &ids).await?;
+        let work: Vec<_> = listed.iter().map(|c| (c.run, c.execution)).collect();
+        let live = run_liveness(pool, &work).await?;
         let now = live.now.unwrap_or_else(chrono::Utc::now);
         let mut removed = 0u64;
         for c in &listed {
@@ -2792,9 +2864,12 @@ struct ListedContainer {
     /// `docker ps`'s `{{.State}}` is `running`, `paused` or `restarting`:
     /// a process that `docker stop` would end.
     running: bool,
+    /// Its `egret.io/execution-id` label, when that is a UUID: what links the
+    /// container of a superseded run to its execution (debt D15).
+    execution: Option<uuid::Uuid>,
 }
 
-/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}\t{{.State}}'`,
+/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}\t{{.State}}\t{{.Label "egret.io/execution-id"}}'`,
 /// parsed: the egret task containers only (name prefix AND a label that is a
 /// UUID), each with whether the author asked to keep it and whether it still
 /// runs. What the sweep does with each is [`docker_sweep_action`]'s (debt D3,
@@ -2810,6 +2885,9 @@ fn parse_docker_ps(stdout: &str) -> Vec<ListedContainer> {
             let running = cols
                 .next()
                 .is_some_and(|s| matches!(s.trim(), "running" | "paused" | "restarting"));
+            let execution = cols
+                .next()
+                .and_then(|e| uuid::Uuid::parse_str(e.trim()).ok());
             if !name.starts_with(RUN_NAME_PREFIX) {
                 return None;
             }
@@ -2818,6 +2896,7 @@ fn parse_docker_ps(stdout: &str) -> Vec<ListedContainer> {
                 run: uuid::Uuid::parse_str(id.trim()).ok()?,
                 keep,
                 running,
+                execution,
             })
         })
         .collect()
@@ -3409,6 +3488,7 @@ mod tests {
             run,
             keep,
             running,
+            execution: None,
         };
         assert_eq!(
             parse_docker_ps(&out),
@@ -3418,6 +3498,23 @@ mod tests {
                 c("egret-run-p-1", b, true, true),
             ]
         );
+    }
+
+    /// Debt D15: the fifth column is the `egret.io/execution-id` label, kept
+    /// when it is a UUID; absent or not a UUID is `None`.
+    #[test]
+    fn the_docker_sweep_parses_the_execution_label() {
+        let (run, ex) = (uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(9));
+        let out = format!(
+            "egret-run-a-1\t{run}\tfalse\texited\t{ex}\n\
+             egret-run-b-1\t{run}\tfalse\texited\tnot-a-uuid\n\
+             egret-run-c-1\t{run}\tfalse\texited\n"
+        );
+        let got: Vec<_> = parse_docker_ps(&out)
+            .into_iter()
+            .map(|c| c.execution)
+            .collect();
+        assert_eq!(got, vec![Some(ex), None, None]);
     }
 
     /// **One decision for both sweeps** (debt D3): a live run's work is never
@@ -3527,6 +3624,63 @@ mod tests {
             DockerSweep::Remove,
             "not kept: removed at once, as before"
         );
+    }
+
+    /// **Debt D15: a superseded iteration's kept work gets the retention
+    /// deadline, measured from its execution's end.** A run with no row whose
+    /// execution is terminal ([`RunLiveness::superseded`]) is judged as a
+    /// kept container of a terminal run: kept until `retention` after the
+    /// execution ended, for ever with `None`, and stopped if it still runs. A
+    /// NOT kept one of a missing run is left, as before D15; so is any work
+    /// of a missing run whose execution is unknown or still live.
+    #[test]
+    fn a_superseded_runs_kept_work_gets_the_retention_deadline() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let (old, new, unknown) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+        );
+        let mut l = RunLiveness::default();
+        l.missing.extend([old, new, unknown]);
+        l.superseded.insert(old, now - D::days(8));
+        l.superseded.insert(new, now - D::days(6));
+        let week = Some(std::time::Duration::from_secs(7 * 86_400));
+        assert!(
+            sweep_decision(&l, old, true, week, now),
+            "kept, execution ended 8 days ago: removed"
+        );
+        assert!(
+            !sweep_decision(&l, new, true, week, now),
+            "kept, execution ended 6 days ago: stays"
+        );
+        assert!(
+            !sweep_decision(&l, old, true, None, now),
+            "retention 0: kept for ever"
+        );
+        assert!(
+            !sweep_decision(&l, old, false, week, now),
+            "not kept, missing run: left, as before D15"
+        );
+        assert!(
+            !sweep_decision(&l, unknown, true, week, now),
+            "an execution unknown here or still live: never ours"
+        );
+        let act = |id, keep, running| docker_sweep_action(&l, id, keep, running, week, now);
+        assert_eq!(act(old, true, false), DockerSweep::Remove);
+        assert_eq!(
+            act(new, true, true),
+            DockerSweep::Stop,
+            "kept, running, execution over: stopped, as a terminal run's"
+        );
+        assert_eq!(act(new, true, false), DockerSweep::Leave);
+        assert_eq!(
+            act(old, false, true),
+            DockerSweep::Leave,
+            "not kept: as before"
+        );
+        assert_eq!(act(unknown, true, true), DockerSweep::Leave);
     }
 
     /// `ScriptService.scriptCommands`: the interpreter, then **one** element.

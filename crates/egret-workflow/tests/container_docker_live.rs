@@ -2860,6 +2860,10 @@ fn container_label(name: &str, label: &str) -> String {
 /// consequence). Now: two kept containers, two names, two ids, each echoed id
 /// the container's own `egret.io/taskrun-id` label.
 ///
+/// Debt D15: once the execution is over, the superseded (first) iteration's
+/// kept container, whose run id no row holds, gets the same retention
+/// deadline as the last one's: kept inside one hour, removed at zero.
+///
 /// Every observation is captured before the case removes its containers;
 /// `KillWorld`'s `Drop` is the second net.
 async fn a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration() {
@@ -2920,15 +2924,19 @@ async fn a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration
     .fetch_one(&w.pool)
     .await
     .expect("read the body run");
-    // Spec §2.1/(a) and (c) of task 2.3, measured and reported rather than
-    // asserted: what the sweep does with each kept container once the
-    // execution has ended, with a zero retention (every terminal kept one is
-    // due). The first iteration's run id has no row any more.
+    // Debt D15: the first iteration's run id has no row any more, but its
+    // execution is over, so its kept container gets the same deadline as the
+    // last one's: inside a one-hour retention both stay, and a zero retention
+    // (both are due) removes both.
+    let hour = Some(std::time::Duration::from_secs(3600));
+    let swept_in_hour = sweep_this_world(&w, hour).await;
+    let left_in_hour = containers_of_workspace(w.ws).len();
     let swept = sweep_this_world(&w, Some(std::time::Duration::ZERO)).await;
     let left = containers_of_workspace(w.ws);
     eprintln!(
         "    m7: end {end}; ran {:?}; containers {seen:?}; row id {row_id}; \
-         a zero-retention sweep removed {swept}, left {left:?}",
+         a one-hour sweep removed {swept_in_hour}; a zero-retention sweep removed {swept}, \
+         left {left:?}",
         reg.ran()
     );
     for n in &names {
@@ -2956,6 +2964,17 @@ async fn a_loop_until_body_with_delete_false_runs_a_new_container_each_iteration
             .any(|(_, label, _)| *label == row_id.to_string()),
         "the row holds the last iteration's id {row_id}: {seen:?}"
     );
+    assert_eq!(
+        (swept_in_hour, left_in_hour),
+        (0, 2),
+        "both kept containers are inside a one-hour deadline"
+    );
+    assert_eq!(
+        swept, 2,
+        "a zero retention removes the superseded iteration's kept container too (D15): \
+         left {left:?}"
+    );
+    assert!(left.is_empty(), "left {left:?}");
 }
 
 type Case = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;

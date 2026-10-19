@@ -1511,6 +1511,12 @@ impl OrphanSweep for KubernetesRunner {
 /// RUNNING pods on every reaper tick. Only a row this database can see as
 /// terminal authorises a delete; an unknown run is logged at debug. The cost,
 /// stated: a pod whose execution was deleted while it ran is not swept.
+///
+/// **Debt D15, the one exception:** a kept pod whose run has no row, but whose
+/// `egret.io/execution-id` names an execution this database holds as
+/// terminal, is a superseded `LoopUntil` iteration's (debt D12 renamed its
+/// row). That execution is this database's, so the pod is too, and it gets a
+/// kept pod's retention from the execution's end ([`sweep_decision`]).
 pub async fn sweep_orphans(
     client: &kube::Client,
     cfg: &PodConfig,
@@ -1536,26 +1542,29 @@ pub async fn sweep_orphans(
             .as_ref()
             .and_then(|a| a.get(DELETE_ANNOTATION))
             .is_some_and(|v| v == "false");
-        let Some(id) = p
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(TASKRUN_LABEL))
-            .and_then(|v| uuid::Uuid::parse_str(v).ok())
-        else {
+        let label = |key: &str| {
+            p.metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(key))
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+        };
+        let Some(id) = label(TASKRUN_LABEL) else {
             continue;
         };
-        candidates.push((name, id, keep));
+        // Debt D15: what links a superseded run's pod to its execution.
+        let execution = label(super::pod_spec::EXECUTION_LABEL);
+        candidates.push((name, id, keep, execution));
     }
     if candidates.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<uuid::Uuid> = candidates.iter().map(|(_, id, _)| *id).collect();
-    let live = run_liveness(pool, &ids).await?;
+    let work: Vec<_> = candidates.iter().map(|(_, id, _, ex)| (*id, *ex)).collect();
+    let live = run_liveness(pool, &work).await?;
     let now = live.now.unwrap_or_else(Utc::now);
     let mut deleted = 0u64;
-    for (name, id, keep) in candidates {
-        if live.missing.contains(&id) {
+    for (name, id, keep, _) in candidates {
+        if live.missing.contains(&id) && !live.superseded.contains_key(&id) {
             tracing::debug!(pod = %name, "orphan sweep: run {id} is unknown to this database; left alone");
             continue;
         }
