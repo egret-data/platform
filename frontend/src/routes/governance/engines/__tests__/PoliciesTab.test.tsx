@@ -321,4 +321,14 @@ describe("controls follow the row's source", () => {
     await userEvent.click(within(rowOf("zeta hand-written")).getByRole("switch", { name: "Enable zeta hand-written" }));
     expect(await screen.findByText("the profile is busy", {}, T)).toBeInTheDocument();
   });
+
+  // Ported from ProfileDetailPage.test.tsx: a 403 names the permission, never echoes "forbidden".
+  it("names the permission a refused toggle needs, instead of echoing 'forbidden'", async () => {
+    serve(answers({ "PUT /policies/10/enabled": fail(403, "forbidden") }));
+    open("", WRITER);
+    await table();
+    await userEvent.click(within(rowOf("zeta hand-written")).getByRole("switch", { name: "Enable zeta hand-written" }));
+    expect(await screen.findByText(/needs the policy:update permission/, {}, T)).toBeInTheDocument();
+    expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
+  });
 });

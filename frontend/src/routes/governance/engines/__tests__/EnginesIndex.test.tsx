@@ -259,6 +259,18 @@ describe("deleting a profile without an engine", () => {
     expect(await screen.findByText("profile orphan is generated; it cannot be deleted", {}, T)).toBeInTheDocument();
     expect(within(orphansSection()).getByRole("link", { name: "orphan" })).toBeInTheDocument();
   });
+  // Ported from Policies.test.tsx: a 403 names the permission, never echoes "forbidden".
+  it("names the permission a refused delete needs, not 'forbidden'", async () => {
+    serve(answers({ "DELETE /policies/services/orphan": { status: 403, body: { error: "forbidden" } } }));
+    openArea(INDEX, DELETER);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Delete orphan" }, T));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByRole("textbox"), "orphan");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText(/needs the policy:delete permission/, {}, T)).toBeInTheDocument();
+    expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
+  });
 });
 
 describe("creating a profile", () => {
@@ -295,6 +307,18 @@ describe("creating a profile", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
     expect(await within(dialog).findByText("a profile named orphan exists", {}, T)).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Name")).toHaveValue("orphan");
+  });
+
+  // Ported from Policies.test.tsx: the create dialog's own 403.
+  it("names the permission a refused create needs, not 'forbidden'", async () => {
+    serve(answers({ "POST /policies/services": { status: 403, body: { error: "forbidden" } } }));
+    openArea(INDEX, CREATOR);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Name"), "sr-2");
+    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    expect(await within(dialog).findByText(/needs the policy:create permission/, {}, T)).toBeInTheDocument();
   });
 });
 

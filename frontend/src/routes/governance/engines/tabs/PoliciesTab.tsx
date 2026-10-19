@@ -296,7 +296,12 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
 
   return (
     <div className="space-y-4">
-      <PolicyWarningsCallout service={profile.name} serviceId={profile.dto?.id} serviceType={profile.type} />
+      <PolicyWarningsCallout
+        service={profile.name}
+        serviceId={profile.dto?.id}
+        serviceType={profile.type}
+        editorHref={(kind, id) => editorUrl(ctx.subject, kind, id)}
+      />
       {total > 0 && !policies.isError ? (
         <p className="text-sm text-muted-foreground tabular-nums">
           {`${total} ${total === 1 ? "policy" : "policies"}: ${counts.compiler} egret-compiled · ${counts.infra} egret-seeded · ${counts.operator} hand-written`}

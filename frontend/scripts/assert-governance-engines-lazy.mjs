@@ -15,6 +15,9 @@
  * this pass on any bundle). `engineUrl.ts` and `PolicyRedirect.tsx` are
  * statically imported on purpose (the old Policies URLs, the Overview and
  * Control Plane link into the area through them) and are not guarded.
+ * `tabBodies.tsx` (a switch over the tabs) and `profilePolicies.ts` (a hook)
+ * hold no literal of their own; only guarded modules import them, so they
+ * cannot reach the entry chunk without one of those markers going with them.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";

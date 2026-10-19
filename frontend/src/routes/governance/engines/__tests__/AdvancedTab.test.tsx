@@ -158,6 +158,15 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Added 3 default policies."));
   });
 
+  // Ported from ProfileDetailPage.test.tsx: a platform admin holds every write.
+  it("offers Create policy and Seed default policies to a platform_admin", async () => {
+    serve(answers());
+    open(me([], ["platform_admin"]));
+    const p = await panel();
+    expect(await within(p).findByRole("button", { name: "Create policy" }, T)).toBeInTheDocument();
+    expect(within(p).getByRole("button", { name: "Seed default policies" })).toBeInTheDocument();
+  });
+
   it("offers no Seed without policy:seed", async () => {
     serve(answers());
     open(me(["policy:read", "policy:create"]));
