@@ -75,6 +75,16 @@ const PeopleRoutes = lazy(() => import("@/routes/governance/people/PeopleRoutes"
 const GrantPage = lazy(() => import("@/routes/governance/people/GrantPage"));
 const RulePage = lazy(() => import("@/routes/governance/people/RulePage"));
 
+/**
+ * The Governance Engine & policy area (DG redesign #4a): the index, one page
+ * per engine and per unbound profile, and the policy editor, code-split like
+ * People (FE-ROUTE-2). Nothing under `routes/governance/engines/` may be
+ * imported statically from the entry graph, except `engineUrl.ts` and
+ * `PolicyRedirect.tsx`, which the old Policies URLs and pages outside the area
+ * go through; `npm run test:bundle:governance-engines` checks it.
+ */
+const EnginesRoutes = lazy(() => import("@/routes/governance/engines/EnginesRoutes"));
+
 /** What the People area shows while its chunk loads: a list skeleton in the page frame. */
 function PeopleFallback() {
   return (
@@ -89,6 +99,15 @@ function OverviewFallback() {
   return (
     <div className="p-4" data-testid="governance-overview-loading">
       <ListSkeleton cols={2} />
+    </div>
+  );
+}
+
+/** What the Engine & policy area shows while its chunk loads: a list skeleton in the page frame. */
+function EnginesFallback() {
+  return (
+    <div className="p-4" data-testid="governance-engines-loading">
+      <ListSkeleton cols={4} />
     </div>
   );
 }
@@ -162,10 +181,6 @@ import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import SecretDetail from "@/routes/control-plane/SecretDetail";
-import Policies from "@/routes/governance/Policies";
-import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
-import PolicyMigrationPage from "@/routes/governance/PolicyMigrationPage";
-import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import Catalogs from "@/routes/control-plane/catalogs/Catalogs";
 import CatalogCreate from "@/routes/control-plane/catalogs/CatalogCreate";
@@ -184,6 +199,7 @@ import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
 import Classifications from "@/routes/governance/Classifications";
 import TagDetail from "@/routes/governance/TagDetail";
 import { LegacyGovernanceRedirect, RetiredPermPageRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
+import PolicyRedirect from "@/routes/governance/engines/PolicyRedirect";
 
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
@@ -612,13 +628,27 @@ function GovernanceRoutes() {
           <Route path="data-permissions" element={<RetiredPermPageRedirect />} />
           <Route path="mask-filter-rules" element={<RetiredPermPageRedirect />} />
           <Route path="explain-access" element={<RetiredPermPageRedirect />} />
-          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
-          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
-          {/* SP4d-3: reading is `policy:read`; Preview, Migrate and Undo need
-              `policy:update`, which the page checks per control. */}
-          <Route path="policies/:service/migrate" element={<RequirePermission perm="policy:read"><PolicyMigrationPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          {/* DG redesign #4a (spec §2, EP3): Engine & policy, gated `policy:read`;
+              writes are checked per control, as on the pages it replaced. */}
+          <Route
+            path="engines/*"
+            element={
+              <RequirePermission perm="policy:read">
+                <LazyRouteArea area="Engine & policy" fallback={<EnginesFallback />}>
+                  <EnginesRoutes />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
+          {/* DG redesign #4a (spec §3, EP15, Q3): the old Policies pages'
+              URLs resolve the profile by name and replace themselves with its
+              engine's page, or its profile page when unbound. Reading the
+              profile list is `policy:read`, so the resolver carries that guard. */}
+          <Route path="policies" element={<Navigate to="/governance/engines" replace />} />
+          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><PolicyRedirect to="profile" /></RequirePermission>} />
+          <Route path="policies/:service/migrate" element={<RequirePermission perm="policy:read"><PolicyRedirect to="migrate" /></RequirePermission>} />
+          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyRedirect to="editor" /></RequirePermission>} />
+          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyRedirect to="editor" /></RequirePermission>} />
           <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
           <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
           {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}

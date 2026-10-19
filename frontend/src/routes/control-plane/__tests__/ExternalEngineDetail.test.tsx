@@ -98,7 +98,7 @@ describe("EngineDetail for an external engine", () => {
     expect(screen.getByText("2.5.0")).toBeInTheDocument();
     expect(await screen.findByRole("link", { name: "trino-main" })).toHaveAttribute(
       "href",
-      "/governance/policies/trino-main",
+      "/governance/engines/profiles/trino-main",
     );
     // Lifecycle routes refuse an external engine with 409, so none is offered.
     for (const name of [/restart/i, /rotate/i, /logs/i, /terminal/i]) {
@@ -106,6 +106,21 @@ describe("EngineDetail for an external engine", () => {
     }
     // A provisioned engine polls its cluster; an external one has nothing to poll.
     expect(screen.queryByText(/pods/i)).not.toBeInTheDocument();
+  });
+
+  // #4a EP12: the two engine pages link to each other.
+  test("offers Open in Engine & policy to a policy:read holder, and not without it", async () => {
+    stubFetch(routes());
+    renderDetail(userWith("engine:read", "policy:read"));
+    expect(await screen.findByRole("link", { name: "Open in Engine & policy" })).toHaveAttribute(
+      "href",
+      "/governance/engines/x1",
+    );
+    cleanup();
+    stubFetch(routes());
+    renderDetail(userWith("engine:read"));
+    expect(await screen.findByRole("heading", { name: "legacy-trino", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open in Engine & policy" })).not.toBeInTheDocument();
   });
 
   test("an unmodelled (type, version) pair says migrations into the bound profile will be refused", async () => {

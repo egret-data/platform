@@ -95,12 +95,57 @@ describe("Needs attention", () => {
     expect(within(row).getByText(/No plugin has polled profile trino-prod for 9 minutes\./)).toBeInTheDocument();
     expect(within(row).queryByRole("link", { name: "sr-prod" })).not.toBeInTheDocument();
     expect(within(row).getByText("sr-prod")).toBeInTheDocument();
-    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", "/governance/policies");
+    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", "/governance/engines");
     // Live check D17: the shared focus ring on every link of the row.
     for (const a of within(row).getAllByRole("link")) {
       expect(a.className).toContain("focus-visible:ring-2");
       expect(a.className).toContain("focus-visible:ring-ring");
     }
+  });
+
+  // #4a spec §3: a profile link opens the engine page's tab where the finding is fixed.
+  it.each([
+    ["plugin_silent", "plugin"],
+    ["plugin_quiet", "plugin"],
+    ["plugin_behind", "plugin"],
+    ["policy_warnings", "policies"],
+    ["rule_overlaps", "overlaps"],
+  ])("links a %s profile sample and Open to ?tab=%s", async (kind, tab) => {
+    serve(
+      ok(
+        response({
+          findings: [
+            finding({
+              kind,
+              severity: "warning",
+              sentence: `${kind} about p/1`,
+              ref: { type: "profile", name: "p/1" },
+              sample: [{ label: "p/1", detail: null, ref: { type: "profile", name: "p/1" } }],
+            }),
+          ],
+        }),
+      ),
+    );
+    openOverview();
+    const row = (await screen.findByText(`${kind} about p/1`)).closest("li")!;
+    const want = `/governance/engines/profiles/p%2F1?tab=${tab}`;
+    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", want);
+    expect(within(row).getByRole("link", { name: "p/1" })).toHaveAttribute("href", want);
+  });
+
+  it("puts no tab on a profile link of a finding kind fixed elsewhere", async () => {
+    serve(
+      ok(
+        response({
+          findings: [
+            finding({ kind: "compile_failed", severity: "critical", sentence: "compile about p", ref: { type: "profile", name: "p" } }),
+          ],
+        }),
+      ),
+    );
+    openOverview();
+    const row = (await screen.findByText("compile about p")).closest("li")!;
+    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", "/governance/engines/profiles/p");
   });
 
   it("shows at most five samples even if the server sends more (review M7)", async () => {

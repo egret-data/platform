@@ -1,6 +1,7 @@
 import type { Ref } from "@/api/generated/model";
 import { pathToUrl } from "@/routes/governance/data/objectPath";
 import { PEOPLE_BASE, principalUrl } from "@/routes/governance/people/peopleUrl";
+import { ENGINES_BASE, profileUrl, type EngineTab } from "@/routes/governance/engines/engineUrl";
 
 /**
  * Where a finding, a sample or a change's target is fixed (spec §2, "Links
@@ -8,14 +9,16 @@ import { PEOPLE_BASE, principalUrl } from "@/routes/governance/people/peopleUrl"
  * link is built here.
  *
  * Data and People names go through `pathToUrl` and `principalUrl`, which keep
- * a `/`, `%`, space or dot-only name in its own segment. A profile name is
- * `encodeURIComponent`d, as every other link to a profile page is
- * (`ProfileDetailPage.tsx`, `OverlapReport.tsx`), because that page reads its
- * param raw. Ids are uuids and need no encoding.
+ * a `/`, `%`, space or dot-only name in its own segment. A profile links to
+ * its Engine & policy profile page through `profileUrl` (DG #4a, spec §3),
+ * which redirects to the engine page when the profile is bound; `tab` opens
+ * the tab where the finding is fixed and applies to a profile ref only (an
+ * engine ref keeps pointing at Control Plane, where `engine_failed` and
+ * `plugin_unmodelled` are fixed). Ids are uuids and need no encoding.
  *
  * `null` for a ref this client does not know: it renders as text.
  */
-export function refUrl(r: Ref): string | null {
+export function refUrl(r: Ref, tab?: EngineTab): string | null {
   switch (r.type) {
     case "grant":
       return `/governance/grants/${r.id}`;
@@ -24,9 +27,9 @@ export function refUrl(r: Ref): string | null {
     case "unmatched":
       return `${PEOPLE_BASE}?kind=unmatched`;
     case "profile":
-      return `/governance/policies/${encodeURIComponent(r.name)}`;
+      return profileUrl(r.name, tab);
     case "profiles":
-      return "/governance/policies";
+      return ENGINES_BASE;
     case "engine":
       return `/control-plane/engines/${r.id}`;
     case "engines":

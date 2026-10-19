@@ -370,19 +370,49 @@ describe("Sidebar – Governance app", () => {
   const groupOf = (heading: string) =>
     screen.getByRole("button", { name: new RegExp(`^${heading}$`, "i") }).parentElement;
 
-  test("renders Policies, Classification and Lineage groups at /governance routes", () => {
-    renderSidebar("/governance/policies");
-    const policies = screen.getByRole("link", { name: "Policies" });
+  test("renders Classification, Lineage and Engine & policy groups at /governance routes", () => {
+    renderSidebar("/governance/engines");
+    const engines = screen.getByRole("link", { name: "Engine & policy" });
     const classifications = screen.getByRole("link", { name: "Classifications" });
     const lineage = screen.getByRole("link", { name: "Data Lineage" });
 
-    expect(policies).toHaveAttribute("href", "/governance/policies");
+    expect(engines).toHaveAttribute("href", "/governance/engines");
     expect(classifications).toHaveAttribute("href", "/governance/classifications");
     expect(lineage).toHaveAttribute("href", "/governance/data-lineage");
 
-    expect(groupOf("Policies")).toContainElement(policies);
+    expect(groupOf("Engine & policy")).toContainElement(engines);
     expect(groupOf("Classification")).toContainElement(classifications);
     expect(groupOf("Lineage")).toContainElement(lineage);
+  });
+
+  // #4a EP3: the "Policies" group is gone; "Engine & policy" is the last group.
+  test("the last group is \"Engine & policy\" with one item linking to /governance/engines; no group is \"Policies\"", () => {
+    renderSidebar("/governance");
+    const headings = within(screen.getByTestId("app-sidebar"))
+      .getAllByRole("button", { expanded: true })
+      .map((b) => b.textContent);
+    expect(headings[headings.length - 1]).toBe("Engine & policy");
+    expect(headings).not.toContain("Policies");
+    const group = groupOf("Engine & policy")!;
+    const links = within(group).getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveTextContent("Engine & policy");
+    expect(links[0]).toHaveAttribute("href", "/governance/engines");
+    expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
+  });
+
+  test("Engine & policy shows for a user holding only policy:read, and not for tag:read alone", () => {
+    renderSidebar("/governance", { user_id: "10", email: "p@example.com", platform_roles: [], permissions: ["policy:read"] });
+    expect(screen.getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
+    cleanup();
+    renderSidebar("/governance", { user_id: "11", email: "t@example.com", platform_roles: [], permissions: ["tag:read"] });
+    expect(screen.queryByRole("link", { name: "Engine & policy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Engine & policy$/i })).not.toBeInTheDocument();
+  });
+
+  test("Engine & policy is the current page on an engine page", () => {
+    renderSidebar("/governance/engines/e1?tab=plugin");
+    expect(screen.getByRole("link", { name: "Engine & policy" })).toHaveAttribute("aria-current", "page");
   });
 
   // #2 P8: Data permissions, Mask & filter rules and Explain access are gone.
@@ -396,9 +426,9 @@ describe("Sidebar – Governance app", () => {
       "Overview",
       "Data",
       "People & groups",
-      "Policies",
       "Classifications",
       "Data Lineage",
+      "Engine & policy",
     ]);
     expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
     expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
@@ -489,21 +519,21 @@ describe("Sidebar – Governance app", () => {
       "/governance/classifications",
     );
     expect(screen.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
-    expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Engine & policy" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
     // Groups left with no visible items are dropped, heading included.
-    expect(screen.queryByRole("button", { name: /^Policies$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Engine & policy$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Lineage$/i })).not.toBeInTheDocument();
   });
 
-  test("a policy-only user sees Policies and not Classifications", () => {
-    renderSidebar("/governance/policies", {
+  test("a policy-only user sees Engine & policy and not Classifications", () => {
+    renderSidebar("/governance/engines", {
       user_id: "5",
       email: "policies@example.com",
       platform_roles: [],
       permissions: ["policy:read"],
     });
-    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute("href", "/governance/policies");
+    expect(screen.getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
     expect(screen.queryByRole("link", { name: "Classifications" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Classification$/i })).not.toBeInTheDocument();
   });
