@@ -129,6 +129,18 @@ describe("the Classification index", () => {
     expect(await screen.findByRole("button", { name: "New classification" }, T)).toBeInTheDocument();
   });
 
+  it("closing New classification returns focus to the button that opened it (live check D4)", async () => {
+    const user = userEvent.setup();
+    serve({ "/tags": ok(TAGS) });
+    openArea(INDEX, STEWARD);
+    const opener = await screen.findByRole("button", { name: "New classification" }, T);
+    await user.click(opener);
+    expect(await screen.findByRole("dialog", { name: "New classification" }, T)).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
+  });
+
   it("derives the key from the name until the key is edited", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok(TAGS) });

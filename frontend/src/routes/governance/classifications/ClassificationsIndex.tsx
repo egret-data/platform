@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { MoreHorizontal, Plus, SearchX, Tags, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
@@ -63,6 +63,7 @@ export default function ClassificationsIndex() {
   const [deleting, setDeleting] = useState<Tag | null>(null);
   // The row's Actions button that opened the menu: the delete dialog returns focus to it.
   const menuOpener = useRef<HTMLButtonElement | null>(null);
+  const createOpener = useRef<HTMLButtonElement | null>(null);
   const searchId = useId();
 
   const setQ = (next: string) =>
@@ -83,7 +84,13 @@ export default function ClassificationsIndex() {
   }, [rows, q]);
 
   const newButton = canManage ? (
-    <Button size="sm" onClick={() => setCreating(true)}>
+    <Button
+      size="sm"
+      onClick={(e) => {
+        createOpener.current = e.currentTarget;
+        setCreating(true);
+      }}
+    >
       <Plus className="mr-1 h-4 w-4" aria-hidden />
       New classification
     </Button>
@@ -245,7 +252,7 @@ export default function ClassificationsIndex() {
         ) : null}
         {body}
       </div>
-      <NewClassificationDialog open={creating} onOpenChange={setCreating} />
+      <NewClassificationDialog open={creating} onOpenChange={setCreating} opener={createOpener} />
       {deleting ? (
         <DeleteTagDialog
           tag={deleting}
@@ -267,7 +274,16 @@ export default function ClassificationsIndex() {
  * key is taken) is shown beside Key (FE-FORM-4). Success opens the new page,
  * without a toast (FE-ACTION-2).
  */
-function NewClassificationDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+function NewClassificationDialog({
+  open,
+  onOpenChange,
+  opener,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** The button that opened it; focus returns there on close (live check D4), the dialog being opened from state. */
+  opener: RefObject<HTMLElement | null>;
+}) {
   const create = useCreateTag();
   const navigate = useNavigate();
   const [name, setName] = useState("");
@@ -315,7 +331,15 @@ function NewClassificationDialog({ open, onOpenChange }: { open: boolean; onOpen
 
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          const element = opener.current?.isConnected ? opener.current : null;
+          if (element) {
+            event.preventDefault();
+            element.focus();
+          }
+        }}
+      >
         <form onSubmit={submit} className="space-y-4">
           <DialogHeader>
             <DialogTitle>New classification</DialogTitle>
