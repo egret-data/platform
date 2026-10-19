@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { AlertOctagon, AlertTriangle, Info, type LucideIcon } from "lucide-react";
 import type { Finding, Ref, Severity } from "@/api/generated/model";
 import { refUrl } from "@/routes/governance/overview/refUrl";
+import type { EngineTab } from "@/routes/governance/engines/engineUrl";
 
 /** The shared focus ring (FE-A11Y-2) for an inline link. */
 export const LINK = "rounded-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -18,8 +19,19 @@ export const SEVERITY: Record<Severity, { word: string; icon: LucideIcon; tone: 
   info: { word: "Info", icon: Info, tone: "text-muted-foreground" },
 };
 
-function RefLink({ r, children }: { r: Ref | null | undefined; children: string }) {
-  const url = r ? refUrl(r) : null;
+/**
+ * The engine page tab where a finding of `kind` is fixed (DG #4a, spec §3): a
+ * profile ref of that finding opens it. Other kinds open the page's default.
+ */
+export function tabForKind(kind: string): EngineTab | undefined {
+  if (kind.startsWith("plugin_")) return "plugin";
+  if (kind === "policy_warnings") return "policies";
+  if (kind === "rule_overlaps") return "overlaps";
+  return undefined;
+}
+
+function RefLink({ r, tab, children }: { r: Ref | null | undefined; tab?: EngineTab; children: string }) {
+  const url = r ? refUrl(r, tab) : null;
   return url ? (
     <Link to={url} className={LINK}>
       {children}
@@ -37,7 +49,8 @@ function RefLink({ r, children }: { r: Ref | null | undefined; children: string 
 export function AttentionRow({ finding }: { finding: Finding }) {
   const sev = SEVERITY[finding.severity];
   const Icon = sev.icon;
-  const open = finding.ref ? refUrl(finding.ref) : null;
+  const tab = tabForKind(finding.kind);
+  const open = finding.ref ? refUrl(finding.ref, tab) : null;
   return (
     <li className="flex flex-col gap-1 rounded-md border border-border p-3" data-kind={finding.kind}>
       <div className="flex items-start justify-between gap-3">
@@ -59,7 +72,7 @@ export function AttentionRow({ finding }: { finding: Finding }) {
           {/* The server sends at most five; the page holds to that whatever it is sent. */}
           {finding.sample.slice(0, 5).map((s, i) => (
             <li key={`${s.label}-${i}`} className="min-w-0 break-words">
-              <RefLink r={s.ref}>{s.label}</RefLink>
+              <RefLink r={s.ref} tab={tab}>{s.label}</RefLink>
               {s.detail ? <span className="text-muted-foreground"> — {s.detail}</span> : null}
             </li>
           ))}

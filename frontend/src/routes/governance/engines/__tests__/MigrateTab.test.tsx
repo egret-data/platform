@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthContext } from "@/auth/useAuth";
@@ -13,10 +13,14 @@ import {
   migrateServicePolicies,
   undoServicePolicyMigration,
 } from "@/api/policies";
-import PolicyMigrationPage from "../PolicyMigrationPage";
+import { MigrateTab } from "@/routes/governance/engines/tabs/MigrateTab";
+import { E_TR, grantsResponse, ok, openArea, pluginResponse, policy, profileDto, serve } from "./engineHarness";
 
 /**
- * The operator's page (SP4d-3 Task 9). The adapters in `@/api/policies` are
+ * The engine page's Migrate tab (spec §6.4), ported from
+ * `routes/governance/__tests__/PolicyMigrationPage.test.tsx` (the operator's
+ * page, SP4d-3 Task 9): every case of that file, against the tab, which takes
+ * the profile as props. The adapters in `@/api/policies` are
  * mocked; the page, `FilterableTable` and the real primitives render for real.
  *
  * The fixture is deliberately NOT in a convenient order (id 16 before 11) and
@@ -170,15 +174,21 @@ const READER: Me = {
   permissions: ["policy:read"],
 };
 
+function Where() {
+  const loc = useLocation();
+  return <output data-testid="where">{loc.pathname + loc.hash}</output>;
+}
+
 function renderPage(me: Me = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
         <TooltipProvider>
-          <MemoryRouter initialEntries={["/governance/policies/trino-prod/migrate"]}>
+          <MemoryRouter initialEntries={["/governance/engines/e1?tab=migrate"]}>
             <Routes>
-              <Route path="/governance/policies/:service/migrate" element={<PolicyMigrationPage />} />
+              <Route path="/governance/engines/:id" element={<MigrateTab service="trino-prod" serviceId={7} />} />
+              <Route path="/governance" element={<Where />} />
             </Routes>
           </MemoryRouter>
         </TooltipProvider>
@@ -207,7 +217,7 @@ beforeEach(() => {
   vi.mocked(undoServicePolicyMigration).mockReset();
 });
 
-describe("PolicyMigrationPage — what each policy is", () => {
+describe("MigrateTab — what each policy is", () => {
   it("renders infra and compiler rows locked, with their reason visible, and not selectable", async () => {
     renderPage();
     const infra = await rowOf("engine-service-account");
@@ -258,7 +268,7 @@ describe("PolicyMigrationPage — what each policy is", () => {
   });
 });
 
-describe("PolicyMigrationPage — preview before migrate", () => {
+describe("MigrateTab — preview before migrate", () => {
   it("keeps Migrate disabled before a preview, enables it after one, and disables it again when the selection changes", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -480,7 +490,7 @@ describe("PolicyMigrationPage — preview before migrate", () => {
   });
 });
 
-describe("PolicyMigrationPage — undo", () => {
+describe("MigrateTab — undo", () => {
   it("undoes after confirmation and says the profile stays generated", async () => {
     const user = userEvent.setup();
     const undone: UndoResponse = {
@@ -521,7 +531,7 @@ describe("PolicyMigrationPage — undo", () => {
   });
 });
 
-describe("PolicyMigrationPage — a policy:read account", () => {
+describe("MigrateTab — a policy:read account", () => {
   it("reads every verdict but is offered no selection, preview, migrate or undo", async () => {
     renderPage(READER);
     const row = await rowOf("unregistered-catalog");
@@ -533,3 +543,63 @@ describe("PolicyMigrationPage — a policy:read account", () => {
     expect(screen.getByText(/needs the policy:update permission/)).toBeInTheDocument();
   });
 });
+
+describe("MigrateTab — in the tab frame", () => {
+  it("has no heading of its own and no back link", async () => {
+    renderPage();
+    await rowOf("allow-analysts");
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("after a written migration, links to Recent changes on the Overview", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+    await waitFor(() => expect(migrateButton()).toBeEnabled());
+    expect(screen.queryByRole("link", { name: "See it in Recent changes" })).toBeNull();
+
+    vi.mocked(migrateServicePolicies).mockResolvedValueOnce(proved({ dry_run: false, committed: true }));
+    await user.click(migrateButton());
+    const link = await screen.findByRole("link", { name: "See it in Recent changes" });
+    expect(link).toHaveAttribute("href", "/governance#recent-changes");
+    await user.click(link);
+    expect(screen.getByTestId("where")).toHaveTextContent("/governance#recent-changes");
+  });
+
+  it("a migration the gate did not prove at commit time offers no such link", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+    await waitFor(() => expect(migrateButton()).toBeEnabled());
+    vi.mocked(migrateServicePolicies).mockResolvedValueOnce(proved({ dry_run: false, committed: false, equivalent: false }));
+    await user.click(migrateButton());
+    await waitFor(() => expect(migrateButton()).toBeDisabled());
+    expect(screen.queryByRole("link", { name: "See it in Recent changes" })).toBeNull();
+  });
+});
+
+describe("MigrateTab — on the engine page", () => {
+  it("the Migrate tab classifies the engine's profile by its id", async () => {
+    serve({
+      [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ profile: { serviceId: 7, name: "trino-prod" } })),
+      "/policies/services": ok([
+        profileDto("trino-prod", {
+          id: 7,
+          engines: [{ id: E_TR, name: "lake-trino", status: "running", origin: "provisioned", type: "trino" }],
+        }),
+      ]),
+      "/policies?service=trino-prod": ok([policy(11, "operator", { name: "allow-analysts", service: "trino-prod" })]),
+      [`/governance/engines/${E_TR}/plugin`]: ok(pluginResponse()),
+    });
+    openArea(`/governance/engines/${E_TR}?tab=migrate`, ADMIN);
+    expect(await screen.findByText("allow-analysts", { selector: "td span" }, { timeout: 3000 })).toBeInTheDocument();
+    expect(classifyServicePolicies).toHaveBeenCalledWith(7);
+    vi.unstubAllGlobals();
+  });
+});
+

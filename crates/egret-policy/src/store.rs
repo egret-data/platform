@@ -1071,6 +1071,26 @@ impl PolicyStore {
         Ok(rows.into_iter().collect())
     }
 
+    /// Policy counts per service and owner (`managed_by`): service_id ->
+    /// (compiler, infra, operator). DG #4a Q1.
+    pub async fn policy_counts_by_owner(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, (i64, i64, i64)>, PolicyStoreError> {
+        let rows = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT service_id, \
+                    count(*) FILTER (WHERE managed_by = 'compiler'), \
+                    count(*) FILTER (WHERE managed_by = 'infra'), \
+                    count(*) FILTER (WHERE managed_by = 'operator') \
+               FROM policy.authz_policies GROUP BY service_id",
+        )
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, c, i, o)| (id, (c, i, o)))
+            .collect())
+    }
+
     /// Catalog resource → tag rows for a service's warehouse(s), feeding the
     /// Ranger tag download (`ServiceTags::from_assignments`).
     ///
@@ -1384,7 +1404,7 @@ pub async fn catalogs_for_service_via(
 /// different question (which ids must be row-locked, the profile itself
 /// INCLUDED) and returns ids rather than names. If that predicate ever changes,
 /// it changes in both — they are the two halves of one agreement.
-async fn usable_tag_services_via(
+pub async fn usable_tag_services_via(
     conn: &mut sqlx::PgConnection,
     service_ids: &[i64],
 ) -> Result<Vec<(i64, String)>, PolicyStoreError> {

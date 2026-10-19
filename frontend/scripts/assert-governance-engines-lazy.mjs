@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+/**
+ * IS THE GOVERNANCE ENGINE & POLICY AREA OUT OF THE ENTRY CHUNK?
+ *
+ * `App.tsx` reaches the Engine & policy area (DG redesign #4a) only through
+ * `lazy(() => import("@/routes/governance/engines/EnginesRoutes"))`
+ * (FE-ROUTE-2). Neither vitest nor `vite dev` code-splits, so only a
+ * production build can show the area stayed lazy; this follows
+ * `assert-governance-overview-lazy.mjs`.
+ *
+ * One marker per guarded module: a string literal from that module that
+ * survives minification and that nothing outside the area spells. Each must be
+ * absent from the entry chunk and from the chunks the entry preloads, and
+ * present in some other chunk (a marker found nowhere is stale and would let
+ * this pass on any bundle). `engineUrl.ts` and `PolicyRedirect.tsx` are
+ * statically imported on purpose (the old Policies URLs, the Overview and
+ * Control Plane link into the area through them) and are not guarded.
+ * `tabBodies.tsx` (a switch over the tabs) and `profilePolicies.ts` (a hook)
+ * hold no literal of their own; only guarded modules import them, so they
+ * cannot reach the entry chunk without one of those markers going with them.
+ */
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
+
+const DIST = "dist";
+const ASSETS = join(DIST, "assets");
+const MARKERS = [
+  // The editor route of an unbound profile (Q2: the kind stays in the URL).
+  ["src/routes/governance/engines/EnginesRoutes.tsx", "profiles/:service/advanced/policies/:kind/:policyId"],
+  // The index's empty Engines section (spec §5).
+  ["src/routes/governance/engines/EnginesIndex.tsx", "No engine is recorded. Engines are created in Control plane."],
+  // The index's notice after an old URL named no profile.
+  ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
+  // The engine page's not-found state.
+  ["src/routes/governance/engines/EnginePage.tsx", "No engine with this id."],
+  // The profile page's header for an unbound profile (EP13).
+  ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this profile."],
+  // The line for a reader without engine:read (EP19), and the shared-profile banner (EP14).
+  ["src/routes/governance/engines/PageFrame.tsx", "Plugin state needs the engine:read permission."],
+  ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
+  // The Engine permissions tab on an engine with no profile (spec §6.1).
+  ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind a profile in Control plane."],
+  // The Engine permissions tab's skipped-compile report (Q4).
+  ["src/routes/governance/engines/tabs/EnginePermissionsPanel.tsx", "Saved, but not compiled: "],
+  // The grant dialog's principal check.
+  ["src/routes/governance/engines/tabs/EngineGrantDialog.tsx", "Add at least one user, group or role."],
+  // Check's Trino impersonation sentence (F11 §5.4).
+  ["src/routes/governance/engines/tabs/CheckCapabilityDialog.tsx", "egret cannot decide impersonation on this engine"],
+  // The value controls' fixed-key text.
+  ["src/routes/governance/engines/tabs/capabilityValues.tsx", "Applies to all (*)"],
+  // What a compiled policy's source is called (spec §6.2).
+  ["src/routes/governance/engines/compiledSource.ts", "Materialized-view deny"],
+  // The Policies tab's compiled-row sentence (spec §6.2).
+  ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
+  // The Overlaps tab's empty state (spec §6.3).
+  ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
+  // The Plugin tab's rule for a held version (spec §6.5).
+  ["src/routes/governance/engines/tabs/PluginTab.tsx", "confirmation takes two polls, about a minute at the default 30 s poll."],
+  // The Advanced tab's fixed warning (spec §6.6).
+  ["src/routes/governance/engines/tabs/AdvancedTab.tsx", "egret does not recompile them, does not check overlaps with grants"],
+  // The editor route of an engine with no profile.
+  ["src/routes/governance/engines/EditorRoute.tsx", "so it has no policy to edit."],
+  // The policy editor's refusal to edit what it could not load (moved from routes/governance/).
+  ["src/routes/governance/engines/PolicyEditorPage.tsx", "there's nothing safe to edit here"],
+  // The Migrate tab's link after a written migration (spec §6.4).
+  ["src/routes/governance/engines/tabs/MigrateTab.tsx", "See it in Recent changes"],
+];
+
+const entry = entryChunkName(DIST);
+const eager = new Set([entry, ...entryPreloadNames(DIST)]);
+const read = (f) => readFileSync(join(ASSETS, f), "utf8");
+const chunks = readdirSync(ASSETS).filter((f) => f.endsWith(".js"));
+
+let failed = false;
+for (const [module, marker] of MARKERS) {
+  const carriers = chunks.filter((f) => read(f).includes(marker));
+  const eagerCarriers = carriers.filter((f) => eager.has(f));
+  if (eagerCarriers.length > 0) {
+    console.error(
+      `✗ ${module} is in a chunk the entry loads (${eagerCarriers.join(", ")}).\n` +
+        `  Engine & policy is eager again. Look for a static import of anything under\n` +
+        `  src/routes/governance/engines/ other than engineUrl.ts and PolicyRedirect.tsx.`,
+    );
+    failed = true;
+  } else if (carriers.length === 0) {
+    console.error(
+      `✗ "${marker}" (${module}) appears in NO chunk at all.\n` +
+        `  The marker is stale, so this guard would pass on any bundle. Pick a literal the module still has.`,
+    );
+    failed = true;
+  }
+}
+
+if (failed) process.exit(1);
+console.log(`✓ Engine & policy stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks.`);

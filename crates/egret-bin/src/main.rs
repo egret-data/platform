@@ -406,6 +406,8 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
                 id: e.id,
                 name: e.name,
                 status: e.status,
+                origin: e.origin,
+                r#type: e.r#type,
                 authz_service_id: e.authz_service_id,
             })
             .collect())

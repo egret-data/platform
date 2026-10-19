@@ -1,10 +1,16 @@
-import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useState, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import type { GrantView, Via } from "@/api/generated/model";
-import { getPermListGrantsQueryKey, usePermDeleteGrant, usePermListGrants } from "@/api/generated/perm/perm";
+import type { EngineGrantView, GrantView, Via } from "@/api/generated/model";
+import {
+  getPermListGrantsQueryKey,
+  usePermDeleteGrant,
+  usePermListAllEngineGrants,
+  usePermListEngineCapabilities,
+  usePermListGrants,
+} from "@/api/generated/perm/perm";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FACET_ALL, FacetSelect } from "@/components/explore/FacetSelect";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -27,6 +33,7 @@ import {
   type ReachGroup,
 } from "@/routes/governance/people/reach";
 import { appliedText } from "@/routes/governance/people/tabs/OverviewTab";
+import { engineUrl } from "@/routes/governance/engines/engineUrl";
 
 export const GROUP_TITLE: Record<ReachGroup, string> = {
   direct: "Directly",
@@ -110,6 +117,18 @@ export const NO_USERNAME_NOTE = "No engine knows this user until they have a use
  * grant is read-only and names its workspace.
  */
 export function PermissionsTab({ principal, onEdit }: { principal: Principal; onEdit: (grant: GrantView) => void }) {
+  // Spec §7 (EP20): engine permissions close the tab. `public` has none to list: an
+  // engine grant is include-only and names users, groups or roles (F11 E5).
+  const isPublic = principal.kind === "group" && principal.data.isPublic;
+  return (
+    <div className="space-y-6">
+      <DataGrants principal={principal} onEdit={onEdit} />
+      {isPublic ? null : <EngineGrantsSection principal={principal} />}
+    </div>
+  );
+}
+
+function DataGrants({ principal, onEdit }: { principal: Principal; onEdit: (grant: GrantView) => void }) {
   const can = usePolicyPermissions();
   const canWrite = can("policy:update");
   const grantsQ = usePermListGrants({ query: { retry: false } });
@@ -258,6 +277,94 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
       />
     </div>
   );
+}
+
+type EngineRow = { grant: EngineGrantView; reach: Reach[] };
+
+/**
+ * The engine grants (F11) one of whose principals stands for this principal,
+ * matched as data grants are (`setReach` over `standsFor`), so a grant that
+ * reaches a user through a group says "Through group g". An engine grant is
+ * include-only, so only include paths count. Each row links to the grant on
+ * its engine's Engine permissions tab. Its own loading and error: a failure
+ * here never hides the data grants above (FE-STATE-1).
+ */
+function EngineGrantsSection({ principal }: { principal: Principal }) {
+  const grantsQ = usePermListAllEngineGrants({ query: { retry: false } });
+  const capsQ = usePermListEngineCapabilities({ query: { retry: false } });
+  const labels = new Map<string, string>();
+  if (capsQ.data?.status === 200) {
+    for (const e of capsQ.data.data.engines) for (const c of e.capabilities) labels.set(c.id, c.label);
+  }
+  const labelOf = (id: string) => labels.get(id) ?? id;
+
+  let body: ReactNode;
+  if (grantsQ.isError) {
+    body = <TabError what="engine permissions" onRetry={() => void grantsQ.refetch()} />;
+  } else if (grantsQ.data?.status !== 200) {
+    body = <ListSkeleton rows={2} cols={4} />;
+  } else {
+    const rows: EngineRow[] = [];
+    for (const g of grantsQ.data.data) {
+      const reach = setReach({ include: g.principals, exclude: [] }, principal.data.standsFor);
+      if (reach.some((r) => r.position === "include")) rows.push({ grant: g, reach });
+    }
+    rows.sort(
+      (a, b) =>
+        a.grant.engineName.localeCompare(b.grant.engineName) ||
+        labelOf(a.grant.capability).localeCompare(labelOf(b.grant.capability)) ||
+        valuesText(a.grant).localeCompare(valuesText(b.grant)),
+    );
+    body =
+      rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{`No engine permission reaches this ${principal.kind}.`}</p>
+      ) : (
+        <Table aria-label="Engine permissions" className={STACKED_TABLE}>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Engine</TableHead>
+              <TableHead>Capability</TableHead>
+              <TableHead>Values</TableHead>
+              <TableHead>How it reaches</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map(({ grant: g, reach }) => (
+              <TableRow key={g.id}>
+                <TableCell>
+                  <Link
+                    to={engineUrl(g.engineId, "engine-permissions", { grant: g.id })}
+                    className="break-all text-primary hover:underline"
+                  >
+                    {g.engineName}
+                  </Link>
+                </TableCell>
+                <TableCell data-label="Capability" className="whitespace-normal">
+                  {labelOf(g.capability)}
+                </TableCell>
+                <TableCell data-label="Values" className="whitespace-normal break-words">
+                  {valuesText(g)}
+                </TableCell>
+                <TableCell data-label="How it reaches" className="whitespace-normal">
+                  <ul role="list" className="space-y-0.5 text-sm">
+                    {reach.map((r, i) => (
+                      <li key={i}>{reachText(r)}</li>
+                    ))}
+                  </ul>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      );
+  }
+  return <Section title="Engine permissions">{body}</Section>;
+}
+
+/** An engine grant's values in the catalogue's key order; an impersonation target with no username says so. */
+function valuesText(g: EngineGrantView): string {
+  if (g.values.length > 0) return g.values.join(", ");
+  return g.targetUserId ? "a user with no username" : "";
 }
 
 function GrantTable({

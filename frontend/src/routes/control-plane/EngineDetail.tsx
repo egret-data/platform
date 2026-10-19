@@ -111,7 +111,7 @@ import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 import ExternalEngineDetail from "./ExternalEngineDetail";
-import { WarningCallout, isExternal } from "./externalEngine";
+import { OpenInEnginePolicyLink, WarningCallout, isExternal } from "./externalEngine";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -452,6 +452,7 @@ export default function EngineDetail() {
             <Badge variant={phaseVariant(data.status.phase)}>
               {data.status.phase === "deleting" ? "Deleting — retry" : data.status.phase}
             </Badge>
+            <OpenInEnginePolicyLink engineId={id} />
             <EngineActions engine={data} engineId={id} />
           </div>
         )}

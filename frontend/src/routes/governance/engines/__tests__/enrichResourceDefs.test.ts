@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ServiceDefResource } from "@/api/policies";
-import { enrichResourceDefs } from "../PolicyEditorPage";
+import { enrichResourceDefs } from "@/routes/governance/engines/PolicyEditorPage";
 
 // The full top-level `resources` carry parent/level/flags; the dataMaskDef/
 // rowFilterDef subsets are flat name-only refs. enrichResourceDefs maps the

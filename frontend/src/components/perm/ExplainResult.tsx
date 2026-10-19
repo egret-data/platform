@@ -372,7 +372,7 @@ function causeScopeNote(c: WireUndecidableCause, declined?: ExplainTagDecline): 
  * things, and collapsing it discards exactly what the three-valued contract
  * exists to say.
  */
-function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): string {
+export function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): string {
   switch (c.kind) {
     case "envelope_construct":
       return `The downloaded policy set carries ${unmodelledPhrase(c.construct)} — so this access cannot be decided.`;
@@ -1078,9 +1078,20 @@ function ProfileTags({
 export function SubjectUserField({
   value,
   onChange,
+  id = "explain-user",
+  label = "User",
+  invalid = false,
+  describedBy,
 }: {
   value: string;
   onChange: (username: string) => void;
+  /** The input's id, for a form holding more than one user field. */
+  id?: string;
+  label?: string;
+  /** Marks the input invalid (`aria-invalid`), for an error shown beside it. */
+  invalid?: boolean;
+  /** Ids of the help or error text under the field. */
+  describedBy?: string;
 }) {
   const sent = useDebounced(value);
   // Searched from the first focus on (as the list first opens), never on mount.
@@ -1112,11 +1123,13 @@ export function SubjectUserField({
 
   return (
     <div className="space-y-1.5">
-      <Label htmlFor="explain-user">User</Label>
+      <Label htmlFor={id}>{label}</Label>
       <div ref={boxRef} className="relative">
         <Input
-          id="explain-user"
+          id={id}
           {...combo.inputProps}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy}
           ref={inputRef}
           onFocus={() => {
             setEnabled(true);

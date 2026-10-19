@@ -1,25 +1,22 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, CheckCircle2, Cog, FileText, Loader2, Lock, Server, Undo2, User } from "lucide-react";
+import { CheckCircle2, Cog, FileText, Loader2, Lock, Server, Undo2, User } from "lucide-react";
 import {
   type ClassifiedPolicy,
   type GatedProfile,
   type MigrateResponse,
-  type Profile,
   type UndoResponse,
   type WireDisagreement,
   classifyQueryKey,
   classifyServicePolicies,
-  listProfiles,
   migrateServicePolicies,
   undoServicePolicyMigration,
 } from "@/api/policies";
 import type { ApiError } from "@/api/client";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
-import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListStates } from "@/components/explore/ListStates";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -43,10 +40,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { refusalMessage, usePolicyPermissions } from "./policyWrites";
+import {
+  getPolicyAdminListPoliciesQueryKey,
+  getPolicyAdminListProfilesQueryKey,
+} from "@/api/generated/policy-admin/policy-admin";
+import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 /**
- * Governance → Policies → a profile → Migrate policies (SP4d-3).
+ * The engine page's Migrate tab (spec §6.4, EP7): the body of the old
+ * Governance → Policies → a profile → Migrate policies page (SP4d-3), with the
+ * profile as a prop instead of a route param, and the tab frame instead of a
+ * page frame (no `h1`, no back link). Shown only while the profile holds a
+ * hand-written policy.
  *
  * What each policy of one profile IS (its owner), whether it can be migrated
  * into the permission model and, if not, why — then a proof (a dry-run
@@ -64,21 +69,20 @@ import { refusalMessage, usePolicyPermissions } from "./policyWrites";
  * names), so changing it disables Migrate and going back to exactly the
  * previewed set re-enables it, because that preview describes it again.
  */
-export default function PolicyMigrationPage() {
-  const { service = "" } = useParams();
+export function MigrateTab({
+  service,
+  serviceId,
+}: {
+  /** The profile's name, as the profile list names it. */
+  service: string;
+  /** The profile's id, which the classify, migrate and undo routes are keyed by; undefined while it loads. */
+  serviceId: number | undefined;
+}) {
   const queryClient = useQueryClient();
   const can = usePolicyPermissions();
   // Preview, Migrate and Undo are all `policy:update` on the server (a dry run
   // takes the same profile locks); a reader is not offered any of them.
   const canWrite = can("policy:update");
-
-  const profiles = useQuery<Profile[], ApiError>({
-    queryKey: ["control-plane", "profiles"],
-    queryFn: listProfiles,
-    retry: false,
-  });
-  const profile = profiles.data?.find((p) => p.name === service);
-  const serviceId = profile?.id;
 
   const classified = useQuery<ClassifiedPolicy[], ApiError>({
     queryKey: classifyQueryKey(serviceId ?? 0),
@@ -96,6 +100,8 @@ export default function PolicyMigrationPage() {
   const [undoTarget, setUndoTarget] = useState<ClassifiedPolicy | null>(null);
   const [undoResult, setUndoResult] = useState<UndoResponse | null>(null);
   const [undoError, setUndoError] = useState<string | null>(null);
+  // Set once a migration is written: it then shows in the Overview's Recent changes.
+  const [applied, setApplied] = useState(false);
 
   // What is selected AND still selectable: a refetch can turn a selected row
   // into a migrated or blocked one, and it must then drop out of the request
@@ -114,6 +120,8 @@ export default function PolicyMigrationPage() {
     // A migration flips profiles to `generated` and switches originals off.
     void queryClient.invalidateQueries({ queryKey: ["control-plane", "profiles"] });
     void queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    void queryClient.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
+    void queryClient.invalidateQueries({ queryKey: getPolicyAdminListPoliciesQueryKey() });
   };
 
   const previewMutation = useMutation<MigrateResponse, ApiError, string[]>({
@@ -161,6 +169,7 @@ export default function PolicyMigrationPage() {
         setSelected(new Set());
         setPreview(null);
         setPreviewedFor(null);
+        setApplied(true);
         invalidate();
       } else {
         // The gate ran again at commit time and did not prove it — the
@@ -269,22 +278,11 @@ export default function PolicyMigrationPage() {
     blocked: rows.filter((r) => verdictOf(r) === "Blocked").length,
   };
 
-  const profileMissing = profiles.isSuccess && !profile;
-
   return (
-    <ListPageShell
-      title="Migrate policies"
-      description={`Profile ${service}: who owns each policy, whether it can move into the permission model, and a proof before it does.`}
-      back={
-        <Link
-          to={`/governance/policies/${encodeURIComponent(service)}`}
-          className="mb-1 inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {service || "Profile"}
-        </Link>
-      }
-    >
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        {`Profile ${service}: who owns each policy, whether it can move into the permission model, and a proof before it does.`}
+      </p>
       <div className="space-y-4">
         {!canWrite && (
           <Alert>
@@ -295,60 +293,66 @@ export default function PolicyMigrationPage() {
           </Alert>
         )}
 
-        {profileMissing ? (
-          <Alert variant="destructive">
+        {applied && (
+          <Alert>
             <AlertDescription>
-              There is no policy profile named “{service}”. Go back to Policies and pick one.
+              The migration is written.{" "}
+              <Link
+                to="/governance#recent-changes"
+                className="text-primary underline focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                See it in Recent changes
+              </Link>
             </AlertDescription>
           </Alert>
-        ) : (
-          <ListStates
-            isLoading={profiles.isLoading || classified.isLoading}
-            isError={profiles.isError || classified.isError}
-            error={{ message: readErrorMessage(profiles.error ?? classified.error) }}
-            errorText="The policies of this profile could not be loaded. Reload the page to try again."
-            hasData={rows.length > 0}
-            skeletonCols={5}
-            empty={
-              <EmptyState
-                icon={FileText}
-                variant="dashed"
-                title="No policies in this profile"
-                description="There is nothing to migrate: this profile holds no policies."
-              />
-            }
-          >
-            <div className="space-y-3">
-              <SummaryStrip
-                items={[
-                  { label: "policies", singular: "policy", value: rows.length },
-                  { label: "migratable", value: counts.migratable },
-                  { label: "migrated", value: counts.migrated },
-                  { label: "locked", value: counts.locked },
-                  { label: "blocked", value: counts.blocked },
-                ]}
-              />
-              <FilterableTable
-                rows={rows}
-                columns={columns}
-                getId={(r) => String(r.id)}
-                searchPlaceholder="Search policies…"
-                noMatchText="No policy matches that search. Clear the search to see them all."
-                bordered
-                selection={
-                  canWrite
-                    ? {
-                        selected,
-                        onToggle: toggle,
-                        canSelect: isSelectable,
-                        rowLabel: (r) => `Select ${r.name}`,
-                      }
-                    : undefined
-                }
-              />
-            </div>
-          </ListStates>
         )}
+
+        <ListStates
+          isLoading={serviceId === undefined || classified.isLoading}
+          isError={classified.isError}
+          error={{ message: readErrorMessage(classified.error) }}
+          errorText="The policies of this profile could not be loaded. Reload the page to try again."
+          hasData={rows.length > 0}
+          skeletonCols={5}
+          empty={
+            <EmptyState
+              icon={FileText}
+              variant="dashed"
+              title="No policies in this profile"
+              description="There is nothing to migrate: this profile holds no policies."
+            />
+          }
+        >
+          <div className="space-y-3">
+            <SummaryStrip
+              items={[
+                { label: "policies", singular: "policy", value: rows.length },
+                { label: "migratable", value: counts.migratable },
+                { label: "migrated", value: counts.migrated },
+                { label: "locked", value: counts.locked },
+                { label: "blocked", value: counts.blocked },
+              ]}
+            />
+            <FilterableTable
+              rows={rows}
+              columns={columns}
+              getId={(r) => String(r.id)}
+              searchPlaceholder="Search policies…"
+              noMatchText="No policy matches that search. Clear the search to see them all."
+              bordered
+              selection={
+                canWrite
+                  ? {
+                      selected,
+                      onToggle: toggle,
+                      canSelect: isSelectable,
+                      rowLabel: (r) => `Select ${r.name}`,
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        </ListStates>
 
         {undoError && (
           <Alert variant="destructive">
@@ -357,7 +361,7 @@ export default function PolicyMigrationPage() {
         )}
         {undoResult && <UndoSummary result={undoResult} />}
 
-        {canWrite && !profileMissing && rows.length > 0 && (
+        {canWrite && rows.length > 0 && (
           <section
             aria-labelledby="migration-preview-heading"
             className="space-y-3 rounded-md border border-border bg-muted/30 p-4"
@@ -442,7 +446,7 @@ export default function PolicyMigrationPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </ListPageShell>
+    </div>
   );
 }
 

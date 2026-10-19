@@ -29,16 +29,18 @@ const TAG_ONLY = me(["tag:read"]);
 const INFRA_ONLY = me(["engine:read"]);
 const ADMIN = me([], ["platform_admin"]);
 
-function openApp(url: string, as: Me) {
+/** `profiles`, when given, answers the policy profile list (the old policy URLs' resolver reads it). */
+function openApp(url: string, as: Me, profiles?: unknown[]) {
+  const ok = (body: unknown) =>
+    Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: RequestInfo | URL) =>
-      String(input) === "/api/auth/me"
-        ? Promise.resolve(
-            new Response(JSON.stringify(as), { status: 200, headers: { "content-type": "application/json" } }),
-          )
-        : Promise.reject(new Error("no network in test")),
-    ),
+    vi.fn((input: RequestInfo | URL) => {
+      const s = String(input);
+      if (s === "/api/auth/me") return ok(as);
+      if (profiles && s === "/api/control-plane/policies/services") return ok(profiles);
+      return Promise.reject(new Error("no network in test"));
+    }),
   );
   window.history.pushState({}, "", url);
   render(<App />);
@@ -89,8 +91,27 @@ describe("Governance routing in App", () => {
   }, 15_000);
 
   it("lands an old policy-editor bookmark on the Governance editor with its query and hash", async () => {
-    openApp("/control-plane/policies/trino/access/new?scope=tag#deny", GOVERNANCE_ONLY);
-    await waitFor(() => expect(currentUrl()).toBe("/governance/policies/trino/access/new?scope=tag#deny"), TIMEOUT);
+    // An unbound profile: the resolver lands on the profile's Advanced editor (spec §3, EP15).
+    const trino = {
+      id: 1,
+      name: "trino",
+      type: "trino",
+      origin: "manual",
+      policy_version: 1,
+      policy_count: 0,
+      policy_counts: { compiler: 0, infra: 0, operator: 0 },
+      engines: [],
+    };
+    openApp("/control-plane/policies/trino/access/new?scope=tag#deny", GOVERNANCE_ONLY, [trino]);
+    await waitFor(
+      () => expect(currentUrl()).toBe("/governance/engines/profiles/trino/advanced/policies/access/new?scope=tag#deny"),
+      TIMEOUT,
+    );
+    // The editor itself rendered: its way back is the profile's Advanced tab.
+    expect(await screen.findByRole("link", { name: "trino" }, TIMEOUT)).toHaveAttribute(
+      "href",
+      "/governance/engines/profiles/trino?tab=advanced",
+    );
     await screen.findByTestId("app-sidebar", {}, TIMEOUT);
     expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
   }, 15_000);

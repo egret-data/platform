@@ -5,6 +5,7 @@ import type { Ref } from "@/api/generated/model";
 import { refUrl } from "@/routes/governance/overview/refUrl";
 import { urlToPath, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { principalParam } from "@/routes/governance/people/peopleUrl";
+import { profileParam } from "@/routes/governance/engines/engineUrl";
 
 /** Read a Data URL back through a REAL router, as `data/__tests__/objectPath.test.tsx` does. */
 function DataProbe() {
@@ -20,7 +21,7 @@ function NameProbe() {
 
 function ProfileProbe() {
   const { service } = useParams();
-  return <output data-testid="out">{JSON.stringify(service)}</output>;
+  return <output data-testid="out">{JSON.stringify(profileParam(service))}</output>;
 }
 
 function through(url: string): unknown {
@@ -30,7 +31,7 @@ function through(url: string): unknown {
         <Route path="/governance/data/:catalog" element={<DataProbe />} />
         <Route path="/governance/data/:catalog/:schema/:object" element={<DataProbe />} />
         <Route path="/governance/people/roles/:name" element={<NameProbe />} />
-        <Route path="/governance/policies/:service" element={<ProfileProbe />} />
+        <Route path="/governance/engines/profiles/:service" element={<ProfileProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -42,8 +43,9 @@ describe("refUrl", () => {
     [{ type: "grant", id: "g-1" }, "/governance/grants/g-1"],
     [{ type: "rule", id: "r-1" }, "/governance/rules/r-1"],
     [{ type: "unmatched" }, "/governance/people?kind=unmatched"],
-    [{ type: "profile", name: "trino prod" }, "/governance/policies/trino%20prod"],
-    [{ type: "profiles" }, "/governance/policies"],
+    [{ type: "profile", name: "trino prod" }, "/governance/engines/profiles/trino%20prod"],
+    [{ type: "profile", name: "a/b" }, "/governance/engines/profiles/a%2Fb"],
+    [{ type: "profiles" }, "/governance/engines"],
     [{ type: "engine", id: "e-1", name: "sr" }, "/control-plane/engines/e-1"],
     [{ type: "engines" }, "/control-plane/engines"],
     [{ type: "catalog", id: "c-1", name: "ice" }, "/control-plane/catalogs/c-1"],
@@ -78,7 +80,19 @@ describe("refUrl", () => {
     expect(through(refUrl({ type: "role", name })!)).toBe(name);
   });
 
-  it.each([["a/b"], ["50% off"]])("keeps a profile named %j through the router", (name) => {
+  it.each([["a/b"], ["50% off"], [".."]])("keeps a profile named %j through the router", (name) => {
     expect(through(refUrl({ type: "profile", name })!)).toBe(name);
+  });
+
+  // #4a spec §3: the Overview opens a profile on the tab where its finding is fixed.
+  it("puts the tab on a profile link", () => {
+    expect(refUrl({ type: "profile", name: "a/b" }, "plugin")).toBe("/governance/engines/profiles/a%2Fb?tab=plugin");
+    expect(refUrl({ type: "profile", name: "p" }, "overlaps")).toBe("/governance/engines/profiles/p?tab=overlaps");
+  });
+
+  it("ignores the tab on a ref that is not a profile", () => {
+    expect(refUrl({ type: "profiles" }, "plugin")).toBe("/governance/engines");
+    expect(refUrl({ type: "engine", id: "e-1", name: "sr" }, "plugin")).toBe("/control-plane/engines/e-1");
+    expect(refUrl({ type: "rule", id: "r-1" }, "overlaps")).toBe("/governance/rules/r-1");
   });
 });

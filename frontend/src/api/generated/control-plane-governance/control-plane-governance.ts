@@ -28,6 +28,7 @@ import type {
   ControlPlaneGovernanceChangesParams,
   ControlPlaneGovernanceObjectLineageParams,
   ControlPlaneGovernanceObjectTagsParams,
+  EnginePluginResponse,
   ErrorBody,
   GovernanceCatalog,
   ObjectLineage,
@@ -600,6 +601,141 @@ export function useControlPlaneGovernanceChanges<TData = Awaited<ReturnType<type
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getControlPlaneGovernanceChangesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceEnginePluginResponse200 = {
+  data: EnginePluginResponse
+  status: 200
+}
+
+export type controlPlaneGovernanceEnginePluginResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceEnginePluginResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceEnginePluginResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernanceEnginePluginResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceEnginePluginResponseSuccess = (controlPlaneGovernanceEnginePluginResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceEnginePluginResponseError = (controlPlaneGovernanceEnginePluginResponse401 | controlPlaneGovernanceEnginePluginResponse403 | controlPlaneGovernanceEnginePluginResponse404 | controlPlaneGovernanceEnginePluginResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceEnginePluginResponse = (controlPlaneGovernanceEnginePluginResponseSuccess | controlPlaneGovernanceEnginePluginResponseError)
+
+export const getControlPlaneGovernanceEnginePluginUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/governance/engines/${encodeURIComponent(id)}/plugin`
+}
+
+/**
+ * The plugin download ledger of the engine's policy profile, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.
+ * @summary What the Ranger plugins of an engine's profile report downloading.
+ */
+export const controlPlaneGovernanceEnginePlugin = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceEnginePluginResponse> => {
+
+  return customInstance<controlPlaneGovernanceEnginePluginResponse>(getControlPlaneGovernanceEnginePluginUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceEnginePluginQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/governance/engines/${encodeURIComponent(id)}/plugin`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceEnginePluginQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceEnginePluginQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>> = ({ signal }) => controlPlaneGovernanceEnginePlugin(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceEnginePluginQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>>
+export type ControlPlaneGovernanceEnginePluginQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceEnginePlugin<TData = Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceEnginePlugin<TData = Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceEnginePlugin<TData = Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What the Ranger plugins of an engine's profile report downloading.
+ */
+
+export function useControlPlaneGovernanceEnginePlugin<TData = Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceEnginePlugin>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceEnginePluginQueryOptions(id,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

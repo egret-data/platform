@@ -168,6 +168,21 @@ describe("EngineDetail — a provisioned engine (control for the external branch
     expect(screen.queryByText("External")).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Plugin config" })).not.toBeInTheDocument();
   });
+
+  // #4a EP12: the two engine pages link to each other.
+  test("offers Open in Engine & policy to a policy:read holder, and not without it", async () => {
+    const holder: Me = { user_id: "u9", email: "s@example.com", platform_roles: [], permissions: ["engine:read", "policy:read"] };
+    renderDetail(undefined, holder);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    expect(screen.getByRole("link", { name: "Open in Engine & policy" })).toHaveAttribute("href", "/governance/engines/e1");
+  });
+
+  test("hides Open in Engine & policy without policy:read", async () => {
+    const infra: Me = { user_id: "u8", email: "i@example.com", platform_roles: [], permissions: ["engine:read"] };
+    renderDetail(undefined, infra);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    expect(screen.queryByRole("link", { name: "Open in Engine & policy" })).not.toBeInTheDocument();
+  });
 });
 
 describe("EngineDetail — Workspaces tab", () => {

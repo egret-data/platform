@@ -230,3 +230,16 @@ describe("Recent changes", () => {
     expect(screen.queryByTestId("recent-changes-table")).not.toBeInTheDocument();
   });
 });
+
+describe("Recent changes as a link target", () => {
+  it("is the section #recent-changes, which the Migrate tab links to", async () => {
+    serve(attentionOk, () => ({ status: 200, body: page([entry(1)]) }));
+    openOverview();
+    await table();
+    const target = document.getElementById("recent-changes");
+    expect(target?.tagName).toBe("SECTION");
+    expect(within(target as HTMLElement).getByRole("heading", { name: "Recent changes" })).toBeInTheDocument();
+    expect(within(target as HTMLElement).getByTestId("recent-changes-table")).toBeInTheDocument();
+  });
+});
+

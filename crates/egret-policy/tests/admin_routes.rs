@@ -825,6 +825,8 @@ async fn list_profiles_shows_bound_engines_from_reader() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            origin: "provisioned".into(),
+            r#type: "trino".into(),
         }],
         ..Default::default()
     });
@@ -1109,6 +1111,8 @@ async fn delete_profile_refused_while_engine_bound() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            origin: "provisioned".into(),
+            r#type: "trino".into(),
         }],
         ..Default::default()
     });
@@ -1162,6 +1166,8 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![wh],
+            origin: "provisioned".into(),
+            r#type: "trino".into(),
         }],
         schemas,
         tables,
@@ -1240,6 +1246,8 @@ async fn resource_lookup_suggests_every_warehouse_the_engine_reads() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![primary_wh, second_wh],
+            origin: "provisioned".into(),
+            r#type: "trino".into(),
         }],
         schemas,
         ..Default::default()
@@ -1305,6 +1313,10 @@ async fn list_profiles_surfaces_tag_service() {
     };
     let token = session_for(&f, "tagsvc", true).await;
     let (svc_name, svc_id) = seed_service(&f).await;
+    // The `tag` service-def must exist before a `tag` profile can (FK
+    // `authz_services_type_fkey`); without this the test passed only when an
+    // earlier test in the same database had seeded it.
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
     let tag_name = format!("{svc_name}_tag");
     let tag_svc = f
         .store
@@ -4199,4 +4211,198 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
     }
+}
+
+// ── DG #4a Q1: origin, type and per-owner counts on `GET /policies/services` ──
+
+async fn insert_owned_policy(f: &Fixture, service_id: i64, name: &str, managed_by: &str) {
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, $2, '{}'::jsonb, $3)",
+    )
+    .bind(service_id)
+    .bind(name)
+    .bind(managed_by)
+    .execute(&f.db.pool)
+    .await
+    .expect("insert policy");
+}
+
+fn listed(body: &serde_json::Value, id: i64) -> &serde_json::Value {
+    body.as_array()
+        .expect("array")
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(id))
+        .unwrap_or_else(|| panic!("profile {id} not listed; body={body}"))
+}
+
+/// Q1: each bound engine carries its `origin` and `type`, so the index can
+/// show them to a reader without `engine:read`.
+#[tokio::test]
+async fn list_profiles_shows_each_engines_origin_and_type() {
+    let Some(f) = setup().await else {
+        panic!("DATABASE_URL not set");
+    };
+    let token = session_for(&f, "q1_origin", true).await;
+    let (_name, svc_id) = seed_service(&f).await;
+    let (provisioned, external) = (Uuid::new_v4(), Uuid::new_v4());
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![
+            EngineBinding {
+                id: provisioned,
+                name: "q1-prov".into(),
+                status: "running".into(),
+                authz_service_id: Some(svc_id),
+                warehouse_ids: Vec::new(),
+                origin: "provisioned".into(),
+                r#type: "trino".into(),
+            },
+            EngineBinding {
+                id: external,
+                name: "q1-ext".into(),
+                status: "running".into(),
+                authz_service_id: Some(svc_id),
+                warehouse_ids: Vec::new(),
+                origin: "external".into(),
+                r#type: "starrocks".into(),
+            },
+        ],
+        ..Default::default()
+    });
+    let (status, body) = into_json(
+        f.app(reader)
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let engines = listed(&body, svc_id)["engines"]
+        .as_array()
+        .expect("engines")
+        .clone();
+    let of = |id: Uuid| {
+        engines
+            .iter()
+            .find(|e| e["id"] == serde_json::json!(id))
+            .unwrap_or_else(|| panic!("engine {id} missing; {body}"))
+            .clone()
+    };
+    assert_eq!(of(provisioned)["origin"], "provisioned", "{body}");
+    assert_eq!(of(provisioned)["type"], "trino", "{body}");
+    assert_eq!(of(external)["origin"], "external", "{body}");
+    assert_eq!(of(external)["type"], "starrocks", "{body}");
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// Q1: counts per owner, the profile plus its tag service; `policy_count`
+/// unchanged (the profile's own total).
+#[tokio::test]
+async fn list_profiles_counts_policies_by_owner_including_the_tag_service() {
+    let Some(f) = setup().await else {
+        panic!("DATABASE_URL not set");
+    };
+    let token = session_for(&f, "q1_counts", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_name = format!("q1tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let svc = f
+        .store
+        .create_service(
+            &format!("q1tr-{suffix}"),
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("trino profile");
+    let empty = f
+        .store
+        .create_service(
+            &format!("q1empty-{suffix}"),
+            "trino",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("empty profile");
+    for (name, owner) in [
+        ("perm-grant-a", "compiler"),
+        ("perm-grant-b", "compiler"),
+        ("egret-delegator", "infra"),
+        ("hand 1", "operator"),
+        ("hand 2", "operator"),
+        ("hand 3", "operator"),
+    ] {
+        insert_owned_policy(&f, svc.id, name, owner).await;
+    }
+    insert_owned_policy(&f, tag_svc.id, "hand tag", "operator").await;
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let p = listed(&body, svc.id);
+    assert_eq!(p["tag_service"], serde_json::json!(tag_name), "{body}");
+    assert_eq!(
+        p["policy_counts"],
+        serde_json::json!({ "compiler": 2, "infra": 1, "operator": 4 }),
+        "{body}"
+    );
+    assert_eq!(
+        p["policy_count"], 6,
+        "the profile's own total is unchanged; {body}"
+    );
+    assert_eq!(
+        listed(&body, empty.id)["policy_counts"],
+        serde_json::json!({ "compiler": 0, "infra": 0, "operator": 0 }),
+        "{body}"
+    );
+    // The compiler-owned rows refuse a profile delete: remove the fixture's
+    // policies first.
+    sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = ANY($1)")
+        .bind(vec![svc.id, tag_svc.id])
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup policies");
+    for id in [svc.id, empty.id, tag_svc.id] {
+        f.store.delete_service(id).await.expect("cleanup");
+    }
+}
+
+/// Q1 adds fields to a `policy:read` route; it stays `policy:read`.
+#[tokio::test]
+async fn list_profiles_still_needs_policy_read() {
+    let Some(mut f) = setup().await else {
+        panic!("DATABASE_URL not set");
+    };
+    let without = session_for_with_permission(&f, "q1_none", "engine:read").await;
+    let with = session_for_with_permission(&f, "q1_read", "policy:read").await;
+    attach_real_pdp(&mut f).await;
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &without, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &with, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

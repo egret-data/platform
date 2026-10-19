@@ -119,6 +119,12 @@ describe("AccessOverview", () => {
     // count is derived from users whose `roles` include "platform_admin".
   });
 
+  // DG #4a spec §3: the data-plane layer opens Engine & policy, not the retired Policies page.
+  test("links the data-plane layer to Engine & policy", async () => {
+    renderPage();
+    expect(await screen.findByRole("link", { name: /Engine & policy/ })).toHaveAttribute("href", "/governance/engines");
+  });
+
   test("counts platform admins from users whose roles include platform_admin", async () => {
     vi.mocked(api.listUsers).mockResolvedValue([
       { id: "u1", email: "a@x.com", name: "A", provider: "local", status: "active", roles: ["platform_admin"], groups: [] },

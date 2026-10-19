@@ -36,19 +36,14 @@ use serde::Serialize;
 use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::plugin_judgement::{
+    expects_tags_via, judge_plugins, ledger_rows_via, KindState, LedgerRow, Liveness,
+    ProfileVersions,
+};
 use crate::{CpError, CpState};
 
 /// At most this many samples per finding.
 const SAMPLE: usize = 5;
-/// A profile no plugin has polled for this long is `plugin_quiet`.
-const QUIET_SECS: i64 = 5 * 60;
-/// … and for this long, `plugin_silent`.
-const SILENT_SECS: i64 = 24 * 3600;
-/// A version not confirmed this long after it was set is `plugin_behind`.
-/// Measured (live doc §1.1): confirmation takes two polls, about 60 s at the
-/// rendered 30 s poll.
-const BEHIND_SECS: i64 = 90;
-
 /// The permissions a source may need.
 const POLICY_READ: &str = "policy:read";
 const TAG_READ: &str = "tag:read";
@@ -607,14 +602,6 @@ struct DriftProfile {
     binds_external: bool,
 }
 
-#[derive(sqlx::FromRow)]
-struct LedgerRow {
-    service_id: i64,
-    kind: String,
-    last_known_version: Option<i64>,
-    at: DateTime<Utc>,
-}
-
 /// One (profile, bound engine) pair: the profile's id, name, policy and tag
 /// versions and `updated_at`; the engine's id, name, origin and status.
 type BoundEngineRow = (
@@ -666,13 +653,8 @@ const EXTERNAL_NOTE: &str =
 async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, SourceError> {
     let profiles = drift_profiles(c).await?;
     let ids: Vec<i64> = profiles.keys().copied().collect();
-    let ledger: Vec<LedgerRow> = sqlx::query_as(
-        "SELECT service_id, kind, last_known_version, at FROM policy.ranger_plugin_downloads \
-          WHERE service_id = ANY($1) ORDER BY service_id, kind, plugin_id",
-    )
-    .bind(&ids)
-    .fetch_all(&mut *c)
-    .await?;
+    let ledger = ledger_rows_via(c, &ids).await?;
+    let expects_tags = expects_tags_via(c, &ids).await?;
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *c)
         .await?;
@@ -680,46 +662,49 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
     let mut sentences = Vec::new();
     for (sid, p) in &profiles {
         let rows: Vec<&LedgerRow> = ledger.iter().filter(|r| r.service_id == *sid).collect();
-        // Liveness: the NEWEST `policies` poll. Every plugin polls policies;
-        // a rescheduled pod's old id keeps its last `at`, and must not count.
-        let newest = rows
-            .iter()
-            .filter(|r| r.kind == "policies")
-            .map(|r| r.at)
-            .max();
-        let age = newest.map(|at| (now - at).num_seconds());
-        let silent = age.is_none_or(|a| a >= SILENT_SECS);
-        let quiet = !silent && age.is_some_and(|a| a >= QUIET_SECS);
-        // Review M6: the tags kind on its own. A plugin whose policies are
-        // polled but whose tag poll stopped (5 min to 24 h) has a quiet tag
-        // poll; that is what it is told, and its tag version is not judged.
-        let tags_age = rows
-            .iter()
-            .filter(|r| r.kind == "tags")
-            .map(|r| (now - r.at).num_seconds())
-            .min();
-        let tags_quiet =
-            !silent && !quiet && tags_age.is_some_and(|a| (QUIET_SECS..SILENT_SECS).contains(&a));
+        let versions = ProfileVersions {
+            policy_version: p.policy_version,
+            tag_version: p.tag_version,
+            updated_at: p.updated_at,
+            expects_tags: expects_tags.contains(sid),
+        };
+        let j = judge_plugins(&versions, &rows, now);
         let (engine_id, engine) = p.running[0].clone();
         let sentence = match which {
-            Drift::Silent if silent => Some(format!(
+            Drift::Silent if j.liveness == Liveness::Silent => Some(format!(
                 "No plugin has polled profile {} in 24 hours, while engine {engine} is recorded \
                  as running. egret cannot tell a stopped engine from one that cannot reach egret \
                  or does not poll.",
                 p.name
             )),
-            Drift::Quiet if quiet => Some(format!(
-                "No plugin has polled profile {} for {} minutes.",
-                p.name,
-                age.unwrap_or(0) / 60
-            )),
-            Drift::Quiet if tags_quiet => Some(format!(
-                "No plugin has polled the tags of profile {} for {} minutes, while its policies \
-                 are polled.",
-                p.name,
-                tags_age.unwrap_or(0) / 60
-            )),
-            Drift::Behind if !silent && !quiet => behind(p, &rows, now),
+            Drift::Quiet => match (j.liveness, j.tags) {
+                (Liveness::Quiet { age_secs }, _) => Some(format!(
+                    "No plugin has polled profile {} for {} minutes.",
+                    p.name,
+                    age_secs / 60
+                )),
+                // Review M6: the tags kind on its own, polled 5 min to 24 h
+                // ago while the policies are polled.
+                (Liveness::Live, KindState::Quiet { age_secs }) => Some(format!(
+                    "No plugin has polled the tags of profile {} for {} minutes, while its \
+                     policies are polled.",
+                    p.name,
+                    age_secs / 60
+                )),
+                _ => None,
+            },
+            // The first kind behind, policies before tags.
+            Drift::Behind => [(j.policies, "policy"), (j.tags, "tag")]
+                .into_iter()
+                .find_map(|(k, what)| match k {
+                    KindState::Behind { version } => Some(format!(
+                        "No plugin of profile {} has reported holding {what} version {version}, \
+                         set at {}.",
+                        p.name,
+                        p.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    )),
+                    _ => None,
+                }),
             _ => None,
         };
         if let Some(mut s) = sentence {
@@ -768,52 +753,6 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
         Some(Ref::Profiles)
     };
     Ok(finding(kind, severity, n, sentence, sample, r#ref))
-}
-
-/// `plugin_behind` for one live profile, or `None`. For each kind the
-/// profile's plugins downloaded within 24 h (StarRocks downloads no tags, so
-/// its tags kind is never judged), with counter V and `updated_at` U, once U
-/// is more than [`BEHIND_SECS`] old: behind when no plugin polled at or after
-/// U, or one that did (within [`QUIET_SECS`], so a dead pod's id is not
-/// counted) reports a version below V. Rows polled before U, and reports of
-/// `-1` ("not yet reported"), neither confirm nor refute.
-fn behind(p: &DriftProfile, rows: &[&LedgerRow], now: DateTime<Utc>) -> Option<String> {
-    if (now - p.updated_at).num_seconds() < BEHIND_SECS {
-        return None;
-    }
-    for (kind, v, what) in [
-        ("policies", p.policy_version, "policy"),
-        ("tags", p.tag_version, "tag"),
-    ] {
-        let of_kind: Vec<&&LedgerRow> = rows.iter().filter(|r| r.kind == kind).collect();
-        // A kind nobody polled within 5 min is not judged here: within 24 h it
-        // is reported as quiet (review M6), and a kind with no download at
-        // all (StarRocks never downloads tags) is never judged.
-        if !of_kind
-            .iter()
-            .any(|r| (now - r.at).num_seconds() < QUIET_SECS)
-        {
-            continue;
-        }
-        let since: Vec<&&&LedgerRow> = of_kind
-            .iter()
-            .filter(|r| r.at >= p.updated_at && (now - r.at).num_seconds() < QUIET_SECS)
-            .collect();
-        let reported: Vec<i64> = since
-            .iter()
-            .filter_map(|r| r.last_known_version.filter(|v| *v >= 0))
-            .collect();
-        let lagging = reported.iter().any(|held| *held < v);
-        let nobody_since = since.is_empty();
-        if lagging || nobody_since {
-            return Some(format!(
-                "No plugin of profile {} has reported holding {what} version {v}, set at {}.",
-                p.name,
-                p.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
-            ));
-        }
-    }
-    None
 }
 
 async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {

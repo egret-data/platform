@@ -59,6 +59,7 @@ import {
   ENGINE_TYPE_LABEL,
   ExternalChip,
   PLUGIN_VERSION_RE,
+  OpenInEnginePolicyLink,
   PolicyProfileLink,
   ServerRefusal,
   UnmodelledVersionNote,
@@ -128,6 +129,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
         <div className="flex shrink-0 items-center gap-2">
           <Badge variant="secondary">{engine.type}</Badge>
           <ExternalChip />
+          <OpenInEnginePolicyLink engineId={engine.id} />
           <ExternalEngineActions engine={engine} />
         </div>
       </div>

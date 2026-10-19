@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { PolicyCounts } from './policyCounts';
 import type { ProfileEngine } from './profileEngine';
 
 /**
@@ -45,4 +46,10 @@ export interface ProfileDto {
      * at, and the first thing they learn is the 409 on save.
      */
   origin: string;
+  /**
+     * Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
+     * Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
+     * (hand-written). `policy_count` stays the profile's own total.
+     */
+  policy_counts: PolicyCounts;
 }

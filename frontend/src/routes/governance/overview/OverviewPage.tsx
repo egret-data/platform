@@ -6,9 +6,20 @@ import { AttentionSection } from "@/routes/governance/overview/AttentionSection"
 import { CountsStrip } from "@/routes/governance/overview/CountsStrip";
 import { RecentChanges } from "@/routes/governance/overview/RecentChanges";
 
-function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+function Section({
+  id,
+  anchor,
+  title,
+  children,
+}: {
+  id: string;
+  /** The section's own id, for a link from elsewhere (`/governance#recent-changes`). */
+  anchor?: string;
+  title: string;
+  children: ReactNode;
+}) {
   return (
-    <section aria-labelledby={id} className="mt-6 flex flex-col gap-3">
+    <section id={anchor} aria-labelledby={id} className="mt-6 flex flex-col gap-3">
       <h2 id={id} className="text-base font-semibold">
         {title}
       </h2>
@@ -49,7 +60,7 @@ export default function OverviewPage() {
           canReadTags={canReadTags}
         />
       </Section>
-      <Section id="overview-changes" title="Recent changes">
+      <Section id="overview-changes" anchor="recent-changes" title="Recent changes">
         <RecentChanges />
       </Section>
     </ListPageShell>

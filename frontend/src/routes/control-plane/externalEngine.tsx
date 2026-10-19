@@ -9,7 +9,7 @@
  * configuration to install. Nothing here talks to a cluster.
  */
 import { Link } from "react-router-dom";
-import { TriangleAlert } from "lucide-react";
+import { ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { ApiError } from "@/api/client";
 import {
@@ -20,6 +20,8 @@ import type { ModelledRangerPluginDto } from "@/api/generated/model";
 import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
 
 /** The sentence for an engine whose (type, version) pair egret does not model. */
 export const UNMODELLED_SENTENCE =
@@ -189,10 +191,28 @@ export function UnmodelledVersionNote({ testId = "unmodelled-note" }: { testId?:
   return <WarningCallout testId={testId}>{UNMODELLED_SENTENCE}</WarningCallout>;
 }
 
+/** A profile's name, linked to its Engine & policy page (which redirects to its engine when bound; DG #4a, EP15). */
 export function PolicyProfileLink({ name }: { name: string }) {
   return (
-    <Link to={`/governance/policies/${encodeURIComponent(name)}`} className="text-primary hover:underline">
+    <Link to={profileUrl(name)} className="text-primary hover:underline">
       {name}
     </Link>
+  );
+}
+
+/**
+ * The engine's page in Governance → Engine & policy (DG #4a, EP12): the two
+ * engine pages link to each other. Shown only to a `policy:read` holder, who
+ * can open it.
+ */
+export function OpenInEnginePolicyLink({ engineId }: { engineId: string }) {
+  if (!useCan("policy:read")) return null;
+  return (
+    <Button asChild variant="outline" size="sm">
+      <Link to={engineUrl(engineId)}>
+        <ShieldCheck aria-hidden />
+        Open in Engine & policy
+      </Link>
+    </Button>
   );
 }

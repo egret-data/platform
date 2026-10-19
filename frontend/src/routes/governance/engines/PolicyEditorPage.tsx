@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, Trash2, TriangleAlert, X } from "lucide-react";
+import { getPolicyAdminListPoliciesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 
 import {
   type AccessItem,
@@ -40,7 +41,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import { refusalMessage, usePolicyPermissions } from "./policyWrites";
+import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -54,6 +55,12 @@ import { grantsSelect, levelGaps, levelHasValue, levelsToFill } from "@/componen
 import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "@/components/form/ConfigSection";
 import { FieldLabel } from "@/routes/control-plane/config/FieldLabel";
+import {
+  editorUrl,
+  engineUrl,
+  profileUrl as profileUrlOf,
+  type EditorSubject,
+} from "@/routes/governance/engines/engineUrl";
 
 type PolicyKind = "access" | "masking" | "rowfilter";
 
@@ -280,18 +287,18 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
 }
 
 /**
- * Governance → Policies → full-page policy editor. Replaces the three modal dialogs
- * (`AccessPolicyDialog`/`MaskingPolicyDialog`/`RowFilterPolicyDialog`) with a
- * single Engine-style page handling all three policy kinds — create + edit.
+ * Engine & policy → Advanced → full-page policy editor (spec §6.6, EP2): one
+ * page for the three policy kinds, create and edit. It edits a policy of
+ * `service`, the profile of the page it hangs under (`subject`: an engine's
+ * page or an unbound profile's), and goes back to that page's Advanced tab.
  *
- * Route params: `service`, `kind` ("access"|"masking"|"rowfilter"), and an
- * optional `id` (present = editing an existing policy).
+ * Route params: `kind` ("access"|"masking"|"rowfilter", Q2) and an optional
+ * `policyId` (present = editing an existing policy).
  */
-export default function PolicyEditorPage() {
-  const params = useParams<{ service: string; kind: string; id?: string }>();
-  const service = params.service ?? "";
+export default function PolicyEditorPage({ service, subject }: { service: string; subject: EditorSubject }) {
+  const params = useParams<{ kind: string; policyId?: string }>();
   const kind = (params.kind as PolicyKind) ?? "access";
-  const id = params.id;
+  const id = params.policyId;
   const [sp] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -385,7 +392,7 @@ export default function PolicyEditorPage() {
     ? leafDef.accessTypeRestrictions
     : (def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES);
 
-  const profileUrl = `/governance/policies/${encodeURIComponent(service)}`;
+  const profileUrl = "engineId" in subject ? engineUrl(subject.engineId, "advanced") : profileUrlOf(subject.profile, "advanced");
 
   // In Tag mode the wire `kind` becomes "tag-<kind>" and a `tag` field
   // carries the selected tag name; `service` stays the trino profile (the BE
@@ -419,10 +426,17 @@ export default function PolicyEditorPage() {
   const [saved, setSaved] = useState<CreatedPolicyId | null>(null);
   const [confirmWiden, setConfirmWiden] = useState(false);
 
+  // The Policies and Advanced tabs read the generated list key; the legacy key
+  // is kept for any other reader of `api/policies`.
+  const invalidatePolicyLists = () => {
+    void queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    void queryClient.invalidateQueries({ queryKey: getPolicyAdminListPoliciesQueryKey() });
+  };
+
   const save = useMutation<CreatedPolicyId, ApiError>({
     mutationFn: () => (id ? updatePolicy(Number(id), buildPayload()) : createPolicy(buildPayload())),
     onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+      invalidatePolicyLists();
       if (res?.filledLevels?.length || res?.warnings?.length) {
         setSaved(res);
         return;
@@ -434,7 +448,7 @@ export default function PolicyEditorPage() {
   const del = useMutation<void, ApiError>({
     mutationFn: () => deletePolicy(Number(id)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+      invalidatePolicyLists();
       navigate(profileUrl);
     },
   });
@@ -615,6 +629,7 @@ export default function PolicyEditorPage() {
         <SavedResult
           result={saved}
           service={service}
+          subject={subject}
           verb={id ? "updated" : "created"}
           profileUrl={profileUrl}
         />
@@ -1121,11 +1136,13 @@ const WARNING_KIND_EDITOR: Record<string, string> = {
 function SavedResult({
   result,
   service,
+  subject,
   verb,
   profileUrl,
 }: {
   result: CreatedPolicyId;
   service: string;
+  subject: EditorSubject;
   verb: "created" | "updated";
   profileUrl: string;
 }) {
@@ -1171,9 +1188,7 @@ function SavedResult({
                     {w.policyId != null ? (
                       <Link
                         className="font-medium text-primary hover:underline"
-                        to={`/governance/policies/${encodeURIComponent(service)}/${
-                          WARNING_KIND_EDITOR[w.policyKind] ?? "access"
-                        }/${w.policyId}`}
+                        to={editorUrl(subject, WARNING_KIND_EDITOR[w.policyKind] ?? "access", w.policyId)}
                       >
                         {w.policy}
                       </Link>

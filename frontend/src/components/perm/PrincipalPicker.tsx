@@ -103,6 +103,11 @@ export interface PrincipalPickerProps {
    * disabled or validated after the fact.
    */
   exempt?: boolean;
+  /**
+   * Edits the Include list only (an engine grant's principals, spec EP21):
+   * no Exclude list is rendered, and `user`/`group`/`role` stay offered.
+   */
+  includeOnly?: boolean;
   disabled?: boolean;
 }
 
@@ -115,6 +120,7 @@ export function PrincipalPicker({
   value,
   onChange,
   exempt = false,
+  includeOnly = false,
   disabled = false,
 }: PrincipalPickerProps) {
   const kinds: OfferableKind[] = exempt ? ["user", "group"] : ["user", "group", "role"];
@@ -128,7 +134,7 @@ export function PrincipalPicker({
         kinds={kinds}
         disabled={disabled}
       />
-      {!exempt && (
+      {!exempt && !includeOnly && (
         <PrincipalListEditor
           label="Exclude"
           principals={value.exclude}

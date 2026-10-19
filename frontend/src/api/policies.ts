@@ -53,7 +53,7 @@ import type {
   ProfileDto,
   ProfileEngine,
 } from "./generated/model";
-import { apiFetch, ApiError } from "./client";
+import { ApiError } from "./client";
 
 // ── Policies (Ranger-backed / control-plane) ─────────────────────────────────
 
@@ -76,10 +76,9 @@ export interface PolicySummary {
 
 // Re-export generated DTOs under the app's existing names.
 export type { CreatedPolicyId, CreatedProfile, ProfileEngine };
-// The backend also returns `tag_service` (the profile's `<name>_tag` policy
-// service, when it exists); the field ships in the JSON but the generated
-// ProfileDto doesn't declare it yet, so widen it here.
-export type Profile = ProfileDto & { tag_service?: string | null };
+// The generated ProfileDto declares `tag_service` (and, since DG #4a Q1,
+// `policy_counts` and each engine's `origin` and `type`).
+export type Profile = ProfileDto;
 
 export async function listProfiles(): Promise<Profile[]> {
   return (await policyAdminListProfiles()).data as Profile[];
@@ -92,18 +91,6 @@ export async function listPolicies(service: string, type?: string): Promise<Poli
 /** Create a new Ranger service (policy profile) — the manual analogue of Trino's auto-bind. */
 export async function createProfile(name: string, type: "trino" | "starrocks"): Promise<CreatedProfile> {
   return (await policyAdminCreateProfile({ name, type })).data as CreatedProfile;
-}
-
-/**
- * Delete a policy profile (Ranger service) and, via `ON DELETE CASCADE`, its
- * policies. The backend refuses (409) while an engine still enforces the
- * profile. Uses `apiFetch` directly — the orval client isn't regenerated for
- * this route yet.
- */
-export async function deleteProfile(name: string): Promise<void> {
-  await apiFetch(`/control-plane/policies/services/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-  });
 }
 
 // ── Policy editor (Task 4) ────────────────────────────────────────────────
@@ -252,24 +239,8 @@ export async function setPolicyEnabled(id: number, enabled: boolean): Promise<vo
   await policyAdminSetPolicyEnabled(id, { enabled });
 }
 
-// ── D10: the compiler's namespace, and the 409 it produces ─────────────────
-//
-// The spec exposes no flag distinguishing a compiler-owned policy from any
-// other, so — like D6's five hardcoded facts in the pickers — the FE mirrors
-// the backend's own rule directly rather than guessing at it.
-
-/**
- * Mirrors `egret-policy::store::{COMPILER_GRANT_PREFIX,COMPILER_RULE_PREFIX}`
- * / `is_compiler_owned_policy_name`: every ACCESS policy the SP4a permission
- * model compiles is named `perm-grant-<uuid>`, every MASKING/ROW-FILTER
- * policy `perm-rule-<uuid>`. The backend's guard fires on the name alone
- * (regardless of profile origin) for the reserved-name check, and on the
- * name AND the profile's `origin` for the edit/delete refusal — see
- * `compilerOwnedConflict` and the `origin` check callers pair this with.
- */
-export function isCompilerOwnedPolicyName(name: string): boolean {
-  return name.startsWith("perm-grant-") || name.startsWith("perm-rule-");
-}
+// ── D10: the 409 a compiler-owned policy produces ──────────────────────────
+// (Who owns a row is read from `PolicySummary.managed_by`, spec #4a premise 1.)
 
 /**
  * A write refused because the SP4a permission-model compiler owns the

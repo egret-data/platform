@@ -109,13 +109,6 @@ const GOVERNANCE_GROUPS: NavGroup[] = [
     heading: "People & groups",
     items: [{ label: "People & groups", icon: UsersRound, perm: "policy:read", to: "people" }],
   },
-  // DG redesign #2 (spec P8): Data permissions, Mask & filter rules and
-  // Explain access are gone; People & groups and the grant and rule pages
-  // replaced them, and their URLs redirect (`App.tsx`).
-  {
-    heading: "Policies",
-    items: [{ label: "Policies", icon: ShieldCheck, perm: "policy:read", to: "policies" }],
-  },
   {
     heading: "Classification",
     items: [{ label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" }],
@@ -125,6 +118,13 @@ const GOVERNANCE_GROUPS: NavGroup[] = [
     // Platform-wide (cross-workspace), so it lives here rather than inside a single
     // workspace. Admin-only until the real feature + its permission land.
     items: [{ label: "Data Lineage", icon: Share2, to: "data-lineage" }],
+  },
+  // DG redesign #4a (spec §2, EP3): Engine & policy, the last group, replaces
+  // "Policies"; its old URLs redirect (`App.tsx`). Gated `policy:read`, as its
+  // route is.
+  {
+    heading: "Engine & policy",
+    items: [{ label: "Engine & policy", icon: ShieldCheck, perm: "policy:read", to: "engines" }],
   },
 ];
 

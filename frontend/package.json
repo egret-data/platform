@@ -15,6 +15,7 @@
     "test:bundle:governance-data": "node scripts/assert-governance-data-lazy.mjs",
     "test:bundle:governance-people": "node scripts/assert-governance-people-lazy.mjs",
     "test:bundle:governance-overview": "node scripts/assert-governance-overview-lazy.mjs",
+    "test:bundle:governance-engines": "node scripts/assert-governance-engines-lazy.mjs",
     "gen:api": "orval && node scripts/encode-path-params.mjs && node scripts/write-api-digest.mjs",
     "lint": "eslint . && node scripts/lint-legacy.mjs",
     "lint:legacy": "node scripts/lint-legacy.mjs",

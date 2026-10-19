@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ServiceDefResource } from "@/api/policies";
-import { defaultResourcesFromDef } from "../PolicyEditorPage";
+import { defaultResourcesFromDef } from "@/routes/governance/engines/PolicyEditorPage";
 
 // Shapes emitted by PolicyEditorPage's emptyLevel()/wildcardLevel() helpers.
 const EMPTY = { values: [], isExcludes: false, isRecursive: false };

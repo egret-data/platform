@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApiError } from "@/api/client";
 
 const navigate = vi.fn();
-let routeParams: Record<string, string | undefined> = { service: "trino", kind: "access" };
+let routeParams: Record<string, string | undefined> = { kind: "access" };
 
 vi.mock("react-router-dom", async (orig) => ({
   ...(await orig<typeof import("react-router-dom")>()),
@@ -69,7 +69,8 @@ vi.mock("@/api/tags", () => ({
   }),
 }));
 
-import PolicyEditorPage from "../PolicyEditorPage";
+import PolicyEditorPage from "@/routes/governance/engines/PolicyEditorPage";
+import { getPolicyAdminListPoliciesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 
@@ -110,11 +111,11 @@ describe("PolicyEditorPage", () => {
     updatePolicy.mockClear();
     deletePolicy.mockClear();
     getPolicy.mockClear();
-    routeParams = { service: "trino", kind: "access" };
+    routeParams = { kind: "access" };
   });
 
   it("creates an access policy from the form (new, no id)", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
 
     // The four ResourceLevelEditors share the same placeholder; catalog is first in DOM order.
@@ -154,12 +155,12 @@ describe("PolicyEditorPage", () => {
     expect(updatePolicy).not.toHaveBeenCalled();
 
     await waitFor(() =>
-      expect(navigate).toHaveBeenCalledWith("/governance/policies/trino"),
+      expect(navigate).toHaveBeenCalledWith("/governance/engines/profiles/trino?tab=advanced"),
     );
   });
 
   it("hides the Deny accordion when 'Deny all else' is enabled", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
 
     // Deny-all-else and the Allow/Deny accordions live under the
@@ -171,7 +172,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("adds an additional resource block via 'Add resource'", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
 
     // Resource is the default section; the primary block starts with the full
@@ -190,7 +191,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("updates an existing policy when an id param is present", async () => {
-    routeParams = { service: "trino", kind: "access", id: "42" };
+    routeParams = { kind: "access", policyId: "42" };
     getPolicy.mockResolvedValueOnce({
       name: "existing",
       isEnabled: true,
@@ -199,7 +200,7 @@ describe("PolicyEditorPage", () => {
       denyPolicyItems: [],
     });
 
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("existing");
 
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
@@ -207,8 +208,40 @@ describe("PolicyEditorPage", () => {
     expect(createPolicy).not.toHaveBeenCalled();
   });
 
+  // Live check L5f: the Advanced and Policies tabs read the orval list key, so a
+  // save or delete that invalidates only the legacy key leaves them stale.
+  it("a save and a delete refresh the profile's policy lists that the tabs read", async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    routeParams = { kind: "access", policyId: "42" };
+    getPolicy.mockResolvedValue({
+      name: "existing",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
+    await screen.findByDisplayValue("existing");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: getPolicyAdminListPoliciesQueryKey() });
+
+    invalidate.mockClear();
+    navigate.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    fireEvent.change(await screen.findByPlaceholderText("delete"), { target: { value: "delete" } });
+    // The page behind the confirmation is aria-hidden, so the only Delete button left is the dialog's.
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deletePolicy).toHaveBeenCalled());
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: getPolicyAdminListPoliciesQueryKey() }));
+    invalidate.mockRestore();
+    getPolicy.mockReset();
+    getPolicy.mockImplementation(() => Promise.resolve({}));
+  });
+
   it("renders the 409 compiler-owned explanation, not a bare error (D10)", async () => {
-    routeParams = { service: "trino", kind: "access", id: "42" };
+    routeParams = { kind: "access", policyId: "42" };
     getPolicy.mockResolvedValueOnce({
       name: "perm-grant-abc123",
       isEnabled: true,
@@ -223,7 +256,7 @@ describe("PolicyEditorPage", () => {
       ),
     );
 
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("perm-grant-abc123");
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
@@ -234,7 +267,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("renders a plain, non-conflict save error unchanged (not mistaken for a 409)", async () => {
-    routeParams = { service: "trino", kind: "access", id: "42" };
+    routeParams = { kind: "access", policyId: "42" };
     getPolicy.mockResolvedValueOnce({
       name: "existing",
       isEnabled: true,
@@ -244,7 +277,7 @@ describe("PolicyEditorPage", () => {
     });
     updatePolicy.mockRejectedValueOnce(new ApiError(500, "internal error"));
 
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("existing");
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
@@ -253,8 +286,8 @@ describe("PolicyEditorPage", () => {
   });
 
   it("renders a masking editor with mask-type items for kind=masking", async () => {
-    routeParams = { service: "trino", kind: "masking" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "masking" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
     // Kind-specific rules live under the "Masking" left-nav section (a plain
     // button, unmounted by default — Resource is the default section).
@@ -267,8 +300,8 @@ describe("PolicyEditorPage", () => {
     // name-only, so without enriching it from the top-level hierarchy the
     // ResourceSelector would render only the catalog level. Enriched, it
     // cascades to catalog/schema/table/column — four resource-value inputs.
-    routeParams = { service: "trino", kind: "masking" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "masking" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
     await waitFor(() =>
       expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4),
@@ -276,8 +309,8 @@ describe("PolicyEditorPage", () => {
   });
 
   it("renders a row-filter editor with a filter-expr input for kind=rowfilter", async () => {
-    routeParams = { service: "trino", kind: "rowfilter" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "rowfilter" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
     // Kind-specific rules live under the "Row filter" left-nav section (a
     // plain button, unmounted by default).
@@ -286,7 +319,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("creates an access policy whose resource type is trinouser, restricting Permissions to 'impersonate'", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), {
       target: { value: "allow-impersonate-bob" },
     });
@@ -328,7 +361,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("renders the trinouser resource (not empty catalog inputs) when editing an existing trinouser-based policy", async () => {
-    routeParams = { service: "trino", kind: "access", id: "7" };
+    routeParams = { kind: "access", policyId: "7" };
     getPolicy.mockResolvedValueOnce({
       name: "existing-impersonation",
       isEnabled: true,
@@ -337,7 +370,7 @@ describe("PolicyEditorPage", () => {
       denyPolicyItems: [],
     });
 
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("existing-impersonation");
 
     // Only one resource-value input renders (the trinouser leaf) — not the
@@ -348,7 +381,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("renders the Override switch (unchecked by default) in the Details section", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
     // Override lives under the "Details" left-nav section (a plain button,
     // unmounted by default — Resource is the default section).
@@ -359,7 +392,7 @@ describe("PolicyEditorPage", () => {
   });
 
   it("toggling to Tag mode shows the tag select and hides the resource picker", async () => {
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
 
     // Resource mode (default) renders the catalog/schema/table/column chain.
@@ -372,8 +405,8 @@ describe("PolicyEditorPage", () => {
   });
 
   it("submits a tag + masking policy with kind:tag-masking, tag, service, and mask items", async () => {
-    routeParams = { service: "trino", kind: "masking" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "masking" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), {
       target: { value: "mask-pii" },
     });
@@ -404,8 +437,8 @@ describe("PolicyEditorPage", () => {
   });
 
   it("submits kind:masking with resources in Resource mode (no regression)", async () => {
-    routeParams = { service: "trino", kind: "masking" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "masking" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), {
       target: { value: "mask-catalog" },
     });
@@ -433,7 +466,7 @@ describe("PolicyEditorPage", () => {
 
 describe("PolicyEditorPage — a reader can read it but not save it (review I-1)", () => {
   beforeEach(() => {
-    routeParams = { service: "trino", kind: "access" };
+    routeParams = { kind: "access" };
   });
 
   /**
@@ -445,7 +478,7 @@ describe("PolicyEditorPage — a reader can read it but not save it (review I-1)
    * itself.
    */
   it("disables Save and says which permission is missing", async () => {
-    wrap(<PolicyEditorPage />, READER);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />, READER);
     await screen.findByLabelText("Policy name");
 
     const save = screen.getByRole("button", { name: "Save" });
@@ -456,8 +489,8 @@ describe("PolicyEditorPage — a reader can read it but not save it (review I-1)
 
   /** Editing an EXISTING policy is a different route and a different key. */
   it("names policy:update, not policy:create, when editing an existing policy", async () => {
-    routeParams = { service: "trino", kind: "access", id: "42" };
-    wrap(<PolicyEditorPage />, READER);
+    routeParams = { kind: "access", policyId: "42" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />, READER);
     await screen.findByLabelText("Policy name");
 
     expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute(
@@ -472,8 +505,8 @@ describe("PolicyEditorPage — a reader can read it but not save it (review I-1)
    *  offered, and no read-only notice — otherwise a fix that disabled Save for
    *  everybody would pass the two tests above. */
   it("still lets a platform_admin save and delete", async () => {
-    routeParams = { service: "trino", kind: "access", id: "42" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "access", policyId: "42" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByLabelText("Policy name");
 
     expect(screen.queryByText(/read-only for this account/)).not.toBeInTheDocument();
@@ -502,7 +535,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     createPolicy.mockClear();
     updatePolicy.mockClear();
     getPolicy.mockClear();
-    routeParams = { service: "trino", kind: "access", id: "42" };
+    routeParams = { kind: "access", policyId: "42" };
   });
 
   /** An unrelated edit: rename the policy. */
@@ -521,7 +554,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
         column: { values: [] },
       }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
 
     const dialog = await screen.findByRole("alertdialog");
@@ -537,7 +570,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [" "] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
     expect(await screen.findByRole("alertdialog")).toHaveTextContent("Saving will widen this stored policy");
     expect(updatePolicy).not.toHaveBeenCalled();
@@ -545,7 +578,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
 
   it("a blank root blocks Save with the reason, like an empty one", async () => {
     getPolicy.mockResolvedValueOnce(stored({ catalog: { values: [""] }, schema: { values: ["*"] } }));
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("stored-row");
     const save = screen.getByRole("button", { name: /^save$/i });
     expect(save).toBeDisabled();
@@ -556,7 +589,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
     fireEvent.click(await screen.findByRole("button", { name: "Keep the policy as stored" }));
 
@@ -569,7 +602,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
     fireEvent.click(await screen.findByRole("button", { name: "Widen and save" }));
     await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(42, expect.any(Object)));
@@ -579,15 +612,15 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: ["*"] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
     await waitFor(() => expect(updatePolicy).toHaveBeenCalled());
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("does not ask for a NEW policy, which has no stored grant to widen", async () => {
-    routeParams = { service: "trino", kind: "access" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "access" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
     const catalog = screen.getAllByPlaceholderText("value or * (Enter to add)")[0];
     fireEvent.change(catalog, { target: { value: "iceberg" } });
@@ -600,13 +633,13 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
   it("warns, beside the chain, when a select policy stops above column — and not for insert", async () => {
     const chain = { catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] } };
     getPolicy.mockResolvedValueOnce(stored(chain, SELECT_ITEM));
-    const { unmount } = wrap(<PolicyEditorPage />);
+    const { unmount } = wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("stored-row");
     expect(screen.getByText(STOPS)).toBeInTheDocument();
     unmount();
 
     getPolicy.mockResolvedValueOnce(stored(chain, INSERT_ITEM));
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("stored-row");
     expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
   });
@@ -615,7 +648,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await renameAndSave();
     await waitFor(() => expect(updatePolicy).toHaveBeenCalled());
     const body = updatePolicy.mock.calls[0][1] as { resources: Record<string, unknown> };
@@ -624,8 +657,8 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
   });
 
   it("disables Save for an empty catalog, with the reason on the button and beside the field", async () => {
-    routeParams = { service: "trino", kind: "access" };
-    wrap(<PolicyEditorPage />);
+    routeParams = { kind: "access" };
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
     const save = screen.getByRole("button", { name: /^save$/i });
     expect(save).toBeDisabled();
@@ -637,7 +670,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, table: { values: ["orders"] } }),
     );
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("stored-row");
     const save = screen.getByRole("button", { name: /^save$/i });
     expect(save).toBeDisabled();
@@ -647,7 +680,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
 
   it("names the Enabled switch that the overlap report points to", async () => {
     getPolicy.mockResolvedValueOnce(stored({ catalog: { values: ["iceberg"] } }));
-    wrap(<PolicyEditorPage />);
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
     await screen.findByDisplayValue("stored-row");
     expect(screen.getByRole("switch", { name: "Enabled" })).toBeInTheDocument();
   });
@@ -669,8 +702,8 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     };
 
     async function createWithEmptyColumn() {
-      routeParams = { service: "trino", kind: "access" };
-      wrap(<PolicyEditorPage />);
+      routeParams = { kind: "access" };
+      wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
       fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
       const catalog = screen.getAllByPlaceholderText("value or * (Enter to add)")[0];
       fireEvent.change(catalog, { target: { value: "iceberg" } });
@@ -688,12 +721,12 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
       expect(screen.getByText("This save changed the order of 1 other policy")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "deny-pii" })).toHaveAttribute(
         "href",
-        "/governance/policies/trino/access/9",
+        "/governance/engines/profiles/trino/advanced/policies/access/9",
       );
       expect(screen.getByText(/evaluates this broader policy before deny-pii/)).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Back to trino" })).toHaveAttribute(
         "href",
-        "/governance/policies/trino",
+        "/governance/engines/profiles/trino?tab=advanced",
       );
       expect(navigate).not.toHaveBeenCalled();
     });
@@ -701,7 +734,7 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     it("a plain { id } response navigates away as before", async () => {
       createPolicy.mockResolvedValueOnce({ id: 8 });
       await createWithEmptyColumn();
-      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/governance/policies/trino"));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/governance/engines/profiles/trino?tab=advanced"));
       expect(screen.queryByText(/Policy created/)).not.toBeInTheDocument();
     });
   });

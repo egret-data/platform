@@ -19,8 +19,11 @@ export function PolicyWarningsCallout({
   service,
   serviceId,
   serviceType,
+  editorHref,
 }: {
   service: string;
+  /** Where a warned policy's editor is (`kind` is the editor's: access, masking, rowfilter). */
+  editorHref: (kind: string, id: number) => string;
   /** The profile's engine (`trino` or `starrocks`); words which engine allows `count(*)`. */
   serviceType?: string;
   /** The profile's id; the route is keyed by it. Undefined while the profile loads. */
@@ -112,7 +115,7 @@ export function PolicyWarningsCallout({
                 {typeOf(p.id) ? (
                   <Link
                     className="font-medium text-primary hover:underline"
-                    to={`/governance/policies/${encodeURIComponent(service)}/${typeOf(p.id)}/${p.id}`}
+                    to={editorHref(typeOf(p.id) as string, p.id)}
                   >
                     {p.name}
                   </Link>

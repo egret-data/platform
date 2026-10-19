@@ -13,6 +13,10 @@ pub struct EngineBinding {
     pub id: uuid::Uuid,
     pub name: String,
     pub status: String,
+    /// `provisioned` or `external` (`engine_mgmt.engines.origin`).
+    pub origin: String,
+    /// The engine type: `trino`, `starrocks`, …
+    pub r#type: String,
     /// The `policy.authz_services` id this engine enforces, if bound.
     pub authz_service_id: Option<i64>,
     /// The egret warehouses this engine reads — one per attached egret
