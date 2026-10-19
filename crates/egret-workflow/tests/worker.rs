@@ -11135,7 +11135,7 @@ async fn a_killing_run_whose_task_is_not_a_leaf_is_killed_without_a_cancel(pool:
 }
 
 // --------------------------------------------------------------------------
-// Group C2 Task 1: `workflow.executions.variables` (migration 0195).
+// Group C2 Task 1: `workflow.executions.variables` (migration 0196).
 // --------------------------------------------------------------------------
 
 const VARS_FLOW: &str =

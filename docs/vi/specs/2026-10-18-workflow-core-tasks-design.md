@@ -108,7 +108,9 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 
 **(2026-10-18, final review)** Đoạn trên đã được sửa cho khớp với bản build. Pass là `render_updates`, tách khỏi `render_expressions` vì update LÀM ĐỔI surface mà mọi lần render sau trong settle đọc; kind trong plan là `ExecutionUpdate { op, spec }`; attempt là `CREATED RUNNING SUCCESS`, đúng golden. Và việc hoàn tất run đã chuyển từ `advance()` vào pass (final review I1): khi còn để cho `advance()`, một update đã tính nằm cạnh một update lỗi trong cùng `Parallel` hoặc `Dag` bị `fail_the_rest` đánh fail (`CREATED FAILED`, không attempt) trong khi settle vẫn ghi thay đổi của nó. Giờ thay đổi và `SUCCESS` đi cùng nhau, và chỉ update lỗi bị fail, giống Kestra. Nhánh `ExecutionUpdate` của `flowable::open` được giữ lại với cùng cách hoàn tất, cho caller tự đặt `rendered`.
 
-### 3.2 Variables của execution (migration 0195)
+### 3.2 Variables của execution (migration 0196)
+
+> **Đổi số (2026-10-19):** viết ban đầu là migration 0195; #694 đã merge `0195_perm_engine_grants.sql` trước, nên gói này ship thành `0196_workflow_execution_variables.sql`.
 
 - **Cột:** `ALTER TABLE workflow.executions ADD COLUMN variables jsonb`, kèm CHECK chỉ cho phép NULL hoặc một object JSON. NULL nghĩa là "dùng `variables:` của flow".
 - **Render:** `vars` là `variables` của execution nếu đã có, nếu chưa thì là `variables:` của flow (`worker/render.rs:183`). Đây là quy tắc trong `RunVariables` của Kestra: biến của execution trước, biến của flow làm dự phòng (`core/…/runners/RunVariables.java:541-550`).
@@ -157,7 +159,7 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 - **Test `advance()`:** ba dạng trạng thái ở §1, gồm fail từ `CREATED`, `runIf` bị skip, và hai lần cập nhật trong cùng một round `Parallel`.
 - **Test DB:**
   - Phạm vi của `PurgeLogs`: namespace của mình, một namespace con, một namespace anh em `a.bc` không được với tới, một namespace khác bị từ chối, một workspace khác không bao giờ với tới, và vòng xoá theo lô.
-  - CHECK của migration 0195.
+  - CHECK của migration 0196.
   - Settle ghi `variables` và `labels`.
   - Replay chép `variables`.
 - **Ratchet oracle:** `cargo test -p egret-workflow --test executor`.
@@ -169,7 +171,7 @@ Mỗi task là một `TaskHandler` trong `worker/handlers/` cộng một dòng `
 
 ## 5. Phạm vi
 
-**Trong phạm vi:** sáu task, migration 0195, quy tắc render cho `vars`, và phần sổ sách của oracle.
+**Trong phạm vi:** sáu task, migration 0196, quy tắc render cho `vars`, và phần sổ sách của oracle.
 
 **Ngoài phạm vi:**
 - kho metric (D1);

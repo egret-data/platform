@@ -14,11 +14,11 @@
 - The pure computation (deep merge, dotted unset, the three label forms, every refusal) lives in a new module `executor/update.rs`, tested without a DB.
 - A new worker render pass (`worker/render.rs::render_updates`, run after `render_expressions`) computes the update while the run is `CREATED`, as it does a `Loop`'s `values:`. It updates the in-memory `Surface` so later renders in the same settle see the new `vars`/`labels`, and records the final value in `RenderSide`. `settle` writes it to `workflow.executions` in the same transaction.
 - `advance()` turns a computed run into `CREATED RUNNING SUCCESS` (one attempt `CREATED RUNNING SUCCESS`) in one round. A failed computation is `CREATED FAILED` with **one attempt whose history is `[FAILED]`**, through a new command.
-- Migration 0195 adds `workflow.executions.variables jsonb` (NULL = the flow's `variables:`).
+- Migration 0196 adds `workflow.executions.variables jsonb` (NULL = the flow's `variables:`).
 
 **Tech stack:** Rust (sqlx, minijinja-based renderer in `crate::runners`), Postgres, Python 3 (`handler_surface.py`).
 
-**Branch and worktree:** `feat/workflow-kestra-executor-tasks` in `data-portal/egret-coretasks`, from `origin/main` `a2850644` (#691, C1). Migration 0195 is free on that main (last is `0194_workflow_task_run_working_dir_snapshot.sql`); re-check with `ls migrations | tail -3` after any rebase.
+**Branch and worktree:** `feat/workflow-kestra-executor-tasks` in `data-portal/egret-coretasks`, from `origin/main` `a2850644` (#691, C1). Migration 0195 was free on that main (last was `0194_workflow_task_run_working_dir_snapshot.sql`); renumbered to 0196 on 2026-10-19 after #694 (`0195_perm_engine_grants.sql`) merged first; re-check with `ls migrations | tail -3` after any rebase.
 
 ## Facts measured for this plan (2026-10-18)
 
@@ -79,7 +79,7 @@ Recorded in the spec by Task 6, under "Default decisions".
 
 | File | Responsibility | Task |
 |---|---|---|
-| `migrations/0195_workflow_execution_variables.sql` | the column and its CHECK | 1 |
+| `migrations/0196_workflow_execution_variables.sql` | the column and its CHECK | 1 |
 | `crates/egret-workflow/src/worker/render.rs` | `vars` rule in `Surface::load`; the `render_updates` pass; `Surface` setters; `RenderSide` fields | 1, 4 |
 | `crates/egret-workflow/src/worker/replay.rs` | copy `variables` | 1 |
 | `crates/egret-workflow/src/executor/update.rs` (new) | `UpdateOp`, the three `Spec`s, `TYPE_ID`s, `compute` and its pure helpers | 2 |
@@ -94,21 +94,21 @@ Recorded in the spec by Task 6, under "Default decisions".
 
 ---
 
-### Task 1: migration 0195, the `vars` rule, and replay copies `variables`
+### Task 1: migration 0196, the `vars` rule, and replay copies `variables`
 
 **Files:**
-- Create: `migrations/0195_workflow_execution_variables.sql`
+- Create: `migrations/0196_workflow_execution_variables.sql`
 - Modify: `crates/egret-workflow/src/worker/render.rs:168-190` (`Surface::load`: select `variables`, apply the rule)
 - Modify: `crates/egret-workflow/src/worker/replay.rs` (the replay `INSERT … RETURNING` that binds `labels` at about `:275`: add `variables`)
-- Test: `crates/egret-workflow/tests/migration_0195_variables.rs` (new; copy the shape of `tests/migration_0192_backfills.rs`), and a test in `tests/worker.rs` for the render rule and the replay copy
+- Test: `crates/egret-workflow/tests/migration_0196_variables.rs` (new; copy the shape of `tests/migration_0192_backfills.rs`), and a test in `tests/worker.rs` for the render rule and the replay copy
 
 **Interfaces:**
 - Produces: column `workflow.executions.variables jsonb NULL`, CHECK `variables IS NULL OR jsonb_typeof(variables) = 'object'`. Task 4 writes it; `Surface::load` reads it.
 
-- [ ] **Step 1: write the failing migration test** in `tests/migration_0195_variables.rs`:
+- [ ] **Step 1: write the failing migration test** in `tests/migration_0196_variables.rs`:
 
 ```rust
-//! Migration 0195: `workflow.executions.variables` holds NULL or a JSON object.
+//! Migration 0196: `workflow.executions.variables` holds NULL or a JSON object.
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn variables_takes_null_or_an_object_and_refuses_anything_else(pool: sqlx::PgPool) {
@@ -128,7 +128,7 @@ async fn variables_takes_null_or_an_object_and_refuses_anything_else(pool: sqlx:
 ```
 
   Match the attribute and seeding helper that `tests/migration_0192_backfills.rs` actually uses; the snippet's names are illustrative only where that file differs.
-- [ ] **Step 2: run it, expect FAIL** (column missing): `DATABASE_URL=… cargo test -p egret-workflow --test migration_0195_variables`.
+- [ ] **Step 2: run it, expect FAIL** (column missing): `DATABASE_URL=… cargo test -p egret-workflow --test migration_0196_variables`.
 - [ ] **Step 3: write the migration**:
 
 ```sql
@@ -162,7 +162,7 @@ let vars = match row.get::<Option<Value>, _>("variables") {
 
   In `replay.rs` add `variables` to the column list and bind `row.get::<Option<Value>, _>("variables")` with a comment in the style of the `labels` one ("D3: `Execution.childExecution` copies the variables like everything else"). Make sure the `SELECT` that produces `row` reads `variables`.
 - [ ] **Step 8: run the three tests, expect PASS.** Run the ratchet: unchanged.
-- [ ] **Step 9: commit** `feat(workflow): executions.variables, read before the flow's variables (migration 0195)`.
+- [ ] **Step 9: commit** `feat(workflow): executions.variables, read before the flow's variables (migration 0196)`.
 
 ---
 

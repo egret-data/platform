@@ -1,4 +1,4 @@
-//! Migration 0195: `workflow.executions.variables` holds NULL or a JSON object.
+//! Migration 0196: `workflow.executions.variables` holds NULL or a JSON object.
 //!
 //! DB-gated through `#[sqlx::test]`, which resolves `DATABASE_URL` itself.
 
@@ -27,7 +27,7 @@ async fn variables_takes_null_or_an_object_and_refuses_anything_else(pool: sqlx:
     let execution: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, namespace, flow_key, source, state, history, inputs) \
-         VALUES ($1, 'w', 'm0195', 'id: m0195', 'CREATED', '[\"CREATED\"]'::jsonb, '{}'::jsonb) \
+         VALUES ($1, 'w', 'm0196', 'id: m0196', 'CREATED', '[\"CREATED\"]'::jsonb, '{}'::jsonb) \
          RETURNING id",
     )
     .bind(ws)

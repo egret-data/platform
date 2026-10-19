@@ -106,7 +106,9 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 
 **(2026-10-18, final review)** The text above is corrected to the build. The pass is `render_updates`, separate from `render_expressions` because an update CHANGES the surface every later render of the settle reads; the plan kind is `ExecutionUpdate { op, spec }`; the attempt is `CREATED RUNNING SUCCESS`, the golden's. And the completion moved from `advance()` into the pass (final review I1): when it was left to `advance()`, a computed update beside a failing one in the same `Parallel` or `Dag` was failed by `fail_the_rest` (`CREATED FAILED`, no attempt) while settle still wrote its change. Now the change and the `SUCCESS` land together, and only the failing update fails, as in Kestra. `flowable::open`'s `ExecutionUpdate` arm is kept as the same completion, for a caller that sets `rendered` itself.
 
-### 3.2 Execution variables (migration 0195)
+### 3.2 Execution variables (migration 0196)
+
+> **Renumbered (2026-10-19):** written as migration 0195; #694 merged `0195_perm_engine_grants.sql` first, so this package ships as `0196_workflow_execution_variables.sql`.
 
 - **Column:** `ALTER TABLE workflow.executions ADD COLUMN variables jsonb`, with a CHECK that it is NULL or a JSON object. NULL means "the flow's `variables:`".
 - **Render:** `vars` is the execution's `variables` when set, and the flow's `variables:` otherwise (`worker/render.rs:183`). This is Kestra's `RunVariables` rule: execution variables first, the flow's as fallback (`core/…/runners/RunVariables.java:541-550`).
@@ -155,7 +157,7 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 - **`advance()` tests:** the three state shapes from §1, with failure from `CREATED`, `runIf` skipped, and two updates in one `Parallel` round.
 - **DB tests:**
   - `PurgeLogs` scope: its own namespace, a child, a sibling `a.bc` that must not be reached, another namespace refused, another workspace never reached, and the batch loop.
-  - Migration 0195's CHECK.
+  - Migration 0196's CHECK.
   - Settle writing `variables` and `labels`.
   - Replay copying `variables`.
 - **Oracle ratchet:** `cargo test -p egret-workflow --test executor`.
@@ -167,7 +169,7 @@ Each task is a `TaskHandler` in `worker/handlers/` and a `spec::registry` row, f
 
 ## 5. Scope
 
-**In scope:** the six tasks, migration 0195, the render rule for `vars`, and the oracle bookkeeping.
+**In scope:** the six tasks, migration 0196, the render rule for `vars`, and the oracle bookkeeping.
 
 **Out of scope:**
 - a metric store (D1);

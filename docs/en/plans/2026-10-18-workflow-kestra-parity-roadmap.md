@@ -38,7 +38,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 | # | Package | Scope | Banks | Size |
 |---|---|---|---|---|
-| 0 | **Group C2** (built 2026-10-18, PR pending: 11 of 12 banked, 73 baselined, LIVE 293) | `SetVariables`, `UnsetVariables`, `Labels`; migration 0195 | 11 of up to 12 | M |
+| 0 | **Group C2** (built 2026-10-18, PR pending: 11 of 12 banked, 73 baselined, LIVE 293) | `SetVariables`, `UnsetVariables`, `Labels`; migration 0196 | 11 of up to 12 | M |
 | 1 | **No silent drops** | Turn every parsed-but-ignored key into a named refusal or warning: flow and flowable `finally:`/`afterExecution:` (until #2 runs them), trigger `stopAfter`, `retry.warningOnRetry`, the Subflow keys egret does not model (`revision`, `labels`, `inheritLabels`, `scheduleDate`, `restartBehavior`), the input keys egret does not model. Fix the stale "345" figures in `driver.rs` comments | 0 (correctness) | S |
 | 2 | **End hooks: `finally:` and `afterExecution:`** | Flow-level `finally:` and `afterExecution:`, and `finally:` on every flowable (`AllowFailure` already plans one, so the pattern exists); `Loop errors:` if it falls out cheaply | ~20 upper, 14–15 strict | M |
 | 3 | **Inputs checked at start** | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date bounds, ARRAY items, at manual, API, webhook and flow-trigger start; the `validate inputs` endpoint | a few invalids | M |
@@ -245,7 +245,7 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | execution.Exit | supported (executor-level) | registry.rs:206, executor/exit.rs:92, plan.rs:1335 |
 | execution.Fail | supported | registry.rs:199, handlers/fail.rs |
 | execution.Labels | **in progress (C2)** | docs/en/specs/2026-10-18-workflow-core-tasks-design.md §3.3 |
-| execution.SetVariables | **in progress (C2)**, migration 0195 | core-tasks spec §3.2 |
+| execution.SetVariables | **in progress (C2)**, migration 0196 | core-tasks spec §3.2 |
 | execution.UnsetVariables | **in progress (C2)** | core-tasks spec §3 |
 | execution.PurgeExecutions | **missing** | no row in TASK_TYPES (registry.rs:91-351) |
 | flow.AllowFailure | supported. A block `retry:` is refused | plan.rs:1267, flowable/allow_failure.rs, validate `unsupported_allow_failure_retry` |

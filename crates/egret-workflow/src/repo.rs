@@ -1102,7 +1102,7 @@ pub struct ExecutionDetail {
     /// draw the topology from this string alone.
     pub source: String,
     pub runs: Vec<TaskRunRow>,
-    /// The execution's executor-level `variables` (migration 0195, group C2);
+    /// The execution's executor-level `variables` (migration 0196, group C2);
     /// `None` is "the flow's `variables:`". Read for the replay route, which
     /// copies it (D3); skipped by `Serialize`, so no response carries it.
     #[serde(skip)]
