@@ -2946,6 +2946,8 @@ async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_
         );
     }
 
+    let first_id = run_id_of(&pool, due, "a").await;
+
     // The delay passes in REAL time. `executions.created_at` is untouched.
     tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
 
@@ -2977,6 +2979,13 @@ async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_
         2,
         "the woken run must open a SECOND attempt rather than reuse the first: {}",
         stuck(&pool, due, "a").await
+    );
+    // Debt D12's negative: a retry is another ATTEMPT of the same task run,
+    // as Kestra's is, so its id is kept. Only `RestartLoop` renews one.
+    assert_eq!(
+        run_id_of(&pool, due, "a").await,
+        first_id,
+        "a retried run keeps its task-run id"
     );
     assert_eq!(
         finished,

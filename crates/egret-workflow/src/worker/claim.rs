@@ -4658,8 +4658,10 @@ fn write_render_side(
         }
         // Group C2 Task 4 (spec §3.3): the execution's new variables and
         // labels -- each the WHOLE value after this settle's last update --
-        // and the `taskrun.id` an update rendered with, onto the row `persist`
-        // has just inserted with the column default.
+        // and each reserved `taskrun.id`: the one an update rendered with,
+        // onto the row `persist` has just inserted with the column default,
+        // and (debt D12) the new id of a run `RestartLoop` threw away, onto
+        // its existing row (`renew_restarted_ids`).
         if let Some(vars) = side.variables {
             sqlx::query("UPDATE workflow.executions SET variables = $2 WHERE id = $1")
                 .bind(execution)
@@ -4714,13 +4716,11 @@ fn drive(
             for cmd in &cmds {
                 spawns.extend(Requested::of(cmd));
                 subflows.extend(subflow::Requested::of(cmd));
-                if matches!(cmd, Command::RestartLoop { .. }) {
-                    let alive: Vec<bool> =
-                        state.runs.iter().map(|r| !r.history.is_empty()).collect();
-                    apply(state, cmd);
+                let alive: Option<Vec<bool>> = matches!(cmd, Command::RestartLoop { .. })
+                    .then(|| state.runs.iter().map(|r| !r.history.is_empty()).collect());
+                apply(state, cmd);
+                if let Some(alive) = alive {
                     renew_restarted_ids(surface, state, &alive, side);
-                } else {
-                    apply(state, cmd);
                 }
             }
             marks.observe(&snapshot, state, *seq);
