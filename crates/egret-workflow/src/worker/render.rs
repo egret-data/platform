@@ -684,6 +684,13 @@ impl Surface {
         (id, true)
     }
 
+    /// Forget `run`'s `taskrun.id`, so the next [`Surface::reserve_id`]
+    /// reserves a fresh one. Debt D12 (M7): a run `Command::RestartLoop`
+    /// threw away is a new task run, as Kestra's `TaskRun.of` makes one.
+    pub(super) fn forget_id(&mut self, run: RunIx) {
+        self.ids.remove(&run);
+    }
+
     /// The flow this execution runs, as `load` parsed it.
     ///
     /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
@@ -1422,6 +1429,8 @@ pub(super) struct RenderSide {
     pub(super) labels: Option<Vec<crate::models::Label>>,
     /// Group C2 Task 4: the `taskrun.id` each update run rendered with, for a
     /// run whose row this settle creates (see [`Surface::reserve_id`]).
+    /// Debt D12 (M7): and the new id of each run a `Command::RestartLoop`
+    /// threw away (`claim::renew_restarted_ids`), in the order reserved.
     pub(super) run_ids: Vec<(RunIx, Uuid)>,
 }
 

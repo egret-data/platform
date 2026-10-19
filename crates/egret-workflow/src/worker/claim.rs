@@ -4714,7 +4714,14 @@ fn drive(
             for cmd in &cmds {
                 spawns.extend(Requested::of(cmd));
                 subflows.extend(subflow::Requested::of(cmd));
-                apply(state, cmd);
+                if matches!(cmd, Command::RestartLoop { .. }) {
+                    let alive: Vec<bool> =
+                        state.runs.iter().map(|r| !r.history.is_empty()).collect();
+                    apply(state, cmd);
+                    renew_restarted_ids(surface, state, &alive, side);
+                } else {
+                    apply(state, cmd);
+                }
             }
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -4750,6 +4757,39 @@ fn drive(
         return Ok((spawns, subflows, exit_killed));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// **Debt D12 (M7): a run `Command::RestartLoop` threw away gets a new
+/// task-run id**, as Kestra's `ExecutionService.retryWaitFor` removes every
+/// descendant task run and `LoopUntil.resolveNexts` recreates each through
+/// `TaskRun.of` with `IdUtils.create()`.
+///
+/// `alive[ix]` is whether run `ix` had a history before the command; a run
+/// that had one and has none now is the one thrown away. A run already empty
+/// (an earlier iteration threw it away and this one never reached it) was
+/// renewed then and has not run since.
+///
+/// **Here, at the command, and not in `persist`**, for two measurements of
+/// the same settle: a `SetVariables` body is rebuilt and rendered in the
+/// settle that restarts it (`render_updates`), so the surface must hold the
+/// new id before that render; and its rebuilt history (`CREATED RUNNING
+/// SUCCESS`) is as long as the thrown-away one, so `persist`'s before/after
+/// cannot tell a restart from an ordinary write. The new id rides
+/// `RenderSide::run_ids` onto the row after `persist` writes it; a run
+/// restarted twice in one settle pushes two, and the later write wins.
+fn renew_restarted_ids(
+    surface: &mut Surface,
+    state: &ExecutionState,
+    alive: &[bool],
+    side: &mut render::RenderSide,
+) {
+    for (ix, run) in state.runs.iter().enumerate() {
+        if alive.get(ix).copied().unwrap_or(false) && run.history.is_empty() {
+            surface.forget_id(ix);
+            let (id, _) = surface.reserve_id(ix);
+            side.run_ids.push((ix, id));
+        }
+    }
 }
 
 /// **This round is an `Exit` with `state: KILLED` deciding** (`exit::kill`):

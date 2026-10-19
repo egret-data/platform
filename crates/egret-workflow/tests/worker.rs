@@ -11760,3 +11760,55 @@ async fn an_update_beside_a_waiting_pause_computes_before_the_resume(pool: sqlx:
         Some(serde_json::json!({"v": 1}))
     );
 }
+
+/// **Debt D12 (M7): each `WaitFor` iteration recreates its body runs with new
+/// ids, as Kestra's `retryWaitFor` + `TaskRun.of` do.** `deep_merge` appends
+/// only list items that are new, so `ids` holds one id per iteration only if
+/// the id changes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn each_loop_until_iteration_has_its_own_task_run_id(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let (_db, ws) = seed(&pool).await;
+    let flow = String::from(
+        "id: m7\nnamespace: t\ntasks:\n\
+         \x20 - id: until\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"false\"\n    \
+         checkFrequency:\n      maxIterations: 3\n      interval: PT0S\n    failOnMaxReached: false\n    tasks:\n\
+         \x20     - id: collect\n        type: io.kestra.plugin.core.execution.SetVariables\n        \
+         variables:\n          ids:\n            - \"{{ taskrun.id }}\"\n",
+    );
+    let ex = start_updates(&pool, ws, &flow).await;
+    // Act
+    drain(&pool, &core_handlers()).await;
+    // Assert
+    let vars = execution_variables(&pool, ex)
+        .await
+        .expect("variables written");
+    let ids = vars["ids"].as_array().expect("a list");
+    // **4, not 3**: `maxIterations: 3` runs the body four times -- the first
+    // pass and three restarts -- which is what Kestra's golden for
+    // `valids/waitfor-max-iterations` records (`RUNNING` four times on the
+    // `WaitFor` run, between three `PAUSED`). The loop's own history says how
+    // many iterations egret ran, so the count is read from it, not assumed.
+    let history = run_history(&pool, ex, "until").await;
+    let iterations = history
+        .as_array()
+        .expect("a history")
+        .iter()
+        .filter(|s| *s == "RUNNING")
+        .count();
+    assert_eq!(iterations, 4, "the loop's history: {history}");
+    assert_eq!(
+        ids.len(),
+        iterations,
+        "one distinct id per iteration: {ids:?}"
+    );
+    let distinct: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(distinct.len(), iterations);
+    // And the row holds the last iteration's id, the one its logs and files
+    // were keyed on.
+    assert_eq!(
+        ids.last().and_then(|v| v.as_str()),
+        Some(run_id_of(&pool, ex, "collect").await.to_string().as_str()),
+    );
+}
