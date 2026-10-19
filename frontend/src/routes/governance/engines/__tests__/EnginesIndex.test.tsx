@@ -125,6 +125,27 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(strip).toHaveTextContent("4hand-written policies");
   });
 
+  it("counts a tag service's hand-written policies once when two profiles name it", async () => {
+    // Nothing makes a tag service one profile's own: `config.tagService` is free
+    // JSON, and migration 0182 bumps every profile linking one. lake-tr-b's 2
+    // is its own 1 plus the shared tag service's 1, which lake-tr's 3 holds too.
+    const shared = [
+      ...profiles(),
+      profileDto("lake-tr-b", {
+        policy_count: 1,
+        tag_service: "lake-tr-tag",
+        policy_counts: { compiler: 0, infra: 0, operator: 2 },
+        engines: [bound(E_OTHER, "lake-trino-b", "trino", "provisioned")],
+      }),
+    ];
+    serve(answers({ "/policies/services": ok(shared) }));
+    openArea(INDEX, READER);
+    expect(await screen.findByText("engines", {}, T)).toBeInTheDocument();
+    const strip = screen.getByText("engines").parentElement!.parentElement!;
+    // zeta-sr 1 + orphan 0 + lake-tr-tag 1 + lake-tr 2 + lake-tr-b 1.
+    expect(strip).toHaveTextContent("5hand-written policies");
+  });
+
   it("with engine:read lists every engine, an unbound one as No profile, with plugin state and grant counts", async () => {
     serve(answers());
     openArea(INDEX, WITH_ENGINE_READ);

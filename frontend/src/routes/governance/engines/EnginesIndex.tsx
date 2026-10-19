@@ -81,6 +81,25 @@ export function unboundProfiles(profiles: ProfileDto[]): ProfileDto[] {
 }
 
 /**
+ * Hand-written policies over every profile, each policy once. A profile's
+ * `policy_counts` is its own plus its tag service's (Q1), and two profiles may
+ * name one tag service: `config.tagService` is free JSON with no UNIQUE, and
+ * migration 0182 bumps every profile linking one. Summing the profiles would
+ * count a shared tag service once per linker, so each profile adds only its
+ * own: its count less its tag service's own (exact along any chain; a cycle,
+ * which no writer produces, stops at the profile it started from).
+ */
+export function handWrittenTotal(profiles: ProfileDto[]): number {
+  const byName = new Map(profiles.map((p) => [p.name, p]));
+  const own = (p: ProfileDto, seen: Set<string>): number => {
+    const tag = p.tag_service ? byName.get(p.tag_service) : undefined;
+    if (!tag || seen.has(tag.name)) return p.policy_counts.operator;
+    return p.policy_counts.operator - own(tag, new Set(seen).add(p.name));
+  };
+  return profiles.reduce((n, p) => n + own(p, new Set([p.name])), 0);
+}
+
+/**
  * Governance → Engine & policy (spec §5, EP3): every engine with its profile,
  * plugin state and engine grants, then the profiles no engine downloads.
  * `GET /policies/services` (`policy:read`) carries each bound engine's type and
@@ -124,10 +143,7 @@ export default function EnginesIndex() {
   (engineRead && cpEngines ? cpEngines : []).forEach((e, i) => pluginById.set(e.id, plugins[i]));
 
   const orphans = profiles ? unboundProfiles(profiles) : null;
-  const tagServices = new Set((profiles ?? []).map((p) => p.tag_service).filter(Boolean));
-  const handWritten = profiles
-    ? profiles.filter((p) => !tagServices.has(p.name)).reduce((n, p) => n + p.policy_counts.operator, 0)
-    : null;
+  const handWritten = profiles ? handWrittenTotal(profiles) : null;
 
   const grantCount = (id: string): ReactNode =>
     allGrants ? allGrants.filter((g) => g.engineId === id).length : grantsQ.isError ? "Not loaded" : "…";
