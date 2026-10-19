@@ -15,7 +15,7 @@ use egret_perm_compile::handwritten::{
     HandWrittenProfileRef, HandWrittenTarget, ItemSummary, ListedState, MatchWord, Naming,
     NamingHow, NotDeterminedReason, ObjectHandWritten, ObjectTarget, PrincipalHandWritten,
     PrincipalMark, PrincipalPolicy, PrincipalRef, PrincipalState, SameNameTag, SeededCount,
-    TagHandWritten, TagOn, TagPolicyRow, TagPolicyState, TagRef, ViaTag,
+    TagHandWritten, TagOn, TagPolicyRow, TagPolicyState, TagRef, UnreadablePolicy, ViaTag,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -69,7 +69,8 @@ pub(crate) fn router() -> Router<CpState> {
         TagPolicyState,
         TagPolicyRow,
         HandWrittenProfileRef,
-        SameNameTag
+        SameNameTag,
+        UnreadablePolicy
     ))
 )]
 pub(crate) struct ControlPlaneGovernanceHandWrittenApi;

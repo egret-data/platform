@@ -9,6 +9,7 @@ import type { SameNameTag } from './sameNameTag';
 import type { TagPolicyRow } from './tagPolicyRow';
 import type { TagPolicyState } from './tagPolicyState';
 import type { TagRef } from './tagRef';
+import type { UnreadablePolicy } from './unreadablePolicy';
 
 /**
  * Route D's answer.
@@ -22,4 +23,9 @@ export interface TagHandWritten {
      * them too (CL10).
      */
   sameName: SameNameTag[];
+  /**
+     * Hand-written tag policies whose body could not be read: they may name
+     * this tag, so the list above may be incomplete.
+     */
+  unreadable: UnreadablePolicy[];
 }

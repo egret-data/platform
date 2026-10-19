@@ -179,13 +179,19 @@ async fn unknown_tag_is_not_found() {
 
 /// With no Trino profile naming a tag service, nothing downloads tag
 /// policies. Measured inside a transaction that unlinks every tag service and
-/// is rolled back, so other tests never see it.
+/// is rolled back, so other tests never see it. The services table is locked
+/// against writes first: a profile another test creates meanwhile would
+/// otherwise be seen, with its tag service, after the UPDATE.
 #[tokio::test]
 async fn no_tag_service_anywhere_is_its_own_state() {
     let e = env().await;
     profile(&e).await;
     let id = tag(&e, &unique("NTS")).await;
     let mut tx = e.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE policy.authz_services IN EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::query("UPDATE policy.authz_services SET config_jsonb = config_jsonb - 'tagService'")
         .execute(&mut *tx)
         .await
@@ -194,4 +200,35 @@ async fn no_tag_service_anywhere_is_its_own_state() {
     tx.rollback().await.unwrap();
     assert_eq!(r.state, TagPolicyState::NoTagService);
     assert!(r.policies.is_empty());
+}
+
+/// A tag policy whose body cannot be read may name this tag; the tab must
+/// not read as "none" without saying so (spec §4.2.6: never dropped).
+#[tokio::test]
+async fn an_unreadable_tag_policy_is_listed_not_dropped() {
+    let e = env().await;
+    let (_, _, tsvc, tname, engine) = profile(&e).await;
+    let id = tag(&e, &unique("PII")).await;
+    let bad = unique("bad-");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, $2, $3, 'operator')",
+    )
+    .bind(tsvc)
+    .bind(&bad)
+    .bind(json!({ "name": &bad, "resources": "not a map" }))
+    .execute(&e.pool)
+    .await
+    .unwrap();
+    let r = read(&e, id).await.unwrap();
+    assert!(!names(&r).contains(&bad.as_str()));
+    let u = r
+        .unreadable
+        .iter()
+        .find(|u| u.name == bad)
+        .expect("listed as unreadable");
+    assert_eq!(u.service, tname);
+    assert!(u.in_tag_service);
+    assert!(!u.parse_error.is_empty());
+    assert!(u.engines.iter().any(|x| x.id == engine));
 }

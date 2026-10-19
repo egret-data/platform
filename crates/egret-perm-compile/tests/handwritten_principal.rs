@@ -446,3 +446,47 @@ async fn group_and_role_items_match_regardless_of_case() {
     let out = read(&e, "role", &p.role).await.unwrap();
     assert!(row(&out, &r).is_some(), "listed on the role's own page");
 }
+
+/// A body that cannot be read may name anyone, so the page must not say "no
+/// hand-written policy names this principal" as if it had read it: route B
+/// lists it as unreadable, with route A's parse error (spec §4.2.6: never
+/// dropped). Only `operator` rows: an unreadable seeded row is not ours to list.
+#[tokio::test]
+async fn an_unreadable_body_is_listed_not_dropped() {
+    let e = env().await;
+    let p = people(&e, true).await;
+    let (sid, sname) = profile(&e).await;
+    let bad = unique("bad-");
+    let bad_infra = unique("bad-infra-");
+    for (name, by) in [(&bad, "operator"), (&bad_infra, "infra")] {
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(sid)
+        .bind(name)
+        .bind(json!({ "name": name, "policyType": 1, "resources": "not a map" }))
+        .bind(by)
+        .execute(&e.pool)
+        .await
+        .unwrap();
+    }
+    for (kind, id) in [
+        ("user", p.user.to_string()),
+        ("group", p.group.clone()),
+        ("role", p.role.clone()),
+    ] {
+        let out = read(&e, kind, &id).await.unwrap();
+        let u = out
+            .unreadable
+            .iter()
+            .find(|u| u.name == bad)
+            .unwrap_or_else(|| panic!("{kind} page lists the unreadable policy"));
+        assert_eq!(u.service, sname);
+        assert!(!u.in_tag_service);
+        assert_eq!(u.policy_type, "masking");
+        assert!(!u.parse_error.is_empty());
+        assert!(out.unreadable.iter().all(|u| u.name != bad_infra));
+        assert!(row(&out, &bad).is_none());
+    }
+}

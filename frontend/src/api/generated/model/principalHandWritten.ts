@@ -9,6 +9,7 @@ import type { EveryoneSummary } from './everyoneSummary';
 import type { PrincipalPolicy } from './principalPolicy';
 import type { PrincipalRef } from './principalRef';
 import type { PrincipalState } from './principalState';
+import type { UnreadablePolicy } from './unreadablePolicy';
 
 /**
  * Route B's answer.
@@ -18,4 +19,9 @@ export interface PrincipalHandWritten {
   state: PrincipalState;
   policies: PrincipalPolicy[];
   everyone: EveryoneSummary;
+  /**
+     * Hand-written policies whose body could not be read: they may name this
+     * principal, so the list above may be incomplete.
+     */
+  unreadable: UnreadablePolicy[];
 }

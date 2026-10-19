@@ -501,10 +501,40 @@ async fn a_tag_policy_reaches_through_the_objects_tags() {
         .await
         .unwrap();
     assert_eq!(row(&r, "by-col").unwrap().r#match, MatchWord::Applies);
-    // The schema: both below.
+    // The schema: both below, each naming the table (and column) it sits on,
+    // so the page can say where below rather than "on a parent".
     let r = read(&e, t(f.catalog, Some("s"), None, None)).await.unwrap();
-    assert_eq!(row(&r, "by-table").unwrap().r#match, MatchWord::Part);
-    assert_eq!(row(&r, "by-col").unwrap().r#match, MatchWord::Part);
+    let p = row(&r, "by-table").unwrap();
+    assert_eq!(p.r#match, MatchWord::Part);
+    let v = p.via_tag.as_ref().unwrap();
+    assert_eq!(
+        (
+            v.on,
+            v.schema.as_str(),
+            v.table.as_str(),
+            v.column.as_deref()
+        ),
+        (TagOn::Below, "s", "t", None)
+    );
+    let p = row(&r, "by-col").unwrap();
+    assert_eq!(p.r#match, MatchWord::Part);
+    let v = p.via_tag.as_ref().unwrap();
+    assert_eq!(
+        (
+            v.on,
+            v.schema.as_str(),
+            v.table.as_str(),
+            v.column.as_deref()
+        ),
+        (TagOn::Below, "s", "u", Some("secret"))
+    );
+    // The catalog: the same.
+    let r = read(&e, t(f.catalog, None, None, None)).await.unwrap();
+    let v = row(&r, "by-col").unwrap().via_tag.as_ref().unwrap();
+    assert_eq!(
+        (v.on, v.schema.as_str(), v.table.as_str()),
+        (TagOn::Below, "s", "u")
+    );
 }
 
 #[tokio::test]

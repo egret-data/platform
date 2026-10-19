@@ -502,6 +502,11 @@ pub enum TagOn {
 pub struct ViaTag {
     pub name: String,
     pub on: TagOn,
+    /// The schema of the tagged table or column, as the assignment spells it.
+    pub schema: String,
+    /// The tagged table, or the table of the tagged column: with `schema` and
+    /// `column` it says where a tag `below` the object sits.
+    pub table: String,
     /// The tagged column, when the tag is on a column.
     pub column: Option<String>,
 }
@@ -597,6 +602,15 @@ fn parse_policy(row: &PolicyRow) -> Result<RangerPolicy, String> {
     serde_json::from_value::<RangerPolicy>(row.policy_jsonb.clone()).map_err(|e| e.to_string())
 }
 
+/// The body's `policyType` word when it carries one, else `access`.
+fn body_policy_type(row: &PolicyRow) -> &'static str {
+    row.policy_jsonb
+        .get("policyType")
+        .and_then(|v| v.as_i64())
+        .map(|c| policy_type_word(c as i32))
+        .unwrap_or("access")
+}
+
 fn policy_row(
     row: &PolicyRow,
     service: &str,
@@ -628,13 +642,7 @@ fn policy_row(
             name: row.name.clone(),
             service: service.to_string(),
             in_tag_service,
-            policy_type: row
-                .policy_jsonb
-                .get("policyType")
-                .and_then(|v| v.as_i64())
-                .map(|c| policy_type_word(c as i32))
-                .unwrap_or("access")
-                .to_string(),
+            policy_type: body_policy_type(row).to_string(),
             r#match: MatchWord::Unknown,
             through_pattern: false,
             via_tag: None,
@@ -727,6 +735,8 @@ async fn object_tags_via(
             out.push(ViaTag {
                 name,
                 on,
+                schema,
+                table,
                 column: col,
             });
         }
@@ -1060,6 +1070,44 @@ pub struct EveryoneSummary {
     pub policies: Vec<EveryonePolicy>,
 }
 
+/// A hand-written policy whose body could not be read: it may name anyone,
+/// so routes B and D list it instead of dropping it (route A lists it as
+/// `unknown`, spec §4.2.6).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadablePolicy {
+    pub id: i64,
+    pub name: String,
+    /// The profile (or tag service) that stores it.
+    pub service: String,
+    pub in_tag_service: bool,
+    /// From the body's `policyType` when present, else `access` (as route A).
+    pub policy_type: String,
+    /// Why the body could not be read (the same text as route A's
+    /// `parseError`).
+    pub parse_error: String,
+    /// The engines that download it.
+    pub engines: Vec<HandWrittenEngineRef>,
+}
+
+fn unreadable_policy(
+    row: &PolicyRow,
+    service: &str,
+    in_tag_service: bool,
+    parse_error: String,
+    engines: Vec<HandWrittenEngineRef>,
+) -> UnreadablePolicy {
+    UnreadablePolicy {
+        id: row.id,
+        name: row.name.clone(),
+        service: service.to_string(),
+        in_tag_service,
+        policy_type: body_policy_type(row).to_string(),
+        parse_error,
+        engines,
+    }
+}
+
 /// Route B's answer.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1068,6 +1116,9 @@ pub struct PrincipalHandWritten {
     pub state: PrincipalState,
     pub policies: Vec<PrincipalPolicy>,
     pub everyone: EveryoneSummary,
+    /// Hand-written policies whose body could not be read: they may name this
+    /// principal, so the list above may be incomplete.
+    pub unreadable: Vec<UnreadablePolicy>,
 }
 
 fn internal(e: impl std::fmt::Display) -> HandWrittenError {
@@ -1194,6 +1245,7 @@ pub async fn handwritten_for_principal_via(
             .fetch_all(&mut *conn)
             .await?;
     let mut policies = Vec::new();
+    let mut unreadable = Vec::new();
     let mut everyone = Vec::new();
     let mut everyone_ids = BTreeSet::new();
     for (sid, sname, stype) in services {
@@ -1207,10 +1259,23 @@ pub async fn handwritten_for_principal_via(
             .collect();
         let mut engines: Option<Vec<HandWrittenEngineRef>> = None;
         for row in &rows {
-            // A body that cannot be read names nobody we can see; route A
-            // lists it as `unknown` on every object of its profile.
-            let Ok(policy) = parse_policy(row) else {
-                continue;
+            // A body that cannot be read may name anyone: listed, never
+            // dropped (route A lists it as `unknown`).
+            let policy = match parse_policy(row) {
+                Ok(p) => p,
+                Err(e) => {
+                    if engines.is_none() {
+                        engines = Some(engines_downloading_via(&mut *conn, sid, &sname).await?);
+                    }
+                    unreadable.push(unreadable_policy(
+                        row,
+                        &sname,
+                        stype == "tag",
+                        e,
+                        engines.clone().unwrap_or_default(),
+                    ));
+                    continue;
+                }
             };
             let mut naming = Vec::new();
             for (bucket, items) in buckets(&policy) {
@@ -1300,6 +1365,7 @@ pub async fn handwritten_for_principal_via(
             count: everyone_ids.len() as i64,
             policies: everyone,
         },
+        unreadable,
     })
 }
 
@@ -1376,6 +1442,9 @@ pub struct TagHandWritten {
     /// Other tags with this name: engine tag policies on the name apply to
     /// them too (CL10).
     pub same_name: Vec<SameNameTag>,
+    /// Hand-written tag policies whose body could not be read: they may name
+    /// this tag, so the list above may be incomplete.
+    pub unreadable: Vec<UnreadablePolicy>,
 }
 
 /// Route D (spec §4.5): every usable tag service's hand-written (`operator`)
@@ -1432,6 +1501,7 @@ pub async fn handwritten_for_tag_via(
             .into_iter()
             .map(|(id, key)| SameNameTag { id, key })
             .collect(),
+        unreadable: Vec::new(),
     };
     let request = RequestResource::new().with("tag", name.as_str());
     let mut defs = Defs::default();
@@ -1455,8 +1525,18 @@ pub async fn handwritten_for_tag_via(
         let rows = policy_rows_via(&mut *conn, tsid).await?;
         let def = defs.get(&mut *conn, "tag").await?;
         for row in rows.iter().filter(|r| r.managed_by == "operator") {
-            let Ok(policy) = parse_policy(row) else {
-                continue;
+            let policy = match parse_policy(row) {
+                Ok(p) => p,
+                Err(e) => {
+                    out.unreadable.push(unreadable_policy(
+                        row,
+                        &tag_service,
+                        true,
+                        e,
+                        engines.clone(),
+                    ));
+                    continue;
+                }
             };
             let prepared = PreparedPolicyResources::new(&policy, def);
             let ObjectMatch::Applies { through_pattern } =

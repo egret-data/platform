@@ -48615,7 +48615,8 @@
           "principal",
           "state",
           "policies",
-          "everyone"
+          "everyone",
+          "unreadable"
         ],
         "properties": {
           "principal": {
@@ -48632,6 +48633,13 @@
           },
           "everyone": {
             "$ref": "#/components/schemas/EveryoneSummary"
+          },
+          "unreadable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnreadablePolicy"
+            },
+            "description": "Hand-written policies whose body could not be read: they may name this\nprincipal, so the list above may be incomplete."
           }
         }
       },
@@ -53002,7 +53010,8 @@
           "tag",
           "state",
           "policies",
-          "sameName"
+          "sameName",
+          "unreadable"
         ],
         "properties": {
           "tag": {
@@ -53023,6 +53032,13 @@
               "$ref": "#/components/schemas/SameNameTag"
             },
             "description": "Other tags with this name: engine tag policies on the name apply to\nthem too (CL10)."
+          },
+          "unreadable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnreadablePolicy"
+            },
+            "description": "Hand-written tag policies whose body could not be read: they may name\nthis tag, so the list above may be incomplete."
           }
         }
       },
@@ -54028,6 +54044,50 @@
           "count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "UnreadablePolicy": {
+        "type": "object",
+        "description": "A hand-written policy whose body could not be read: it may name anyone,\nso routes B and D list it instead of dropping it (route A lists it as\n`unknown`, spec §4.2.6).",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "inTagService",
+          "policyType",
+          "parseError",
+          "engines"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string",
+            "description": "The profile (or tag service) that stores it."
+          },
+          "inTagService": {
+            "type": "boolean"
+          },
+          "policyType": {
+            "type": "string",
+            "description": "From the body's `policyType` when present, else `access` (as route A)."
+          },
+          "parseError": {
+            "type": "string",
+            "description": "Why the body could not be read (the same text as route A's\n`parseError`)."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HandWrittenEngineRef"
+            },
+            "description": "The engines that download it."
           }
         }
       },
@@ -55063,7 +55123,9 @@
         "type": "object",
         "required": [
           "name",
-          "on"
+          "on",
+          "schema",
+          "table"
         ],
         "properties": {
           "name": {
@@ -55071,6 +55133,14 @@
           },
           "on": {
             "$ref": "#/components/schemas/TagOn"
+          },
+          "schema": {
+            "type": "string",
+            "description": "The schema of the tagged table or column, as the assignment spells it."
+          },
+          "table": {
+            "type": "string",
+            "description": "The tagged table, or the table of the tagged column: with `schema` and\n`column` it says where a tag `below` the object sits."
           },
           "column": {
             "type": [

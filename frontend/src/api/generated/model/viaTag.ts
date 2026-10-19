@@ -10,6 +10,13 @@ import type { TagOn } from './tagOn';
 export interface ViaTag {
   name: string;
   on: TagOn;
+  /** The schema of the tagged table or column, as the assignment spells it. */
+  schema: string;
+  /**
+     * The tagged table, or the table of the tagged column: with `schema` and
+     * `column` it says where a tag `below` the object sits.
+     */
+  table: string;
   /**
      * The tagged column, when the tag is on a column.
      * @nullable
