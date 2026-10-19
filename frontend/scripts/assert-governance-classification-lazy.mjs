@@ -46,6 +46,29 @@ const MARKERS = [
   ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No hand-written tag policy names this classification."],
 ];
 
+/**
+ * The shared hand-written policy views (`src/routes/governance/handwritten/`,
+ * #4b spec §6): Data and People import them, and so does this area's
+ * Hand-written tab. Each marker must stay out of the entry chunk and its
+ * preloads, and its chunk must be loaded (statically, from the area's own
+ * chunk) by each area named: the area's anchor is a marker of that area.
+ */
+const AREA_ANCHORS = {
+  Data: "Reading grants needs the policy:read permission, which this account does not have.",
+  People: "Users, groups and roles, and the egret grants and rules that reach each one.",
+  Classification: "No hand-written tag policy names this classification.",
+};
+const HANDWRITTEN = [
+  // Route A's section (Data).
+  ["src/routes/governance/handwritten/HandWrittenSection.tsx", "No hand-written policy reaches this object.", ["Data"]],
+  // Route B's section (People).
+  ["src/routes/governance/handwritten/PrincipalHandWrittenSection.tsx", "No hand-written policy names this principal.", ["People"]],
+  // The shared words: Q1's sentence.
+  ["src/routes/governance/handwritten/handwrittenText.ts", "Engines resolve no groups, so on the engine it reaches nobody.", ["Data", "People", "Classification"]],
+  // The item summary's empty item.
+  ["src/routes/governance/handwritten/HandWrittenItems.tsx", "nobody named", ["Data", "Classification"]],
+];
+
 const entry = entryChunkName(DIST);
 const eager = new Set([entry, ...entryPreloadNames(DIST)]);
 const read = (f) => readFileSync(join(ASSETS, f), "utf8");
@@ -71,5 +94,45 @@ for (const [module, marker] of MARKERS) {
   }
 }
 
+/** The chunks `chunk` imports statically (not `import()`), transitively, itself included. */
+function staticClosure(chunk) {
+  const seen = new Set();
+  const walk = (f) => {
+    if (seen.has(f)) return;
+    seen.add(f);
+    for (const m of read(f).matchAll(/\bimport\s*(?:[\w*{}\s,$]+?\s*from\s*)?["']\.\/([^"']+?\.js)["']/g)) walk(m[1]);
+  };
+  walk(chunk);
+  return seen;
+}
+
+for (const [module, marker, areas] of HANDWRITTEN) {
+  const carriers = chunks.filter((f) => read(f).includes(marker));
+  const eagerCarriers = carriers.filter((f) => eager.has(f));
+  if (eagerCarriers.length > 0) {
+    console.error(`✗ ${module} is in a chunk the entry loads (${eagerCarriers.join(", ")}). Look for a static import of src/routes/governance/handwritten/ from the entry graph.`);
+    failed = true;
+    continue;
+  }
+  if (carriers.length === 0) {
+    console.error(`✗ "${marker}" (${module}) appears in NO chunk at all. The marker is stale.`);
+    failed = true;
+    continue;
+  }
+  for (const area of areas) {
+    const anchors = chunks.filter((f) => read(f).includes(AREA_ANCHORS[area]));
+    if (anchors.length === 0) {
+      console.error(`✗ the ${area} anchor "${AREA_ANCHORS[area]}" appears in no chunk; update AREA_ANCHORS.`);
+      failed = true;
+      continue;
+    }
+    const reached = anchors.some((a) => carriers.some((c) => staticClosure(a).has(c)));
+    if (!reached) {
+      console.error(`✗ ${module} is not loaded by the ${area} area's chunk (${anchors.join(", ")}).`);
+      failed = true;
+    }
+  }
+}
+
 if (failed) process.exit(1);
-console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks.`);
+console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks; the hand-written views load with Data, People and Classification.`);
