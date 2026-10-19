@@ -17,6 +17,7 @@ import {
   serve,
   type Answer,
 } from "./engineHarness";
+import { pluginWord } from "../EnginesIndex";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -351,5 +352,34 @@ describe("each section's states (FE-STATE-1)", () => {
     const section = await screen.findByRole("region", { name: "Profiles without an engine" }, T);
     expect(await within(section).findByRole("button", { name: "Retry" }, T)).toBeInTheDocument();
     expect(await within(enginesSection()).findByRole("link", { name: "lake-trino" }, T)).toBeInTheDocument();
+  });
+});
+
+describe("the plugin column's word (live check L0a)", () => {
+  const kind = (k: "policies" | "tags", state: "up_to_date" | "not_reported" | "behind") => ({
+    kind: k,
+    currentVersion: 5,
+    lastDownloadAt: state === "not_reported" ? null : "2026-10-19T09:59:00Z",
+    newestReportedVersion: state === "not_reported" ? null : 5,
+    servedVersion: state === "not_reported" ? null : 5,
+    state,
+    notReported: state === "not_reported" ? ("no_download" as const) : null,
+    sentence: "s",
+  });
+  const sr = { id: E_SR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
+
+  it("ignores the tags kind of a StarRocks engine, which never downloads tags", () => {
+    const p = pluginResponse({ engine: sr, kinds: [kind("policies", "up_to_date"), kind("tags", "not_reported")] });
+    expect(pluginWord(p)).toBe("Up to date");
+  });
+
+  it("still counts a Trino engine's unreported tags", () => {
+    const p = pluginResponse({ kinds: [kind("policies", "up_to_date"), kind("tags", "not_reported")] });
+    expect(pluginWord(p)).toBe("Not reported");
+  });
+
+  it("still counts a StarRocks engine's policies kind", () => {
+    const p = pluginResponse({ engine: sr, kinds: [kind("policies", "behind"), kind("tags", "not_reported")] });
+    expect(pluginWord(p)).toBe("Behind");
   });
 });

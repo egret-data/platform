@@ -63,7 +63,10 @@ const NOT_JUDGED_WORD: Record<string, string> = {
 /** The plugin column's word for one engine's plugin route answer. */
 export function pluginWord(p: EnginePluginResponse): string {
   if (p.judged.state === "not_judged") return NOT_JUDGED_WORD[p.judged.reason] ?? "Not judged";
-  const worst = STATE_ORDER.find((s) => p.kinds.some((k) => k.state === s));
+  // StarRocks never downloads tags, so its tags kind is always `not_reported`;
+  // counting it would show every healthy StarRocks engine as "Not reported".
+  const kinds = p.engine.type === "starrocks" ? p.kinds.filter((k) => k.kind !== "tags") : p.kinds;
+  const worst = STATE_ORDER.find((s) => kinds.some((k) => k.state === s));
   return worst ? KIND_STATE_WORD[worst] : KIND_STATE_WORD.not_reported;
 }
 
