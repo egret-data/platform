@@ -28,7 +28,7 @@
   - Both runners' sweeps apply the deadline: Docker's (`worker/commands.rs:2514-2557`) and the pod sweep (`worker/k8s/runner.rs:1485-1547`). It reaches every kept container whose run is terminal (decided with the user, 2026-10-19).
 - **D4. A kill that cannot load an execution closes it by force, as `KILLED`.** The force-close is §2.2. Kestra's executor fails an execution it cannot process (`Execution.failedExecutionFromExecutor`, `core/src/main/java/io/kestra/core/models/executions/Execution.java:860-902`). Egret writes `KILLED` instead of `FAILED`, because the operator asked for a kill.
 - **D5. `commit_kill` keeps its single retry of a deadlock victim.** This package adds the test the retry never had (§2.3). There is no behaviour change.
-- **D6. A dedicated hourly sweep removes the `_wd/{block}/` snapshots that a crashed `WorkingDirectory` block left behind**, 24 hours after the block's run ended (§3.1). It uses migration **0196** (next free: `ls migrations | tail -1` is `0195_workflow_execution_variables.sql`).
+- **D6. A dedicated hourly sweep removes the `_wd/{block}/` snapshots that a crashed `WorkingDirectory` block left behind**, 24 hours after the block's run ended (§3.1). It uses migration **0197** (next free: `ls migrations | tail -1` is `0196_workflow_execution_variables.sql`).
 - **D7. The executor suite's oracle setup empties `workflow.flows` before it files the corpus.** A failed first setup then no longer turns every later test into a misleading "left 335" (§3.2).
 - **D8. `executions.variables` is capped at 1 MiB of serialised JSON.** That is `runners::env::MAX_OUTPUT_BYTES` (`runners/env.rs:204`), the bound on one render and on a container's output markers (`worker/commands.rs:204`). An update that would exceed it fails the run, with egret's own message.
 - **D9. A `Labels` task's labels pass the backfill's per-label caps**: a key of at most 128 characters and a value of at most 1,024 (`labels.rs:7-8`). The merged list holds at most 100 labels: twice a backfill's 50 (`labels.rs:6`), so a flow's own labels and a backfill's fit.
@@ -163,7 +163,8 @@ Mutation check: with the retry arm removed, the tick returns `Err`.
 - a block that never reaches its finish claim.
 
 **Design (D6):**
-- Migration 0196: `ALTER TABLE workflow.task_runs ADD COLUMN working_dir_swept_at timestamptz`, with `CHECK (working_dir_swept_at IS NULL OR working_dir IS NOT NULL)`, and a partial index on `(ended_at) WHERE working_dir IS NOT NULL AND working_dir_swept_at IS NULL`.
+- Migration 0197: `ALTER TABLE workflow.task_runs ADD COLUMN working_dir_swept_at timestamptz`, with `CHECK (working_dir_swept_at IS NULL OR working_dir IS NOT NULL)`, and a partial index on `(ended_at) WHERE working_dir IS NOT NULL AND working_dir_swept_at IS NULL`.
+  *Renumbered, 2026-10-19:* written as 0196; #694 took 0195 first, so C2 moved to 0196 and this migration ships as `0197_workflow_task_run_working_dir_swept.sql`.
 - **Why a column:** without a "done" mark, the sweep must re-list every block of the last 30 days on every pass. With one, it lists each crashed block once.
 - `discard` stamps `working_dir_swept_at = now()` after a `delete_prefix` that succeeded. A failed one leaves it NULL.
 - **The sweeper** (`storage::wd_sweep`, modelled on `storage/nsfiles/staging.rs:118-206`):
@@ -330,7 +331,7 @@ The C2 final review's M6 and this measurement agree that this is a fallback path
   - `Unset` on null variables;
   - the `labels[i]` and form messages;
   - `set_variables_without_variables_fails` asserting the whole message.
-- `tests/migration_0195_variables.rs` keeps its own seed. Sharing `worker.rs`'s `seed()` would make a migration test depend on a worker test file; this is recorded and not changed.
+- `tests/migration_0196_variables.rs` keeps its own seed. Sharing `worker.rs`'s `seed()` would make a migration test depend on a worker test file; this is recorded and not changed.
 
 ## 5. C1 follow-ups and docs (PR-2)
 
@@ -374,7 +375,7 @@ The lookup behind it, `FlowRepo::find_by_name` (`repo.rs:892-946`), is not scope
 ## 6. Packaging
 
 Two PRs. Each is reviewable alone, and they touch different files except the docs:
-- **PR-1, kill and WorkingDirectory:** §2 and §3, with migration 0196 and the new config key.
+- **PR-1, kill and WorkingDirectory:** §2 and §3, with migration 0197 and the new config key.
   - Live Docker cases: the flipped `a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false`, and a new kept-then-swept case.
 - **PR-2, C2, C1 and docs:** §4 and §5. There is no migration.
   - §5.1 is built (the user answered yes on 2026-10-19).

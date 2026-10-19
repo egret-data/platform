@@ -4,7 +4,7 @@
 //!
 //! A block's snapshots ([`FileStore::working_dir_prefix`]) are removed by
 //! `worker::working_dir::discard` when its finish claim runs, which then
-//! stamps `workflow.task_runs.working_dir_swept_at` (migration 0196). Three
+//! stamps `workflow.task_runs.working_dir_swept_at` (migration 0197). Three
 //! things leave them behind, unstamped:
 //! - a crash: the execution ended without the block's finish claim;
 //! - a kill that closed the execution by force (debt D4,

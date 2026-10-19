@@ -30,7 +30,7 @@
   - Sweep của cả hai runner đều áp dụng hạn: của Docker (`worker/commands.rs:2514-2557`) và pod sweep (`worker/k8s/runner.rs:1485-1547`). Nó với tới mọi container được giữ mà run đã terminal (đã chốt với user, 2026-10-19).
 - **D4. Kill không load được execution thì đóng execution đó cưỡng bức, thành `KILLED`.** Việc đóng cưỡng bức là §2.2. Executor của Kestra làm fail execution mà nó không xử lý được (`Execution.failedExecutionFromExecutor`, `core/src/main/java/io/kestra/core/models/executions/Execution.java:860-902`). Egret ghi `KILLED` thay vì `FAILED`, vì operator đã yêu cầu kill.
 - **D5. `commit_kill` giữ lần retry duy nhất khi là nạn nhân deadlock.** Gói này thêm test mà retry chưa từng có (§2.3). Không đổi hành vi.
-- **D6. Một sweep riêng chạy mỗi giờ xoá các snapshot `_wd/{block}/` mà block `WorkingDirectory` bị crash để lại**, 24 giờ sau khi run của block kết thúc (§3.1). Nó dùng migration **0196** (số trống tiếp theo: `ls migrations | tail -1` là `0195_workflow_execution_variables.sql`).
+- **D6. Một sweep riêng chạy mỗi giờ xoá các snapshot `_wd/{block}/` mà block `WorkingDirectory` bị crash để lại**, 24 giờ sau khi run của block kết thúc (§3.1). Nó dùng migration **0197** (số trống tiếp theo: `ls migrations | tail -1` là `0196_workflow_execution_variables.sql`).
 - **D7. Phần setup oracle của executor suite làm rỗng `workflow.flows` trước khi nạp corpus.** Setup đầu tiên hỏng thì từ đó không còn biến mọi test sau thành thông báo gây hiểu lầm "left 335" (§3.2).
 - **D8. `executions.variables` bị chặn ở 1 MiB JSON đã serialize.** Đó là `runners::env::MAX_OUTPUT_BYTES` (`runners/env.rs:204`), giới hạn cho một lần render và cho các output marker của container (`worker/commands.rs:204`). Update vượt giới hạn thì làm run fail, với message riêng của egret.
 - **D9. Label của task `Labels` phải qua các giới hạn theo-label của backfill**: key tối đa 128 ký tự và value tối đa 1.024 (`labels.rs:7-8`). Danh sách sau merge chứa tối đa 100 label: gấp đôi 50 của backfill (`labels.rs:6`), để label của flow và của backfill đều vừa.
@@ -165,7 +165,8 @@ Kiểm tra mutation: bỏ nhánh retry thì tick trả `Err`.
 - block không bao giờ tới finish claim.
 
 **Thiết kế (D6):**
-- Migration 0196: `ALTER TABLE workflow.task_runs ADD COLUMN working_dir_swept_at timestamptz`, với `CHECK (working_dir_swept_at IS NULL OR working_dir IS NOT NULL)`, và một partial index trên `(ended_at) WHERE working_dir IS NOT NULL AND working_dir_swept_at IS NULL`.
+- Migration 0197: `ALTER TABLE workflow.task_runs ADD COLUMN working_dir_swept_at timestamptz`, với `CHECK (working_dir_swept_at IS NULL OR working_dir IS NOT NULL)`, và một partial index trên `(ended_at) WHERE working_dir IS NOT NULL AND working_dir_swept_at IS NULL`.
+  *Đổi số, 2026-10-19:* viết ban đầu là 0196; #694 lấy 0195 trước, nên C2 chuyển sang 0196 và migration này ship thành `0197_workflow_task_run_working_dir_swept.sql`.
 - **Vì sao một cột:** không có dấu "xong", sweep phải liệt kê lại mọi block của 30 ngày gần nhất ở mỗi lượt. Có dấu, nó liệt kê mỗi block bị crash đúng một lần.
 - `discard` đóng dấu `working_dir_swept_at = now()` sau một `delete_prefix` thành công. Lần thất bại để NULL.
 - **Sweeper** (`storage::wd_sweep`, theo mẫu `storage/nsfiles/staging.rs:118-206`):
@@ -332,7 +333,7 @@ M6 của C2 final review và phép đo này đồng ý rằng đây là đườn
   - `Unset` trên variables null;
   - các message `labels[i]` và form;
   - `set_variables_without_variables_fails` assert toàn bộ message.
-- `tests/migration_0195_variables.rs` giữ seed riêng. Dùng chung `seed()` của `worker.rs` sẽ làm test migration phụ thuộc vào một file test của worker; điều này được ghi lại và không đổi.
+- `tests/migration_0196_variables.rs` giữ seed riêng. Dùng chung `seed()` của `worker.rs` sẽ làm test migration phụ thuộc vào một file test của worker; điều này được ghi lại và không đổi.
 
 ## 5. Follow-up của C1 và tài liệu (PR-2)
 
@@ -376,7 +377,7 @@ Phép tra cứu đằng sau nó, `FlowRepo::find_by_name` (`repo.rs:892-946`), k
 ## 6. Đóng gói
 
 Hai PR. Mỗi PR có thể review riêng, và chúng chạm các file khác nhau trừ tài liệu:
-- **PR-1, kill và WorkingDirectory:** §2 và §3, với migration 0196 và config key mới.
+- **PR-1, kill và WorkingDirectory:** §2 và §3, với migration 0197 và config key mới.
   - Các case Docker live: `a_killed_container_is_stopped_by_the_cancel_even_when_delete_is_false` được lật lại, và một case mới giữ-rồi-sweep.
 - **PR-2, C2, C1 và tài liệu:** §4 và §5. Không có migration.
   - §5.1 được xây (user trả lời có ngày 2026-10-19).

@@ -1,4 +1,4 @@
-//! Migration 0196: `working_dir_swept_at` only on a WorkingDirectory block's run.
+//! Migration 0197: `working_dir_swept_at` only on a WorkingDirectory block's run.
 //!
 //! DB-gated through `#[sqlx::test]`, which resolves `DATABASE_URL` itself.
 
@@ -25,7 +25,7 @@ async fn seed_one_run(pool: &sqlx::PgPool) -> Uuid {
     let execution: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, namespace, flow_key, source, state, history, inputs) \
-         VALUES ($1, 'w', 'm0196', 'id: m0196', 'CREATED', '[\"CREATED\"]'::jsonb, '{}'::jsonb) \
+         VALUES ($1, 'w', 'm0197', 'id: m0197', 'CREATED', '[\"CREATED\"]'::jsonb, '{}'::jsonb) \
          RETURNING id",
     )
     .bind(ws)

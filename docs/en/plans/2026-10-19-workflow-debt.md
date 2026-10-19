@@ -18,7 +18,7 @@
   - `TaskRunner::cancel` learns the task's `RunnerSpec`. Docker stops a `delete: false` container and does not remove it.
   - The two orphan sweeps share one pure decision, which now has a deadline for kept work.
   - A new `worker::force_close` writes a terminal state in plain SQL when `claim::load` cannot plan the execution.
-  - A new `storage::wd_sweep` removes a crashed block's `_wd/{block}/`, with migration 0196 as its done mark.
+  - A new `storage::wd_sweep` removes a crashed block's `_wd/{block}/`, with migration 0197 as its done mark.
   - The oracle setup's `TRUNCATE` is widened.
 - **PR-2, C2, C1 and docs** (Tasks 2.1–2.6):
   - caps in `executor/update.rs::compute`;
@@ -36,7 +36,7 @@
 - Both start from `origin/main` after C2 (#693) merges, each in its own worktree with a private Postgres, Valkey and target directory.
 - PR-1 is built first, in `data-portal/egret-debt`, on Postgres `egret-debt-postgres` :5455 and Valkey `egret-debt-valkey` :6455. It was branched from the C2 head `4942843d` while #693 awaited its merge, and is moved onto `origin/main` with `git rebase --onto origin/main 4942843d` once #693 lands. PR-2 follows PR-1, on the same containers.
 - The `path:line` citations were taken at `481d9101`. `4942843d` only renamed `TaskKind::Update` to `TaskKind::ExecutionUpdate` (the SQL guard in `tests/execution_timestamps.rs` read the old name as an `UPDATE`), which can shift a cited line by one or two.
-- Migration **0196** is free today: `ls migrations | tail -1` is `0195_workflow_execution_variables.sql`. Re-check it with `git ls-tree origin/main migrations/ | tail -3` immediately before PR-1 Task 5, and again after every rebase (see the memory note *migration numbers are a shared namespace*).
+- Migration **0197** is free today: `ls migrations | tail -1` is `0196_workflow_execution_variables.sql`. Re-check it with `git ls-tree origin/main migrations/ | tail -3` immediately before PR-1 Task 5, and again after every rebase (see the memory note *migration numbers are a shared namespace*).
 
 ## Facts measured for this plan (2026-10-19, at `481d9101`)
 
@@ -133,7 +133,7 @@ Paths are relative to `crates/egret-workflow/src/` unless another root is given.
 | `tests/container_docker_live.rs` | flip the kept case; add kept-then-swept | 1.1, 1.2 |
 | `tests/kill_route.rs` | `commit_kill` deadlock test; force-close tests | 1.3, 1.4 |
 | `src/worker/force_close.rs` (new), `src/worker/{kill,claim,mod}.rs`, `src/routes.rs` | force-close and its three call sites; audit `forced` | 1.4 |
-| `migrations/0196_workflow_task_run_working_dir_swept.sql` (new) | `working_dir_swept_at` | 1.5 |
+| `migrations/0197_workflow_task_run_working_dir_swept.sql` (new) | `working_dir_swept_at` | 1.5 |
 | `src/storage/wd_sweep.rs` (new), `src/storage/mod.rs`, `src/worker/working_dir.rs`, `crates/egret-bin/src/main.rs` | the sweep; `discard` stamps | 1.5 |
 | `tests/working_dir_claims.rs` | sweep tests | 1.5 |
 | `tests/executor.rs` | `TRUNCATE workflow.flows` in `egret_side` | 1.6 |
@@ -559,23 +559,23 @@ async fn a_force_close_leaves_a_held_leaf_to_its_worker(pool: sqlx::PgPool) {
 
 ---
 
-### Task 1.5: the `_wd` crash sweep, migration 0196 (D6)
+### Task 1.5: the `_wd` crash sweep, migration 0197 (D6)
 
 **Files:**
-- Create: `migrations/0196_workflow_task_run_working_dir_swept.sql`.
+- Create: `migrations/0197_workflow_task_run_working_dir_swept.sql`.
 - Create: `src/storage/wd_sweep.rs`, with `WdSweepConfig { every: 3600 s, older_than: 24 h, batch: 100 }`, `sweep(pool, fs, cfg) -> Result<u64>` and `spawn_wd_sweeper(..)`; `pub mod wd_sweep;` in `storage/mod.rs`.
 - Modify: `src/worker/working_dir.rs:953-966`: `discard` stamps the column after a `delete_prefix` that succeeded. Its warn says "the `_wd` sweep will remove them", not "the pruner".
 - Modify: `crates/egret-bin/src/main.rs:1928-1946`: spawn it beside the staging sweeper.
-- Test: `tests/working_dir_claims.rs`; `tests/migration_0196_wd_swept.rs` (new; copy the shape of `tests/migration_0195_variables.rs`).
+- Test: `tests/working_dir_claims.rs`; `tests/migration_0197_wd_swept.rs` (new; copy the shape of `tests/migration_0196_variables.rs`).
 
-- [ ] **Step 0:** `git ls-tree origin/main migrations/ | tail -3`. If 0196 is taken, use the next free number everywhere in this task and in the docs.
+- [ ] **Step 0:** `git ls-tree origin/main migrations/ | tail -3`. If 0197 is taken, use the next free number everywhere in this task and in the docs.
 - [ ] **Step 1: write the failing tests.** The migration test:
 
 ```rust
-//! Migration 0196: `working_dir_swept_at` only on a WorkingDirectory block's run.
+//! Migration 0197: `working_dir_swept_at` only on a WorkingDirectory block's run.
 #[sqlx::test(migrations = "../../migrations")]
 async fn swept_at_is_only_for_a_block_run(pool: sqlx::PgPool) {
-    // Arrange: a run that is not a block (copy migration_0195's seed for one row).
+    // Arrange: a run that is not a block (copy migration_0196's seed for one row).
     let run = seed_one_run(&pool).await;
     // Act
     let err = sqlx::query("UPDATE workflow.task_runs SET working_dir_swept_at = now() WHERE id = $1")
@@ -638,7 +638,7 @@ async fn the_wd_sweep_removes_a_crashed_blocks_snapshots_once(pool: PgPool) {
   Also add `a_normal_finish_stamps_swept_at`: a block that finishes normally has `working_dir_swept_at` set, and the sweep counts 0. Also add `a_failed_delete_leaves_swept_at_null_for_the_sweep`: use the failing-store pattern of `tests/nsfiles_store.rs:2786-2793` (`fail_deletes`), with the `MemStore` wrapper that test uses.
 
   The fixture's state names (`FAILED` on every run) must satisfy migration 0183's checks: `ended_at` only on terminal rows, and `ended_at >= started_at`. If one refuses, set `started_at` too.
-- [ ] **Step 2: run them, expect FAIL**: `cargo test -p egret-workflow --test working_dir_claims -- wd_sweep normal_finish failed_delete` and `--test migration_0196_wd_swept`.
+- [ ] **Step 2: run them, expect FAIL**: `cargo test -p egret-workflow --test working_dir_claims -- wd_sweep normal_finish failed_delete` and `--test migration_0197_wd_swept`.
 - [ ] **Step 3: write the migration**:
 
 ```sql
@@ -665,7 +665,7 @@ CREATE INDEX workflow_task_runs_wd_unswept
 
   Wire `discard` and `main.rs`. Run Step 1's tests; expect PASS.
 - [ ] **Step 5: mutation.** Remove the stamp in `wd_sweep`, and see the "once" assertion fail (the second pass counts 1). Restore it.
-- [ ] **Step 6:** `sqlx` offline data, if the crate uses it (`grep -rn "query!" src/storage/wd_sweep.rs`; this plan uses `query`/`query_scalar` only). Run the ratchet, then commit `feat(workflow): sweep the _wd snapshots a crashed WorkingDirectory left (migration 0196)`.
+- [ ] **Step 6:** `sqlx` offline data, if the crate uses it (`grep -rn "query!" src/storage/wd_sweep.rs`; this plan uses `query`/`query_scalar` only). Run the ratchet, then commit `feat(workflow): sweep the _wd snapshots a crashed WorkingDirectory left (migration 0197)`.
 
 ---
 
@@ -706,10 +706,10 @@ sqlx::query("TRUNCATE workflow.flows, workflow.executions CASCADE")
 **Files:**
 - `docs/{en,vi}/specs/2026-10-17-workflow-kill-and-exit-design.md`. §4.2: a dated "(2026-10-19, debt package)" note after the `:101` bullet, saying that the user's ruling closes the open question, and stating D1, D2, D3 and D4 with their test names.
 - `docs/{en,vi}/specs/2026-10-16-workflow-working-directory-design.md`:
-  - `:101` and `:111`, and open point 2 at `:174`: the pruner does not reach `_wd`; the `_wd` sweep (migration 0196) does;
+  - `:101` and `:111`, and open point 2 at `:174`: the pruner does not reach `_wd`; the `_wd` sweep (migration 0197) does;
   - `{seq}.tar` becomes `prepare.tar` and `{child run}.tar`.
 - `docs/{en,vi}/plans/2026-10-16-workflow-working-directory.md`: tick the 32 boxes whose work spec §3.3 found in code. Give the remaining 3 (Task 0's Kubernetes question, Task 1 Step 5) a dated "deferred: Kubernetes" note.
-- `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9: a dated note for PR-1, giving what shipped, migration 0196, the new config key, and the ratchet counts from Task 1.6's run.
+- `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9: a dated note for PR-1, giving what shipped, migration 0197, the new config key, and the ratchet counts from Task 1.6's run.
 - `docs/en/specs/2026-10-19-workflow-debt-design.md` (and its VI mirror): `Status:` "PR-1 built and verified <date>".
 
 - [ ] **Step 1:** write the edits. Every count names its source (the ratchet printout).
@@ -719,7 +719,7 @@ sqlx::query("TRUNCATE workflow.flows, workflow.executions CASCADE")
 ## PR-1 final gate (controller, after the whole-branch review)
 
 On the branch rebased onto fresh `origin/main`, on the private containers, one command at a time:
-1. `ls migrations | tail -3`: 0196 is still unique.
+1. `ls migrations | tail -3`: 0197 is still unique.
 2. `cargo fmt --all -- --check`
 3. `cargo clippy --workspace --all-targets -- -D warnings`
 4. `cargo test -p egret-workflow` (all targets). The Docker live suites `container_docker_live` and `working_dir_docker_live` need a daemon and the pinned images; never set `EGRET_ALLOW_DOCKER_SKIP` at the gate.
