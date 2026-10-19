@@ -29,11 +29,12 @@ const MARKERS = [
   ["src/routes/governance/engines/EnginesIndex.tsx", "No engine is recorded. Engines are created in Control plane."],
   // The index's notice after an old URL named no profile.
   ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
-  // The engine page's line for a reader without engine:read (EP19).
-  ["src/routes/governance/engines/EnginePage.tsx", "Plugin state needs the engine:read permission."],
+  // The engine page's not-found state.
+  ["src/routes/governance/engines/EnginePage.tsx", "No engine with this id."],
   // The profile page's header for an unbound profile (EP13).
   ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this profile."],
-  // The shared-profile banner (EP14).
+  // The line for a reader without engine:read (EP19), and the shared-profile banner (EP14).
+  ["src/routes/governance/engines/PageFrame.tsx", "Plugin state needs the engine:read permission."],
   ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
   // The Engine permissions tab on an engine with no profile (spec §6.1).
   ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind a profile in Control plane."],
@@ -51,6 +52,8 @@ const MARKERS = [
   ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
   // The Overlaps tab's empty state (spec §6.3).
   ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
+  // The Plugin tab's rule for a held version (spec §6.5).
+  ["src/routes/governance/engines/tabs/PluginTab.tsx", "confirmation takes two polls, about a minute at the default 30 s poll."],
   // The Migrate tab's link after a written migration (spec §6.4).
   ["src/routes/governance/engines/tabs/MigrateTab.tsx", "See it in Recent changes"],
 ];

@@ -5,6 +5,7 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { EngineDto, EnginePluginResponse, KindStateDto, ProfileDto } from "@/api/generated/model";
 import { useControlPlaneEnginesListEngines } from "@/api/generated/control-plane-engines/control-plane-engines";
+import { KIND_STATE_WORD } from "@/routes/governance/engines/tabs/PluginTab";
 import { getControlPlaneGovernanceEnginePluginQueryOptions } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { usePermListAllEngineGrants } from "@/api/generated/perm/perm";
 import {
@@ -53,14 +54,6 @@ interface EngineRow {
 
 /** Worst first: the index shows one word per engine, the worst of its kinds (spec §5). */
 const STATE_ORDER: KindStateDto[] = ["silent", "behind", "quiet", "not_reported", "pending", "up_to_date"];
-const STATE_WORD: Record<KindStateDto, string> = {
-  silent: "Silent",
-  behind: "Behind",
-  quiet: "Quiet",
-  not_reported: "Not reported",
-  pending: "Pending",
-  up_to_date: "Up to date",
-};
 const NOT_JUDGED_WORD: Record<string, string> = {
   external: "Not judged: external",
   not_running: "Not judged: not running",
@@ -71,7 +64,7 @@ const NOT_JUDGED_WORD: Record<string, string> = {
 export function pluginWord(p: EnginePluginResponse): string {
   if (p.judged.state === "not_judged") return NOT_JUDGED_WORD[p.judged.reason] ?? "Not judged";
   const worst = STATE_ORDER.find((s) => p.kinds.some((k) => k.state === s));
-  return worst ? STATE_WORD[worst] : "Not reported";
+  return worst ? KIND_STATE_WORD[worst] : KIND_STATE_WORD.not_reported;
 }
 
 /**

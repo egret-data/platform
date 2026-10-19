@@ -3,6 +3,7 @@ import { TAB_LABEL, type TabContext } from "@/routes/governance/engines/PageFram
 import { EnginePermissionsPanel } from "@/routes/governance/engines/tabs/EnginePermissionsPanel";
 import { MigrateTab } from "@/routes/governance/engines/tabs/MigrateTab";
 import { OverlapsTab } from "@/routes/governance/engines/tabs/OverlapsTab";
+import { PluginTab } from "@/routes/governance/engines/tabs/PluginTab";
 import { PoliciesTab } from "@/routes/governance/engines/tabs/PoliciesTab";
 
 /**
@@ -17,5 +18,6 @@ export function EngineTabBody({ tab, ctx }: { tab: EngineTab; ctx: TabContext })
   if (tab === "migrate" && ctx.profile) {
     return <MigrateTab service={ctx.profile.name} serviceId={ctx.profile.dto?.id} />;
   }
+  if (tab === "plugin") return <PluginTab ctx={ctx} />;
   return <p className="text-sm text-muted-foreground">{TAB_LABEL[tab]}</p>;
 }

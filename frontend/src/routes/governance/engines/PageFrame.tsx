@@ -118,6 +118,9 @@ export function sharedSentence(profile: string, others: string[]): string {
   return `Profile ${profile} is shared with engines ${others.join(", ")}. Everything on this page applies to all of them.`;
 }
 
+/** EP19: what the plugin version and the Plugin tab say without `engine:read`. */
+export const NEEDS_ENGINE_READ = "Plugin state needs the engine:read permission.";
+
 export const EXTERNAL_SENTENCE =
   "egret compiles this engine's policies but cannot see whether the external engine downloads them.";
 

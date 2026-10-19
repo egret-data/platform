@@ -17,6 +17,7 @@ import {
   Fact,
   FrameHeader,
   FrameTabs,
+  NEEDS_ENGINE_READ,
   NotFound,
   OriginBadge,
   sharedSentence,
@@ -27,8 +28,6 @@ import {
 import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
-
-export const NEEDS_ENGINE_READ = "Plugin state needs the engine:read permission.";
 
 /**
  * An engine's page (spec §6): `/governance/engines/:id`, `policy:read`.
