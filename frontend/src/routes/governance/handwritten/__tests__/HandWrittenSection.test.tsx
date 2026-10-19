@@ -150,7 +150,7 @@ describe("HandWrittenSection", () => {
         answer({
           policies: [
             policy({ id: 7, name: "res" }),
-            policy({ id: 8, name: "tagged", service: "lake-tr-tag", inTagService: true, policyType: "masking", viaTag: { name: "PII", on: "below", column: "email" }, match: "part" }),
+            policy({ id: 8, name: "tagged", service: "lake-tr-tag", inTagService: true, policyType: "masking", viaTag: { name: "PII", on: "below", schema: "sales", table: "orders", column: "email" }, match: "part" }),
             policy({ id: 9, name: "sr", service: "spare-sr" }),
           ],
         }),
@@ -170,6 +170,33 @@ describe("HandWrittenSection", () => {
       "href",
       "/governance/engines/profiles/spare-sr/advanced/policies/access/9",
     );
+  });
+
+  it.each([
+    // [page target, viaTag, sentence]: a tag below the object names where it sits, relative to the page; never "parent".
+    [{ schema: "sales", table: "orders", column: null }, { on: "below", schema: "sales", table: "orders", column: "email" }, "Through tag PII on column email"],
+    [{ schema: "sales", table: null, column: null }, { on: "below", schema: "sales", table: "orders", column: "email" }, "Through tag PII on column orders.email"],
+    [{ schema: "sales", table: null, column: null }, { on: "below", schema: "sales", table: "orders", column: null }, "Through tag PII on table orders"],
+    [{ schema: null, table: null, column: null }, { on: "below", schema: "sales", table: "orders", column: null }, "Through tag PII on table sales.orders"],
+    [{ schema: null, table: null, column: null }, { on: "below", schema: "sales", table: "orders", column: "email" }, "Through tag PII on column sales.orders.email"],
+    [{ schema: "sales", table: "orders", column: "email" }, { on: "parent", schema: "sales", table: "orders", column: null }, "Through tag PII on table orders, which holds this column"],
+    [{ schema: "sales", table: "orders", column: null }, { on: "this", schema: "sales", table: "orders", column: null }, "Through tag PII on this object"],
+    [{ schema: "sales", table: "orders", column: "email" }, { on: "this", schema: "sales", table: "orders", column: "email" }, "Through tag PII on this object"],
+  ] as const)("names where the matched tag sits (%j, %j)", async (target, via, sentence) => {
+    open(
+      ok(
+        answer({
+          target,
+          policies: [
+            policy({ id: 8, name: "tagged", service: "lake-tr-tag", inTagService: true, viaTag: { name: "PII", ...via }, match: via.on === "below" ? "part" : "applies" }),
+          ],
+        }),
+      ),
+    );
+    await screen.findByRole("link", { name: "tagged" }, T);
+    const reach = within(rowOf("tagged")).getByText(/^Through tag/);
+    expect(reach).toHaveTextContent(new RegExp(`^${sentence}$`));
+    expect(rowOf("tagged")).not.toHaveTextContent(/on a parent/);
   });
 
   it("shows only access rows for access, masking and row-filter rows for rules, every row for all", async () => {

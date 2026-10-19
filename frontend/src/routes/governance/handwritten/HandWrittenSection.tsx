@@ -2,7 +2,7 @@ import { Fragment } from "react";
 import { Link } from "react-router-dom";
 import { FileCode2 } from "lucide-react";
 import type { ApiError } from "@/api/client";
-import type { HandWrittenPolicy, HandWrittenProfile, MatchWord } from "@/api/generated/model";
+import type { HandWrittenPolicy, HandWrittenProfile, HandWrittenTarget, MatchWord } from "@/api/generated/model";
 import { useControlPlaneGovernanceObjectHandwritten } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -45,9 +45,18 @@ function subjectOf(profile: HandWrittenProfile | undefined): EditorSubject | nul
   return engine ? { engineId: engine.id } : { profile: profile.name };
 }
 
-function viaTagText(v: NonNullable<HandWrittenPolicy["viaTag"]>): string {
-  if (v.column) return `Through tag ${v.name} on column ${v.column}`;
-  return v.on === "this" ? `Through tag ${v.name} on this object` : `Through tag ${v.name} on a parent`;
+/**
+ * Where the tag a tag policy matched sits. `this` is the object; `parent` is
+ * the table of the column asked about; `below` names the tagged table or
+ * column relative to the page (a schema page says `orders.email`, a catalog
+ * page `sales.orders.email`), never "a parent".
+ */
+function viaTagText(v: NonNullable<HandWrittenPolicy["viaTag"]>, target: HandWrittenTarget): string {
+  const head = `Through tag ${v.name} on`;
+  if (v.on === "this") return `${head} this object`;
+  if (v.on === "parent") return `${head} table ${v.table}, which holds this column`;
+  const path = [...(target.schema ? [] : [v.schema]), ...(target.table ? [] : [v.table]), ...(v.column ? [v.column] : [])];
+  return `${head} ${v.column ? "column" : "table"} ${path.join(".")}`;
 }
 
 /**
@@ -158,7 +167,7 @@ function Body({
             </TableHeader>
             <TableBody>
               {rows.map((p) => (
-                <PolicyRow key={`${p.service}/${p.id}`} p={p} profiles={d.profiles} />
+                <PolicyRow key={`${p.service}/${p.id}`} p={p} profiles={d.profiles} target={d.target} />
               ))}
             </TableBody>
           </Table>
@@ -195,7 +204,7 @@ function Body({
   );
 }
 
-function PolicyRow({ p, profiles }: { p: HandWrittenPolicy; profiles: HandWrittenProfile[] }) {
+function PolicyRow({ p, profiles, target }: { p: HandWrittenPolicy; profiles: HandWrittenProfile[]; target: HandWrittenTarget }) {
   const subject = subjectOf(profileOf(p, profiles));
   const href = subject ? `${editorUrl(subject, p.policyType, p.id)}${p.inTagService ? "?scope=tag" : ""}` : null;
   return (
@@ -227,7 +236,7 @@ function PolicyRow({ p, profiles }: { p: HandWrittenPolicy; profiles: HandWritte
             {`Names ${p.resourceSummary} only; engines do not apply it to this object's data.`}
           </span>
         ) : null}
-        {p.viaTag ? <span className="block text-xs text-muted-foreground">{viaTagText(p.viaTag)}</span> : null}
+        {p.viaTag ? <span className="block text-xs text-muted-foreground">{viaTagText(p.viaTag, target)}</span> : null}
       </TableCell>
       <TableCell data-label="Items" className="whitespace-normal align-top">
         <HandWrittenItems items={p.items} />
