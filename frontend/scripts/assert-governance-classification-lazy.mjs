@@ -35,6 +35,8 @@ const MARKERS = [
   ["src/routes/governance/classifications/TagHeader.tsx", "Classification saved."],
   // Where used's Data empty sentence (spec §5.1).
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
+  // The Clearance tab's compile line (spec §5.2).
+  ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
 ];
 
 const entry = entryChunkName(DIST);

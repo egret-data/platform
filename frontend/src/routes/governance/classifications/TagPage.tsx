@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { TagHeader } from "@/routes/governance/classifications/TagHeader";
+import { ClearanceTab } from "@/routes/governance/classifications/tabs/ClearanceTab";
 import { WhereUsedTab } from "@/routes/governance/classifications/tabs/WhereUsedTab";
 import { CLASSIFICATIONS_BASE, type TagTab } from "@/routes/governance/classifications/tagUrl";
 
@@ -40,6 +41,8 @@ function TabBody({ tab, tag }: { tab: TagTab; tag: Tag }) {
   switch (tab) {
     case "where-used":
       return <WhereUsedTab tagId={tag.id} />;
+    case "clearance":
+      return <ClearanceTab tag={tag} />;
     default:
       return <p className="text-sm text-muted-foreground">{TAG_TAB_LABEL[tab]}</p>;
   }
