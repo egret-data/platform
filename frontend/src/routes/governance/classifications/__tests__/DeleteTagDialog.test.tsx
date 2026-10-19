@@ -133,6 +133,33 @@ describe("Delete a classification (CL14)", () => {
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
   });
 
+  // FE-ACTION-2: from the index the delete stays on the page, so a toast confirms it.
+  it("deleting from the index stays there, closes the dialog and toasts", async () => {
+    const user = userEvent.setup();
+    const served = open({ "DELETE /tags/t-pii": { status: 204, body: null } }, STEWARD, "/governance/classifications");
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Classification PII deleted."));
+    expect(served.asked).toContain("DELETE /tags/t-pii");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(where()).toBe("/governance/classifications");
+  });
+
+  it("a 409 from the index is toasted too", async () => {
+    const user = userEvent.setup();
+    open({ "DELETE /tags/t-pii": fail(409, "still selected") }, STEWARD, "/governance/classifications");
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it("is offered from the index row menu too", async () => {
     const user = userEvent.setup();
     open({}, STEWARD, "/governance/classifications");

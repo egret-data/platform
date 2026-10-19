@@ -1,5 +1,6 @@
 import type { ReactNode, RefObject } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import type { ApiError } from "@/api/client";
 import { useControlPlaneGovernanceTagUsage } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { usePermListRules } from "@/api/generated/perm/perm";
@@ -19,8 +20,9 @@ const n = (count: number, one: string, many: string) => `${count} ${count === 1 
  * only those, are the foreign key that refuses the delete (premise 11; a rule
  * on another tag with the same name does not). The button stays: the server
  * decides, and a 409 is toasted as before. Confirming needs the exact key.
- * Success opens the index without a toast (FE-ACTION-2); a failure closes the
- * dialog and focus returns to the control that opened it.
+ * Success from the tag's page opens the index without a toast; from the index
+ * it stays there and toasts (FE-ACTION-2). A failure closes
+ * the dialog and focus returns to the control that opened it.
  */
 export function DeleteTagDialog({
   tag,
@@ -85,16 +87,27 @@ export function DeleteTagDialog({
     lines.push(<Skeleton key="rules" className="h-4 w-48" />);
   }
 
-  const confirm = () =>
-    del.mutate(tag.id, {
-      onSuccess: () => navigate(CLASSIFICATIONS_BASE),
-      onError: (e) =>
+  // `mutateAsync`, not `mutate`'s per-call callbacks: the dialog closes on
+  // confirm, and from the index that unmounts it, which drops those callbacks
+  // (no toast either way).
+  const confirm = () => {
+    del.mutateAsync(tag.id).then(
+      () => {
+        if (where === "this page") {
+          navigate(CLASSIFICATIONS_BASE);
+        } else {
+          // Opened from the index: the page stays, so a toast confirms it (FE-ACTION-2).
+          toast.success(`Classification ${tag.name} deleted.`);
+        }
+      },
+      (e: unknown) =>
         toastTagDeleteFailure(e, {
           where,
           canReadRules,
           showRules: where === "this page" ? undefined : () => navigate(tagUrl(tag.id, "rules")),
         }),
-    });
+    );
+  };
 
   return (
     <ConfirmDeleteDialog
