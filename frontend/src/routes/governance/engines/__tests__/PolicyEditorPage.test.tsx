@@ -70,6 +70,7 @@ vi.mock("@/api/tags", () => ({
 }));
 
 import PolicyEditorPage from "@/routes/governance/engines/PolicyEditorPage";
+import { getPolicyAdminListPoliciesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 
@@ -205,6 +206,38 @@ describe("PolicyEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(42, expect.any(Object)));
     expect(createPolicy).not.toHaveBeenCalled();
+  });
+
+  // Live check L5f: the Advanced and Policies tabs read the orval list key, so a
+  // save or delete that invalidates only the legacy key leaves them stale.
+  it("a save and a delete refresh the profile's policy lists that the tabs read", async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    routeParams = { kind: "access", policyId: "42" };
+    getPolicy.mockResolvedValue({
+      name: "existing",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
+    await screen.findByDisplayValue("existing");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: getPolicyAdminListPoliciesQueryKey() });
+
+    invalidate.mockClear();
+    navigate.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    fireEvent.change(await screen.findByPlaceholderText("delete"), { target: { value: "delete" } });
+    // The page behind the confirmation is aria-hidden, so the only Delete button left is the dialog's.
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deletePolicy).toHaveBeenCalled());
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: getPolicyAdminListPoliciesQueryKey() }));
+    invalidate.mockRestore();
+    getPolicy.mockReset();
+    getPolicy.mockImplementation(() => Promise.resolve({}));
   });
 
   it("renders the 409 compiler-owned explanation, not a bare error (D10)", async () => {

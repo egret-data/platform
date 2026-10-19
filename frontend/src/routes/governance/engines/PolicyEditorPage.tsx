@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, Trash2, TriangleAlert, X } from "lucide-react";
+import { getPolicyAdminListPoliciesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 
 import {
   type AccessItem,
@@ -425,10 +426,17 @@ export default function PolicyEditorPage({ service, subject }: { service: string
   const [saved, setSaved] = useState<CreatedPolicyId | null>(null);
   const [confirmWiden, setConfirmWiden] = useState(false);
 
+  // The Policies and Advanced tabs read the generated list key; the legacy key
+  // is kept for any other reader of `api/policies`.
+  const invalidatePolicyLists = () => {
+    void queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    void queryClient.invalidateQueries({ queryKey: getPolicyAdminListPoliciesQueryKey() });
+  };
+
   const save = useMutation<CreatedPolicyId, ApiError>({
     mutationFn: () => (id ? updatePolicy(Number(id), buildPayload()) : createPolicy(buildPayload())),
     onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+      invalidatePolicyLists();
       if (res?.filledLevels?.length || res?.warnings?.length) {
         setSaved(res);
         return;
@@ -440,7 +448,7 @@ export default function PolicyEditorPage({ service, subject }: { service: string
   const del = useMutation<void, ApiError>({
     mutationFn: () => deletePolicy(Number(id)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+      invalidatePolicyLists();
       navigate(profileUrl);
     },
   });
