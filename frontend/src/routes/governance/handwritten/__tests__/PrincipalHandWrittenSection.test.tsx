@@ -40,6 +40,7 @@ function answer(over: Partial<PrincipalHandWritten> = {}): PrincipalHandWritten 
     state: "listed",
     policies: [],
     everyone: { count: 0, policies: [] },
+    unreadable: [],
     ...over,
   };
 }
@@ -152,6 +153,45 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Applies to everyone" })).toHaveTextContent("1 hand-written policy names everyone.");
     expect(screen.queryByRole("region", { name: "Direct" })).not.toBeInTheDocument();
+  });
+
+  it("lists unreadable policies of the shown type and says the list may be incomplete", async () => {
+    const unreadable = (id: number, name: string, policyType: string, engines = [{ id: "e-tr", name: "lake-trino" }]) => ({
+      id,
+      name,
+      service: "lake-tr",
+      inTagService: false,
+      policyType,
+      parseError: `bad body ${id}`,
+      engines,
+    });
+    open(ok(answer({ unreadable: [unreadable(7, "broken-a", "access"), unreadable(8, "broken-b", "access", []), unreadable(9, "broken-m", "masking")] })));
+    const note = await screen.findByRole("region", { name: "Could not be read" }, T);
+    expect(note).toHaveTextContent("2 hand-written policies could not be read, so this list may be incomplete.");
+    expect(within(note).getByRole("link", { name: "broken-a" })).toHaveAttribute("href", "/governance/engines/e-tr/advanced/policies/access/7");
+    // No engine: the profile's own editor, as a readable row.
+    expect(within(note).getByRole("link", { name: "broken-b" })).toHaveAttribute(
+      "href",
+      "/governance/engines/profiles/lake-tr/advanced/policies/access/8",
+    );
+    expect(note).toHaveTextContent("bad body 7");
+    expect(within(note).queryByText("broken-m")).not.toBeInTheDocument();
+    expect(screen.getByText("No hand-written policy names this principal.")).toBeInTheDocument();
+  });
+
+  it("states unreadable policies for a user without a username too", async () => {
+    open(
+      ok(
+        answer({
+          state: "no_username",
+          principal: { kind: "user", id: "u-ana", label: "Ana", username: null },
+          unreadable: [{ id: 7, name: "broken", service: "lake-tr", inTagService: false, policyType: "access", parseError: "x", engines: [] }],
+        }),
+      ),
+    );
+    expect(await screen.findByRole("region", { name: "Could not be read" }, T)).toHaveTextContent(
+      "1 hand-written policy could not be read, so this list may be incomplete.",
+    );
   });
 
   it("explains, and asks nothing, without policy:read", async () => {

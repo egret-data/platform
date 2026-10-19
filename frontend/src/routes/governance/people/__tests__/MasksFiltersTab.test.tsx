@@ -339,6 +339,7 @@ describe("hand-written policies on a People page's Masks & filters tab", () => {
         state: "listed",
         policies: [row(1, "hw-access", "access", "allow"), row(2, "hw-mask", "masking", "mask"), row(3, "hw-filter", "rowfilter", "row_filter")],
         everyone: { count: 0, policies: [] },
+        unreadable: [],
       }) as { status: number; body: unknown },
     };
     serve({ "users/u-ana": ok(ANA) }, ok([]));

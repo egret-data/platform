@@ -609,6 +609,7 @@ describe("hand-written policies on a People page's Permissions tab", () => {
       },
     ],
     everyone: { count: 1, policies: [{ id: 3, name: "hw-all", service: "lake-tr", bucket: "allow" }] },
+    unreadable: [],
     ...over,
   });
   const GROUP: GroupPrincipal = {

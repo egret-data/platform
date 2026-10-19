@@ -13,6 +13,7 @@ import { STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import { HandWrittenItems } from "@/routes/governance/handwritten/HandWrittenItems";
 import { DENY_ALL_ELSE, policyTypeWord } from "@/routes/governance/handwritten/handwrittenText";
+import { UnreadablePolicies } from "@/routes/governance/handwritten/UnreadablePolicies";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 
 export const TAG_POLICIES_NEED_POLICY_READ =
@@ -146,6 +147,7 @@ function Body({ tagId }: { tagId: string }) {
           </Table>
         </div>
       )}
+      <UnreadablePolicies policies={d.unreadable} what="tag policy" />
     </div>
   );
 }

@@ -70,7 +70,7 @@ function row(over: Partial<TagPolicyRow> & Pick<TagPolicyRow, "id" | "name">): T
 }
 
 function handwritten(over: Partial<TagHandWritten> = {}): TagHandWritten {
-  return { tag: { id: "t-pii", key: "pii", name: "PII" }, state: "listed", policies: [], sameName: [], ...over };
+  return { tag: { id: "t-pii", key: "pii", name: "PII" }, state: "listed", policies: [], sameName: [], unreadable: [], ...over };
 }
 
 const rowOf = (name: string) => screen.getByRole("link", { name }).closest("tr") as HTMLElement;
@@ -177,6 +177,35 @@ describe("Hand-written tab (route D)", () => {
     );
     expect(line).toHaveTextContent("Tag pii2 has this name too; engine tag policies on this name apply to both.");
     expect(within(line).getByRole("link", { name: "pii2" })).toHaveAttribute("href", "/governance/classifications/t-2");
+  });
+
+  it("lists unreadable tag policies and says the list may be incomplete", async () => {
+    open("handwritten", STEWARD, {
+      [HW]: ok(
+        handwritten({
+          unreadable: [
+            {
+              id: 51,
+              name: "broken",
+              service: "lake-tr-tag",
+              inTagService: true,
+              policyType: "masking",
+              parseError: "invalid type: string",
+              engines: [{ id: "e-1", name: "lake-trino" }],
+            },
+          ],
+        }),
+      ),
+    });
+    const note = await screen.findByRole("region", { name: "Could not be read" }, T);
+    expect(note).toHaveTextContent("1 hand-written tag policy could not be read, so this list may be incomplete.");
+    expect(within(note).getByRole("link", { name: "broken" })).toHaveAttribute(
+      "href",
+      "/governance/engines/e-1/advanced/policies/masking/51?scope=tag",
+    );
+    expect(note).toHaveTextContent("invalid type: string");
+    // The empty sentence stays, qualified by the note.
+    expect(screen.getByText("No hand-written tag policy names this classification.")).toBeInTheDocument();
   });
 
   it("says when no profile has a tag service", async () => {

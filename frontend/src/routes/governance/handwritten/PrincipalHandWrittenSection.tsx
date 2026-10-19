@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { Section, STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 import { editorUrl, type EditorSubject } from "@/routes/governance/engines/engineUrl";
+import { UnreadablePolicies } from "@/routes/governance/handwritten/UnreadablePolicies";
 import {
   BUCKET_WORD,
   DENY_ALL_ELSE,
@@ -103,6 +104,7 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
   const through = policies.filter((p) => p.naming.some((n) => !isDirect(n, subject)));
   const everyoneEntries = d.everyone.policies.filter((e) => RULE_BUCKETS.includes(e.bucket) === (show === "rules"));
   const everyoneIds = [...new Map(everyoneEntries.map((e) => [`${e.service}/${e.id}`, e])).values()].sort(byName);
+  const unreadable = d.unreadable.filter((u) => wanted(u.policyType));
 
   return (
     <Section title={d.state === "no_username" ? "Hand-written policies" : `Hand-written policies (${policies.length})`}>
@@ -121,6 +123,7 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
         </>
       )}
       {everyoneIds.length > 0 ? <Everyone entries={everyoneIds} /> : null}
+      <UnreadablePolicies policies={unreadable} what="policy" />
     </Section>
   );
 }
