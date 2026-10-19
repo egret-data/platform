@@ -18,7 +18,8 @@
  * its own; it imports every page, so it cannot reach the entry chunk without
  * their markers going with it. `tagParts.tsx` (swatch, counts, the clearance
  * cell) holds only words other modules also spell; only guarded modules
- * import it.
+ * import it. `tabs/ViewsTab.tsx` only passes the tag to `ViewExposureSection`,
+ * which lives outside the area.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -37,6 +38,10 @@ const MARKERS = [
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
   // The Clearance tab's compile line (spec §5.2).
   ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
+  // The Mask & filter tab without policy:read (spec §5.3).
+  ["src/routes/governance/classifications/tabs/RulesTab.tsx", "Rules are read with the policy:read permission"],
+  // The Hand-written tab's empty state (spec §5.5).
+  ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No hand-written tag policy names this classification."],
 ];
 
 const entry = entryChunkName(DIST);

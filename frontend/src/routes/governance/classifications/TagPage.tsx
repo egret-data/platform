@@ -8,6 +8,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { TagHeader } from "@/routes/governance/classifications/TagHeader";
 import { ClearanceTab } from "@/routes/governance/classifications/tabs/ClearanceTab";
+import { HandWrittenTagTab } from "@/routes/governance/classifications/tabs/HandWrittenTagTab";
+import { RulesTab } from "@/routes/governance/classifications/tabs/RulesTab";
+import { ViewsTab } from "@/routes/governance/classifications/tabs/ViewsTab";
 import { WhereUsedTab } from "@/routes/governance/classifications/tabs/WhereUsedTab";
 import { CLASSIFICATIONS_BASE, type TagTab } from "@/routes/governance/classifications/tagUrl";
 
@@ -43,8 +46,12 @@ function TabBody({ tab, tag }: { tab: TagTab; tag: Tag }) {
       return <WhereUsedTab tagId={tag.id} />;
     case "clearance":
       return <ClearanceTab tag={tag} />;
-    default:
-      return <p className="text-sm text-muted-foreground">{TAG_TAB_LABEL[tab]}</p>;
+    case "rules":
+      return <RulesTab tag={tag} />;
+    case "views":
+      return <ViewsTab tag={tag} />;
+    case "handwritten":
+      return <HandWrittenTagTab tagId={tag.id} />;
   }
 }
 
