@@ -15,6 +15,7 @@ import { formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
+import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { Detail, ItemHeader, ItemMissing } from "@/routes/governance/people/itemParts";
 
 /** What a reader without `policy:update` reads instead of Edit and Delete. Also this module's bundle marker. */
@@ -151,7 +152,7 @@ function TagLink({ tagKey, subject }: { tagKey: string; subject: string }) {
   if (!id) return null;
   return (
     <span className="block">
-      <OpenInDataLink to={`/governance/classifications/${encodeURIComponent(id)}`} subject={subject} label="Open classification" />
+      <OpenInDataLink to={tagUrl(id, "rules")} subject={subject} label="Open classification" />
     </span>
   );
 }
