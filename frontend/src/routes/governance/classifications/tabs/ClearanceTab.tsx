@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, ChevronsUpDown, Plus, X } from "lucide-react";
 import { type AccessGroup, type AccessRole, listGroups, listRoles } from "@/api/access";
+import { ApiError } from "@/api/client";
 import { type AccessPolicyWritten, type Tag, useClearTagAccessPolicy, useSetTagAccessPolicy } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -17,7 +18,15 @@ import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 
 /** Spec §5.2: what a required role compiles to, stated under the table. */
 export const COMPILES_TO =
-  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny per tagged column.";
+  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
+
+/** Why a picker's list is missing when the server refused it (403): the permission that lists it. */
+export const LIST_NEEDS: Record<"role" | "group", string> = {
+  role: "Roles are listed with the role:read permission, which this account does not have.",
+  group: "Groups are listed with the group:read permission, which this account does not have.",
+};
+
+const refused = (e: unknown) => e instanceof ApiError && e.status === 403;
 
 function Warning({ children }: { children: React.ReactNode }) {
   return (
@@ -40,8 +49,22 @@ function Warning({ children }: { children: React.ReactNode }) {
  */
 export function ClearanceTab({ tag }: { tag: Tag }) {
   const canEdit = useCanManageTags();
-  const rolesQ = useQuery({ queryKey: ["control-plane", "access", "roles"], queryFn: listRoles, retry: false });
-  const groupsQ = useQuery({ queryKey: ["control-plane", "access", "groups"], queryFn: listGroups, retry: false });
+  // The role list only feeds the picker; the group list also names required
+  // groups (stored by id). Neither is asked for when nothing on the tab uses it,
+  // and a refusal (403) is a missing permission, said as such, not a load error
+  // (live check D1: a tag reader saw "could not be loaded" and a Retry).
+  const rolesQ = useQuery({
+    queryKey: ["control-plane", "access", "roles"],
+    queryFn: listRoles,
+    retry: false,
+    enabled: canEdit,
+  });
+  const groupsQ = useQuery({
+    queryKey: ["control-plane", "access", "groups"],
+    queryFn: listGroups,
+    retry: false,
+    enabled: canEdit || tag.required_groups.length > 0,
+  });
   const allRoles: AccessRole[] = useMemo(() => rolesQ.data ?? [], [rolesQ.data]);
   const allGroups: AccessGroup[] = useMemo(() => groupsQ.data ?? [], [groupsQ.data]);
   const groupNameById = useMemo(() => new Map(allGroups.map((g) => [g.id, g.name])), [allGroups]);
@@ -119,7 +142,7 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
         Objects with this classification can only be opened by principals holding one of the required roles{" "}
         <em>or</em> belonging to one of the required groups. Leave it empty for no restriction.
       </p>
-      {rolesQ.isError || groupsQ.isError ? (
+      {(rolesQ.isError && !refused(rolesQ.error)) || (groupsQ.isError && !refused(groupsQ.error)) ? (
         <TabError
           what="roles and groups"
           onRetry={() => {
@@ -172,6 +195,7 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
         availableGroups={allGroups.filter((g) => !requiredGroups.includes(g.id)).map((g) => ({ value: g.id, label: g.name }))}
         rows={rows}
         canEdit={canEdit}
+        listRefused={{ role: refused(rolesQ.error), group: refused(groupsQ.error) }}
         onAdd={add}
         onRemove={remove}
       />
@@ -194,6 +218,7 @@ function ClearanceTable({
   availableGroups,
   rows,
   canEdit,
+  listRefused,
   onAdd,
   onRemove,
 }: {
@@ -201,6 +226,8 @@ function ClearanceTable({
   availableGroups: Option[];
   rows: ClearanceRow[];
   canEdit: boolean;
+  /** The server refused this kind's list: the picker says which permission lists it instead. */
+  listRefused: Record<ClearanceType, boolean>;
   onAdd: (type: ClearanceType, value: string) => void;
   onRemove: (type: ClearanceType, value: string) => void;
 }) {
@@ -234,72 +261,78 @@ function ClearanceTable({
               <SelectItem value="group">Group</SelectItem>
             </SelectContent>
           </Select>
-          <Popover
-            open={open}
-            onOpenChange={(o) => {
-              setOpen(o);
-              if (!o) setQ("");
-            }}
-          >
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                role="combobox"
-                aria-expanded={open}
-                aria-controls={listId}
-                aria-label={`${type === "role" ? "Role" : "Group"} to add`}
-                className="w-56 justify-between font-normal"
+          {listRefused[type] ? (
+            <p className="text-sm text-muted-foreground">{LIST_NEEDS[type]}</p>
+          ) : (
+            <>
+              <Popover
+                open={open}
+                onOpenChange={(o) => {
+                  setOpen(o);
+                  if (!o) setQ("");
+                }}
               >
-                <span className="truncate">{pending ? pending.label : `Select a ${type}…`}</span>
-                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" aria-hidden />
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={open}
+                    aria-controls={listId}
+                    aria-label={`${type === "role" ? "Role" : "Group"} to add`}
+                    className="w-56 justify-between font-normal"
+                  >
+                    <span className="truncate">{pending ? pending.label : `Select a ${type}…`}</span>
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" aria-hidden />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-56 p-0" align="start">
+                  <div className="border-b p-2">
+                    <Input
+                      autoFocus
+                      aria-label={`Search ${type}s`}
+                      placeholder={`Search ${type}s…`}
+                      value={q}
+                      onChange={(e) => setQ(e.target.value)}
+                    />
+                  </div>
+                  <div id={listId} className="max-h-64 overflow-y-auto py-1">
+                    {matches.length === 0 ? (
+                      <p className="px-3 py-2 text-sm text-muted-foreground">No {type}s found.</p>
+                    ) : (
+                      matches.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          className="block w-full px-3 py-1.5 text-left text-sm hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
+                          onClick={() => {
+                            setPending(o);
+                            setOpen(false);
+                            setQ("");
+                          }}
+                        >
+                          {o.label}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <Button
+                aria-label="Add clearance"
+                disabled={!pending}
+                onClick={() => {
+                  if (pending) {
+                    onAdd(type, pending.value);
+                    setPending(null);
+                  }
+                }}
+              >
+                <Plus className="mr-1 h-4 w-4" aria-hidden />
+                Add
               </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-56 p-0" align="start">
-              <div className="border-b p-2">
-                <Input
-                  autoFocus
-                  aria-label={`Search ${type}s`}
-                  placeholder={`Search ${type}s…`}
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                />
-              </div>
-              <div id={listId} className="max-h-64 overflow-y-auto py-1">
-                {matches.length === 0 ? (
-                  <p className="px-3 py-2 text-sm text-muted-foreground">No {type}s found.</p>
-                ) : (
-                  matches.map((o) => (
-                    <button
-                      key={o.value}
-                      type="button"
-                      className="block w-full px-3 py-1.5 text-left text-sm hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
-                      onClick={() => {
-                        setPending(o);
-                        setOpen(false);
-                        setQ("");
-                      }}
-                    >
-                      {o.label}
-                    </button>
-                  ))
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-          <Button
-            aria-label="Add clearance"
-            disabled={!pending}
-            onClick={() => {
-              if (pending) {
-                onAdd(type, pending.value);
-                setPending(null);
-              }
-            }}
-          >
-            <Plus className="mr-1 h-4 w-4" aria-hidden />
-            Add
-          </Button>
-          {!pending ? <span className="text-xs text-muted-foreground">Pick a {type} to add.</span> : null}
+              {!pending ? <span className="text-xs text-muted-foreground">Pick a {type} to add.</span> : null}
+            </>
+          )}
         </div>
       ) : null}
       <div className="rounded-md border">

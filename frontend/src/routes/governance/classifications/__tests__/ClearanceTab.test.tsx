@@ -41,7 +41,7 @@ const READS_ONLY = /this clearance withholds reads only, on trino and on starroc
 const VIEWS = /trino views in egret.s catalogs carry the classification/i;
 const CEILING = /if more than 500 of this tag.s columns are visible to one starrocks profile, that profile.s recompile fails outright rather than truncating the clearance/i;
 const COMPILES =
-  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny per tagged column.";
+  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
 
 async function pickAndAdd(user: ReturnType<typeof userEvent.setup>, type: "Role" | "Group", label: string) {
   if (type === "Group") {
@@ -141,6 +141,28 @@ describe("Clearance tab: the editor (ported from TagDetail)", () => {
     expect(screen.queryByRole("combobox", { name: "Role to add" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add clearance" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove auditor" })).not.toBeInTheDocument();
+  });
+
+  it("a reader who cannot list roles or groups asks for neither and sees no load error (live check D1)", async () => {
+    const served = open(pii({ required_roles: ["auditor"] }), TAG_READER, {
+      "/access/roles": fail(403, "forbidden: role:read"),
+      "/groups": fail(403, "forbidden: group:read"),
+    });
+    const t = await table();
+    expect(within(t).getByText("auditor")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+    expect(served.asked).not.toContain("GET /access/roles");
+    expect(served.asked).not.toContain("GET /groups");
+  });
+
+  it("a steward refused the role list is told which permission lists roles, not 'No roles found.' (live check D1)", async () => {
+    open(pii(), STEWARD, { "/access/roles": fail(403, "forbidden: role:read"), "/groups": fail(403, "forbidden: group:read") });
+    await table();
+    expect(
+      await screen.findByText("Roles are listed with the role:read permission, which this account does not have.", {}, T),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Role to add" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
   });
 
   it("the picker returns focus to its trigger when a pick closes it, and on Escape", async () => {
