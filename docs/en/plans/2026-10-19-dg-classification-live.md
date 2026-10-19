@@ -132,3 +132,56 @@ DBs `egret_dgcl_live` and `dgcl_src`, the egret binary copy, the admin password 
 target dir and the exported source tree of M4. Kept in the scratchpad: the scripts (`api.sh`, `tq.py`, `sq.sh`,
 `only.sh`, `m2.sh`, `policies.py`), the Trino and StarRocks plugin files and the cell outputs. `dgcl-pg` and
 `dgcl-valkey` stay for the package.
+
+## 2. Live browser check (Task 19)
+
+### 2.0 Predictions
+
+Written at `79176846` (Tasks 1–18) before any container of this run was started; nothing in this subsection is edited
+after observing. A wrong prediction is a finding.
+
+**Setup the predictions are about.** Task 1's recipe (§1.2), rebuilt from `79176846`: egret as a host binary on
+127.0.0.1:18498 against DB `egret_dgcl_live` in `dgcl-pg`; `dgcl-rustfs` as the warehouse's object store, so the egret
+catalog `ice` (warehouse `ice` in workspace `w1`) holds real Iceberg tables `s.t (id, email, country)`, `s.u (id)` and
+`s2.v (id)` and the Data pages can browse them; `dgcl-trino` (483, user from `X-Trino-User`) and `dgcl-sr` (4.1.6,
+`access_control = ranger`) registered as external engines on profiles `cltr` (tag service `cltr-tag`) and `clsr`,
+their catalog `ice` reading PostgreSQL DB `dgcl_src` with the same tables; Ranger poll 5000 ms. Users through the API:
+`admin`; `vs` (`tag:read`, `tag:manage`, `policy:read`); `vt` (`tag:read`); `ua` (member of `w1` only, plus `tag:read`
+so it can open a classification, L5); `ub`; egret group `g1` (`ua` in it); egret role `cleared` (held by `ub`). Tag
+`PII` (key `pii`). Hand-written policies inserted by SQL as `operator` rows (DEV-n), on both profiles unless said:
+`hw-l1` allow `ua`, `ub` `select` on `{ice, s, *, *}`; `hw-l2` deny `ua` `select` on `{ice, s, t, email}`; `hw-l3`
+(cltr-tag only) mask `ua` on tag `PII`; `hw-l4-g1` allow group `g1` on `{ice, s, t, *}`; `hw-l4-pub` allow group
+`public` on `{ice, s, u, *}`; Trino baselines `hw-base-imp`/`hw-base-qid` naming `ua`, `ub`. Vite from this worktree on
+127.0.0.1:5398 proxying `/api`, `/catalog`, `/oauth` to 18498. The browser is driven by scripted Playwright
+(`@playwright/test` from `frontend/node_modules`, Chromium), screenshots inspected; logins ≥ 60 s apart.
+
+| id | check | prediction |
+|---|---|---|
+| L1a | `hw-l1` on Data `ice.s.t` Permissions | listed under "Hand-written policies (N)" with the "Hand-written" badge, "Applies to this object · through a pattern", items "Allow: ua, ub — select" (one row per profile: `cltr` and `clsr`) |
+| L1b | `hw-l1` on schema `ice.s` | "Applies to this object" **without** "through a pattern" (every level the request names is literal: `ice`, `s`) |
+| L1c | `hw-l1` in the column panel of `email` | "Applies to this object · through a pattern" |
+| L1d | schema `ice.s2` | `hw-l1` not listed |
+| L1e | engines, only `hw-l1` (+ baselines) enabled | `ua` `SELECT email FROM ice.s.t` returns rows on Trino and StarRocks; `SELECT id FROM ice.s2.v` refused on both |
+| L2a | `hw-l2` on `ice.s.t` | "Applies to part of it", a "Deny" item with the deny icon |
+| L2b | `hw-l2` in `email`'s panel | "Applies to this object" (no pattern) |
+| L2c | engines, `hw-l1` + `hw-l2` | `ua` `SELECT email FROM ice.s.t` refused on both; `SELECT id FROM ice.s.t` allowed on both |
+| L2d | Who can read? on `email` for `ua` | denied, deciding policy `hw-l2-<profile>` (agrees with the engines) |
+| L3a | `hw-l3` in `email`'s panel | one row, service `cltr-tag`, "Applies to this object", "Through tag PII on this object", "Mask: ua — mask MASK" |
+| L3b | `hw-l3` on `ice.s.t` Masks & filters | "Applies to part of it", "Through tag PII on column email"; absent from Permissions (masking row) |
+| L3c | `PII` page Hand-written tab | `hw-l3` listed, engines "cltr", editor link `/governance/engines/<cltr id>/advanced/policies/masking/<id>?scope=tag` |
+| L3d | engines, `hw-l1` + `hw-l3` (`hw-l2` off) | Trino returns `email` masked for `ua`; StarRocks returns it unmasked (no tag service; the UI lists the tag row only under `cltr-tag`, so it claims nothing for StarRocks) |
+| L4a | People `ua` Permissions | "Direct" lists `hw-l1`, `hw-l2` (and the Trino baselines `hw-base-imp`, `hw-base-qid`); "Through a group or role" lists `hw-l4-g1` with "Names group g1, which this user is in. Engines resolve no groups, so on the engine it reaches nobody."; "Applies to everyone": "2 hand-written policies name everyone." (`hw-l4-pub` on both profiles), expandable |
+| L4b | engines, `hw-l4-g1` only | `ua` refused `ice.s.t` on both (Task 1 M3) — the sentence's claim holds |
+| L4c | People `ua` Masks & filters | `hw-l3` under Direct |
+| L5a | tag `ice.s.u` (table), `ice.s.t.email` (column), a dashboard in `w1`, a dashboard in `w2` | index row PII: Data "1 table · 1 column", BI objects 2 |
+| L5b | Where used as admin | Data: `ice.s` group, `t` "Columns: email", `u` "Table"; BI: both dashboards with links `/explore/w1/dashboards/<id>`, `/explore/w2/dashboards/<id>` |
+| L5c | Where used as `ua` | BI lists `w1`'s dashboard only and "1 object you cannot read."; no workspace name of `w2` anywhere |
+| L5d | as `vt` | page renders; Where used shows both dashboards as unreadable ("2 objects you cannot read."); Mask & filter "Rules are read with the policy:read permission, which this account does not have."; Hand-written "Hand-written tag policies are read with the policy:read permission, …"; no `/perm/rules` and no `/handwritten` request |
+| L6a | Clearance: add role `cleared` as `vs` | row added; the compile line "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny per tagged column." shown |
+| L6b | engines after one poll (`hw-l2` off) | `ua` `SELECT email FROM ice.s.t` refused on both; `ub` reads it on both |
+| L6c | remove `cleared` | after one poll `ua` reads `email` again on both (masked on Trino by `hw-l3`) |
+| L7a | delete dialog with a rule selecting `pii` | lines "Removes it from 1 table and 1 column.", "Removes it from 2 BI objects.", "1 rule selects it: the delete will be refused until they are deleted or retargeted."; Delete disabled after typing `PII`, enabled after `pii` |
+| L7b | confirm with the rule present | 409 toast (the rules sentence), dialog closed, focus on the page's Delete button |
+| L7c | delete the rule, delete again | navigates to the index; `PII` not listed; `tag_assignments` and `catalog_tag_assignments` have no row for its id |
+| L8 | old links | Overview `tags_without_clearance` row → `/governance/classifications/<id>`; Engine & policy compiled clearance row "Open source" → `…?tab=clearance` (Clearance tab selected); `ub`'s People Clearances → `?tab=clearance`; RulePage "Open classification" → `?tab=rules`; `/control-plane/classifications/<id>` → `/governance/classifications/<id>` |
+| L9 | keyboard, Escape, widths, themes | the index, the tabs (arrow keys move `?tab=`), Edit form, delete dialog and clearance picker reachable by keyboard with a visible focus ring; Escape closes each and focus returns to its opener; 390 px: `scrollWidth = clientWidth` on the index, every tab, the Data placements and People (stacked tables); 1280 px light and dark readable |
