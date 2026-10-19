@@ -276,6 +276,10 @@ unknown catalog. One `REPEATABLE READ, READ ONLY` snapshot.
 
 Rows sorted: `applies` before `part` before `parent` before `unknown`, then profile name, then policy name.
 
+**Note (2026-10-20, review fix, item 1).** `viaTag` also carries `schema` and `table`: the tagged table, or the table of
+the tagged column. A tag `below` the object (a table under a schema or catalog page, a column under a schema page) is
+then named where it sits, relative to the page (§6 note); `on: "below"` is never worded as a parent.
+
 ### 4.3 Route B: hand-written policies naming a principal (CL3, Q1)
 
 `GET /api/control-plane/governance/principals/{kind}/{id}/handwritten`, `policy:read`. `kind` ∈ `user` (`id` = user
@@ -297,6 +301,19 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
                 engines: [ { id, name } ] } ],
   everyone: { count, policies: [ { id, name, service, bucket } ] } }
 ```
+
+**Notes (2026-10-20).**
+
+- *Live check D3.* On a group's or role's own page the route reports that group's or role's own naming as
+  `how: "group"`/`"role"` (the identity sets are reused); the page shows it under **Direct**, keeping Q1's sentence. The
+  route is unchanged.
+- *Review fix, item 2.* A row whose body cannot be parsed was skipped, so the page could say "No hand-written policy
+  names this principal" over a policy that may name it. The answer gains
+  `unreadable: [ { id, name, service, inTagService, policyType, parseError, engines } ]` (every unparsable `operator` row
+  of every Trino, StarRocks and tag service; `parseError` is route A's text), never dropped (§4.2.6). Gate unchanged.
+- *Review fix, item 8.* egret folds group names (#688) while an item keeps its author's spelling, so group and role
+  names are matched case-insensitively for this listing; `via` keeps the item's spelling. It is informational: Q1's
+  sentence stands, engines resolve no groups.
 
 ### 4.4 Route C and the `/tags` counts (CL4, Q3)
 
@@ -326,6 +343,10 @@ uuid), `group`, `role` (`id` = name); 400 otherwise; 404 for an unknown principa
 (`tags.rs:113-133`). `assignment_count` unchanged. Create/update responses carry zeros (they already leave clearance
 empty, `tags.rs:52-53`).
 
+**Note (2026-10-20, review fix, item 7).** `catalog_tables` and `catalog_columns` leave out rows in a warehouse no
+catalog names, so the index agrees with Where used's `tableCount`/`columnCount`; route C keeps counting those rows as
+`orphaned` (CL11).
+
 ### 4.5 Route D: hand-written tag policies of a classification (Q4)
 
 `GET /api/control-plane/classifications/{id}/handwritten`, `policy:read`. Every Trino profile with a usable tag service;
@@ -333,6 +354,9 @@ each tag service's `operator` rows whose tag resource matches this tag's **name*
 `{tag: name}`); per row the profiles (and engines) whose tag service it is, `items`, `enabled`, `unmodelled`; plus
 `sameName: [ { id, key } ]` for other tags with this name (CL10). No tag service anywhere →
 `{ state: "no_tag_service" }` ("No engine profile has a tag service, so no engine downloads tag policies.").
+
+**Note (2026-10-20, review fix, item 2).** As route B: an `operator` row of a usable tag service whose body cannot be
+parsed is returned in `unreadable` (same shape as route B's), never dropped, since it may name this tag.
 
 ## 5. The tag page (`/governance/classifications/:id`)
 
@@ -364,6 +388,19 @@ not compiled into any engine: …"). The four statements of premise 3, each unde
 under the table, shown when a role is required: "Compiles to one deny tag policy in each Trino profile's tag service,
 and on StarRocks to a select deny per tagged column." Picker focus returns to its trigger on close (#4a D3).
 
+**Notes (2026-10-20).**
+
+- *Live check D2.* The compile line above was wrong for StarRocks: there the clearance compiles to a select deny **and a
+  `MASK_NULL` mask** per tagged column, and the mask decides, so an uncleared reader reads NULL rather than being
+  refused. The line now reads: "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to
+  a select deny and a NULL mask per tagged column. StarRocks does not access-check a masked column, so an uncleared
+  reader reads NULL there rather than being refused."
+- *Live check D1.* The role list is asked only by an editor; the group list by an editor or when a required group must
+  be named (groups are stored by id). A 403 on either is a missing permission, stated as "Roles are listed with the
+  role:read permission, which this account does not have." (groups: `group:read`), not "could not be loaded" with Retry.
+- *Review fix, item 9.* A reader refused the group list sees required groups by id with "Groups are listed with the
+  group:read permission, which this account does not have, so required groups are shown by id."
+
 ### 5.3 Mask & filter
 
 `TagRulesSection` as today, each rule linking to its rule page (`/governance/rules/:id`). Without `policy:read`: "Rules
@@ -380,6 +417,10 @@ the profile page's for an unbound profile), engines, type, items (principals wit
 filter), enabled, `unmodelled` sentences; `sameName` sentence (CL10). Without `policy:read`: the explanation. Empty:
 "No hand-written tag policy names this classification."
 
+**Note (2026-10-20, review fix, item 2).** Route D's `unreadable` rows are stated under the table: "N hand-written tag
+policies could not be read, so this list may be incomplete.", each named with its parse error and an editor link (the
+first downloading engine's; none when no engine downloads it).
+
 ### 5.6 Delete (CL2, CL14)
 
 `ConfirmDeleteDialog` with `confirmText` = the tag's key. Body, from route C and the rules list:
@@ -387,6 +428,11 @@ filter), enabled, `unmodelled` sentences; `sameName` sentence (CL10). Without `p
 (R roles, G groups). N rules select it: the delete will be refused until they are deleted or retargeted." Unknown
 parts say why (no `policy:read` → the rules line of CL14; route C failed → "Usage could not be read: <message>").
 Success: navigate to the index (no toast). 409: `toastTagDeleteFailure` as today, dialog closed, focus back on Delete.
+
+**Note (2026-10-20, review fix, item 6).** From the index row menu the delete stays on the index, so FE-ACTION-2 wants
+a toast: "Classification K deleted.". From the tag's page it still navigates without a toast. The dialog awaits
+`mutateAsync`, because closing it from the index unmounts it and drops `mutate`'s per-call callbacks (which had also
+lost the 409 toast there).
 
 ## 6. Hand-written on Data and People (CL3)
 
@@ -404,6 +450,20 @@ permission, which this account does not have." Error → error with Retry, never
 - **People**: `PermissionsTab` (access) and `MasksFiltersTab` (masking, row filter) from route B, same section, rows
   grouped Direct · Through a group or role (Q1) · Applies to everyone (count, expandable).
 
+**Notes (2026-10-20).**
+
+- *Review fix, item 1.* A tag-policy row's tag line names where the tag sits: "Through tag T on this object"; on a
+  column page, a tag on its table: "Through tag T on table t, which holds this column"; below the object, the tagged
+  table or column relative to the page ("on column email" on a table page, "on column t.email" on a schema page, "on
+  table s.t" on a catalog page). Never "on a parent" for something below.
+- *Review fix, item 5.* A seeded count stored in a tag service links the Policies tab of each engine of every profile
+  naming it as its tag service (an unbound such profile: its own page); a service no listed profile involves is named
+  without a link. A tag service has no page of its own.
+- *Review fix, item 2.* People's section states route B's `unreadable` rows of the shown types (access, or masking and
+  row filter): "N hand-written policies could not be read, so this list may be incomplete.", each with its parse error
+  and editor link, also for a user without a username.
+- *Live check D3.* See §4.3: on a group's or role's page its own naming is Direct.
+
 ## 7. Links
 
 URLs are unchanged, so every link keeps working; tab-meaning links gain `?tab=` (CL17): `engines/tabs/PoliciesTab.tsx:64`
@@ -415,6 +475,11 @@ and `people/tabs/ClearancesTab.tsx:117` → `?tab=clearance`; `people/RulePage.t
 As #4a: each tab and section owns its states; an error is never rendered as empty; empty sentences state the fact;
 controls without permission are hidden or say why (FE-ACTION-4); writes invalidate exactly the keys they change (CL16)
 and any 2xx is success (#4a D2: create answers 201); dialogs return focus to their opener (#4a D3).
+
+**Note (2026-10-20, review fix, item 4).** A Data tag assignment or removal (Add tag, the catalog tag editor), a tag
+rename and a tag delete also invalidate route A (every catalog's answers, by a predicate over its key family, since
+the write knows no catalog id); a rename and a delete also invalidate the tag's route D key. Both match tag policies by
+tag name. Route B is unaffected by tag writes.
 
 ## 9. Testing (CL5)
 

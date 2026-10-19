@@ -276,6 +276,10 @@ catalog không biết. Một snapshot `REPEATABLE READ, READ ONLY`.
 
 Thứ tự dòng: `applies` trước `part` trước `parent` trước `unknown`, rồi tên profile, rồi tên policy.
 
+**Ghi chú (2026-10-20, sửa sau review, mục 1).** `viaTag` mang thêm `schema` và `table`: bảng được gắn tag, hoặc bảng
+chứa cột được gắn tag. Nhờ vậy một tag nằm `below` đối tượng (bảng dưới trang schema hay catalog, cột dưới trang schema)
+được nêu đúng chỗ nó nằm, tương đối với trang (ghi chú ở §6); `on: "below"` không bao giờ được diễn đạt là "parent".
+
 ### 4.3 Route B: policy viết tay nêu một principal (CL3, Q1)
 
 `GET /api/control-plane/governance/principals/{kind}/{id}/handwritten`, `policy:read`. `kind` ∈ `user` (`id` = uuid của
@@ -297,6 +301,19 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
                 engines: [ { id, name } ] } ],
   everyone: { count, policies: [ { id, name, service, bucket } ] } }
 ```
+
+**Ghi chú (2026-10-20).**
+
+- *Kiểm sống D3.* Trên trang của chính một group hay role, route báo việc nêu chính group/role đó là
+  `how: "group"`/`"role"` (dùng lại tập danh tính); trang hiện nó dưới **Direct**, giữ câu của Q1. Route không đổi.
+- *Sửa sau review, mục 2.* Dòng có body không parse được từng bị bỏ qua, nên trang có thể nói "No hand-written policy
+  names this principal" trong khi policy đó có thể nêu principal. Câu trả lời thêm
+  `unreadable: [ { id, name, service, inTagService, policyType, parseError, engines } ]` (mọi dòng `operator` không
+  parse được của mọi service Trino, StarRocks và tag; `parseError` là chữ của route A), không bao giờ bỏ (§4.2.6). Gate
+  không đổi.
+- *Sửa sau review, mục 8.* egret gập chữ tên group (#688) còn item giữ cách viết của tác giả, nên với danh sách này tên
+  group và role được so không phân biệt hoa thường; `via` giữ cách viết của item. Đây chỉ là thông tin: câu của Q1 giữ
+  nguyên, engine không phân giải group nào.
 
 ### 4.4 Route C và số đếm của `/tags` (CL4, Q3)
 
@@ -325,6 +342,10 @@ user), `group`, `role` (`id` = tên); khác thì 400; principal không biết th
 (các dòng có `column_name <> ''`), một truy vấn group by, join trong bộ nhớ như phần phủ policy (`tags.rs:113-133`).
 `assignment_count` không đổi. Response của create/update mang số 0 (chúng vốn để trống clearance, `tags.rs:52-53`).
 
+**Ghi chú (2026-10-20, sửa sau review, mục 7).** `catalog_tables` và `catalog_columns` bỏ các dòng thuộc warehouse
+không catalog nào nêu, nên index khớp `tableCount`/`columnCount` của Where used; route C vẫn đếm các dòng đó là
+`orphaned` (CL11).
+
 ### 4.5 Route D: tag policy viết tay của một classification (Q4)
 
 `GET /api/control-plane/classifications/{id}/handwritten`, `policy:read`. Mọi profile Trino có tag service dùng được;
@@ -332,6 +353,9 @@ các dòng `operator` của mỗi tag service có tài nguyên tag khớp **tên
 `{tag: name}`); mỗi dòng kèm các profile (và engine) có tag service đó, `items`, `enabled`, `unmodelled`; cộng
 `sameName: [ { id, key } ]` cho các tag khác cùng tên (CL10). Không có tag service nào → `{ state: "no_tag_service" }`
 ("No engine profile has a tag service, so no engine downloads tag policies.").
+
+**Ghi chú (2026-10-20, sửa sau review, mục 2).** Như route B: một dòng `operator` của tag service dùng được mà body không
+parse được được trả trong `unreadable` (cùng dạng với route B), không bao giờ bỏ, vì nó có thể nêu tag này.
 
 ## 5. Trang tag (`/governance/classifications/:id`)
 
@@ -362,6 +386,19 @@ engine: …"). Bốn câu của tiền đề 3, mỗi câu dưới điều kiệ
 buộc: "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny per tagged
 column." Focus của picker trở về nút mở khi đóng (#4a D3).
 
+**Ghi chú (2026-10-20).**
+
+- *Kiểm sống D2.* Dòng compile ở trên sai với StarRocks: ở đó clearance compile thành một select deny **và một mask
+  `MASK_NULL`** cho mỗi cột được gắn tag, và mask quyết định, nên người đọc chưa được clearance đọc ra NULL chứ không bị
+  từ chối. Dòng giờ là: "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a
+  select deny and a NULL mask per tagged column. StarRocks does not access-check a masked column, so an uncleared reader
+  reads NULL there rather than being refused."
+- *Kiểm sống D1.* Danh sách role chỉ được hỏi bởi người sửa; danh sách group bởi người sửa hoặc khi cần gọi tên một group
+  bắt buộc (group lưu theo id). 403 ở danh sách nào cũng là thiếu quyền, nói rõ "Roles are listed with the role:read
+  permission, which this account does not have." (group: `group:read`), không phải "could not be loaded" kèm Retry.
+- *Sửa sau review, mục 9.* Người đọc bị từ chối danh sách group thấy group bắt buộc theo id kèm "Groups are listed with
+  the group:read permission, which this account does not have, so required groups are shown by id."
+
 ### 5.3 Mask & filter
 
 `TagRulesSection` như hôm nay, mỗi rule link tới trang rule (`/governance/rules/:id`). Thiếu `policy:read`: "Rules are
@@ -378,6 +415,10 @@ profile với profile chưa bind), engine, loại, item (principal kèm dấu Q1
 `unmodelled`; câu `sameName` (CL10). Thiếu `policy:read`: lời giải thích. Rỗng: "No hand-written tag policy names this
 classification."
 
+**Ghi chú (2026-10-20, sửa sau review, mục 2).** Các dòng `unreadable` của route D được nêu dưới bảng: "N hand-written
+tag policies could not be read, so this list may be incomplete.", mỗi dòng kèm lỗi parse và link editor (của engine tải
+đầu tiên; không có link khi không engine nào tải).
+
 ### 5.6 Xoá (CL2, CL14)
 
 `ConfirmDeleteDialog` với `confirmText` = key của tag. Nội dung, từ route C và danh sách rule: "Deleting K removes it from
@@ -385,6 +426,10 @@ T tables and C columns, B BI objects (and U you cannot read), and removes its cl
 it: the delete will be refused until they are deleted or retargeted." Phần không biết thì nói lý do (thiếu `policy:read`
 → dòng rule của CL14; route C lỗi → "Usage could not be read: <message>"). Thành công: chuyển về index (không toast).
 409: `toastTagDeleteFailure` như hôm nay, đóng hộp, focus trở lại nút Delete.
+
+**Ghi chú (2026-10-20, sửa sau review, mục 6).** Xoá từ menu dòng của index thì ở lại index, nên FE-ACTION-2 đòi một
+toast: "Classification K deleted.". Từ trang tag vẫn chuyển trang, không toast. Hộp thoại chờ `mutateAsync`, vì đóng
+nó từ index sẽ unmount nó và làm mất callback theo lần gọi của `mutate` (cũng đã làm mất toast 409 ở đó).
 
 ## 6. Hand-written trên Data và People (CL3)
 
@@ -402,6 +447,20 @@ have." Lỗi → lỗi kèm Retry, không bao giờ là "None".
 - **People**: `PermissionsTab` (access) và `MasksFiltersTab` (masking, row filter) từ route B, cùng section, dòng nhóm
   theo Direct · Through a group or role (Q1) · Applies to everyone (số đếm, mở rộng được).
 
+**Ghi chú (2026-10-20).**
+
+- *Sửa sau review, mục 1.* Dòng tag của một tag policy nêu tag nằm ở đâu: "Through tag T on this object"; trên trang cột,
+  tag trên bảng của nó: "Through tag T on table t, which holds this column"; dưới đối tượng: bảng hay cột được gắn tag,
+  tương đối với trang ("on column email" trên trang bảng, "on column t.email" trên trang schema, "on table s.t" trên
+  trang catalog). Không bao giờ "on a parent" cho thứ nằm bên dưới.
+- *Sửa sau review, mục 5.* Số seeded lưu trong một tag service link tới tab Policies của từng engine của mọi profile
+  lấy nó làm tag service (profile như vậy chưa bind: trang của chính nó); service không profile nào trong danh sách liên
+  quan thì nêu tên, không link. Tag service không có trang riêng.
+- *Sửa sau review, mục 2.* Section của People nêu các dòng `unreadable` của route B thuộc loại đang hiện (access, hoặc
+  masking và row filter): "N hand-written policies could not be read, so this list may be incomplete.", mỗi dòng kèm lỗi
+  parse và link editor, kể cả với user không có username.
+- *Kiểm sống D3.* Xem §4.3: trên trang group hay role, việc nêu chính nó là Direct.
+
 ## 7. Link
 
 URL không đổi, nên mọi link vẫn chạy; link mang nghĩa một tab thêm `?tab=` (CL17): `engines/tabs/PoliciesTab.tsx:64` và
@@ -413,6 +472,11 @@ và `AttentionSection.tsx:111` không đổi.
 Như #4a: mỗi tab và section tự lo trạng thái; lỗi không bao giờ hiển thị thành rỗng; câu rỗng nêu sự thật; control
 thiếu quyền bị ẩn hoặc nói lý do (FE-ACTION-4); lệnh ghi invalidate đúng các key nó đổi (CL16) và mọi 2xx là thành công
 (#4a D2: create trả 201); hộp thoại trả focus về nút mở (#4a D3).
+
+**Ghi chú (2026-10-20, sửa sau review, mục 4).** Gắn hay gỡ tag Data (Add tag, trình sửa tag catalog), đổi tên tag và xoá
+tag cũng invalidate route A (câu trả lời của mọi catalog, bằng predicate trên họ key của nó, vì lệnh ghi không biết id
+catalog); đổi tên và xoá còn invalidate key route D của tag. Cả hai khớp tag policy theo tên tag. Route B không bị ảnh
+hưởng bởi lệnh ghi tag.
 
 ## 9. Kiểm thử (CL5)
 
