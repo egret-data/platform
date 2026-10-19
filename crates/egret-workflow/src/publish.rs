@@ -406,40 +406,21 @@ fn resolve_task<'a>(
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let ws = cx.ws;
-        let errors_path = path.clone();
+        let parent = path.clone();
         let own: Result<()> = async {
             match &mut task.kind {
-                TaskKind::Sequential(s) => resolve_all(&mut s.tasks, path, cx, warnings).await,
-                TaskKind::Parallel(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
-                TaskKind::If(i) => {
-                    resolve_all(&mut i.then, path.clone(), cx, warnings).await?;
-                    resolve_all(&mut i.r#else, path, cx, warnings).await
-                }
-                TaskKind::Switch(s) => {
-                    for case_tasks in s.cases.values_mut() {
-                        resolve_all(case_tasks, path.clone(), cx, warnings).await?;
-                    }
-                    resolve_all(&mut s.defaults, path, cx, warnings).await
-                }
-                TaskKind::Dag(d) => {
-                    for node in d.tasks.iter_mut() {
-                        if let Some(t) = node.task.as_mut() {
-                            let child = task_path(&path, &t.id);
-                            resolve_task(t, child, cx, warnings).await?;
-                        }
-                    }
-                    Ok(())
-                }
-                TaskKind::Loop(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
-                TaskKind::LoopUntil(l) => resolve_all(&mut l.tasks, path, cx, warnings).await,
-                TaskKind::AllowFailure(a) => resolve_all(&mut a.tasks, path, cx, warnings).await,
-                TaskKind::WorkingDirectory(w) => {
-                    resolve_all(&mut w.tasks, path, cx, warnings).await
-                }
-                // `tasks` only, and `errors` deliberately not -- this walk mirrors
-                // `Task::children()`, which is the control-flow walk, and every
-                // other arm here is narrow in exactly the same way.
-                TaskKind::Pause(p) => resolve_all(&mut p.tasks, path, cx, warnings).await,
+                // Control flow names no egret object of its own; its children
+                // are walked below, through `Task::children_mut`.
+                TaskKind::Sequential(_)
+                | TaskKind::Parallel(_)
+                | TaskKind::If(_)
+                | TaskKind::Switch(_)
+                | TaskKind::Dag(_)
+                | TaskKind::Loop(_)
+                | TaskKind::LoopUntil(_)
+                | TaskKind::AllowFailure(_)
+                | TaskKind::WorkingDirectory(_)
+                | TaskKind::Pause(_) => Ok(()),
                 // Fix round 1: a subflow spawns a DIFFERENT flow's execution
                 // rather than owning local tasks -- `Task::children()` returns
                 // none for it either, and `registry::known_type` never sees its
@@ -541,33 +522,28 @@ fn resolve_task<'a>(
         }
         .await;
         own?;
+        // The control-flow children, exactly `Task::children()`'s lists in
+        // its order: `children_mut` is its mutable twin, checked against it
+        // by `children_mut_walks_exactly_what_children_walks`. This walk used
+        // its own per-kind arms until PR-2's final review (M1), and they had
+        // drifted: `AllowFailure.finally` was never walked, so a `Subflow`
+        // there kept an authored `flowRef` and got no warning.
+        for child in task.children_mut() {
+            let child_path = task_path(&parent, &child.id);
+            resolve_task(child, child_path, cx, warnings).await?;
+        }
         // Task 2.5 fix round 1 (review I1): every kind's own `errors:`
         // lists too -- `Task::error_children()`, which `children()`
         // deliberately leaves out. Without this, a `Subflow` there kept an
         // authored `flowRef` and got no warning, and an `egret.sql`
         // `database:` there reached the snapshot unchecked. After the
         // control-flow children, in `error_children()`'s order.
-        if let Some(errors) = errors_mut(&mut task.kind) {
-            resolve_all(errors, errors_path, cx, warnings).await?;
+        for child in task.error_children_mut() {
+            let child_path = task_path(&parent, &child.id);
+            resolve_task(child, child_path, cx, warnings).await?;
         }
         Ok(())
     })
-}
-
-/// The mutable twin of [`Task::error_children`]: the same kinds, the
-/// same list. Kept beside it in meaning -- a kind that grows an `errors:`
-/// must be added to both.
-fn errors_mut(kind: &mut TaskKind) -> Option<&mut Vec<Task>> {
-    match kind {
-        TaskKind::Sequential(s) => Some(&mut s.errors),
-        TaskKind::Parallel(p) => Some(&mut p.errors),
-        TaskKind::If(i) => Some(&mut i.errors),
-        TaskKind::Switch(s) => Some(&mut s.errors),
-        TaskKind::Dag(d) => Some(&mut d.errors),
-        TaskKind::Pause(p) => Some(&mut p.errors),
-        TaskKind::AllowFailure(a) => Some(&mut a.errors),
-        _ => None,
-    }
 }
 
 /// Kestra's warning for a `Subflow` whose target the publishing workspace

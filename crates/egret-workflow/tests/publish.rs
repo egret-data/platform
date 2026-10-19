@@ -1072,3 +1072,51 @@ async fn an_unknown_task_type_inside_a_nested_errors_list_cannot_be_published() 
         other => panic!("{other:?}"),
     }
 }
+
+/// **PR-2 final review M1: an `AllowFailure`'s `finally:` is walked too.**
+/// `Task::children()` walks `tasks` then `finally`, and publish's walk now
+/// goes through the same list (`Task::children_mut`). Before, the
+/// `AllowFailure` arm walked `tasks` only: a `Subflow` inside `finally:` kept
+/// the `flowRef` its author wrote -- here another workspace's flow id -- and
+/// got no warning. Now it gets what a top-level one gets.
+#[tokio::test]
+async fn a_subflow_inside_an_allow_failure_finally_is_resolved_warned_and_its_authored_flow_ref_cleared(
+) {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let theirs = common::draft(
+        &repo, other_ws, other_user,
+        "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n",
+    )
+    .await;
+    let source = format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    finally:\n      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n        flowRef: {}\n",
+        theirs.id
+    );
+    let f = common::draft(&repo, ws, user, &source).await;
+
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect("publishes");
+    let h = &v.snapshot["plan"]["tasks"][0]["finally"][0];
+    // The path is real, so `flowRef` being absent is not vacuous.
+    assert_eq!(h["flowId"], "nightly_rollup", "{}", v.snapshot);
+    assert!(h["flowRef"].is_null(), "{}", v.snapshot);
+    assert!(
+        !v.snapshot["plan"]
+            .to_string()
+            .contains(&theirs.id.to_string()),
+        "another workspace's id must not reach the plan: {}",
+        v.snapshot
+    );
+    assert_eq!(
+        v.snapshot["warnings"],
+        serde_json::json!([{
+            "code": "subflow_not_found",
+            "message": subflow_warning("company.analytics", "nightly_rollup"),
+            "path": "tasks.af.h",
+        }]),
+    );
+}
