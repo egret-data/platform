@@ -907,25 +907,27 @@ pub(crate) fn audit_detail(g: &EngineGrant, services: &[i64]) -> serde_json::Val
     })
 }
 
-/// The audit hook of the three writes (spec E18). Logs the `Mutation` shape
-/// today; whichever of #3 and F11 merges second replaces the body with
-/// `st.audit.emit(egret_audit::mutation_for(p, None, action, "engine_grant",
-/// Some(id), detail))`.
-pub(crate) fn audit_engine_grant_write(
+/// The audit hook of the three writes (spec E18), wired to DG #3's
+/// governance events: one `engine_grant:*` event on the write's own
+/// transaction, so it exists exactly when the write committed. `before` and
+/// `after` are [`audit_detail`]s.
+pub(crate) async fn audit_engine_grant_write(
+    tx: &mut Transaction<'_, Postgres>,
     p: &egret_core::Principal,
-    action: &str,
+    action: &'static str,
     id: Uuid,
-    detail: &serde_json::Value,
-) {
-    tracing::info!(
-        target: "egret::audit",
-        actor = %p.user_id.0,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+) -> Result<(), PermHttpError> {
+    crate::governance_events::record(
+        tx,
         action,
-        resource_type = "engine_grant",
-        resource_id = %id,
-        detail = %detail,
-        "engine grant written"
-    );
+        egret_audit::governance::resource::ENGINE_GRANT,
+        id.to_string(),
+        crate::governance_events::before_after(before, after),
+        p,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -952,13 +954,16 @@ pub(crate) async fn create_engine_grant(
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     let out = write_engine_grant(&mut tx, engine_id, None, body).await?;
-    tx.commit().await.map_err(PermHttpError::db)?;
     audit_engine_grant_write(
+        &mut tx,
         &p,
-        "perm.engine_grant.create",
+        egret_audit::governance::action::ENGINE_GRANT_CREATE,
         out.grant.id,
-        &audit_detail(&out.grant, &out.services),
-    );
+        None,
+        Some(audit_detail(&out.grant, &out.services)),
+    )
+    .await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
     Ok((
         axum::http::StatusCode::CREATED,
         Json(EngineGrantWriteResponse {
@@ -996,13 +1001,18 @@ pub(crate) async fn patch_engine_grant(
         return Err(PermHttpError::NotFound);
     };
     let out = write_engine_grant(&mut tx, existing.engine_id, Some(id), body).await?;
-    tx.commit().await.map_err(PermHttpError::db)?;
+    // The engine (and so its profile) is fixed: the stored row's services are
+    // the write's.
     audit_engine_grant_write(
+        &mut tx,
         &p,
-        "perm.engine_grant.update",
+        egret_audit::governance::action::ENGINE_GRANT_UPDATE,
         id,
-        &audit_detail(&out.grant, &out.services),
-    );
+        Some(audit_detail(&existing, &out.services)),
+        Some(audit_detail(&out.grant, &out.services)),
+    )
+    .await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(EngineGrantWriteResponse {
         id,
         compile: CompileResponse::from_summaries(out.services, &out.summaries),
@@ -1043,13 +1053,16 @@ pub(crate) async fn delete_engine_grant(
     }
     let summaries = recompile_services_in_tx(&mut tx, &services).await?;
     let reach = reach_of(&mut tx, profile, &engine).await?;
-    tx.commit().await.map_err(PermHttpError::db)?;
     audit_engine_grant_write(
+        &mut tx,
         &p,
-        "perm.engine_grant.delete",
+        egret_audit::governance::action::ENGINE_GRANT_DELETE,
         id,
-        &audit_detail(&g, &services),
-    );
+        Some(audit_detail(&g, &services)),
+        None,
+    )
+    .await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(EngineGrantWriteResponse {
         id,
         compile: CompileResponse::from_summaries(services, &summaries),

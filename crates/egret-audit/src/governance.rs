@@ -37,8 +37,10 @@ pub mod action {
     pub const MIGRATION_APPLY: &str = "policy_migration:apply";
     pub const MIGRATION_UNDO: &str = "policy_migration:undo";
     pub const PROFILE_COMPILE: &str = "profile:compile";
-    // F11 (engine-scoped grants) adds, in its own package:
-    // ENGINE_GRANT_CREATE/UPDATE/DELETE = "engine_grant:create|update|delete", family Policy.
+    // F11 (engine-scoped grants, `perm.engine_grants`).
+    pub const ENGINE_GRANT_CREATE: &str = "engine_grant:create";
+    pub const ENGINE_GRANT_UPDATE: &str = "engine_grant:update";
+    pub const ENGINE_GRANT_DELETE: &str = "engine_grant:delete";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -48,6 +50,7 @@ pub mod resource {
     pub const TAG: &str = "tag";
     pub const RANGER_POLICY: &str = "ranger_policy";
     pub const POLICY_PROFILE: &str = "policy_profile";
+    pub const ENGINE_GRANT: &str = "engine_grant";
 }
 
 /// Which permission reads an event in the feed: `Policy` needs `policy:read`,
@@ -111,6 +114,21 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
         resource::POLICY_PROFILE,
         Family::Policy,
     ),
+    (
+        action::ENGINE_GRANT_CREATE,
+        resource::ENGINE_GRANT,
+        Family::Policy,
+    ),
+    (
+        action::ENGINE_GRANT_UPDATE,
+        resource::ENGINE_GRANT,
+        Family::Policy,
+    ),
+    (
+        action::ENGINE_GRANT_DELETE,
+        resource::ENGINE_GRANT,
+        Family::Policy,
+    ),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -135,6 +153,9 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::MIGRATION_APPLY,
     action::MIGRATION_UNDO,
     action::PROFILE_COMPILE,
+    action::ENGINE_GRANT_CREATE,
+    action::ENGINE_GRANT_UPDATE,
+    action::ENGINE_GRANT_DELETE,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.
