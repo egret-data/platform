@@ -27,6 +27,12 @@ const MARKERS = [
   ["src/routes/governance/engines/EnginesRoutes.tsx", "profiles/:service/advanced/policies/:kind/:policyId"],
   // The index's notice after an old URL named no profile.
   ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
+  // The engine page's line for a reader without engine:read (EP19).
+  ["src/routes/governance/engines/EnginePage.tsx", "Plugin state needs the engine:read permission."],
+  // The profile page's header for an unbound profile (EP13).
+  ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this profile."],
+  // The shared-profile banner (EP14).
+  ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
 ];
 
 const entry = entryChunkName(DIST);

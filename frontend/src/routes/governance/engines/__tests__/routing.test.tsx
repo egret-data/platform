@@ -20,7 +20,8 @@ describe("the Engine & policy area's routes", () => {
 
   it("opens an engine page at /governance/engines/:id", async () => {
     openApp("/governance/engines/7f1c0e8a-0000-4000-8000-000000000001?tab=plugin", POLICY_READER);
-    expect(await screen.findByTestId("engine-page-stub", {}, TIMEOUT)).toHaveTextContent(
+    // Every read but the profile list rejects here, so the page names the engine by its id.
+    expect(await screen.findByRole("region", { name: "Engine" }, TIMEOUT)).toHaveTextContent(
       "7f1c0e8a-0000-4000-8000-000000000001",
     );
     expect(currentUrl()).toBe("/governance/engines/7f1c0e8a-0000-4000-8000-000000000001?tab=plugin");
@@ -29,7 +30,7 @@ describe("the Engine & policy area's routes", () => {
   it("opens the profile page at /governance/engines/profiles/:service: the static segment wins over :id", async () => {
     openApp("/governance/engines/profiles/p1", POLICY_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "p1" }, TIMEOUT)).toBeInTheDocument();
-    expect(screen.queryByTestId("engine-page-stub")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Engine" })).not.toBeInTheDocument();
   }, 15_000);
 
   it("keeps a profile named with a / in its segment", async () => {
