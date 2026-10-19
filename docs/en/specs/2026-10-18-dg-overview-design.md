@@ -63,11 +63,11 @@ code:
 | O3 | Governance events are written **in the write's own transaction** by a new `egret_audit::governance::record_change`, into `audit.audit_log` as `kind = 'mutation'`. A refused, rolled-back, previewed or dry-run write leaves no event. They are written whether or not `audit.enabled` is set; the flag keeps governing decision rows and the existing sink events, and its doc comment says so | user, 2026-10-18 |
 | O4 | The existing role and catalog-tag events stay on the sink (best effort, after commit); the feed reads them and says they are best effort | default decision (2026-10-18) |
 | O5 | No backfill. Recording begins when this version is deployed; the feed's empty state and footnote say so | user, 2026-10-18 |
-| O6 | `perm.compile_runs` (migration 0196): the last compile per profile. Success is written by the compile funnel in the compile's transaction; failure only by entry points no write waits on (§3.3) | default decision (2026-10-18) |
+| O6 | `perm.compile_runs` (migration 0197): the last compile per profile. Success is written by the compile funnel in the compile's transaction; failure only by entry points no write waits on (§3.3) | default decision (2026-10-18) |
 | O7 | `GET /api/control-plane/governance/attention`, gated `policy:read` OR `tag:read`; each finding computed only for a reader holding its source's permission, otherwise listed in `notChecked` | user, 2026-10-18 |
 | O8 | Each source runs in its own savepoint of one `REPEATABLE READ, READ ONLY` transaction with a 5 s `statement_timeout`; a failing source becomes a `source_unavailable` finding | default decision (2026-10-18) |
 | O9 | Drift: `plugin_silent` (critical, no poll in 24 h), `plugin_behind` (critical, version not confirmed 90 s after it was set), and an added `plugin_quiet` (warning, no poll in 5 min) so a stopped engine is not invisible for a day | default decision (2026-10-18); thresholds confirmed by Task 1 (`2026-10-18-dg-overview-live.md` §1.1), which also refined the rules: newest poll per profile, `-1` is "not yet reported", a kind with no recent download is not judged (§4.3) |
-| O10 | Migration numbers 0196 (`perm.compile_runs`) and 0197 (partial index on audit mutations). F11 holds 0195 | user, 2026-10-18 |
+| O10 | Migration numbers 0197 (`perm.compile_runs`) and 0198 (partial index on audit mutations). F11 holds 0195; renumbered from 0196/0197 on 2026-10-19 after workflow C2 (main `78c182ab`) took 0196 | user, 2026-10-18 |
 | O11 | Frontend: lazy area `routes/governance/overview/`, the Governance index; the catch-all `*` redirects to `/governance` (the Overview); sidebar group headed **"Governance overview"**, item "Overview", first | default decision (2026-10-18) |
 | O12 | No charts. Counts strip, Needs attention (by severity), Recent changes (paged, 25 per page) | user, 2026-10-18 |
 | O13 | Out of #3: an audit trail for tag CRUD, profile create/delete and seed, workspace membership; a system actor for sweeps and the workspace-assignment sync; per-engine plugin attribution; caching | default decision (2026-10-18) |
@@ -263,7 +263,7 @@ sync, sweeps) record nothing (O13).
 | Ranger policy delete/enabled | `delete_policy_handler`, `set_policy_enabled`, before commit | `ranger_policy:delete`/`enable`/`disable` |
 | engine grant (F11) create/patch/delete | `audit_engine_grant_write` in `routes/engine_grants.rs`, before commit; summary = F11's audit detail (`engineId`, `capability`, `values`, `principals`, `services`) as before/after | `engine_grant:create`/`update`/`delete` |
 
-### 3.3 `perm.compile_runs` (migration 0196)
+### 3.3 `perm.compile_runs` (migration 0197)
 
 ```sql
 CREATE TABLE perm.compile_runs (
@@ -295,7 +295,7 @@ CREATE TABLE perm.compile_runs (
   also records `profile:compile` with `{outcome: "error", error}` in that same transaction.
 - **Not recorded as failures**: a compile that fails inside a grant, rule, tag, clearance, membership, policy or
   catalog write. That write is refused with the error (its caller sees it), and the engine keeps the previous compile.
-- Migration 0197: `CREATE INDEX audit_log_mutation_ts_idx ON audit.audit_log (ts DESC, id DESC) WHERE kind = 'mutation'`,
+- Migration 0198: `CREATE INDEX audit_log_mutation_ts_idx ON audit.audit_log (ts DESC, id DESC) WHERE kind = 'mutation'`,
   so the feed does not scan decision rows.
 
 ### 3.4 `GET /api/control-plane/governance/changes`
@@ -310,7 +310,7 @@ CREATE TABLE perm.compile_runs (
   - Tag: `tag_clearance:*`, and the legacy `tag:assign`/`tag:unassign` **with `resource_type = 'catalog'` only** (the
     `object` rows are workspace BI tags, premise 8).
 - SQL: `kind = 'mutation' AND (action, resource_type) IN (allowed pairs) AND (ts, id) < cursor ORDER BY ts DESC,
-  id DESC LIMIT n`, served by the 0197 index. The pair list comes from `egret_audit::governance`, the one place F11
+  id DESC LIMIT n`, served by the 0198 index. The pair list comes from `egret_audit::governance`, the one place F11
   adds its strings.
 - Each entry: `{ id, at, actor: {userId, label} | null, impersonator: {userId, label} | null, action, sentence,
   target: Ref | null, targetExists: bool, detail }`. Labels are resolved at read time: user name or email, role

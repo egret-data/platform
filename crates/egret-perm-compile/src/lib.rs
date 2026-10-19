@@ -70,7 +70,7 @@ pub mod classify;
 pub mod engine_capabilities;
 /// F11: compile an engine grant into its engine's profile.
 pub mod engine_grants;
-// DG #3: each profile's last compile (`perm.compile_runs`, migration 0196).
+// DG #3: each profile's last compile (`perm.compile_runs`, migration 0197).
 pub mod compile_runs;
 mod governance_events;
 // SP4d-3 Task 6: the equivalence gate — probes derived from a profile's
