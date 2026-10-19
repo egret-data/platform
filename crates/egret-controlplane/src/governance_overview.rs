@@ -37,7 +37,8 @@ use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::plugin_judgement::{
-    judge_plugins, ledger_rows_via, KindState, LedgerRow, Liveness, ProfileVersions,
+    expects_tags_via, judge_plugins, ledger_rows_via, KindState, LedgerRow, Liveness,
+    ProfileVersions,
 };
 use crate::{CpError, CpState};
 
@@ -653,6 +654,7 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
     let profiles = drift_profiles(c).await?;
     let ids: Vec<i64> = profiles.keys().copied().collect();
     let ledger = ledger_rows_via(c, &ids).await?;
+    let expects_tags = expects_tags_via(c, &ids).await?;
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *c)
         .await?;
@@ -664,6 +666,7 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
             policy_version: p.policy_version,
             tag_version: p.tag_version,
             updated_at: p.updated_at,
+            expects_tags: expects_tags.contains(sid),
         };
         let j = judge_plugins(&versions, &rows, now);
         let (engine_id, engine) = p.running[0].clone();

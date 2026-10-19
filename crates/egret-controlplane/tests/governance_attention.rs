@@ -292,6 +292,32 @@ async fn poll(f: &Fixture, sid: i64, plugin: &str, kind: &str, held: i64, ago_se
     .expect("poll");
 }
 
+/// [`live_profile`] for a Trino profile naming a tag service (`<name>_tag`):
+/// only such a profile's plugins are expected to download tags (DG #4a fix D1).
+async fn live_tagged_profile(f: &Fixture, name: &str) -> i64 {
+    let tag = format!("{name}_tag");
+    f.policy
+        .create_service(&tag, "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let sid = f
+        .policy
+        .create_service(name, "trino", &json!({ "tagService": tag }))
+        .await
+        .expect("profile")
+        .id;
+    engine(
+        f,
+        &format!("{name}-eng"),
+        "trino",
+        "provisioned",
+        "running",
+        Some(sid),
+    )
+    .await;
+    sid
+}
+
 /// A provisioned running engine bound to a new profile of `ty`.
 async fn live_profile(f: &Fixture, name: &str, ty: &str) -> i64 {
     let sid = profile(f, name, ty).await;
@@ -364,7 +390,7 @@ async fn the_drift_rules_follow_the_measured_ledger() {
     counters(&f, s, 5, 1, 30 * 3600).await;
 
     // (a) A rescheduled pod: the old id's rows stay with their last `at`.
-    let s = live_profile(&f, "d_resched", "trino").await;
+    let s = live_tagged_profile(&f, "d_resched").await;
     counters(&f, s, 5, 1, 3600).await;
     poll(&f, s, "trino@old-pod-d_resched", "policies", 5, 1800).await;
     poll(&f, s, "trino@old-pod-d_resched", "tags", 1, 1800).await;
@@ -372,16 +398,23 @@ async fn the_drift_rules_follow_the_measured_ledger() {
     poll(&f, s, "trino@new-pod-d_resched", "tags", 1, 20).await;
 
     // (b) Trino's tags row reports -1 right after a policy download.
-    let s = live_profile(&f, "d_tags_reset", "trino").await;
+    let s = live_tagged_profile(&f, "d_tags_reset").await;
     counters(&f, s, 5, 3, 120).await;
     poll(&f, s, "trino@p-d_tags_reset", "policies", 5, 10).await;
     poll(&f, s, "trino@p-d_tags_reset", "tags", -1, 20).await;
 
     // … while a tags row that reports a real, older version is behind.
-    let s = live_profile(&f, "d_tags_stale", "trino").await;
+    let s = live_tagged_profile(&f, "d_tags_stale").await;
     counters(&f, s, 5, 3, 120).await;
     poll(&f, s, "trino@p-d_tags_stale", "policies", 5, 10).await;
     poll(&f, s, "trino@p-d_tags_stale", "tags", 2, 20).await;
+
+    // … but not for a Trino profile with no tag service: no tag policy reaches
+    // its plugins, so its tags are not expected (DG #4a fix D1).
+    let s = live_profile(&f, "d_untagged_stale", "trino").await;
+    counters(&f, s, 5, 3, 120).await;
+    poll(&f, s, "trino@p-d_untagged_stale", "policies", 5, 10).await;
+    poll(&f, s, "trino@p-d_untagged_stale", "tags", 2, 20).await;
 
     // (c) StarRocks downloads no tags: a bumped tag version is never "behind".
     let s = live_profile(&f, "d_sr_notags", "starrocks").await;
@@ -1078,7 +1111,7 @@ async fn a_long_compile_error_is_shortened_in_its_sample() {
 async fn a_tag_poll_gone_quiet_is_reported_as_quiet_not_behind() {
     let _serial = SERIAL.lock().await;
     let Some(f) = setup().await else { return };
-    let s = live_profile(&f, "t_tags_quiet", "trino").await;
+    let s = live_tagged_profile(&f, "t_tags_quiet").await;
     counters(&f, s, 5, 3, 3600).await;
     poll(&f, s, "trino@p-t_tags_quiet", "policies", 5, 10).await;
     poll(&f, s, "trino@p-t_tags_quiet", "tags", 3, 600).await;

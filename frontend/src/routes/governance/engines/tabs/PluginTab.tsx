@@ -1,5 +1,5 @@
 import { useState, type ComponentType } from "react";
-import { AlertTriangle, BellOff, CheckCircle2, CircleHelp, Clock, Download, PauseCircle } from "lucide-react";
+import { AlertTriangle, BellOff, CheckCircle2, CircleHelp, CircleMinus, Clock, Download, PauseCircle } from "lucide-react";
 import { useControlPlaneGovernanceEnginePlugin } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { KindReport, KindStateDto, LedgerRowDto } from "@/api/generated/model";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
@@ -20,6 +20,7 @@ export const KIND_STATE_WORD: Record<KindStateDto, string> = {
   quiet: "Quiet",
   silent: "Silent",
   not_reported: "Not reported",
+  not_expected: "Not expected",
 };
 
 const NOT_REPORTED_WORD: Record<string, string> = {
@@ -34,6 +35,7 @@ const STATE_ICON: Record<KindStateDto, ComponentType<{ className?: string; "aria
   quiet: PauseCircle,
   silent: BellOff,
   not_reported: CircleHelp,
+  not_expected: CircleMinus,
 };
 
 const STATE_TONE: Partial<Record<KindStateDto, string>> = {

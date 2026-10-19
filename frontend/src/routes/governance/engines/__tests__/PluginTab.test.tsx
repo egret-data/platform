@@ -104,6 +104,27 @@ describe("the Plugin tab (spec §6.5, EP17–EP19)", () => {
     expect(within(row).getByText(k.sentence)).toBeInTheDocument();
   });
 
+  it("renders a tags kind the server judges not expected with its word, an icon and the server's sentence", async () => {
+    const sentence = "Profile lake-sr has no tag service, so its plugins are not expected to download tags.";
+    serve(
+      answers(
+        ok(
+          pluginResponse({
+            kinds: [
+              kind({ kind: "policies", state: "up_to_date" }),
+              kind({ kind: "tags", state: "not_expected", lastDownloadAt: null, newestReportedVersion: null, sentence }),
+            ],
+          }),
+        ),
+      ),
+    );
+    open();
+    const row = await within(await screen.findByRole("tabpanel", {}, T)).findByRole("row", { name: /Tags/ }, T);
+    expect(within(row).getByText("Not expected")).toBeInTheDocument();
+    expect(row.querySelector("svg")).not.toBeNull();
+    expect(within(row).getByText(sentence)).toBeInTheDocument();
+  });
+
   it("shows the last download as a <time> with its relative text, and the three versions as tabular numbers", async () => {
     serve(
       answers(

@@ -1404,7 +1404,7 @@ pub async fn catalogs_for_service_via(
 /// different question (which ids must be row-locked, the profile itself
 /// INCLUDED) and returns ids rather than names. If that predicate ever changes,
 /// it changes in both — they are the two halves of one agreement.
-async fn usable_tag_services_via(
+pub async fn usable_tag_services_via(
     conn: &mut sqlx::PgConnection,
     service_ids: &[i64],
 ) -> Result<Vec<(i64, String)>, PolicyStoreError> {

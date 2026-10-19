@@ -377,7 +377,7 @@ describe("each section's states (FE-STATE-1)", () => {
 });
 
 describe("the plugin column's word (live check L0a)", () => {
-  const kind = (k: "policies" | "tags", state: "up_to_date" | "not_reported" | "behind") => ({
+  const kind = (k: "policies" | "tags", state: "up_to_date" | "not_reported" | "behind" | "not_expected") => ({
     kind: k,
     currentVersion: 5,
     lastDownloadAt: state === "not_reported" ? null : "2026-10-19T09:59:00Z",
@@ -389,9 +389,18 @@ describe("the plugin column's word (live check L0a)", () => {
   });
   const sr = { id: E_SR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
 
-  it("ignores the tags kind of a StarRocks engine, which never downloads tags", () => {
+  // The server's `judge_plugins` decides which kinds an engine is expected to
+  // download (fix D1); the column renders that judgement and adds no rule.
+  it("a tags kind the server judges not expected never outranks the policies kind", () => {
+    for (const engine of [sr, undefined]) {
+      const p = pluginResponse({ ...(engine ? { engine } : {}), kinds: [kind("policies", "up_to_date"), kind("tags", "not_expected")] });
+      expect(pluginWord(p)).toBe("Up to date");
+    }
+  });
+
+  it("applies no engine-type rule of its own: a StarRocks tags kind the server judged counts", () => {
     const p = pluginResponse({ engine: sr, kinds: [kind("policies", "up_to_date"), kind("tags", "not_reported")] });
-    expect(pluginWord(p)).toBe("Up to date");
+    expect(pluginWord(p)).toBe("Not reported");
   });
 
   it("still counts a Trino engine's unreported tags", () => {

@@ -275,6 +275,32 @@ async fn live(f: &Fixture, name: &str, ty: &str) -> (i64, Uuid) {
     (sid, eid)
 }
 
+/// [`live`] for a Trino profile that names a tag service (`<name>_tag`), so
+/// its plugins are expected to download tags.
+async fn live_tagged(f: &Fixture, name: &str) -> (i64, Uuid) {
+    let tag = format!("{name}_tag");
+    f.policy
+        .create_service(&tag, "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let sid = f
+        .policy
+        .create_service(name, "trino", &json!({ "tagService": tag }))
+        .await
+        .expect("profile")
+        .id;
+    let eid = engine(
+        f,
+        &format!("{name}-eng"),
+        "trino",
+        "provisioned",
+        "running",
+        Some(sid),
+    )
+    .await;
+    (sid, eid)
+}
+
 fn kind<'a>(body: &'a Value, k: &str) -> &'a Value {
     body["kinds"]
         .as_array()
@@ -290,7 +316,7 @@ fn kind<'a>(body: &'a Value, k: &str) -> &'a Value {
 async fn a_confirmed_trino_profile_is_up_to_date_and_lists_its_rows_newest_first() {
     let _serial = SERIAL.lock().await;
     let f = setup().await;
-    let (sid, eid) = live(&f, "j_ok", "trino").await;
+    let (sid, eid) = live_tagged(&f, "j_ok").await;
     counters(&f, sid, 5, 2, 600).await;
     poll(&f, sid, "trino@a-j_ok", "policies", 5, 10).await;
     poll(&f, sid, "trino@a-j_ok", "tags", 2, 20).await;
@@ -354,7 +380,7 @@ async fn an_old_version_two_minutes_after_the_bump_is_behind_with_the_overviews_
 }
 
 #[tokio::test]
-async fn a_starrocks_profile_with_no_tags_rows_reports_no_download() {
+async fn a_starrocks_profile_expects_no_tags() {
     let _serial = SERIAL.lock().await;
     let f = setup().await;
     let (sid, eid) = live(&f, "j_sr", "starrocks").await;
@@ -364,13 +390,47 @@ async fn a_starrocks_profile_with_no_tags_rows_reports_no_download() {
     let token = session(&f, &["platform_admin"]).await;
     let (_, body) = plugin(&st, &token, eid).await;
     let tags = kind(&body, "tags");
-    assert_eq!(tags["state"], "not_reported", "{body}");
-    assert_eq!(tags["notReported"], "no_download", "{body}");
+    assert_eq!(tags["state"], "not_expected", "{body}");
+    assert_eq!(tags["notReported"], Value::Null, "{body}");
     assert_eq!(
         tags["sentence"],
-        "No plugin of profile j_sr downloaded tags in 24 hours. StarRocks never downloads tags."
+        "Profile j_sr has no tag service, so its plugins are not expected to download tags. \
+         StarRocks never downloads tags."
     );
     assert_eq!(kind(&body, "policies")["state"], "up_to_date");
+}
+
+/// Live-check fix D1: a Trino profile naming no tag service has no tag policy
+/// to download, so its tags rows (here quiet) are not judged, and the
+/// Overview raises nothing for them either.
+#[tokio::test]
+async fn a_trino_profile_with_no_tag_service_expects_no_tags() {
+    let _serial = SERIAL.lock().await;
+    let f = setup().await;
+    let (sid, eid) = live(&f, "j_untagged", "trino").await;
+    counters(&f, sid, 5, 1, 3600).await;
+    poll(&f, sid, "trino@a-j_untagged", "policies", 5, 10).await;
+    poll(&f, sid, "trino@a-j_untagged", "tags", 1, 600).await;
+    let st = state(&f).await;
+    let token = session(&f, &["platform_admin"]).await;
+    let (_, body) = plugin(&st, &token, eid).await;
+    let tags = kind(&body, "tags");
+    assert_eq!(tags["state"], "not_expected", "{body}");
+    assert_eq!(
+        tags["sentence"],
+        "Profile j_untagged has no tag service, so its plugins are not expected to download tags."
+    );
+    // The raw rows still show what the plugin did.
+    assert_eq!(body["rows"].as_array().unwrap().len(), 2, "{body}");
+    let (_, att) = get(&st, &token, "/governance/attention").await;
+    assert!(
+        !att["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["kind"] == "plugin_quiet"),
+        "{att}"
+    );
 }
 
 #[tokio::test]
@@ -522,23 +582,30 @@ async fn the_overview_and_the_plugin_route_agree_on_every_drift_kind() {
     poll(&f, s, "starrocks@a_quiet", "policies", 5, 600).await;
     engines.push(("a_quiet", e));
 
-    let (s, e) = live(&f, "a_tags_quiet", "trino").await;
+    let (s, e) = live_tagged(&f, "a_tags_quiet").await;
     counters(&f, s, 5, 1, 3600).await;
     poll(&f, s, "trino@a_tags_quiet", "policies", 5, 10).await;
     poll(&f, s, "trino@a_tags_quiet", "tags", 1, 600).await;
     engines.push(("a_tags_quiet", e));
 
-    let (s, e) = live(&f, "a_behind", "trino").await;
+    let (s, e) = live_tagged(&f, "a_behind").await;
     counters(&f, s, 5, 3, 120).await;
     poll(&f, s, "trino@a_behind", "policies", 5, 10).await;
     poll(&f, s, "trino@a_behind", "tags", 2, 20).await;
     engines.push(("a_behind", e));
 
-    let (s, e) = live(&f, "a_clean", "trino").await;
+    let (s, e) = live_tagged(&f, "a_clean").await;
     counters(&f, s, 5, 1, 600).await;
     poll(&f, s, "trino@a_clean", "policies", 5, 10).await;
     poll(&f, s, "trino@a_clean", "tags", 1, 10).await;
     engines.push(("a_clean", e));
+
+    // No tag service: tags quiet and behind, yet neither side judges them.
+    let (s, e) = live(&f, "a_untagged", "trino").await;
+    counters(&f, s, 5, 3, 3600).await;
+    poll(&f, s, "trino@a_untagged", "policies", 5, 10).await;
+    poll(&f, s, "trino@a_untagged", "tags", 1, 600).await;
+    engines.push(("a_untagged", e));
 
     let st = state(&f).await;
     let token = session(&f, &["platform_admin"]).await;

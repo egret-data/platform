@@ -130,6 +130,7 @@ picker một user là `SubjectUserField` (`frontend/src/components/perm/ExplainR
 | EP19 | Trang engine gate `policy:read`. Không có `engine:read` thì tab Plugin và phiên bản plugin ở header được thay bằng một dòng nêu tên quyền; mọi tab khác vẫn hoạt động | default decision (2026-10-19) |
 | EP20 | People: mục "Engine permissions" nằm cuối tab Permissions của trang principal, không phải tab mới | default decision (2026-10-19) |
 | EP21 | `PrincipalPicker` có thêm prop `includeOnly` (không có danh sách Exclude), theo kiểu cộng thêm; dialog grant dùng nó | default decision (2026-10-19) |
+| EP22 | **Kind mà engine không được kỳ vọng tải được phán `not_expected`, và chỉ ở `judge_plugins`** (sửa theo review D1). Tiền đề: plugin của một profile chỉ có tag policy để tải khi profile nêu một tag service phân giải được (`egret_policy::usable_tag_services_via`, đúng phép join mà `ProfileDto.tag_service` và bản tải plugin đọc); CHECK của migration 0176 giữ `tagService` khỏi mọi profile không phải Trino, nên mọi profile StarRocks và profile Trino không có tag service đều không kỳ vọng tags. Kind tags của profile như vậy là `not_expected` bất kể các hàng nói gì (hàng thô vẫn được liệt kê), với câu "Profile P has no tag service, so its plugins are not expected to download tags." (thêm " StarRocks never downloads tags." trên engine StarRocks). Chọn cách này thay vì bỏ kind: thiếu hàng thì tab im lặng về lý do tags không được phán, còn câu trung thực là egret không kỳ vọng gì, chứ không phải không có gì xảy ra. Overview không nêu drift tags nào cho profile như vậy; index xếp `not_expected` cuối cùng và không giữ luật riêng theo loại engine. Điều này sửa EP16: các test Overview có fixture drift tags không nêu tag service nay nêu một tag service (assertion không đổi), và mỗi test có thêm một fixture ghim trường hợp không có tag service | default decision (2026-10-19, vòng sửa review) |
 | Q1 | **Dữ liệu index cho người chỉ có `policy:read`** (tiền đề 10): response `GET /policies/services` hiện có (vốn đã `policy:read`) được thêm `ProfileEngine.origin`, `ProfileEngine.type` và `ProfileDto.policyCounts {compiler, infra, operator}` (profile cộng tag service của nó), theo kiểu cộng thêm; không thêm route. Cột plugin của index chỉ hiện khi có `engine:read`, mỗi engine một lần gọi plugin | user, 2026-10-19 |
 | Q2 | URL editor giữ segment kind (tiền đề 7): `…/advanced/policies/:kind/new` và `…/advanced/policies/:kind/:policyId` | default decision (2026-10-19) |
 | Q3 | URL cũ `/governance/policies/:service` nêu một profile bind với nhiều engine (chia sẻ kiểu cũ) redirect tới engine đầu tiên theo tên (thứ tự `reach`); banner của nó nêu các engine còn lại | default decision (2026-10-19) |
@@ -212,20 +213,22 @@ policy" → `/governance/engines/:id`, hiện khi có `policy:read` (EP12).
 `crates/egret-controlplane/src/plugin_judgement.rs`:
 
 ```rust
-pub(crate) struct ProfileVersions { pub policy_version: i64, pub tag_version: i64, pub updated_at: DateTime<Utc> }
+pub(crate) struct ProfileVersions { pub policy_version: i64, pub tag_version: i64, pub updated_at: DateTime<Utc>,
+                                    pub expects_tags: bool }   // EP22
 pub(crate) struct LedgerRow { pub service_id: i64, pub plugin_id: String, pub kind: String,
                               pub last_known_version: Option<i64>, pub served_version: Option<i64>, pub at: DateTime<Utc> }
 pub(crate) enum Liveness { Live, Quiet { age_secs: i64 }, Silent }
 pub(crate) enum NotReported { NoDownload, VersionUnreported }
 pub(crate) enum KindState { UpToDate, Pending, Behind { version: i64 }, Quiet { age_secs: i64 }, Silent,
-                            NotReported(NotReported) }
+                            NotReported(NotReported), NotExpected }   // NotExpected: EP22
 pub(crate) struct Judgement { pub liveness: Liveness, pub policies: KindState, pub tags: KindState }
 pub(crate) fn judge_plugins(p: &ProfileVersions, rows: &[&LedgerRow], now: DateTime<Utc>) -> Judgement;
 pub(crate) async fn ledger_rows_via(c: &mut PgConnection, service_ids: &[i64]) -> Result<Vec<LedgerRow>, sqlx::Error>;
 ```
 
 Luật là luật của Overview, được chuyển chứ không viết lại (`QUIET_SECS`, `SILENT_SECS`, `BEHIND_SECS`, liveness theo
-poll mới nhất, luật `-1`, cửa sổ 5 phút cho `behind`, tags quiet của review M6). Ánh xạ: khi liveness là `Silent` hoặc
+poll mới nhất, luật `-1`, cửa sổ 5 phút cho `behind`, tags quiet của review M6). Ánh xạ: kind tags mà profile không
+kỳ vọng (EP22) là `NotExpected` trước mọi luật khác; khi liveness là `Silent` hoặc
 `Quiet`, cả hai kind mang trạng thái đó; ngược lại mỗi kind là `NotReported(NoDownload)` khi không có hàng nào của kind
 đó trong 24 h, `Quiet` cho kind tags im trong khi policies vẫn được poll, `Pending` khi `updated_at` chưa quá 90 s,
 `Behind` như `behind` quyết định hiện nay, `UpToDate` khi một hàng poll lúc hoặc sau U trong vòng 5 phút báo ≥ V, còn lại
@@ -248,7 +251,7 @@ Trong file mới `crates/egret-controlplane/src/governance_engines.rs`, tag `con
   plugin: { version: string|null, modelled: bool, note: string|null },   // egret_perm::ranger_plugin_report
   judged: { state: "judged" } | { state: "not_judged", reason: "external" | "not_running" | "no_profile" },
   kinds: [ { kind: "policies"|"tags", currentVersion, lastDownloadAt|null, newestReportedVersion|null,
-             servedVersion|null, state: "up_to_date"|"pending"|"behind"|"quiet"|"silent"|"not_reported",
+             servedVersion|null, state: "up_to_date"|"pending"|"behind"|"quiet"|"silent"|"not_reported"|"not_expected",
              notReported: "no_download"|"version_unreported"|null, sentence } ],   // rỗng khi không phán
   rows: [ { pluginId, kind, lastKnownVersion, servedVersion, at } ] }              // thô, mới nhất trước
 ```
@@ -259,8 +262,8 @@ Trong file mới `crates/egret-controlplane/src/governance_engines.rs`, tag `con
   trừ `no_profile`.
 - Câu chữ: dùng câu của Overview cho cùng trạng thái khi Overview có câu (`behind`, `quiet`, `silent`); các trạng thái
   khác: "Plugins of profile P report holding policy version V." / "A plugin downloaded version V at T; confirmation
-  takes two polls." / "No plugin of profile P downloaded tags in 24 hours. StarRocks never downloads tags." (vế sau chỉ
-  cho engine StarRocks) / "Plugins polled since version V was set, but none has reported a version yet." Không bao giờ
+  takes two polls." / "No plugin of profile P downloaded tags in 24 hours." / "Profile P has no tag service, so its plugins are
+  not expected to download tags. StarRocks never downloads tags." (`not_expected`, EP22; vế sau chỉ cho engine StarRocks) / "Plugins polled since version V was set, but none has reported a version yet." Không bao giờ
   dùng "enforces" (ledger ghi lại những gì plugin báo, `plugin_downloads.rs:12-14`).
 - 404 cho engine không tồn tại. Profile chia sẻ (`sharedWith` không rỗng) được trả lời theo profile; tab nói rằng các
   hàng có thể đến từ bất kỳ engine nào trong số đó.
@@ -409,7 +412,8 @@ không còn ai gọi. `TrinoConfigDialog` và `PolicyWarningsCallout` được g
 ## 9. Kiểm thử (EP10)
 
 - **Test DB backend** (`egret_test_db::url()`, fixture giới hạn trong id của chính nó): `judge_plugins` trên mọi trạng
-  thái của §4.1 gồm `-1`, plugin id cũ, tags quiet, profile StarRocks không có tags; route cho profile được phán,
+  thái của §4.1 gồm `-1`, plugin id cũ, tags quiet, profile StarRocks và profile Trino không có tag service
+  (`not_expected`, EP22); route cho profile được phán,
   external (`not_judged`, có rows), không chạy, không có profile, engine không tồn tại (404), 403 khi thiếu
   `engine:read`, 403 khi thiếu `policy:read`. **Test đồng thuận**: mỗi kind drift của Overview một fixture, khẳng định
   `attention_via` phát `plugin_silent`/`plugin_quiet`/`plugin_behind` đúng khi route báo `silent`/`quiet`/`behind` cho

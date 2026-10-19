@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::governance_overview::begin_snapshot;
 use crate::plugin_judgement::{
-    judge_plugins, ledger_rows_via, Judgement, KindState, LedgerRow, Liveness, NotReported,
-    ProfileVersions,
+    expects_tags_via, judge_plugins, ledger_rows_via, Judgement, KindState, LedgerRow, Liveness,
+    NotReported, ProfileVersions,
 };
 use crate::{CpError, CpState};
 
@@ -141,6 +141,9 @@ pub enum KindStateDto {
     Quiet,
     Silent,
     NotReported,
+    /// A tags kind no plugin is expected to download: the profile has no tag
+    /// service (every StarRocks profile among them).
+    NotExpected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -350,10 +353,18 @@ async fn engine_plugin_via(
         Judged::Judged
     };
     let kinds = if judged == Judged::Judged {
+        let expects_tags = expects_tags_via(c, &[sid])
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "governance engine plugin: read the tag service");
+                CpError::Internal
+            })?
+            .contains(&sid);
         let versions = ProfileVersions {
             policy_version: pv,
             tag_version: tv,
             updated_at,
+            expects_tags,
         };
         let refs: Vec<&LedgerRow> = ledger.iter().collect();
         let j = judge_plugins(&versions, &refs, now);
@@ -462,16 +473,19 @@ fn kind_report(
                 ctx.first_running
             ),
         ),
-        KindState::NotReported(NotReported::NoDownload) => {
-            let mut s = format!("No plugin of profile {p} downloaded {name} in 24 hours.");
-            if kind == PluginKind::Tags && ctx.engine_type == "starrocks" {
+        KindState::NotReported(NotReported::NoDownload) => (
+            KindStateDto::NotReported,
+            Some(NotReportedDto::NoDownload),
+            format!("No plugin of profile {p} downloaded {name} in 24 hours."),
+        ),
+        KindState::NotExpected => {
+            let mut s = format!(
+                "Profile {p} has no tag service, so its plugins are not expected to download tags."
+            );
+            if ctx.engine_type == "starrocks" {
                 s.push_str(" StarRocks never downloads tags.");
             }
-            (
-                KindStateDto::NotReported,
-                Some(NotReportedDto::NoDownload),
-                s,
-            )
+            (KindStateDto::NotExpected, None, s)
         }
         KindState::NotReported(NotReported::VersionUnreported) => (
             KindStateDto::NotReported,

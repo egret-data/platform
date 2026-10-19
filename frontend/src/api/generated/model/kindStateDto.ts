@@ -16,4 +16,5 @@ export const KindStateDto = {
   quiet: 'quiet',
   silent: 'silent',
   not_reported: 'not_reported',
+  not_expected: 'not_expected',
 } as const;

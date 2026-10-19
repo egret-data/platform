@@ -10,8 +10,10 @@
 //!   rescheduled pod leaves behind never count;
 //! - a report of `lastKnownVersion = -1` is "not yet reported": it neither
 //!   confirms nor counts as behind;
-//! - a kind with no download within 24 h is not judged (StarRocks never
-//!   downloads tags); a kind polled 5 min–24 h ago while policies are live is
+//! - the tags kind of a profile with no tag service is not expected
+//!   (StarRocks never downloads tags; a Trino profile without one has no tag
+//!   policy to download), whatever its rows say;
+//! - a kind with no download within 24 h is not reported; a kind polled 5 min–24 h ago while policies are live is
 //!   quiet (review M6).
 use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
@@ -31,6 +33,9 @@ pub(crate) struct ProfileVersions {
     pub policy_version: i64,
     pub tag_version: i64,
     pub updated_at: DateTime<Utc>,
+    /// Whether the profile's plugins are expected to download tags: the
+    /// profile names a tag service that resolves ([`expects_tags_via`]).
+    pub expects_tags: bool,
 }
 
 /// One row of `policy.ranger_plugin_downloads`.
@@ -81,6 +86,10 @@ pub(crate) enum KindState {
     },
     Silent,
     NotReported(NotReported),
+    /// The tags kind of a profile with no tag service (every StarRocks
+    /// profile, and a Trino profile whose `config.tagService` names nothing):
+    /// no tag policy reaches its plugins, so a tags download is not judged.
+    NotExpected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,8 +160,31 @@ pub(crate) fn judge_plugins(
     Judgement {
         liveness,
         policies: kind_state("policies", p.policy_version),
-        tags: kind_state("tags", p.tag_version),
+        // The one place a kind the engine is not expected to download is
+        // decided (DG #4a fix D1): the index and the Plugin tab both render it.
+        tags: if p.expects_tags {
+            kind_state("tags", p.tag_version)
+        } else {
+            KindState::NotExpected
+        },
     }
+}
+
+/// The profiles of `service_ids` whose plugins are expected to download tags:
+/// those naming a tag service that resolves. This is the join
+/// `ProfileDto.tag_service` and the plugin download read
+/// (`egret_policy::usable_tag_services_via`), so the judgement and the profile
+/// list agree; that list also requires `type = 'trino'`, which migration
+/// 0176's CHECK already guarantees for any profile carrying a `tagService`.
+pub(crate) async fn expects_tags_via(
+    c: &mut PgConnection,
+    service_ids: &[i64],
+) -> Result<std::collections::HashSet<i64>, egret_policy::PolicyStoreError> {
+    Ok(egret_policy::usable_tag_services_via(c, service_ids)
+        .await?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
 }
 
 /// The ledger rows of `service_ids`, newest first.
@@ -186,6 +218,7 @@ mod tests {
             policy_version: v,
             tag_version: tv,
             updated_at: ago(set_secs_ago),
+            expects_tags: true,
         }
     }
     fn row(plugin: &str, kind: &str, known: i64, secs_ago: i64) -> LedgerRow {
@@ -305,5 +338,27 @@ mod tests {
         let j = judge(&p, &[row("sr", "policies", 8, 5)]);
         assert_eq!(j.policies, KindState::UpToDate);
         assert_eq!(j.tags, KindState::NotReported(NotReported::NoDownload));
+    }
+
+    #[test]
+    fn tags_of_a_profile_with_no_tag_service_are_not_expected() {
+        let mut p = profile(8, 3, 3600);
+        p.expects_tags = false;
+        // Quiet, behind and absent tags rows alike: none is judged.
+        for tags in [
+            vec![row("a", "tags", 3, 1200)],
+            vec![row("a", "tags", 1, 5)],
+            vec![],
+        ] {
+            let mut rows = vec![row("a", "policies", 8, 5)];
+            rows.extend(tags);
+            let j = judge(&p, &rows);
+            assert_eq!(j.policies, KindState::UpToDate, "{rows:?}");
+            assert_eq!(j.tags, KindState::NotExpected, "{rows:?}");
+        }
+        // Liveness still reaches the policies kind.
+        let j = judge(&p, &[]);
+        assert_eq!(j.policies, KindState::Silent);
+        assert_eq!(j.tags, KindState::NotExpected);
     }
 }

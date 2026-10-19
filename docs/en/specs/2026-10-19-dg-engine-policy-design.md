@@ -128,6 +128,7 @@ picker is `SubjectUserField` (`frontend/src/components/perm/ExplainResult.tsx:10
 | EP19 | The engine page is gated `policy:read`. Without `engine:read` the Plugin tab and the header's plugin version are replaced by one line naming the permission; every other tab works | default decision (2026-10-19) |
 | EP20 | People: the "Engine permissions" section sits at the end of the principal page's Permissions tab, not as a new tab | default decision (2026-10-19) |
 | EP21 | `PrincipalPicker` gains an additive `includeOnly` prop (no Exclude list); the grant dialog uses it | default decision (2026-10-19) |
+| EP22 | **A kind the engine is not expected to download is judged `not_expected`, in `judge_plugins` alone** (review fix D1). Premise: a profile's plugins have tag policies to download only when the profile names a tag service that resolves (`egret_policy::usable_tag_services_via`, the join `ProfileDto.tag_service` and the plugin download read); migration 0176's CHECK keeps a `tagService` off every non-Trino profile, so every StarRocks profile and a Trino profile without one expect no tags. Such a profile's tags kind is `not_expected` whatever its rows say (rows still listed raw), with the sentence "Profile P has no tag service, so its plugins are not expected to download tags." (plus " StarRocks never downloads tags." on a StarRocks engine). Chosen over omitting the kind: an absent row would leave the tab silent about why tags are not judged, and the honest statement is that egret expects nothing, not that nothing happened. The Overview raises no tag drift for such a profile; the index ranks `not_expected` last and keeps no engine-type rule of its own. This amends EP16: the Overview tests whose tag-drift fixtures named no tag service now name one (assertions unchanged), and one fixture per test pins the untagged case | default decision (2026-10-19, review fix round) |
 | Q1 | **Index data for a `policy:read`-only reader** (premise 10): the existing `GET /policies/services` response (already `policy:read`) gains `ProfileEngine.origin`, `ProfileEngine.type` and `ProfileDto.policyCounts {compiler, infra, operator}` (the profile plus its tag service), additively; no new route. The index's plugin column shows only with `engine:read`, one plugin call per engine | user, 2026-10-19 |
 | Q2 | Editor URLs keep the kind segment (premise 7): `…/advanced/policies/:kind/new` and `…/advanced/policies/:kind/:policyId` | default decision (2026-10-19) |
 | Q3 | An old `/governance/policies/:service` URL naming a profile bound to several engines (legacy shared) redirects to the first engine by name (`reach` order); its banner names the others | default decision (2026-10-19) |
@@ -211,20 +212,22 @@ policy" → `/governance/engines/:id`, shown with `policy:read` (EP12).
 `crates/egret-controlplane/src/plugin_judgement.rs`:
 
 ```rust
-pub(crate) struct ProfileVersions { pub policy_version: i64, pub tag_version: i64, pub updated_at: DateTime<Utc> }
+pub(crate) struct ProfileVersions { pub policy_version: i64, pub tag_version: i64, pub updated_at: DateTime<Utc>,
+                                    pub expects_tags: bool }   // EP22
 pub(crate) struct LedgerRow { pub service_id: i64, pub plugin_id: String, pub kind: String,
                               pub last_known_version: Option<i64>, pub served_version: Option<i64>, pub at: DateTime<Utc> }
 pub(crate) enum Liveness { Live, Quiet { age_secs: i64 }, Silent }
 pub(crate) enum NotReported { NoDownload, VersionUnreported }
 pub(crate) enum KindState { UpToDate, Pending, Behind { version: i64 }, Quiet { age_secs: i64 }, Silent,
-                            NotReported(NotReported) }
+                            NotReported(NotReported), NotExpected }   // NotExpected: EP22
 pub(crate) struct Judgement { pub liveness: Liveness, pub policies: KindState, pub tags: KindState }
 pub(crate) fn judge_plugins(p: &ProfileVersions, rows: &[&LedgerRow], now: DateTime<Utc>) -> Judgement;
 pub(crate) async fn ledger_rows_via(c: &mut PgConnection, service_ids: &[i64]) -> Result<Vec<LedgerRow>, sqlx::Error>;
 ```
 
 The rules are the Overview's, moved, not rewritten (`QUIET_SECS`, `SILENT_SECS`, `BEHIND_SECS`, the newest-poll
-liveness, the `-1` rule, the 5-minute window for `behind`, review M6's tags quiet). Mapping: when liveness is `Silent`
+liveness, the `-1` rule, the 5-minute window for `behind`, review M6's tags quiet). Mapping: a tags kind the profile
+does not expect (EP22) is `NotExpected` before anything else; when liveness is `Silent`
 or `Quiet`, both kinds carry it; otherwise each kind is `NotReported(NoDownload)` with no row of that kind in 24 h,
 `Quiet` for a tags kind quiet while policies are polled, `Pending` while `updated_at` is under 90 s old, `Behind` as
 `behind` decides today, `UpToDate` when a row polled at or after U within 5 min reports ≥ V, else
@@ -247,7 +250,7 @@ READ, READ ONLY` transaction, as `begin_snapshot` (`governance_overview.rs:359`)
   plugin: { version: string|null, modelled: bool, note: string|null },   // egret_perm::ranger_plugin_report
   judged: { state: "judged" } | { state: "not_judged", reason: "external" | "not_running" | "no_profile" },
   kinds: [ { kind: "policies"|"tags", currentVersion, lastDownloadAt|null, newestReportedVersion|null,
-             servedVersion|null, state: "up_to_date"|"pending"|"behind"|"quiet"|"silent"|"not_reported",
+             servedVersion|null, state: "up_to_date"|"pending"|"behind"|"quiet"|"silent"|"not_reported"|"not_expected",
              notReported: "no_download"|"version_unreported"|null, sentence } ],   // empty when not judged
   rows: [ { pluginId, kind, lastKnownVersion, servedVersion, at } ] }              // raw, newest first
 ```
@@ -258,8 +261,9 @@ READ, READ ONLY` transaction, as `begin_snapshot` (`governance_overview.rs:359`)
   case except `no_profile`.
 - Sentences: the Overview's sentence for the same state where it has one (`behind`, `quiet`, `silent`); for the others
   "Plugins of profile P report holding policy version V." / "A plugin downloaded version V at T; confirmation takes two
-  polls." / "No plugin of profile P downloaded tags in 24 hours. StarRocks never downloads tags." (the last clause only
-  for a StarRocks engine) / "Plugins polled since version V was set, but none has reported a version yet." Never
+  polls." / "No plugin of profile P downloaded tags in 24 hours." / "Profile P has no tag service, so its plugins are
+  not expected to download tags. StarRocks never downloads tags." (`not_expected`, EP22; the last clause only for a
+  StarRocks engine) / "Plugins polled since version V was set, but none has reported a version yet." Never
   "enforces" (the ledger records what plugins report, `plugin_downloads.rs:12-14`).
 - 404 for an unknown engine. A shared profile (`sharedWith` not empty) answers per profile; the tab says the rows may
   come from any of the engines.
@@ -410,7 +414,8 @@ still describes behaviour moves to the new file), `isCompilerOwnedPolicyName` an
 ## 9. Testing (EP10)
 
 - **Backend DB tests** (`egret_test_db::url()`, fixtures scoped to their own ids): `judge_plugins` on every state of
-  §4.1 including `-1`, an old plugin id, tags quiet, a StarRocks profile with no tags; the route for a judged profile,
+  §4.1 including `-1`, an old plugin id, tags quiet, a StarRocks profile and a Trino profile with no tag service
+  (`not_expected`, EP22); the route for a judged profile,
   external (`not_judged`, rows present), not running, no profile, unknown engine (404), 403 without `engine:read`, 403
   without `policy:read`. **Agreement test**: one fixture per Overview drift kind, asserting that `attention_via` raises
   `plugin_silent`/`plugin_quiet`/`plugin_behind` exactly when the route reports `silent`/`quiet`/`behind` for that

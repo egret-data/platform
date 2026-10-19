@@ -52,8 +52,13 @@ interface EngineRow {
   profile: ProfileDto | null | undefined;
 }
 
-/** Worst first: the index shows one word per engine, the worst of its kinds (spec §5). */
-const STATE_ORDER: KindStateDto[] = ["silent", "behind", "quiet", "not_reported", "pending", "up_to_date"];
+/**
+ * Worst first: the index shows one word per engine, the worst of its kinds
+ * (spec §5). Which kinds an engine is expected to download is the server's
+ * judgement (`judge_plugins`, fix D1): a kind it does not expect is
+ * `not_expected` and ranks last, so the index and the Plugin tab agree.
+ */
+const STATE_ORDER: KindStateDto[] = ["silent", "behind", "quiet", "not_reported", "pending", "up_to_date", "not_expected"];
 const NOT_JUDGED_WORD: Record<string, string> = {
   external: "Not judged: external",
   not_running: "Not judged: not running",
@@ -63,10 +68,7 @@ const NOT_JUDGED_WORD: Record<string, string> = {
 /** The plugin column's word for one engine's plugin route answer. */
 export function pluginWord(p: EnginePluginResponse): string {
   if (p.judged.state === "not_judged") return NOT_JUDGED_WORD[p.judged.reason] ?? "Not judged";
-  // StarRocks never downloads tags, so its tags kind is always `not_reported`;
-  // counting it would show every healthy StarRocks engine as "Not reported".
-  const kinds = p.engine.type === "starrocks" ? p.kinds.filter((k) => k.kind !== "tags") : p.kinds;
-  const worst = STATE_ORDER.find((s) => kinds.some((k) => k.state === s));
+  const worst = STATE_ORDER.find((s) => p.kinds.some((k) => k.state === s));
   return worst ? KIND_STATE_WORD[worst] : KIND_STATE_WORD.not_reported;
 }
 
