@@ -310,6 +310,8 @@ impl TagRepo {
     /// (`catalog_tag_assignments`, DG #4b `GET /tags`): a table is a distinct
     /// `(warehouse, schema, table)` with a table-level row (`column_name = ''`);
     /// a column is a row with `column_name <> ''`. Tags with neither are absent.
+    /// Rows in a warehouse no catalog names are left out: they are no catalog's
+    /// tables, and Where used (route C) reports them apart as `orphaned` (CL11).
     pub async fn catalog_counts(
         &self,
     ) -> Result<std::collections::HashMap<Uuid, (i64, i64)>, BiError> {
@@ -318,7 +320,10 @@ impl TagRepo {
                     count(DISTINCT (warehouse_id, schema_name, table_name)) \
                         FILTER (WHERE column_name = ''), \
                     count(*) FILTER (WHERE column_name <> '') \
-               FROM catalog_tag_assignments GROUP BY tag_id",
+               FROM catalog_tag_assignments a \
+              WHERE EXISTS (SELECT 1 FROM registry.catalogs c \
+                             WHERE c.warehouse_id = a.warehouse_id) \
+              GROUP BY tag_id",
         )
         .fetch_all(&self.db.pool)
         .await?;

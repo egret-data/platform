@@ -177,6 +177,48 @@ async fn get(st: &CpState, token: &str, uri: &str) -> (StatusCode, Value) {
     )
 }
 
+/// An egret catalog over a new warehouse; returns the warehouse id.
+async fn catalog_warehouse(f: &Fixture) -> Uuid {
+    let p = &f.db.pool;
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, $1) RETURNING id")
+            .bind(unique("tgc-ws"))
+            .fetch_one(p)
+            .await
+            .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','b','AK') RETURNING id",
+    )
+    .bind(unique("tgc-sc"))
+    .fetch_one(p)
+    .await
+    .unwrap();
+    let wh: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("tgc_wh"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(p)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2)",
+    )
+    .bind(unique("tgc_cat"))
+    .bind(wh)
+    .execute(p)
+    .await
+    .unwrap();
+    wh
+}
+
+/// Assignments in a warehouse no catalog names are not tables or columns of
+/// any catalog: the index leaves them out, as Where used (route C) does, which
+/// reports them separately as `orphaned` (CL11).
 #[tokio::test]
 async fn tags_carry_their_data_counts() {
     let f = setup().await;
@@ -190,14 +232,21 @@ async fn tags_carry_their_data_counts() {
     };
     let a = mk(unique("tgc-a")).await;
     let other = mk(unique("tgc-o")).await;
-    let wh = Uuid::new_v4();
-    for (table, column) in [("t", ""), ("u", "a"), ("u", "b")] {
+    let wh = catalog_warehouse(&f).await;
+    let orphan = Uuid::new_v4();
+    for (w, table, column) in [
+        (wh, "t", ""),
+        (wh, "u", "a"),
+        (wh, "u", "b"),
+        (orphan, "o", ""),
+        (orphan, "o", "c"),
+    ] {
         sqlx::query(
             "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
              VALUES ($1, $2, 's', $3, $4)",
         )
         .bind(a)
-        .bind(wh)
+        .bind(w)
         .bind(table)
         .bind(column)
         .execute(p)
@@ -230,6 +279,21 @@ async fn tags_carry_their_data_counts() {
         (json!(1), json!(2))
     );
     assert_eq!(ta["assignment_count"], 1);
+    // The same numbers as Where used, which counts the orphaned rows apart.
+    let (status, usage) = get(&st, &reader, &format!("/classifications/{a}/usage")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (
+            usage["data"]["tableCount"].clone(),
+            usage["data"]["columnCount"].clone(),
+            usage["data"]["orphaned"].clone()
+        ),
+        (
+            ta["catalog_tables"].clone(),
+            ta["catalog_columns"].clone(),
+            json!(2)
+        )
+    );
     let to = find(other);
     assert_eq!(
         (to["catalog_tables"].clone(), to["catalog_columns"].clone()),
