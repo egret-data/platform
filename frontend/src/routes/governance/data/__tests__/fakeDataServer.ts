@@ -74,6 +74,11 @@ export interface FakeData {
   tagCatalogue?: Answer;
   /** `PUT …/warehouses/{id}/resource-tags`; default 200 `{}`. */
   tagWrite?: Answer;
+  /**
+   * `GET …/governance/objects/{catalog_id}/handwritten` (route A), keyed
+   * `catalogId|schema|table|column` (absent levels empty). Default: listed, none.
+   */
+  handwritten?: Record<string, Answer>;
 }
 
 /** What the fake was asked, as keys of {@link FakeData}. */
@@ -85,6 +90,8 @@ export interface DataCalls {
   permCalls: { call: string; body?: unknown }[];
   /** Each tag write: the warehouse id from the path and the body. */
   tagWrites: { warehouseId: string; body: unknown }[];
+  /** Each route A read, keyed as {@link FakeData.handwritten}. */
+  handwrittenCalls: string[];
 }
 
 const json = (status: number, body: unknown) =>
@@ -97,6 +104,7 @@ export function serveData(data: FakeData): DataCalls {
   const lineageCalls: string[] = [];
   const permCalls: DataCalls["permCalls"] = [];
   const tagWrites: DataCalls["tagWrites"] = [];
+  const handwrittenCalls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -112,6 +120,25 @@ export function serveData(data: FakeData): DataCalls {
       if (w && (init?.method ?? "GET").toUpperCase() === "PUT") {
         tagWrites.push({ warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
         return reply(data.tagWrite ?? { status: 200, body: {} });
+      }
+      const hw = /^\/api\/control-plane\/governance\/objects\/([^/]+)\/handwritten$/.exec(url.pathname);
+      if (hw) {
+        const id = decodeURIComponent(hw[1]);
+        const key = [id, ...["schema", "table", "column"].map((k) => url.searchParams.get(k) ?? "")].join("|");
+        handwrittenCalls.push(key);
+        const none = {
+          status: 200,
+          body: {
+            catalog: { id, name: id },
+            target: {},
+            state: "listed",
+            reason: null,
+            profiles: [],
+            policies: [],
+            seeded: [],
+          },
+        };
+        return reply(data.handwritten?.[key] ?? none);
       }
       const m = /^\/api\/control-plane\/governance\/browse\/([^/]+)$/.exec(url.pathname);
       if (m) {
@@ -166,5 +193,5 @@ export function serveData(data: FakeData): DataCalls {
       return Promise.reject(new Error(`no fake for ${url.pathname}`));
     }),
   );
-  return { browseCalls, tagCalls, lineageCalls, permCalls, tagWrites };
+  return { browseCalls, tagCalls, lineageCalls, permCalls, tagWrites, handwrittenCalls };
 }

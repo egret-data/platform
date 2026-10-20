@@ -3,6 +3,7 @@ import type { GroupPrincipal, Membership, RolePrincipal, UserPrincipal } from "@
 import type { WorkspaceNames } from "@/routes/governance/permFormat";
 import { parseUuid } from "@/routes/governance/people/reach";
 import { usePermReadGroup, usePermReadRole, usePermReadUser } from "@/api/generated/perm/perm";
+import type { PrincipalSubject } from "@/routes/governance/handwritten/PrincipalHandWrittenSection";
 
 export type PageKind = "user" | "group" | "role";
 
@@ -65,4 +66,11 @@ export function workspaceNamesOf(principal: Principal): WorkspaceNames {
     const key = parseUuid(id);
     return key ? names.get(key) : undefined;
   };
+}
+
+/** The principal as route B names it (#4b): a user by id, a group or role by name. */
+export function principalSubject(principal: Principal): PrincipalSubject {
+  return principal.kind === "user"
+    ? { kind: "user", id: principal.data.id }
+    : { kind: principal.kind, id: principal.data.name };
 }

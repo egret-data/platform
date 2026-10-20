@@ -189,7 +189,7 @@ describe("RulePage: Open in Data, or the tag", () => {
     renderPage("r1", TAG_READER);
     expect(screen.getByRole("link", { name: /Open classification/ })).toHaveAttribute(
       "href",
-      "/governance/classifications/tag-9",
+      "/governance/classifications/tag-9?tab=rules",
     );
   });
 

@@ -88,6 +88,9 @@ pub mod grants;
 // `user_groups` writer recompiles through this port implementation — see that
 // module's own doc comment for why it is a port and `role_membership` is not.
 pub mod group_membership;
+// DG #4b (CL7): the one module that matches hand-written Ranger policies to
+// Data objects, principals and classifications.
+pub mod handwritten;
 // View governance B1 (Task 7): a view's table-level lineage from Trino's
 // `EXPLAIN (TYPE IO, FORMAT JSON)`, and the tags it carries to the view.
 pub mod lineage;

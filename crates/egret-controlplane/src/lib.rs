@@ -18,11 +18,16 @@ mod governance_browse;
 mod governance_changes;
 /// DG #4a: an engine's plugin download state (`GET /governance/engines/{id}/plugin`).
 mod governance_engines;
+/// DG #4b: hand-written policies reaching an object, naming a principal or a
+/// classification (routes A, B, D).
+mod governance_handwritten;
 mod governance_lineage;
 /// DG #3: the Governance Overview. Public so its sources can be tested.
 pub mod governance_overview;
 pub use governance_changes::{ChangeEntry, ChangesPage, Party};
 pub use governance_engines::EnginePluginResponse;
+/// DG #4b route C: where a classification is used.
+mod governance_tag_usage;
 mod governance_tags;
 mod lineage_sweep;
 /// DG #4a: one judging function for the plugin ledger (the Overview and the
@@ -159,6 +164,8 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(governance_overview::router())
         .merge(governance_changes::router())
         .merge(governance_engines::router())
+        .merge(governance_handwritten::router())
+        .merge(governance_tag_usage::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -180,5 +187,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(governance_overview::ControlPlaneGovernanceOverviewApi::openapi());
     doc.merge(governance_changes::ControlPlaneGovernanceChangesApi::openapi());
     doc.merge(governance_engines::ControlPlaneGovernanceEnginesApi::openapi());
+    doc.merge(governance_handwritten::ControlPlaneGovernanceHandWrittenApi::openapi());
+    doc.merge(governance_tag_usage::ControlPlaneTagUsageApi::openapi());
     doc
 }

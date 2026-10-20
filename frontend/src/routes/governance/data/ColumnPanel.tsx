@@ -15,7 +15,8 @@ import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from 
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
+import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
+import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
 /**
@@ -236,6 +237,14 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
           <Section title="Grants">
             <Grants path={path} catalogId={catalog.id} canExplain={canRead} />
           </Section>
+          {/* F12 (#4b spec §6): every hand-written policy that reaches the column. */}
+          <HandWrittenSection
+            catalogId={catalog.id}
+            schema={path.schema}
+            table={path.object}
+            column={path.column}
+            show="all"
+          />
         </>
       ) : (
         <p className="text-sm text-muted-foreground">{PANEL_NEEDS_POLICY_READ}</p>
@@ -333,7 +342,7 @@ function Grants({ path, catalogId, canExplain }: { path: ColumnPath; catalogId: 
   const note = (
     <>
       <p className="text-xs text-muted-foreground">Grants on the table and above reach this column too. See Permissions.</p>
-      <EgretGrantsOnlyNote explainLabel={canExplain ? "Who can read this column?" : null} />
+      <HandWrittenPointer explainLabel={canExplain ? "Who can read this column?" : null} />
     </>
   );
   if (onColumn.length === 0) {

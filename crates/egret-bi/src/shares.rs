@@ -97,6 +97,31 @@ async fn gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, Error> {
     Ok(held)
 }
 
+/// [`read_action`] for a GATE kind (what [`gate_kind`] answers): the action a
+/// reader must hold on an object of that kind. DG #4b route C asks the PDP
+/// this per tagged object, so it cannot keep its own copy.
+pub fn read_action_for_gate(gate: &str) -> Option<&'static str> {
+    read_action(gate)
+}
+
+/// The kind whose permissions gate `(kind, id)` — see [`gate_kind`]. Public for
+/// DG #4b route C.
+pub async fn object_gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, Error> {
+    gate_kind(db, kind, id).await
+}
+
+/// The display name of `(kind, id)`, `None` when no such object exists.
+/// `InvalidInput` for an unknown kind.
+pub async fn object_name(db: &Db, kind: &str, id: Uuid) -> Result<Option<String>, Error> {
+    let table = object_table(kind).ok_or_else(|| Error::InvalidInput(format!("kind: {kind}")))?;
+    let sql = format!("SELECT name FROM analytics.{table} WHERE id = $1");
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| Error::Internal(e.into()))
+}
+
 /// [`manage_action`] for `(kind, id)`, through [`gate_kind`]. In practice an
 /// unknown kind never reaches here -- `resolve` (via `object_ref`) rejects it
 /// first as `InvalidInput` -- so the `NotFound` is only a backstop.

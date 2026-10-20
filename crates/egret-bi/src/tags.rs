@@ -306,6 +306,30 @@ impl TagRepo {
         Ok(())
     }
 
+    /// Per tag, how many TABLES and COLUMNS carry it in egret catalogs
+    /// (`catalog_tag_assignments`, DG #4b `GET /tags`): a table is a distinct
+    /// `(warehouse, schema, table)` with a table-level row (`column_name = ''`);
+    /// a column is a row with `column_name <> ''`. Tags with neither are absent.
+    /// Rows in a warehouse no catalog names are left out: they are no catalog's
+    /// tables, and Where used (route C) reports them apart as `orphaned` (CL11).
+    pub async fn catalog_counts(
+        &self,
+    ) -> Result<std::collections::HashMap<Uuid, (i64, i64)>, BiError> {
+        let rows: Vec<(Uuid, i64, i64)> = sqlx::query_as(
+            "SELECT tag_id, \
+                    count(DISTINCT (warehouse_id, schema_name, table_name)) \
+                        FILTER (WHERE column_name = ''), \
+                    count(*) FILTER (WHERE column_name <> '') \
+               FROM catalog_tag_assignments a \
+              WHERE EXISTS (SELECT 1 FROM registry.catalogs c \
+                             WHERE c.warehouse_id = a.warehouse_id) \
+              GROUP BY tag_id",
+        )
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(t, a, b)| (t, (a, b))).collect())
+    }
+
     /// Delete a tag. `tag_assignments` and `catalog_tag_assignments` cascade
     /// (FK `ON DELETE CASCADE`, migrations 0080/0081).
     ///

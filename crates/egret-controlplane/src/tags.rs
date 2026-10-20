@@ -58,6 +58,15 @@ pub struct TagDto {
     /// gate. Populated by the tag list from `list_policies`.
     #[serde(default)]
     pub required_groups: Vec<String>,
+    /// DG #4b: tables of egret catalogs carrying this tag on the table itself
+    /// (distinct `(warehouse, schema, table)` with a table-level row). Filled by
+    /// the list; 0 on the create/update responses.
+    #[serde(default)]
+    pub catalog_tables: i64,
+    /// DG #4b: columns of egret catalogs carrying this tag. Filled by the list;
+    /// 0 on the create/update responses.
+    #[serde(default)]
+    pub catalog_columns: i64,
 }
 
 impl From<Tag> for TagDto {
@@ -72,6 +81,8 @@ impl From<Tag> for TagDto {
             created_at: t.created_at.to_rfc3339(),
             required_roles: Vec::new(),
             required_groups: Vec::new(),
+            catalog_tables: 0,
+            catalog_columns: 0,
         }
     }
 }
@@ -119,15 +130,20 @@ async fn list_tags(State(st): State<CpState>, Auth(p): Auth) -> Result<Json<Vec<
         .into_iter()
         .map(|(id, roles, groups)| (id, (roles, groups)))
         .collect();
+    // DG #4b: the Data counts, one grouped query joined the same way.
+    let counts = st.tags.catalog_counts().await?;
     Ok(Json(
         tags.into_iter()
             .map(|t| {
+                let t_id = t.id;
                 let (required_roles, required_groups) =
                     policies.get(&t.id).cloned().unwrap_or_default();
                 let mut dto = TagDto::from(t);
                 dto.required_roles = required_roles;
                 // Emit group ids as strings so the FE consumes a single type.
                 dto.required_groups = required_groups.iter().map(|g| g.to_string()).collect();
+                (dto.catalog_tables, dto.catalog_columns) =
+                    counts.get(&t_id).copied().unwrap_or_default();
                 dto
             })
             .collect(),

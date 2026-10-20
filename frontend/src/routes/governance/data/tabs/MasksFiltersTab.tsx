@@ -27,6 +27,7 @@ import {
 } from "@/routes/governance/data/coverage";
 import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
@@ -106,7 +107,17 @@ export function MasksFiltersTab({
   catalog: CatalogState;
   tags: TagsResult;
 }) {
-  return <CatalogGate catalog={catalog}>{(c) => <Rules path={path} kind={kind} catalog={c} tags={tags} />}</CatalogGate>;
+  return (
+    <CatalogGate catalog={catalog}>
+      {(c) => (
+        <div className="space-y-6">
+          <Rules path={path} kind={kind} catalog={c} tags={tags} />
+          {/* F12 (#4b spec §6): the hand-written masking and row-filter policies that reach the object. */}
+          <HandWrittenSection catalogId={c.id} schema={path.schema} table={path.object} show="rules" />
+        </div>
+      )}
+    </CatalogGate>
+  );
 }
 
 function Rules({

@@ -7,8 +7,9 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { OpenInDataLink, scopeToDataLink, useCatalogNameById } from "@/routes/governance/openInData";
 import { formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
-import { EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
-import { principalTitle, type Principal } from "@/routes/governance/people/principalData";
+import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
+import { PrincipalHandWrittenSection } from "@/routes/governance/handwritten/PrincipalHandWrittenSection";
+import { principalSubject, principalTitle, type Principal } from "@/routes/governance/people/principalData";
 import { REACH_GROUPS, reachesAtAll, reachGroup, setReach, type Reach, type ReachGroup } from "@/routes/governance/people/reach";
 import { GROUP_TITLE, NO_USERNAME_NOTE, reachText } from "@/routes/governance/people/tabs/PermissionsTab";
 
@@ -46,6 +47,18 @@ type Row = { rule: RuleView; reach: Reach[] };
  * own page, `/governance/rules/:id`.
  */
 export function MasksFiltersTab({ principal }: { principal: Principal }) {
+  // #4b (spec §6): the hand-written masking and row-filter policies naming the
+  // principal follow egret's rules. `public` is named by no item as itself.
+  const isPublic = principal.kind === "group" && principal.data.isPublic;
+  return (
+    <div className="space-y-6">
+      <EgretRules principal={principal} />
+      {isPublic ? null : <PrincipalHandWrittenSection subject={principalSubject(principal)} show="rules" />}
+    </div>
+  );
+}
+
+function EgretRules({ principal }: { principal: Principal }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const catalogNameById = useCatalogNameById();
   const name = principalTitle(principal, principal.data.name);
@@ -64,15 +77,14 @@ export function MasksFiltersTab({ principal }: { principal: Principal }) {
   const others = all.length - exempting.length;
 
   // `public` has no Check access tab (spec §2), so its note names none.
-  const header = (
-    <div className="space-y-1">
-      <EgretGrantsOnlyNote
-        subject="egret rules"
-        explainLabel={isPublic ? null : "Check access"}
-        explainTo={isPublic ? undefined : "?tab=check"}
-      />
-      {noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null}
-    </div>
+  const header = noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null;
+  const pointer = (
+    <HandWrittenPointer
+      subject="egret rules"
+      lead="To see the engines' answer, use"
+      explainLabel={isPublic ? null : "Check access"}
+      explainTo={isPublic ? undefined : "?tab=check"}
+    />
   );
   const rest = others > 0 ? <p className="text-sm text-muted-foreground">{otherRulesText(others)}</p> : null;
 
@@ -82,6 +94,7 @@ export function MasksFiltersTab({ principal }: { principal: Principal }) {
         {header}
         <EmptyState icon={EyeOff} title={`No egret rule exempts ${name}`} />
         {rest}
+        {pointer}
       </div>
     );
   }
@@ -105,6 +118,7 @@ export function MasksFiltersTab({ principal }: { principal: Principal }) {
         </Section>
       ))}
       {rest}
+      {pointer}
     </div>
   );
 }
