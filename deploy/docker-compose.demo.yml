@@ -50,6 +50,19 @@ services:
           || aws s3api create-bucket --bucket "$${S3_BUCKET}"
         echo "bucket $${S3_BUCKET} ready"
 
+  trino-demo:
+    image: trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx1g"
+    volumes:
+      - ./demo/trino/config.properties:/etc/trino/config.properties:ro
+      - ./demo/trino/catalog:/etc/trino/catalog:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
 volumes:
   demo-pgdata:
   demo-rustfsdata:
