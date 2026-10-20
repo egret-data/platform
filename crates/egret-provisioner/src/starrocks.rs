@@ -2861,6 +2861,7 @@ mod tests {
 
         let kube = Arc::new(FakeKube::default());
         let p = StarRocksProvisioner::new(kube.clone());
+        kube.set_live(crate::rollout::tests::secret("sr1-rc-c1", "c1"));
         p.delete_ranger_secret("egret-engines", "sr1", "c1")
             .await
             .unwrap();

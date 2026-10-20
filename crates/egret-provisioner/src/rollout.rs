@@ -69,7 +69,10 @@ pub fn legacy_ranger_secret_name(engine: &str) -> String {
 /// credential's content, and a later re-apply could rewrite the Secret without
 /// rolling them — the probe would then say complete while every pod still held
 /// the previous credential. A pod built from a template that names credential
-/// X can only ever mount X's Secret, which is written once with X's content.
+/// X can only ever mount X's Secret, and every write of that name renders X's
+/// password: egret keeps the tags of an engine's current and previous
+/// credential distinct, and a delete of one checks the credential the Secret
+/// names (`delete_retired_ranger_secret`).
 pub fn ranger_secret_name(engine: &str, credential_id: Option<&str>) -> String {
     match credential_id {
         Some(id) => format!(
@@ -170,19 +173,40 @@ pub(crate) async fn delete_retired_ranger_secret(
     engine: &str,
     credential_id: &str,
 ) -> anyhow::Result<()> {
-    crate::kube_client::delete_objects(
-        kube,
-        namespace,
-        &[
-            (
-                "v1",
-                "Secret",
-                ranger_secret_name(engine, Some(credential_id)),
-            ),
-            ("v1", "Secret", legacy_ranger_secret_name(engine)),
-        ],
-    )
-    .await
+    // Conditional: delete the tagged Secret only while it still holds THIS
+    // credential (its annotation), and only the version just read (a
+    // `resourceVersion` precondition), so a same-tag Secret written for another
+    // credential is never deleted.
+    let name = ranger_secret_name(engine, Some(credential_id));
+    let mut result = Ok(());
+    if let Some(found) = kube
+        .get_object_metadata("v1", "Secret", namespace, &name)
+        .await?
+    {
+        if annotated(&found["metadata"]["annotations"]) == Some(credential_id) {
+            result = kube
+                .delete_if_unchanged(
+                    "v1",
+                    "Secret",
+                    namespace,
+                    &name,
+                    found["metadata"]["resourceVersion"].as_str(),
+                )
+                .await;
+        } else {
+            tracing::warn!(engine, secret = %name,
+                "the ranger Secret of a retired credential now names another credential; kept");
+        }
+    }
+    let legacy = kube
+        .delete(
+            "v1",
+            "Secret",
+            namespace,
+            &legacy_ranger_secret_name(engine),
+        )
+        .await;
+    result.and(legacy)
 }
 
 fn name_of(obj: &Value) -> &str {

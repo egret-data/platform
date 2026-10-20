@@ -5760,6 +5760,72 @@ async fn a_starrocks_engine_name_over_the_volume_budget_is_refused() {
     );
 }
 
+/// Task 6b review round 3: the name bound holds on every apply of a BOUND
+/// StarRocks engine, not only at create — an engine created before it with a
+/// longer name is refused (400, same message) before anything is minted.
+#[tokio::test]
+async fn an_existing_starrocks_engine_over_the_name_bound_is_refused_on_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_name_bound_apply_admin", true).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let profile = seed_typed_profile(&f, &name, "starrocks").await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks", "authzServiceId": profile,
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    // As if created before the bound existed.
+    let long = format!("{name}-{}", "x".repeat(20));
+    assert!(long.len() > egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN);
+    sqlx::query("UPDATE engine_mgmt.engines SET name = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&long)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let slots = ranger_slots(&f, id).await;
+    let updates = port.updated.lock().unwrap().len();
+
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(j["error"].as_str().unwrap().contains("at most 48"), "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates,
+        "nothing applied"
+    );
+    assert_eq!(ranger_slots(&f, id).await, slots, "nothing minted");
+}
+
 /// The StarRocks path builds its request separately; it must carry the
 /// credential too.
 #[tokio::test]

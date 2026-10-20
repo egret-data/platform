@@ -43,6 +43,18 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
         name: &str,
     ) -> anyhow::Result<()>;
+    /// [`delete`](Self::delete) with a `resourceVersion` precondition: the
+    /// object is deleted only if it is still the version the caller read
+    /// (`None`: no precondition). A missing object is `Ok`; a changed one is an
+    /// `Err` (HTTP 409) and nothing is deleted.
+    async fn delete_if_unchanged(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()>;
     /// Pods labeled `app.kubernetes.io/instance=<instance>` in the namespace.
     /// Returns `(name, phase, ready)` per pod.
     async fn list_pods(
@@ -276,6 +288,31 @@ impl KubeClient for FakeKube {
         }
         self.deleted.lock().unwrap().push(key);
         Ok(())
+    }
+    async fn delete_if_unchanged(
+        &self,
+        av: &str,
+        kind: &str,
+        ns: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let live_version = self
+            .live
+            .lock()
+            .unwrap()
+            .get(&format!("{kind}/{name}"))
+            .and_then(|o| {
+                o["metadata"]["resourceVersion"]
+                    .as_str()
+                    .map(str::to_string)
+            });
+        if let (Some(want), Some(have)) = (resource_version, live_version) {
+            if want != have {
+                anyhow::bail!("precondition failed: {kind}/{name} changed");
+            }
+        }
+        self.delete(av, kind, ns, name).await
     }
     async fn list_pods(
         &self,
@@ -577,6 +614,29 @@ impl KubeClient for LiveKube {
         let ar = Self::api_resource(api_version, kind);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         tolerate_not_found(api.delete(name, &DeleteParams::default()).await.map(|_| ()))
+    }
+
+    async fn delete_if_unchanged(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use kube::api::{Api, DeleteParams, Preconditions};
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let dp = DeleteParams {
+            preconditions: resource_version.map(|rv| Preconditions {
+                resource_version: Some(rv.to_string()),
+                uid: None,
+            }),
+            ..DeleteParams::default()
+        };
+        tolerate_not_found(api.delete(name, &dp).await.map(|_| ()))
     }
 
     async fn list_pods(

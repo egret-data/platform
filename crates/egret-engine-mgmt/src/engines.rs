@@ -887,7 +887,7 @@ pub(crate) async fn apply_built(
 ) -> Result<(), ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(current)) if current.status != crate::engine_status::DELETING => {
-            if !renders_a_live_ranger_credential(&built.req, &current) {
+            if !renders_the_current_ranger_credential(&built.req, &current) {
                 if let Some(secrets) = &built.internal {
                     discard_internal_secrets(st, secrets).await;
                 }
@@ -998,17 +998,21 @@ async fn ranger_binding(
 }
 
 /// The 409 of an apply whose rendered Ranger credential is no longer the
-/// engine's current or previous one.
+/// engine's current one.
 pub(crate) const RANGER_CREDENTIAL_CHANGED: &str =
     "the engine's ranger credential changed while the request was being built; retry";
 
-/// Whether the Ranger credential `req` renders (if any) is still one the row
-/// names, current or previous. A stale build that would render a RETIRED
-/// credential is refused right before the provisioner call. This narrows,
-/// but does not close, the race between concurrent applies (there is no
-/// per-engine lock): a rotation and retire can still land between this
-/// re-read and the apply.
-pub(crate) fn renders_a_live_ranger_credential(req: &EngineProvisionReq, row: &Engine) -> bool {
+/// Whether the Ranger credential `req` renders (if any) is still the row's
+/// CURRENT one. A build only ever renders the current credential, so this
+/// refuses nothing legitimate; a stale build — one that would render the
+/// previous (rolling back a rotation) or a retired credential — is refused
+/// right before the provisioner call. This narrows, but does not close, the
+/// race between concurrent applies (there is no per-engine lock): a rotation
+/// can still land between this re-read and the apply.
+pub(crate) fn renders_the_current_ranger_credential(
+    req: &EngineProvisionReq,
+    row: &Engine,
+) -> bool {
     let Some(id) = req
         .ranger
         .as_ref()
@@ -1017,10 +1021,8 @@ pub(crate) fn renders_a_live_ranger_credential(req: &EngineProvisionReq, row: &E
     else {
         return true;
     };
-    [row.ranger_secret_id, row.ranger_secret_prev_id]
-        .iter()
-        .flatten()
-        .any(|slot| slot.to_string() == id)
+    row.ranger_secret_id
+        .is_some_and(|current| current.to_string() == id)
 }
 
 /// The SR paths call the provisioner directly: the same re-read and check.
@@ -1034,11 +1036,37 @@ async fn refuse_a_stale_ranger_credential(
         .get_engine(engine_id)
         .await?
         .ok_or(CpError::NotFound)?;
-    if renders_a_live_ranger_credential(req, &row) {
+    if renders_the_current_ranger_credential(req, &row) {
         Ok(())
     } else {
         Err(CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into()))
     }
+}
+
+/// 400 for a StarRocks engine name longer than
+/// [`egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN`]: the operator
+/// derives 63-character pod volume names from it.
+pub(crate) fn check_starrocks_engine_name(name: &str) -> Result<(), CpError> {
+    if name.len() > egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN {
+        return Err(CpError::BadRequest(format!(
+            "a StarRocks engine name must be at most {} characters (the operator derives \
+             63-character pod volume names from it)",
+            egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN
+        )));
+    }
+    Ok(())
+}
+
+/// The StarRocks update's provisioner call, behind the same stale-credential
+/// re-read `apply_built` does (the StarRocks paths do not go through it).
+pub(crate) async fn update_starrocks_cluster(
+    st: &CpState,
+    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+    engine_id: Uuid,
+    req: &EngineProvisionReq,
+) -> Result<(), CpError> {
+    refuse_a_stale_ranger_credential(st, engine_id, req).await?;
+    prov.update(req).await.map_err(CpError::ClusterApplyFailed)
 }
 
 /// `CpError::Conflict` with the wording every apply route uses when
@@ -3194,7 +3222,7 @@ fn refuse_dropped_trino_image(b: &CreateEngineBody) -> Result<(), CpError> {
     request_body = CreateEngineBody,
     responses(
         (status = 201, description = "Engine created and provisioned; the primary catalog is attached, and `catalogAttachErrors` lists any of the request's other `catalogs` the engine came up without", body = CreateEngineResponse),
-        (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
+        (status = 400, description = "Unknown/unprovisioned warehouse, invalid input (including a StarRocks engine name longer than 48 characters: the operator derives 63-character pod volume names from it), or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 409, description = "An engine with this name already exists, or its same-name policy profile is bound to another engine", body = ErrorBody),
@@ -3783,6 +3811,12 @@ async fn build_starrocks_provision_req_with(
         }
     }
 
+    // A bound engine mounts `{name}-ranger-cm` and `{name}-rc-{tag}`, whose
+    // operator-hashed FE volume names fit a DNS label only up to this bound.
+    // Checked before the binding, so nothing is minted for a refused apply.
+    if ranger_service_name.is_some() {
+        check_starrocks_engine_name(&engine.name)?;
+    }
     // Last fallible step: a refused rotation (409) leaves nothing half-done.
     let ranger = ranger_binding(
         st,
@@ -4329,13 +4363,7 @@ async fn create_starrocks_engine(
     // provision-req assembly time (below), so no bindings are threaded through.
     // The operator names each FE pod volume `<object>-<4 chars>`, a DNS label:
     // `{name}-ranger-cm` and `{name}-rc-{tag}` fit only up to this bound.
-    if b.name.len() > egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN {
-        return Err(CpError::BadRequest(format!(
-            "a StarRocks engine name must be at most {} characters (the operator derives \
-             63-character pod volume names from it)",
-            egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN
-        )));
-    }
+    check_starrocks_engine_name(&b.name)?;
     let sc = st
         .storage_registry
         .get_storage_conn(wh.storage_conn_id)
@@ -6046,13 +6074,9 @@ async fn update_starrocks_engine(
             return Err(e);
         }
     };
-    if let Err(e) = refuse_a_stale_ranger_credential(&st, engine_id, &req).await {
+    if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), engine_id, &req).await {
         restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
         return Err(e);
-    }
-    if let Err(msg) = prov.update(&req).await {
-        restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
-        return Err(CpError::ClusterApplyFailed(msg));
     }
 
     // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
@@ -12486,10 +12510,12 @@ mod tests {
         );
     }
 
-    /// Task 6b review round 2: a request built with a Ranger credential the
-    /// row no longer names (a rotation AND its retire landed while it was
-    /// built) is refused right before the provisioner call, applying nothing.
-    /// The current or the previous credential is still applied.
+    /// Task 6b review rounds 2-3: a request built with a Ranger credential that
+    /// is not the row's CURRENT one (a rotation landed while it was built: the
+    /// previous credential would roll the cluster back; a retired one would
+    /// lock it out) is refused right before the provisioner call, applying
+    /// nothing. The current credential is applied. The same holds for the
+    /// StarRocks update's own provisioner call (`update_starrocks_cluster`).
     #[tokio::test]
     async fn apply_built_refuses_a_ranger_credential_the_row_no_longer_names() {
         let Some(st) = test_state().await else {
@@ -12540,12 +12566,44 @@ mod tests {
             "nothing applied"
         );
 
-        for live in [c1, c2] {
-            render(&mut built, live.to_string());
-            apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        render(&mut built, c1.to_string());
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("the PREVIOUS credential would roll the cluster back");
+        assert!(matches!(err, ApplyBuiltError::CredentialChanged));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        render(&mut built, c2.to_string());
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .unwrap_or_else(|_| panic!("the current credential applies"));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // The StarRocks update path's own call: the same refusal.
+        for stale in [c1.to_string(), Uuid::new_v4().to_string()] {
+            render(&mut built, stale);
+            let err = update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
                 .await
-                .unwrap_or_else(|_| panic!("{live} is still named by the row"));
+                .expect_err("a stale credential is refused on the StarRocks path too");
+            assert!(
+                matches!(&err, CpError::Conflict(m) if m == RANGER_CREDENTIAL_CHANGED),
+                "{err:?}"
+            );
         }
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        render(&mut built, c2.to_string());
+        update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
+            .await
+            .expect("the current credential is applied");
         assert_eq!(
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),
             2

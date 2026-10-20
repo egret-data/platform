@@ -3124,8 +3124,10 @@ mod tests {
     #[tokio::test]
     async fn retiring_deletes_exactly_the_retired_credentials_secret() {
         use crate::kube_client::FakeKube;
+        use crate::rollout::tests::secret;
         let kube = Arc::new(FakeKube::default());
         let p = TrinoProvisioner::new(kube.clone());
+        kube.set_live(secret("demo-rc-c1", "c1"));
         p.delete_ranger_secret("egret-engines", "demo", "c1")
             .await
             .unwrap();
@@ -3136,6 +3138,50 @@ mod tests {
                 "Secret/demo-ranger-secret".to_string()
             ]
         );
+    }
+
+    /// Review round 3 (M1): the delete is conditional on the credential the
+    /// Secret names. A Secret of that name written for ANOTHER credential, or
+    /// changed since it was read, is kept.
+    #[tokio::test]
+    async fn a_same_named_secret_of_another_credential_is_not_deleted() {
+        use crate::kube_client::FakeKube;
+        use crate::rollout::tests::secret;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        kube.set_live(secret("demo-rc-c1", "c1-but-another"));
+        p.delete_ranger_secret("egret-engines", "demo", "c1")
+            .await
+            .unwrap();
+        assert_eq!(
+            *kube.deleted.lock().unwrap(),
+            vec!["Secret/demo-ranger-secret".to_string()],
+            "only the legacy Secret"
+        );
+
+        // A changed version (the precondition) is not deleted either.
+        let kube = Arc::new(FakeKube::default());
+        let mut live = secret("demo-rc-c1", "c1");
+        live["metadata"]["resourceVersion"] = serde_json::json!("7");
+        kube.set_live(live.clone());
+        let found = kube
+            .get_object_metadata("v1", "Secret", "egret-engines", "demo-rc-c1")
+            .await
+            .unwrap()
+            .unwrap();
+        live["metadata"]["resourceVersion"] = serde_json::json!("8");
+        kube.set_live(live);
+        assert!(kube
+            .delete_if_unchanged(
+                "v1",
+                "Secret",
+                "egret-engines",
+                "demo-rc-c1",
+                found["metadata"]["resourceVersion"].as_str(),
+            )
+            .await
+            .is_err());
+        assert!(kube.deleted.lock().unwrap().is_empty());
     }
 
     /// Trino mounts the Secret through a fixed volume name (`ranger-secret`),

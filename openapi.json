@@ -4033,7 +4033,7 @@
             }
           },
           "400": {
-            "description": "Unknown/unprovisioned warehouse, invalid input, or provisioning failed",
+            "description": "Unknown/unprovisioned warehouse, invalid input (including a StarRocks engine name longer than 48 characters: the operator derives 63-character pod volume names from it), or provisioning failed",
             "content": {
               "application/json": {
                 "schema": {
