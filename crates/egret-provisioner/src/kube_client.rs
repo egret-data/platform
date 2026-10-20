@@ -120,6 +120,28 @@ pub trait KubeClient: Send + Sync {
     ) -> anyhow::Result<kube::api::AttachedProcess>;
 }
 
+/// One plain-HTTP request to a coordinator at `base` (`http://host:port`) +
+/// `path`. The in-cluster Kubernetes branch of `coordinator_request` and the
+/// Docker engine provisioner's transport both go through this.
+pub async fn http_coordinator_request(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+) -> anyhow::Result<(u16, Vec<u8>)> {
+    let url = format!("{base}{path}");
+    let mut rb = reqwest::Client::new().request(method.parse()?, &url);
+    for (k, v) in headers {
+        rb = rb.header(k, v);
+    }
+    if let Some(b) = body {
+        rb = rb.body(b);
+    }
+    let resp = rb.send().await?;
+    Ok((resp.status().as_u16(), resp.bytes().await?.to_vec()))
+}
+
 /// In-memory fake for unit tests: records applied/deleted objects.
 pub struct FakeKube {
     pub applied: Mutex<BTreeMap<String, Value>>, // key = "kind/name"
@@ -482,16 +504,8 @@ impl KubeClient for LiveKube {
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         if self.in_cluster {
             // Prod: reach the coordinator Service directly over cluster DNS.
-            let url = format!("http://{service}.{namespace}.svc:8080{path}");
-            let mut rb = reqwest::Client::new().request(method.parse()?, &url);
-            for (k, v) in headers {
-                rb = rb.header(k, v);
-            }
-            if let Some(b) = body {
-                rb = rb.body(b);
-            }
-            let resp = rb.send().await?;
-            Ok((resp.status().as_u16(), resp.bytes().await?.to_vec()))
+            let base = format!("http://{service}.{namespace}.svc:8080");
+            http_coordinator_request(&base, method, path, headers, body).await
         } else {
             // Dev: egret on the host proxies through the kube API server.
             use kube::client::Body;

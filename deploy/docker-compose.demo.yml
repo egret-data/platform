@@ -63,6 +63,35 @@ services:
       timeout: 5s
       retries: 30
 
+  # Narrow door to the Docker API for egret's engine provisioner. Not published to the host. DEMO ONLY:
+  # CONTAINERS+POST still lets a caller start containers on the host (see the guide's Safety section).
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      NETWORKS: "1"
+      POST: "1"
+      INFO: "1"
+      PING: "1"
+      EXEC: "0"
+      VOLUMES: "0"
+      SERVICES: "0"
+      SWARM: "0"
+      SECRETS: "0"
+      CONFIGS: "0"
+      NODES: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      PLUGINS: "0"
+      SYSTEM: "0"
+      AUTH: "0"
+      SESSION: "0"
+      DISTRIBUTION: "0"
+      TASKS: "0"
+
   egret:
     image: egret-demo-backend:dev
     # egret is PID 1; Docker's init reaps the kernel processes marimo leaves behind when a pod stops.
@@ -80,6 +109,7 @@ services:
       renderer: { condition: service_started }
       mailpit: { condition: service_started }
       trino-demo: { condition: service_healthy }
+      docker-proxy: { condition: service_started }
     entrypoint: ["/bin/sh", "/demo/egret-entrypoint.sh"]
     volumes:
       - ./demo/egret-entrypoint.sh:/demo/egret-entrypoint.sh:ro
@@ -102,6 +132,11 @@ services:
       EGRET_RANGER__AUTH_TOKEN: ""
       EGRET_WORKFLOW__WORKER_ENABLED: "true"
       EGRET_WORKFLOW__SCHEDULER_ENABLED: "true"
+      # "Add engine" starts Trino containers through the socket proxy (egret never mounts the socket).
+      EGRET_ENGINES__PROVISIONER: docker
+      EGRET_ENGINES__DOCKER__HOST: tcp://docker-proxy:2375
+      EGRET_ENGINES__DOCKER__NETWORK: egret-demo_default
+      EGRET_ENGINES__DOCKER__PROJECT: egret-demo
       EGRET_LOG__FILTER: info,egret=debug
       EGRET_OIDC__ENABLED: "true"
       EGRET_OIDC__ISSUER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}/auth/realms/egret
@@ -203,6 +238,10 @@ services:
       timeout: 5s
       retries: 20
       start_period: 15s
+
+networks:
+  default:
+    name: egret-demo_default
 
 volumes:
   demo-pgdata:

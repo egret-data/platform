@@ -691,6 +691,22 @@ pub trait EngineProvisioningPort: Send + Sync {
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
 }
 
+/// Sends one HTTP request to an engine's coordinator without Kubernetes (the
+/// Docker engine provisioner). The coordinator is addressed as
+/// `service.namespace` on port 8080, exactly as in-cluster.
+#[async_trait]
+pub trait CoordinatorTransport: Send + Sync {
+    async fn request(
+        &self,
+        namespace: &str,
+        service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<(u16, Vec<u8>), String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

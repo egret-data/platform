@@ -83,6 +83,7 @@ async fn setup() -> Option<Fixture> {
             pdp: std::sync::Arc::new(AllowAllPdp),
             engine_provisioner: None,
             kube: None,
+            coordinator_transport: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
