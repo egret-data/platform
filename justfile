@@ -28,14 +28,14 @@ demo-up:
     ./deploy/demo/wait.sh
     ./deploy/demo/seed.sh
 
-# Stop the demo; removes engine containers egret provisioned (label egret.managed=true); keeps data volumes
+# Stop the demo; removes engine containers egret provisioned (labels egret.managed=true and egret.project=egret-demo); keeps data volumes
 demo-down:
-    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    -./deploy/demo/remove-engines.sh
     {{demo_compose}} down
 
 # Stop the demo and DELETE its data volumes
 demo-reset:
-    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    -./deploy/demo/remove-engines.sh
     {{demo_compose}} down -v
 
 # Re-run the idempotent seed

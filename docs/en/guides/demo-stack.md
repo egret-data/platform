@@ -74,7 +74,7 @@ In workspace `default`, open Apps, choose "+ App", name it, and the marimo edito
 
 | Command | Effect |
 |---|---|
-| `just demo-down` | Stops and removes the containers, including engines egret provisioned (label `egret.managed=true`). **Keeps the data volumes** (including the Data Apps files), so `just demo-up` returns with your data; app processes stop with the container and start again on the next open. Mailpit keeps no volume, so caught mail is lost. |
+| `just demo-down` | Stops and removes the containers, including engines egret provisioned (labels `egret.managed=true` and `egret.project=egret-demo`). **Keeps the data volumes** (including the Data Apps files), so `just demo-up` returns with your data; app processes stop with the container and start again on the next open. Mailpit keeps no volume, so caught mail is lost. |
 | `just demo-reset` | Same, and **deletes the data volumes** (Postgres, the object store and the Data Apps files). The next `just demo-up` starts from zero. |
 
 ## Change the port
@@ -100,7 +100,7 @@ Mailpit stays on `http://localhost:8025`.
 
 ## What is not in this stack yet
 
-- **Engine provisioning** arrives in a later work package. Egret logs "kubernetes unavailable; engine provisioning disabled" in this stack, which is expected.
+- **Engine provisioning** (*Add engine*) runs on Docker: see "Safety" below. The first *Add engine* pulls `trinodb/trino:483`, so it takes longer than later ones; `just demo-up` does not pre-pull it.
 - Workflow tasks that run containers (the container runner) are not configured. Plain tasks such as `Log` run; container and script tasks are expected to fail.
 - Only the Trino engine is included. StarRocks and RisingWave are not.
 
@@ -113,6 +113,7 @@ Mailpit stays on `http://localhost:8025`.
 - The subprocess launcher sets `PYTEST_CURRENT_TEST` for the app processes, which unlocks test-only overrides. Author code runs as the same user as Egret and can read Egret's process environment (`/proc`). Over plain http Egret's session cookies lack the `__Host-` prefix, so author code on the apps host could set cookies for `Domain=localtest.me` that the browser then sends to Egret (cookie tossing). marimo binds all interfaces of the Egret container, so other demo containers can reach it (token-gated). All acceptable for a demo; never use real data.
 - Only the edge (`DEMO_PORT`) and Mailpit (`8025`) are published, on `127.0.0.1`. Do not put the stack behind a public address, a tunnel or a shared network.
 - `egret init` prints the bootstrap admin password to the container log on first start (a known issue). The demo credentials are public anyway, but keep it in mind before you copy this setup for anything else.
+- *Add engine* starts containers through the `docker-proxy` service (`tecnativa/docker-socket-proxy`, not published to the host), which mounts the host's Docker socket read-only. The socket is never mounted into Egret. The proxy allows only the container, image, network, `POST`, `INFO` and `PING` parts of the Docker API and refuses exec, volumes, build and the rest. Starting containers is still allowed, and that is effectively control of the host's Docker: anything that can reach `docker-proxy:2375` on the demo network can start a container. Egret itself only starts images from `trinodb/trino`, with no mounts, no published ports and all capabilities dropped. Never expose this stack.
 - This is not a production topology: one node, no TLS, no backups, no resource limits.
 
 ## Troubleshooting
