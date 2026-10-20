@@ -112,6 +112,20 @@ pub fn image_allowed(image: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|a| a == repo)
 }
 
+/// Whether `image` names one tag or digest. A pull of a reference without
+/// either fetches EVERY tag of the repository, so such a reference is refused
+/// rather than defaulted to a floating `latest`.
+pub fn image_has_tag_or_digest(image: &str) -> bool {
+    if let Some((_, digest)) = image.split_once('@') {
+        return !digest.is_empty();
+    }
+    // A tag is a `:` after the last `/` (an earlier `:` is a registry port).
+    match image.rfind(':') {
+        Some(i) => !image[i..].contains('/') && i + 1 < image.len(),
+        None => false,
+    }
+}
+
 pub fn parse_cpu(q: &str) -> Result<i64, String> {
     let bad = || format!("invalid cpu quantity {q:?}");
     let (num, scale) = match q.strip_suffix('m') {
@@ -260,6 +274,11 @@ pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<Container
             return Err(format!(
                 "image {image} is not in the allowed images ({})",
                 opts.allowed_images.join(", ")
+            ));
+        }
+        if !image_has_tag_or_digest(&image) {
+            return Err(format!(
+                "image {image} has no tag or digest; name one (pulling it as is would fetch every tag)"
             ));
         }
         let labels = [
@@ -711,6 +730,29 @@ mod tests {
             "localhost:5000/x/trino:1",
             &["localhost:5000/x/trino".into()]
         ));
+    }
+
+    #[test]
+    fn image_tag_or_digest_is_required() {
+        assert!(image_has_tag_or_digest("trinodb/trino:483"));
+        assert!(image_has_tag_or_digest("trinodb/trino@sha256:abc"));
+        assert!(image_has_tag_or_digest("trinodb/trino:483@sha256:abc"));
+        assert!(image_has_tag_or_digest("localhost:5000/x/trino:1"));
+        assert!(!image_has_tag_or_digest("trinodb/trino"));
+        assert!(!image_has_tag_or_digest("trinodb/trino:"));
+        assert!(!image_has_tag_or_digest("trinodb/trino@"));
+        assert!(!image_has_tag_or_digest("localhost:5000/x/trino"));
+    }
+
+    #[test]
+    fn plan_refuses_an_untagged_image() {
+        let mut spec = sample_spec();
+        spec.config.image = Some("trinodb/trino".into());
+        let e = plan(&spec).unwrap_err();
+        assert!(
+            e.contains("image trinodb/trino has no tag or digest"),
+            "{e}"
+        );
     }
 
     #[test]

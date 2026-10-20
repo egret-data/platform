@@ -7,7 +7,7 @@
 //! itself (for instance a name conflict) removes nothing: that container is not ours.
 
 use super::api::{ContainerInfo, ContainerState, DockerApi};
-use super::plan::{files_tar, ContainerPlan};
+use super::plan::{files_tar, image_has_tag_or_digest, ContainerPlan};
 use bollard::body_full;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
@@ -157,6 +157,10 @@ fn create_body(plan: &ContainerPlan, network: &str) -> ContainerCreateBody {
 #[async_trait::async_trait]
 impl DockerApi for BollardDocker {
     async fn ensure_image(&self, image: &str) -> Result<(), String> {
+        // Never pull an untagged reference: that fetches every tag.
+        if !image_has_tag_or_digest(image) {
+            return Err(format!("refusing to pull {image}: no tag or digest"));
+        }
         match self.docker.inspect_image(image).await {
             Ok(_) => return Ok(()),
             Err(e) if is_not_found(&e) => {}
