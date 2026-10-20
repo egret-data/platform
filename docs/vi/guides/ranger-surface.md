@@ -14,12 +14,14 @@ Bề mặt được phục vụ dưới `/ranger`, cùng server và cổng với
 |---|---|---|
 | `GET /ranger/service/plugins/policies/download/{profile}` | plugin cấu hình không có username và password | có |
 | `GET /ranger/service/plugins/secure/policies/download/{profile}` | plugin 2.8.0+ cấu hình có username và password (đường mà engine của egret gọi) | có, cùng handler và cùng body với đường thường |
-| `GET /ranger/service/tags/download/{profile}` | plugin Trino, cho tag service của profile | có |
+| `GET /ranger/service/tags/download/{profile}` | plugin Trino cấu hình không có username và password, cho tags của profile | có |
+| `GET /ranger/service/tags/secure/download/{profile}` | plugin Trino 2.8.0+ cấu hình có username và password (đường mà engine của egret gọi) | có, cùng handler và cùng body với đường thường |
 | `GET /ranger/service/plugins/definitions`, `…/definitions/name/{name}`, `…/services`, `…/policies/{id}` | chỉ công cụ của operator | có, chỉ với bearer của operator |
 | `GET /ranger/service/roles/secure/download/{profile}` | plugin 2.8.0+ ở chế độ secure, mỗi chu kỳ poll | **không**: 404 với caller đã xác thực, 401 với mọi caller khác |
+| `GET /ranger/service/xusers/secure/download/{profile}` | plugin 2.8.0+ ở chế độ secure, chỉ khi cấu hình làm giàu user-store (engine của egret không cấu hình) | **không**: như route roles |
 | `/service/...` ở gốc server | URL cũ | **đã bỏ**: 404, không có alias |
 
-Plugin chịu được 404 ở route roles và vẫn cưỡng chế (đã đo với jar 2.8.0, tài liệu số đo, Q3). egret không phục vụ Ranger roles.
+Plugin chịu được 404 ở route roles và vẫn cưỡng chế (đã đo với jar 2.8.0, tài liệu số đo, Q3). egret không phục vụ Ranger roles hay user store. Đường tags đổi giống hệt đường policies (tài liệu số đo, Q4); plugin nhận 404 ở lần tải tags vẫn cưỡng chế policy theo tài nguyên nhưng lặng lẽ ngừng áp mọi mask, deny và row filter theo tag.
 
 Khi Ranger tắt (`[ranger] enabled = false`, Helm `ranger.enabled`) thì không có gì dưới `/ranger`.
 

@@ -12,12 +12,14 @@ The surface is served under `/ranger`, on the same server and port as `/api`. A 
 |---|---|---|
 | `GET /ranger/service/plugins/policies/download/{profile}` | a plugin configured without a username and password | yes |
 | `GET /ranger/service/plugins/secure/policies/download/{profile}` | a 2.8.0+ plugin configured with a username and password (what egret's engines call) | yes, same handler and same body as the plain path |
-| `GET /ranger/service/tags/download/{profile}` | Trino plugins, for the profile's tag service | yes |
+| `GET /ranger/service/tags/download/{profile}` | a Trino plugin configured without a username and password, for the profile's tags | yes |
+| `GET /ranger/service/tags/secure/download/{profile}` | a 2.8.0+ Trino plugin configured with a username and password (what egret's engines call) | yes, same handler and same body as the plain path |
 | `GET /ranger/service/plugins/definitions`, `…/definitions/name/{name}`, `…/services`, `…/policies/{id}` | operator tooling only | yes, operator bearer only |
 | `GET /ranger/service/roles/secure/download/{profile}` | a 2.8.0+ plugin in secure mode, every poll interval | **no**: 404 to an authenticated caller, 401 to anyone else |
+| `GET /ranger/service/xusers/secure/download/{profile}` | a 2.8.0+ plugin in secure mode, only when user-store enrichment is configured (egret's engines do not configure it) | **no**: like the roles route |
 | `/service/...` at the server root | the old URL | **removed**: 404, with no alias |
 
-The plugin tolerates the 404 on the roles route and keeps enforcing (measured with the 2.8.0 jar, measurements doc, Q3). egret does not serve Ranger roles.
+The plugin tolerates the 404 on the roles route and keeps enforcing (measured with the 2.8.0 jar, measurements doc, Q3). egret does not serve Ranger roles or the user store. The tag paths switch the same way the policy paths do (measurements doc, Q4); a plugin that got a 404 on its tag download would keep enforcing resource policies but silently stop applying every tag-addressed mask, deny and row filter.
 
 Nothing is served under `/ranger` when Ranger is off (`[ranger] enabled = false`, Helm `ranger.enabled`).
 

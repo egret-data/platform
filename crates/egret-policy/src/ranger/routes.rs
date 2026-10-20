@@ -35,6 +35,16 @@ pub fn ranger_router(state: RangerState) -> Router {
             "/tags/download/{service}",
             get(api::download::download_tags),
         )
+        // A 2.8.0/2.9.0 plugin configured with a username and password fetches
+        // tags HERE, not from the plain path (measured: measurements doc, Q4).
+        // Without it the tag enricher gets a 404 and every tag-addressed mask,
+        // deny and row filter stops applying. Same handler, so the same
+        // `authorize_service` binding; like the secure policies route it has no
+        // OpenAPI entry of its own (the plain path documents the handler).
+        .route(
+            "/tags/secure/download/{service}",
+            get(api::download::download_tags),
+        )
         // The CRUD routes are operator-only: an engine credential reads only
         // its own profile's downloads. Layered BEFORE the merge so it wraps
         // these routes alone.

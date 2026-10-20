@@ -430,3 +430,83 @@ async fn anonymous_mode_still_binds_a_valid_engine_credential_to_its_profile() {
     assert_eq!(status(download(&x), None).await, StatusCode::OK);
     assert_eq!(status(download(&y.name), None).await, StatusCode::OK);
 }
+
+/// The secure TAG path a 2.8.0+ plugin with a username and password calls
+/// (measured, `2026-10-20-ranger-surface-auth-measurements.md` Q4: `GET
+/// /service/tags/secure/download/<svc>` with `Authorization: Basic ...`) gets
+/// the same authentication and profile binding as every other download: 401
+/// without a credential, 200 for the bound profile and the tag service it
+/// names, 403 for anything else, and nothing outside `/ranger`.
+#[tokio::test]
+async fn the_secure_tags_path_is_authenticated_and_bound_to_the_profile() {
+    let Some((store, _svc, _)) = store_with_profile().await else {
+        eprintln!("skip");
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag = store
+        .create_service(&format!("p_{suffix}_tag"), "tag", &json!({}))
+        .await
+        .expect("create tag service");
+    let unrelated_tag = store
+        .create_service(&format!("u_{suffix}_tag"), "tag", &json!({}))
+        .await
+        .expect("create unrelated tag service");
+    let other = store
+        .create_service(&format!("o_{suffix}"), "trino", &json!({}))
+        .await
+        .expect("create other profile");
+    let profile = store
+        .create_service(
+            &format!("p_{suffix}"),
+            "trino",
+            &json!({ "tagService": tag.name }),
+        )
+        .await
+        .expect("create profile");
+    let engine = Uuid::new_v4();
+    let v = Arc::new(Stub {
+        good: (engine, ENGINE_PW),
+        bound_to: Some(profile.id),
+    });
+    let app = surface(store, AuthMode::Required, Some(v));
+    let auth = basic(&engine_user(engine), ENGINE_PW);
+    let secure_tags = |svc: &str| format!("/ranger/service/tags/secure/download/{svc}");
+
+    let r = app
+        .clone()
+        .oneshot(get(&secure_tags(&profile.name), None))
+        .await
+        .unwrap();
+    assert_basic_challenge(&r);
+    let r = app
+        .clone()
+        .oneshot(get(
+            &secure_tags(&profile.name),
+            Some(&basic(&engine_user(engine), "wrong")),
+        ))
+        .await
+        .unwrap();
+    assert_basic_challenge(&r);
+
+    let status = |uri: String| {
+        let app = app.clone();
+        let auth = auth.clone();
+        async move { app.oneshot(get(&uri, Some(&auth))).await.unwrap().status() }
+    };
+    assert_eq!(status(secure_tags(&profile.name)).await, StatusCode::OK);
+    assert_eq!(status(secure_tags(&tag.name)).await, StatusCode::OK);
+    assert_eq!(
+        status(secure_tags(&unrelated_tag.name)).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        status(secure_tags(&other.name)).await,
+        StatusCode::FORBIDDEN
+    );
+    // Only under `/ranger`: the old root `/service/...` prefix serves nothing.
+    assert_eq!(
+        status(format!("/service/tags/secure/download/{}", profile.name)).await,
+        StatusCode::NOT_FOUND
+    );
+}
