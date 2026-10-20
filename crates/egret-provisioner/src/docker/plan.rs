@@ -888,4 +888,24 @@ mod tests {
         let got: BTreeSet<String> = plans[1].files.iter().map(|f| f.path.clone()).collect();
         assert_eq!(got, want);
     }
+
+    #[test]
+    fn shared_namespace_alone_and_exposed_ports_combined_are_named() {
+        let mut s = sample_spec();
+        s.config.coordinator.share_process_namespace = Some(true);
+        let e = plan(&s).unwrap_err();
+        assert!(e.contains("shared process namespace"), "{e}");
+
+        let mut s = sample_spec();
+        s.config.worker.base.additional_exposed_ports = vec![ContainerPort {
+            name: "x".into(),
+            container_port: 9000,
+        }];
+        s.config.ingress = Some(Ingress {
+            enabled: true,
+            ..Default::default()
+        });
+        let e = plan(&s).unwrap_err();
+        assert!(e.contains("exposed ports") && e.contains("ingress"), "{e}");
+    }
 }
