@@ -67,6 +67,18 @@ fn unsupported(spec: &EngineSpec) -> Vec<&'static str> {
         }
     }
     for r in [&c.coordinator, &c.worker.base] {
+        if !r.additional_exposed_ports.is_empty() {
+            out.push("additional exposed ports (no published ports on Docker)");
+            break;
+        }
+    }
+    for r in [&c.coordinator, &c.worker.base] {
+        if r.share_process_namespace == Some(true) {
+            out.push("shared process namespace");
+            break;
+        }
+    }
+    for r in [&c.coordinator, &c.worker.base] {
         if !r.init_containers.is_empty() {
             out.push("init containers");
             break;
@@ -107,10 +119,12 @@ pub fn parse_cpu(q: &str) -> Result<i64, String> {
         None => (q, 1_000_000_000.0),
     };
     let v: f64 = num.parse().map_err(|_| bad())?;
-    if !v.is_finite() || v <= 0.0 {
+    let nano = (v * scale).round();
+    // `as i64` saturates, so bound the value before converting.
+    if !nano.is_finite() || nano < 1.0 || nano >= i64::MAX as f64 {
         return Err(bad());
     }
-    Ok((v * scale).round() as i64)
+    Ok(nano as i64)
 }
 
 pub fn parse_memory(q: &str) -> Result<i64, String> {
@@ -152,11 +166,24 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let config = trino_config_map(spec);
-    let catalogs = trino_catalogs_config_map(spec);
     let tls = trino_tls_secret(spec);
+    resolve_mounts(
+        &mounts,
+        &trino_config_map(spec),
+        &trino_catalogs_config_map(spec),
+        tls.as_ref(),
+    )
+}
+
+/// Resolve `volumeMounts` entries to the ConfigMap/Secret data behind them.
+fn resolve_mounts(
+    mounts: &[serde_json::Value],
+    config: &serde_json::Value,
+    catalogs: &serde_json::Value,
+    tls: Option<&serde_json::Value>,
+) -> Result<Vec<PlanFile>, String> {
     let mut files = Vec::new();
-    for m in &mounts {
+    for m in mounts {
         let path = m["mountPath"].as_str().unwrap_or_default();
         let sub = m["subPath"].as_str();
         let unsupported = || format!("unsupported volume mount {path}");
@@ -180,7 +207,6 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
             }
             ("tls", Some("keystore.pem")) => {
                 let pem = tls
-                    .as_ref()
                     .and_then(|t| t["stringData"]["keystore.pem"].as_str())
                     .ok_or_else(unsupported)?;
                 files.push(PlanFile {
@@ -190,7 +216,7 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
                 });
             }
             // The image already ships /data/trino, owned by uid 1000.
-            ("data", None) => {}
+            ("data", None) if path == "/data/trino" => {}
             _ => return Err(unsupported()),
         }
     }
@@ -198,6 +224,9 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
     Ok(files)
 }
 
+/// Scheduling and replica fields (coordinator replicas above 1, probes, node
+/// selectors, tolerations, affinity, topology spread, termination grace) have no
+/// Docker meaning and are intentionally not applied.
 pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<ContainerPlan>, String> {
     let bad = unsupported(spec);
     if !bad.is_empty() {
@@ -279,13 +308,17 @@ pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<Container
     Ok(plans)
 }
 
+const CONFIG_ROOT: &str = "etc/trino";
+
 /// A tar of `files` for `PUT /containers/{id}/archive` at `/`: parent
 /// directories first, everything owned by uid/gid 1000 (the Trino user).
 pub fn files_tar(files: &[PlanFile]) -> Vec<u8> {
     let mut dirs = std::collections::BTreeSet::new();
     for f in files {
         let mut p = std::path::Path::new(f.path.trim_start_matches('/')).parent();
-        while let Some(d) = p.filter(|d| !d.as_os_str().is_empty()) {
+        // Only directories at or below the config root: put_archive applies tar
+        // metadata to existing directories, so an `etc/` entry would chown /etc.
+        while let Some(d) = p.filter(|d| d.starts_with(CONFIG_ROOT)) {
             dirs.insert(d.to_path_buf());
             p = d.parent();
         }
@@ -722,7 +755,7 @@ mod tests {
             assert_eq!(seen[i].2 & 0o777, f.mode);
             assert_eq!(seen[i].5, f.content);
             let mut dir = std::path::Path::new(rel).parent().unwrap();
-            while !dir.as_os_str().is_empty() {
+            while dir.starts_with("etc/trino") {
                 let d = dir.to_string_lossy().to_string();
                 let di = seen
                     .iter()
@@ -732,5 +765,127 @@ mod tests {
                 dir = dir.parent().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn tar_never_touches_directories_above_the_config_root() {
+        let files = vec![PlanFile {
+            path: "/etc/trino/catalog/a.properties".into(),
+            content: b"a=1\n".to_vec(),
+            mode: 0o644,
+        }];
+        let bytes = files_tar(&files);
+        let names: Vec<String> = tar::Archive::new(bytes.as_slice())
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.trim_end_matches('/') == "etc"),
+            "{names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .map(|n| n.trim_end_matches('/'))
+                .collect::<Vec<_>>(),
+            vec![
+                "etc/trino",
+                "etc/trino/catalog",
+                "etc/trino/catalog/a.properties"
+            ]
+        );
+        // A path outside the config root gets no directory entries at all.
+        let other = files_tar(&[PlanFile {
+            path: "/data/x/y".into(),
+            content: vec![],
+            mode: 0o644,
+        }]);
+        let n = tar::Archive::new(other.as_slice())
+            .entries()
+            .unwrap()
+            .count();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn exposed_ports_and_shared_process_namespace_are_rejected() {
+        let mut s = sample_spec();
+        s.config.worker.base.additional_exposed_ports = vec![ContainerPort {
+            name: "x".into(),
+            container_port: 9000,
+        }];
+        let e = plan(&s).unwrap_err();
+        assert!(e.contains("exposed ports"), "{e}");
+
+        let mut s = sample_spec();
+        s.config.coordinator.share_process_namespace = Some(true);
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "hpa".into(),
+            hpa: None,
+            keda: None,
+        });
+        let e = plan(&s).unwrap_err();
+        assert!(
+            e.contains("shared process namespace") && e.contains("autoscaling"),
+            "{e}"
+        );
+
+        let mut s = sample_spec();
+        s.config.coordinator.share_process_namespace = Some(false);
+        assert!(plan(&s).is_ok());
+    }
+
+    #[test]
+    fn cpu_rounding_to_zero_or_overflow_is_rejected() {
+        assert!(parse_cpu("0.0000004m").is_err());
+        assert!(parse_cpu("1e30").is_err());
+        assert!(parse_cpu("99999999999").is_err());
+        assert_eq!(parse_cpu("1m").unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn unknown_or_misplaced_volumes_are_unsupported_mounts() {
+        let none = serde_json::json!({});
+        let m = |name: &str, path: &str, sub: Option<&str>| {
+            let mut v = serde_json::json!({ "name": name, "mountPath": path });
+            if let Some(s) = sub {
+                v["subPath"] = s.into();
+            }
+            v
+        };
+        for bad in [
+            m("mystery", "/etc/trino/x", None),
+            m("data", "/somewhere/else", None),
+            m("config", "/etc/trino/x", Some("not-a-key")),
+            m("tls", "/etc/trino/tls/keystore.pem", Some("keystore.pem")),
+        ] {
+            let e = resolve_mounts(&[bad], &none, &none, None).unwrap_err();
+            assert!(e.contains("unsupported volume mount"), "{e}");
+        }
+        assert!(
+            resolve_mounts(&[m("data", "/data/trino", None)], &none, &none, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn worker_files_match_the_kubernetes_mounts() {
+        let mut s = rich_spec();
+        s.config.worker.base.replicas = 1;
+        let plans = plan(&s).unwrap();
+        let dep = trino_deployment(&s, Role::Worker);
+        let mut want: BTreeSet<String> = dep["spec"]["template"]["spec"]["containers"][0]
+            ["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["mountPath"].as_str().unwrap().to_string())
+            .filter(|m| m != "/data/trino" && m != "/etc/trino/catalog")
+            .collect();
+        want.insert("/etc/trino/catalog/egret.properties".into());
+        let got: BTreeSet<String> = plans[1].files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(got, want);
     }
 }
