@@ -71,6 +71,31 @@ impl BollardDocker {
     }
 }
 
+/// Stop, then force-remove. A container that is gone is fine. A stop that
+/// fails otherwise (a wedged container) does not skip the remove: `force`
+/// kills it, so delete is not blocked; the stop error is reported only when
+/// the remove fails too.
+async fn stop_then_force_remove<S, R, RF>(name: &str, stop: S, remove: RF) -> Result<(), String>
+where
+    S: std::future::Future<Output = Result<(), BollardError>>,
+    R: std::future::Future<Output = Result<(), BollardError>>,
+    RF: FnOnce() -> R,
+{
+    let stop_err = match stop.await {
+        Ok(()) => None,
+        Err(e) if is_not_found(&e) => return Ok(()),
+        Err(e) => Some(e),
+    };
+    match remove().await {
+        Ok(()) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(match stop_err {
+            Some(s) => format!("stopping container {name}: {s}; removing it: {e}"),
+            None => format!("removing container {name}: {e}"),
+        }),
+    }
+}
+
 fn is_not_found(e: &BollardError) -> bool {
     matches!(
         e,
@@ -273,17 +298,11 @@ impl DockerApi for BollardDocker {
         let stop = StopContainerOptionsBuilder::default()
             .t(STOP_TIMEOUT_SECS)
             .build();
-        match self.docker.stop_container(name, Some(stop)).await {
-            Ok(()) => {}
-            Err(e) if is_not_found(&e) => return Ok(()),
-            Err(e) => return Err(format!("stopping container {name}: {e}")),
-        }
         let rm = RemoveContainerOptionsBuilder::default().force(true).build();
-        match self.docker.remove_container(name, Some(rm)).await {
-            Ok(()) => Ok(()),
-            Err(e) if is_not_found(&e) => Ok(()),
-            Err(e) => Err(format!("removing container {name}: {e}")),
-        }
+        stop_then_force_remove(name, self.docker.stop_container(name, Some(stop)), || {
+            self.docker.remove_container(name, Some(rm))
+        })
+        .await
     }
 
     async fn log_tail(&self, name: &str, lines: usize) -> Result<String, String> {
@@ -306,6 +325,53 @@ impl DockerApi for BollardDocker {
 mod tests {
     use super::*;
     use crate::docker::plan::PlanRole;
+
+    fn server_error(status_code: u16) -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code,
+            message: format!("status {status_code}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_stop_still_force_removes() {
+        let removed = std::cell::Cell::new(false);
+        let r = stop_then_force_remove("c", async { Err(server_error(500)) }, || async {
+            removed.set(true);
+            Ok(())
+        })
+        .await;
+        assert_eq!(r, Ok(()));
+        assert!(removed.get());
+    }
+
+    #[tokio::test]
+    async fn a_failed_stop_and_remove_reports_both() {
+        let r = stop_then_force_remove("c", async { Err(server_error(500)) }, || async {
+            Err(server_error(409))
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            r.contains("stopping container c") && r.contains("removing it"),
+            "{r}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_container_is_not_an_error() {
+        let removed = std::cell::Cell::new(false);
+        let r = stop_then_force_remove("c", async { Err(server_error(404)) }, || async {
+            removed.set(true);
+            Ok(())
+        })
+        .await;
+        assert_eq!(r, Ok(()));
+        assert!(!removed.get());
+        let r = stop_then_force_remove("c", async { Ok(()) }, || async { Err(server_error(404)) })
+            .await;
+        assert_eq!(r, Ok(()));
+    }
 
     fn plan() -> ContainerPlan {
         ContainerPlan {
