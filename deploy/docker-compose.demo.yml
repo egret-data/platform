@@ -65,6 +65,8 @@ services:
 
   egret:
     image: egret-demo-backend:dev
+    # egret is PID 1; Docker's init reaps the kernel processes marimo leaves behind when a pod stops.
+    init: true
     build:
       context: ..
       dockerfile: deploy/docker/backend.Dockerfile

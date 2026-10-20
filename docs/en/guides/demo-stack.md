@@ -26,7 +26,7 @@ The seed creates, in workspace `default`: database `trino-demo`, dataset `orders
 
 - Docker with Compose v2, [`just`](https://github.com/casey/just), `curl` and `python3` (the seed and readiness scripts use them).
 - About 6 to 8 GB of RAM free for Docker.
-- The first `just demo-up` builds the backend (a Rust compile) and takes 20 to 40 minutes. Later runs reuse the cached images.
+- The first `just demo-up` builds the backend (a Rust compile) and takes 20 to 40 minutes. The first build also pip-installs the Data Apps payload (marimo, duckdb, polars, pyarrow, plotly and more; the backend image is about 1.5 GB). Later runs reuse the cached images.
 - `*.localtest.me` resolves to `127.0.0.1` through public DNS. On an offline machine add this line to `/etc/hosts`:
 
   ```text
@@ -79,7 +79,7 @@ In workspace `default`, open Apps, choose "+ App", name it, and the marimo edito
 
 ## Change the port
 
-The default port is 8080. If something else uses it, change **both** values in `deploy/demo/demo.env`, which must match:
+The default port is 8080. If something else uses it, change **all three** values in `deploy/demo/demo.env`, which must match:
 
 ```bash
 DEMO_PORT=18080
@@ -89,7 +89,7 @@ DEMO_APPS_URL=http://apps.localtest.me:18080
 
 `DEMO_PORT` is the port the stack publishes. `DEMO_URL` is what egret, Keycloak and the browser use as the public address, so a mismatch breaks SSO. `DEMO_APPS_URL` is the Data Apps address: the same port, host `apps.localtest.me`. The verify script derives the apps host from `DEMO_APPS_URL`, else from `DEMO_APPS_HOST` (default `apps.localtest.me`) on the port of `BASE`; if you point `BASE` at another host, also set `DEMO_APPS_URL`. Then run `just demo-reset && just demo-up`, because Keycloak and egret read the address when they first start.
 
-To try another port without editing the file, export both in the shell before the command (shell values win over `demo.env`):
+To try another port without editing the file, export all three in the shell before the command (shell values win over `demo.env`):
 
 ```bash
 export DEMO_PORT=18080 DEMO_URL=http://egret.localtest.me:18080 DEMO_APPS_URL=http://apps.localtest.me:18080
@@ -110,6 +110,7 @@ Mailpit stays on `http://localhost:8025`.
 - Every secret here is a **public development value** committed to the repository (`deploy/demo/demo.env`): the database password, the object store keys, the master key and the admin password. Never reuse them anywhere real.
 - The Keycloak admin console is at `/auth/admin` on the same address, login `admin` / `admin`.
 - The imported dev realm (`deploy/keycloak/egret-realm.json`) allows redirect URI `*`, the password grant and `sslRequired: none`. That is why this stack must never be exposed.
+- The subprocess launcher sets `PYTEST_CURRENT_TEST` for the app processes, which unlocks test-only overrides. Author code runs as the same user as Egret and can read Egret's process environment (`/proc`). Over plain http Egret's session cookies lack the `__Host-` prefix, so author code on the apps host could set cookies for `Domain=localtest.me` that the browser then sends to Egret (cookie tossing). marimo binds all interfaces of the Egret container, so other demo containers can reach it (token-gated). All acceptable for a demo; never use real data.
 - Only the edge (`DEMO_PORT`) and Mailpit (`8025`) are published, on `127.0.0.1`. Do not put the stack behind a public address, a tunnel or a shared network.
 - `egret init` prints the bootstrap admin password to the container log on first start (a known issue). The demo credentials are public anyway, but keep it in mind before you copy this setup for anything else.
 - This is not a production topology: one node, no TLS, no backups, no resource limits.

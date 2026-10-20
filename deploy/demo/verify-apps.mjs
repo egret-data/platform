@@ -59,7 +59,14 @@ async function appsFrame(iframeSelector) {
 
 try {
   await step("login", async () => {
-    if (fs.existsSync(STATE)) return;
+    if (fs.existsSync(STATE)) {
+      // A cached session can outlive `demo-reset`; keep it only while the server still accepts it.
+      const probe = await browser.newContext({ storageState: STATE });
+      const res = await probe.request.get(`${BASE}/api/ws/${WS}/apps/capabilities`);
+      await probe.close();
+      if (res.ok()) return;
+      fs.rmSync(STATE, { force: true });
+    }
     const ctx = await browser.newContext();
     const p = (page = await ctx.newPage());
     await p.goto(`${BASE}/login`);
@@ -67,12 +74,11 @@ try {
     const breakGlass = p.getByRole("button", { name: "Admin sign-in (break-glass)" });
     await breakGlass.or(p.getByPlaceholder("Email")).first().waitFor({ timeout: 30_000 });
     const email = p.getByPlaceholder("Email");
-    // The click can land before the page handles it; retry until the form shows.
-    for (let i = 0; i < 5 && !(await email.isVisible()); i++) {
-      if (await breakGlass.isVisible()) await breakGlass.click();
-      await email.waitFor({ timeout: 3_000 }).catch(() => {});
+    // The page can re-render (auth config) and drop the form, or swallow the click; retry the pair.
+    for (let i = 0; ; i++) {
+      if (!(await email.isVisible()) && (await breakGlass.isVisible())) await breakGlass.click();
+      try { await email.fill(EMAIL, { timeout: 4_000 }); break; } catch (e) { if (i >= 6) throw e; }
     }
-    await p.getByPlaceholder("Email").fill(EMAIL);
     await p.getByPlaceholder("Password").fill(PASSWORD);
     await p.getByRole("button", { name: "Sign in", exact: true }).click();
     await p.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 30_000 });

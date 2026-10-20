@@ -20,7 +20,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # DEMO ONLY. The subprocess launcher runs marimo as the same uid as the server and gives no
 # isolation (crates/egret-apps/src/subprocess_pod.rs). Production uses the Kubernetes launcher and
 # the separate egret-apps pod image; the default (last) stage below is unchanged.
-FROM python:3.12-slim AS demo
+# Pinned to bookworm (the builder's glibc) by tag and digest. apps-image/Dockerfile uses the floating
+# python:3.12-slim and may drift from this.
+FROM python:3.12.15-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS demo
 ARG MARIMO_VERSION=0.25.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tini \
