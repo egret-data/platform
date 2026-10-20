@@ -35,14 +35,22 @@ if [ -z "$DB" ]; then
   echo "database trino-demo $DB"
 else echo "database trino-demo exists"; fi
 
-# 2. Dataset and metrics
+# 2. Dataset and metrics (each metric is added when missing, so a partial earlier run is repaired)
 DS=$(find_id "/api/ws/$WS/datasets" orders)
 if [ -z "$DS" ]; then
   DS=$(call POST "/api/ws/$WS/datasets" "{\"name\":\"orders\",\"database_id\":\"$DB\",\"description\":\"TPC-H sample orders\",\"source\":{\"kind\":\"physical\",\"catalog\":\"tpch\",\"schema\":\"tiny\",\"table\":\"orders\"}}" | id)
-  call POST "/api/ws/$WS/datasets/$DS/metrics" '{"metric_name":"revenue","verbose_name":"Revenue","expression":"sum(totalprice)"}' >/dev/null
-  call POST "/api/ws/$WS/datasets/$DS/metrics" '{"metric_name":"order_count","verbose_name":"Orders","expression":"count(*)"}' >/dev/null
   echo "dataset orders $DS"
 else echo "dataset orders exists"; fi
+metric() { # metric <name> <verbose> <expression>
+  if get "/api/ws/$WS/datasets/$DS" | python3 -c 'import json,sys;sys.exit(0 if any(m["metric_name"]==sys.argv[1] for m in json.load(sys.stdin)["metrics"]) else 1)' "$1"; then
+    echo "metric $1 exists"
+  else
+    call POST "/api/ws/$WS/datasets/$DS/metrics" "{\"metric_name\":\"$1\",\"verbose_name\":\"$2\",\"expression\":\"$3\"}" >/dev/null
+    echo "metric $1 created"
+  fi
+}
+metric revenue Revenue 'sum(totalprice)'
+metric order_count Orders 'count(*)'
 
 # 3. Charts and dashboard
 spec() { echo "{\"metrics\":$1,\"dimensions\":$2,\"columns\":[],\"filters\":[],\"orderby\":$3,\"row_limit\":1000,\"rollup_groups\":[]$4}"; }
@@ -61,11 +69,17 @@ TBL=$(chart "Orders by priority" table "$(spec '["order_count"]' '["orderpriorit
 DASH=$(find_id "/api/ws/$WS/dashboards" "Sales overview")
 if [ -z "$DASH" ]; then
   DASH=$(call POST "/api/ws/$WS/dashboards" '{"name":"Sales overview","description":"Demo dashboard"}' | id)
+  NEW=1; echo "dashboard Sales overview $DASH"
+else
+  NEW=0
+fi
+CARDS=$(get "/api/ws/$WS/dashboards/$DASH" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["cards"]))')
+if [ "$CARDS" = 0 ]; then
   call PUT "/api/ws/$WS/dashboards/$DASH" "{\"name\":\"Sales overview\",\"description\":\"Demo dashboard\",\"parameters\":[],\"width\":\"full\",\"tabs\":[],\"cards\":[
    {\"chart_id\":\"$BAR\",\"card_type\":\"chart\",\"grid_col\":0,\"grid_row\":0,\"size_x\":12,\"size_y\":4,\"options\":{}},
    {\"chart_id\":\"$LINE\",\"card_type\":\"chart\",\"grid_col\":12,\"grid_row\":0,\"size_x\":12,\"size_y\":4,\"options\":{}},
    {\"chart_id\":\"$TBL\",\"card_type\":\"chart\",\"grid_col\":0,\"grid_row\":4,\"size_x\":24,\"size_y\":5,\"options\":{}}]}" >/dev/null
-  echo "dashboard Sales overview $DASH"
+  [ "$NEW" = 1 ] || echo "dashboard Sales overview cards repaired"
 else echo "dashboard Sales overview exists"; fi
 
 # 4. Workspace SMTP -> Mailpit (a PUT replaces; safe to repeat). Needs EGRET_SECRETS__MASTER_KEY on the

@@ -76,6 +76,7 @@ services:
       edge: { condition: service_started }
       renderer: { condition: service_started }
       mailpit: { condition: service_started }
+      trino-demo: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/demo/egret-entrypoint.sh"]
     volumes:
       - ./demo/egret-entrypoint.sh:/demo/egret-entrypoint.sh:ro
@@ -152,7 +153,7 @@ services:
     depends_on:
       keycloak: { condition: service_healthy }
     ports:
-      - "${DEMO_PORT:-8080}:${DEMO_PORT:-8080}"
+      - "127.0.0.1:${DEMO_PORT:-8080}:${DEMO_PORT:-8080}"
     environment:
       NGINX_ENVSUBST_FILTER: ^DEMO_
       # Interpolated, not env_file: a shell override such as DEMO_PORT=18080 must reach the container too.
@@ -167,7 +168,7 @@ services:
   mailpit:
     image: axllent/mailpit:v1.21@sha256:81370195cd4a0eab9604d17c2617a7525b0486f9365555253b6c5376c6350f1a
     ports:
-      - "8025:8025"   # web UI: every mail the demo sends lands here
+      - "127.0.0.1:8025:8025"   # web UI: every mail the demo sends lands here
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: "1"
       MP_SMTP_AUTH_ALLOW_INSECURE: "1"

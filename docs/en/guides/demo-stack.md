@@ -17,7 +17,7 @@ just demo-up
 | Mailpit (every mail the demo sends) | `http://localhost:8025` | none |
 | Trino | internal only, registered in workspace `default` as database `trino-demo` | catalogs `tpch` and `memory` |
 
-Behind the one address `http://egret.localtest.me:8080`, an edge nginx serves the frontend and Keycloak (`/auth`), so the browser and the backend see the same OIDC issuer. Postgres, the object store (bucket `warehouse`), the renderer and Trino are not published to the host.
+Behind the one address `http://egret.localtest.me:8080`, an edge nginx serves the frontend and Keycloak (`/auth`), so the browser and the backend see the same OIDC issuer. Postgres, the object store (bucket `warehouse`), the renderer and Trino are not published to the host. The two published ports (the edge and Mailpit) bind to `127.0.0.1` only. On a remote VM, reach them through an SSH tunnel, for example `ssh -L 8080:localhost:8080 -L 8025:localhost:8025 user@vm`; the browser address stays `http://egret.localtest.me:8080`, which resolves to `127.0.0.1` on your own machine.
 
 The seed creates, in workspace `default`: database `trino-demo`, dataset `orders` (TPC-H `tpch.tiny.orders`) with metrics `revenue` and `order_count`, charts "Revenue by order status", "Revenue by month" and "Orders by priority", the dashboard "Sales overview", and a workspace SMTP setting that points at Mailpit.
 
@@ -43,7 +43,9 @@ The command builds and starts the services, waits until Egret answers, prints th
 - **Local admin**: on the login page choose "Admin sign-in (break-glass)" and use `admin@egret.local` / `Admin12345!`. This account sees the `default` workspace and everything seeded.
 - **SSO users**: the "Sign in with SSO" button signs `admin-sso` or `member-sso` in through Keycloak. They have **no workspace** until an admin adds them ("No workspaces yet" is the expected first screen), and egret only knows them after their first sign-in. Sign in once with the SSO user, then add the user to a workspace as the local admin.
 
-The first dashboard load can take a few seconds while Trino warms up.
+A cold first dashboard load can take 15 seconds or more while Trino warms up.
+
+Reports: CSV works on charts only, not on dashboards (use PDF or PNG for a dashboard).
 
 To re-run the seed alone (every line prints `exists` once the content is there):
 
@@ -93,7 +95,9 @@ Mailpit stays on `http://localhost:8025`.
 ## Safety
 
 - Every secret here is a **public development value** committed to the repository (`deploy/demo/demo.env`): the database password, the object store keys, the master key and the admin password. Never reuse them anywhere real.
-- Only the edge (`DEMO_PORT`) and Mailpit (`8025`) are published. Do not put the stack behind a public address, a tunnel or a shared network.
+- The Keycloak admin console is at `/auth/admin` on the same address, login `admin` / `admin`.
+- The imported dev realm (`deploy/keycloak/egret-realm.json`) allows redirect URI `*`, the password grant and `sslRequired: none`. That is why this stack must never be exposed.
+- Only the edge (`DEMO_PORT`) and Mailpit (`8025`) are published, on `127.0.0.1`. Do not put the stack behind a public address, a tunnel or a shared network.
 - `egret init` prints the bootstrap admin password to the container log on first start (a known issue). The demo credentials are public anyway, but keep it in mind before you copy this setup for anything else.
 - This is not a production topology: one node, no TLS, no backups, no resource limits.
 
