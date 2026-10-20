@@ -2,8 +2,10 @@
 // DEMO ONLY. Browser check of the Data Apps lifecycle on the demo stack: create an app in the UI,
 // open its editor (marimo, served from the apps origin inside an iframe), run a cell, publish,
 // open the published app as a viewer. Prints "OK <step>" per step; exits 1 with a screenshot.
-//   STATE=/tmp/x/state.json SHOT_DIR=/tmp/x DEMO_PORT=18080 node deploy/demo/verify-apps.mjs
+//   DEMO_PORT=18080 node deploy/demo/verify-apps.mjs
+// STATE (session cookies) and SHOT_DIR default to the system temp dir, never the repo.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -17,9 +19,11 @@ try {
 }
 
 const BASE = process.env.BASE ?? `http://egret.localtest.me:${process.env.DEMO_PORT ?? "8080"}`;
-const APPS = new URL(process.env.DEMO_APPS_URL ?? BASE.replace("//egret.", "//apps.")).host;
-const STATE = process.env.STATE ?? "verify-apps-state.json";
-const SHOT_DIR = process.env.SHOT_DIR ?? ".";
+const APPS = new URL(
+  process.env.DEMO_APPS_URL ?? `${new URL(BASE).protocol}//${process.env.DEMO_APPS_HOST ?? "apps.localtest.me"}:${new URL(BASE).port}`,
+).host;
+const STATE = process.env.STATE ?? path.join(os.tmpdir(), "egret-demo-verify-apps-state.json");
+const SHOT_DIR = process.env.SHOT_DIR ?? os.tmpdir();
 const EMAIL = process.env.EGRET_ADMIN_EMAIL ?? "admin@egret.local";
 const PASSWORD = process.env.EGRET_ADMIN_PASSWORD ?? "Admin12345!";
 const WS = process.env.WS ?? "default";
@@ -54,7 +58,12 @@ try {
     // With SSO on, the local form hides behind the break-glass link (once the auth config loads).
     const breakGlass = p.getByRole("button", { name: "Admin sign-in (break-glass)" });
     await breakGlass.or(p.getByPlaceholder("Email")).first().waitFor({ timeout: 30_000 });
-    if (await breakGlass.isVisible()) await breakGlass.click();
+    const email = p.getByPlaceholder("Email");
+    // The click can land before the page handles it; retry until the form shows.
+    for (let i = 0; i < 5 && !(await email.isVisible()); i++) {
+      if (await breakGlass.isVisible()) await breakGlass.click();
+      await email.waitFor({ timeout: 3_000 }).catch(() => {});
+    }
     await p.getByPlaceholder("Email").fill(EMAIL);
     await p.getByPlaceholder("Password").fill(PASSWORD);
     await p.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -95,8 +104,9 @@ try {
     await editor.pressSequentially("1 + 1");
     await editor.press("Control+Enter");
     await frame.locator(".output-area").filter({ hasText: /^\s*2\s*$/ }).first().waitFor({ timeout: 60_000 });
-    // Save, then wait until the server has a newer revision AND the header (polled every 5s)
-    // shows it: publishing against a stale revision is refused with 409.
+    // Workaround for a product issue: Publish right after Ctrl+S can return 409, because the editor
+    // header refreshes the draft revision only every 5 s. So wait until the server has a newer
+    // revision AND the button shows it.
     await editor.press("Control+s");
     let rev = before;
     for (let i = 0; i < 30 && rev <= before; i++) { await page.waitForTimeout(1000); rev = await draftRev(); }
@@ -108,7 +118,8 @@ try {
     await page.getByRole("button", { name: /^Publish draft rev \d+$/ }).click();
     await page.getByText("Published version 1").waitFor({ timeout: 30_000 });
     await page.getByText("Published v1", { exact: true }).waitFor({ timeout: 15_000 });
-    // Reload first: publishing does not invalidate the cached version list (usePublishApp).
+    // Workaround for a product issue: the Versions dialog is not refreshed after a publish
+    // (usePublishApp in frontend/src/api/apps.ts does not invalidate the versions query), so reload.
     await page.reload();
     await page.getByRole("button", { name: "Versions" }).click();
     await page.getByRole("dialog").getByText("v1", { exact: true }).waitFor({ timeout: 15_000 });

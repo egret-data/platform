@@ -46,6 +46,10 @@ demo-seed:
 demo-logs service="":
     {{demo_compose}} logs -f {{service}}
 
+# Browser check of the Data Apps lifecycle (needs Node and Playwright; see deploy/demo/verify-apps.mjs)
+demo-verify-apps:
+    node deploy/demo/verify-apps.mjs
+
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
 #
 # `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
