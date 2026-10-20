@@ -346,7 +346,9 @@ describe("Ranger credential — provisioned engine", () => {
     stubFetch({});
     renderProvisioned({ rangerCredentialPending: true });
     expect(screen.getByText("Previous credential pending")).toBeInTheDocument();
-    expect(screen.getByText(/until the rollout of the current one completes/)).toBeInTheDocument();
+    expect(screen.getByText(/until the current one has been applied and its rollout completes/)).toBeInTheDocument();
+    // Not "updates by itself": after a failed apply (502) nothing rolls out until a later apply.
+    expect(screen.getByText(/If the last apply failed, .*save the engine's settings/)).toBeInTheDocument();
     const rotate = screen.getByRole("button", { name: "Rotate credential" });
     expect(rotate).toBeDisabled();
     expect(rotate).toHaveAccessibleDescription(/until the rollout of the current credential completes/);

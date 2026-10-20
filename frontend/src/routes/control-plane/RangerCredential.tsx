@@ -320,6 +320,9 @@ export function RangerCredentialSection({
       onError: (e) => {
         setConfirmRotate(false);
         setFailure(e);
+        // A 502 still committed the new credential (the previous one is now
+        // pending): re-read the engine so the page says so.
+        settle();
       },
     },
   });
@@ -359,7 +362,7 @@ export function RangerCredentialSection({
       variant: "outline",
       text: external
         ? "Both the current and the previous credential authenticate until you confirm the engine runs the current one."
-        : "Both credentials authenticate until the rollout of the current one completes; then egret retires the previous one. This updates by itself.",
+        : "Both credentials authenticate until the current one has been applied and its rollout completes; then egret retires the previous one. If the last apply failed, the pods still run the previous credential: save the engine's settings to apply the current one again.",
     };
   else if (currentId)
     state = { badge: "Active", variant: "secondary", text: "One credential authenticates this engine's plugin." };

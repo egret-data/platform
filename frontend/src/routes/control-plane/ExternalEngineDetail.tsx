@@ -519,7 +519,7 @@ function SettingsForm({
   const invalid: string[] = [];
   if (!host.trim()) invalid.push("a host");
   if (!portOk) invalid.push("a port from 1 to 65535");
-  if (!versionOk) invalid.push("a plugin version like 2.5.0");
+  if (!versionOk) invalid.push("a plugin version like 2.8.0");
   const blockedReason = invalid.length
     ? `Enter ${invalid.join(", ")}.`
     : !changed
