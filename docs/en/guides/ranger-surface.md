@@ -98,15 +98,16 @@ Then restart the engine. A running plugin reads this file only at start (measure
 
 The plugin must be 2.8.0 or later. Plugin 2.5.0 ignores these two properties and sends no `Authorization` header at all (measured). egret refuses such an engine (see [the version floor](#the-version-floor)).
 
-To check the credential before you restart, call the path the plugin will call:
+To check the credential before you restart, call the path the plugin will call, and look at the content type and the body as well as the status:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' \
+curl -s -o ranger-check.json -w '%{http_code} %{content_type}\n' \
   -u 'engine-<engine uuid>:<password>' \
   'https://egret.example.com/ranger/service/plugins/secure/policies/download/<profile>'
+grep -o '"serviceName":"[^"]*"' ranger-check.json
 ```
 
-`200` means the credential and the binding are right. See [troubleshooting](#troubleshooting) for the other codes.
+`200 application/json` followed by `"serviceName":"<profile>"` means the credential and the binding are right. A `200` with `text/html` is not egret: a proxy or ingress in front of egret sends `/ranger` to the web console, and it answers 200 to any credential. Route `/ranger` to egret's backend. The Helm chart's ingress and the console's nginx (`frontend/nginx-prod.conf`) do this from this release on; a proxy of your own needs the same rule. See [troubleshooting](#troubleshooting) for the other codes. Delete `ranger-check.json` afterwards: it holds the profile's policies.
 
 ## Rotation and retirement
 
@@ -195,11 +196,15 @@ What the 2.8.0 plugin does, measured against a stub admin with the real jar (mea
 - **A plugin that starts with a cache file on disk behaves like a running one**: it enforces the cached policies.
 - A running plugin does not re-read its security XML. A credential change needs a restart.
 
-Not measured yet (the live check on kind, a separate step, records them):
+Measured on kind with Trino 483 and StarRocks 4.1.6 pods against egret itself ([live result](../plans/2026-10-20-ranger-surface-auth-live-result.md), scenario 4):
 
-- the same behaviour with real Trino 483 and StarRocks 4.1.6 pods, against egret itself;
-- **whether the plugin cache survives a pod restart.** The cache directory is `/tmp/ranger/<profile>/policycache` inside the container, and egret mounts no volume there. A new pod, for example one created by a rotation's rollout or a reschedule, is therefore expected to start with no cache. If egret is down or refuses its credential when such a pod starts, that pod denies everything until a download succeeds. A rotation itself does not hit this: the new pods start with a credential that already authenticates.
+- **A running engine keeps enforcing from memory while egret is down.** A StarRocks FE with egret scaled to 0 for more than one poll interval still answered queries by its policies.
+- **The policy cache does not survive a pod restart.** The cache directory is `/tmp/ranger/<profile>/policycache` inside the container, on the container's own filesystem, and egret mounts no volume there. A new pod (a reschedule, a node drain, an OOM kill, a rotation's rollout, a deleted pod) starts with no cache.
+- **A restarted StarRocks FE denies everything while egret is down**, including to the holders of the `egret-admin` policies: a query got `Access denied; you need (at least one of) the SELECT privilege(s)` and `SHOW DATABASES` returned no rows. The plugin logged `cache file does not exist or not readable`. Access came back 16 s after egret did. (With egret down, an Iceberg catalog that egret serves cannot be used at all either, whatever Ranger decides.)
+- **A Trino engine with JWT authentication (the default) does not start at all while egret is down.** Its coordinator reads egret's JWKS at start (`Error reading JWK keys from http://egret…/.well-known/jwks.json`) and goes to `CrashLoopBackOff`; it starts once egret is back. Workers that were not restarted keep their cache.
+- A rotation itself does not hit this: the new pods start with a credential that already authenticates, while egret is up.
 
+So any pod restart while egret is unreachable takes that engine to deny-all (StarRocks) or down (JWT Trino) until egret returns. **Open, not decided:** mount an `emptyDir` at the cache directory (survives a container restart, not a pod deletion or a reschedule), mount a small PVC there (survives both, at the cost of a volume per pod), or accept the risk as documented here.
 ## Troubleshooting
 
 | Code | On | Meaning and fix |
@@ -211,6 +216,7 @@ Not measured yet (the live check on kind, a separate step, records them):
 | 404 | `/ranger/service/roles/secure/download/...` | Expected for an authenticated plugin; egret does not serve roles and the plugin carries on. |
 | 404 | a download, after authentication | No profile has that name. |
 | 404 | anything under `/ranger` | Ranger is off on this egret (`ranger.enabled`). |
+| 200 `text/html` | anything under `/ranger` | Not egret: a proxy or ingress sends `/ranger` to the web console, which answers 200 to every request. Route the `/ranger` prefix to egret's backend (the Helm ingress and the console's nginx do from this release on). |
 | 500 | `/ranger/service/...` | egret could not check the credential (database or secret store). The log says "ranger: engine credential check failed" with the engine id. |
 
 Control-plane answers:
@@ -229,7 +235,7 @@ Control-plane answers:
 - **An external operator who loses a new password before installing it is stuck** (see above). There is no route to discard a pending credential.
 - **The failure coalescer has no negative cache** for unknown engine ids, so a flood of random ids can hide a real engine's first rejection for up to 10 s.
 - **Any user with `engine:read` sees each engine's current `credentialId`.** It grants nothing on its own: retiring needs `engine:update`, and the UI never sends that id by itself.
-- **A warm plugin keeps enforcing its cached policies across 401s, but a cold one denies everything.** See above.
+- **A warm plugin keeps enforcing its cached policies across 401s, but a cold one denies everything,** and the cache does not survive a pod restart. A pod restarted while egret is down denies everything (StarRocks) or does not start (JWT Trino) until egret returns. See [above](#when-egret-cannot-be-reached-or-refuses-a-plugin).
 
 ## Upgrade notes
 
@@ -244,6 +250,8 @@ This is a breaking change, with no transition period.
 - **The dev-compose StarRocks** (`deploy/docker-compose.dev.yml`) mounts a hand-written XML with no credential and gets 401. Either register it as an external engine bound to `sr1` and add the two properties with the credential to `deploy/starrocks/ranger/ranger-starrocks-security.xml`, or run the host egret with `EGRET_RANGER__AUTH_MODE=anonymous` (local development only).
 - `just deploy-kind-governance` no longer sets `ranger.authMode=anonymous`.
 - Setting `ranger.authMode=anonymous` while you migrate restores the old behaviour, with the exposure described above.
+
+**Trino engines logged their Ranger password before this fix.** The Trino Ranger plugin printed every plugin property at INFO on start, the password included (`AUDIT PROPERTY: ranger.plugin.trino.policy.rest.client.password=…`, logger `org.apache.ranger.audit.provider.AuditProviderFactory`). That line was in the stdout of every coordinator and worker, so anyone who could read the pod logs (`kubectl logs`, or egret's pod-logs view with `engine:read`) could read the credential. egret now renders that logger at `WARN` in every bound Trino engine's `log.properties`, after your own log lines, so a level you set for it is replaced. The change is in the pod-template checksum, so each bound Trino engine rolls on its next apply. egret's pod-logs view and its live stream also mask `…password=`, `…secret=` style values. **Rotate the credential of every bound Trino engine that ran before this fix**: the old password may also be in log storage outside egret. A rotation is itself an apply, so it renders the new `log.properties` too, and the pods that start with the new credential do not log it. StarRocks did not log it.
 
 **The plugin-config response changed.** `GET /api/control-plane/engines/{id}/ranger-plugin-config` reports `authMode` as `engine-credential` or `anonymous`. The value `bearer-configured` is gone. A client outside egret that matched on it must change.
 

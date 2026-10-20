@@ -100,15 +100,16 @@ Sau đó restart engine. Plugin đang chạy chỉ đọc file này lúc khởi 
 
 Plugin phải từ 2.8.0 trở lên. Plugin 2.5.0 bỏ qua hai property này và không gửi header `Authorization` nào (đã đo). egret từ chối engine như vậy (xem [mức sàn phiên bản](#mức-sàn-phiên-bản)).
 
-Để kiểm credential trước khi restart, gọi đúng đường plugin sẽ gọi:
+Để kiểm credential trước khi restart, gọi đúng đường plugin sẽ gọi, và xem cả content type và body chứ không chỉ mã trạng thái:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' \
+curl -s -o ranger-check.json -w '%{http_code} %{content_type}\n' \
   -u 'engine-<engine uuid>:<password>' \
   'https://egret.example.com/ranger/service/plugins/secure/policies/download/<profile>'
+grep -o '"serviceName":"[^"]*"' ranger-check.json
 ```
 
-`200` nghĩa là credential và việc gắn profile đều đúng. Các mã khác: xem [xử lý sự cố](#xử-lý-sự-cố).
+`200 application/json` kèm `"serviceName":"<profile>"` nghĩa là credential và việc gắn profile đều đúng. Một `200` với `text/html` không phải egret: một proxy hay ingress đứng trước egret đang chuyển `/ranger` sang web console, và console trả 200 cho mọi credential. Hãy route `/ranger` tới backend của egret. Ingress của Helm chart và nginx của console (`frontend/nginx-prod.conf`) làm việc này từ bản này; proxy của riêng bạn cần cùng quy tắc đó. Các mã khác: xem [xử lý sự cố](#xử-lý-sự-cố). Xoá `ranger-check.json` sau đó: file chứa policy của profile.
 
 ## Rotate và retire
 
@@ -197,10 +198,15 @@ Plugin 2.8.0 làm gì, đã đo với jar thật trên một admin giả (tài l
 - **Plugin khởi động có file cache trên đĩa thì hành xử như plugin đang chạy**: nó cưỡng chế policy đã cache.
 - Plugin đang chạy không đọc lại security XML. Đổi credential cần restart.
 
-Chưa đo (lần live check trên kind, một bước riêng, sẽ ghi lại):
+Đã đo trên kind với pod Trino 483 và StarRocks 4.1.6, với chính egret ([kết quả live](../../en/plans/2026-10-20-ranger-surface-auth-live-result.md), kịch bản 4):
 
-- cùng hành vi đó với pod Trino 483 và StarRocks 4.1.6 thật, với chính egret;
-- **cache của plugin có sống qua một lần restart pod hay không.** Thư mục cache là `/tmp/ranger/<profile>/policycache` trong container, và egret không mount volume nào ở đó. Vì vậy một pod mới, ví dụ pod do rollout của một lần rotate hay do reschedule tạo ra, được dự đoán sẽ khởi động không có cache. Nếu egret đang sập hoặc từ chối credential của nó lúc pod đó khởi động, pod đó từ chối mọi thứ cho tới khi tải thành công. Bản thân việc rotate không gặp chuyện này: pod mới khởi động với một credential đã xác thực được.
+- **Engine đang chạy tiếp tục cưỡng chế từ bộ nhớ khi egret sập.** Một FE StarRocks, với egret scale về 0 lâu hơn một chu kỳ poll, vẫn trả lời query theo policy của nó.
+- **Cache policy không sống qua một lần restart pod.** Thư mục cache là `/tmp/ranger/<profile>/policycache` trong container, nằm trên filesystem riêng của container, và egret không mount volume nào ở đó. Một pod mới (reschedule, drain node, OOM kill, rollout của một lần rotate, pod bị xoá) khởi động không có cache.
+- **FE StarRocks restart khi egret sập thì từ chối mọi thứ**, kể cả với người giữ các policy `egret-admin`: một query nhận `Access denied; you need (at least one of) the SELECT privilege(s)` và `SHOW DATABASES` không trả dòng nào. Plugin log `cache file does not exist or not readable`. Quyền truy cập trở lại 16 s sau khi egret trở lại. (Khi egret sập, một Iceberg catalog do egret phục vụ cũng hoàn toàn không dùng được, bất kể Ranger quyết định gì.)
+- **Engine Trino xác thực JWT (mặc định) hoàn toàn không khởi động được khi egret sập.** Coordinator đọc JWKS của egret lúc khởi động (`Error reading JWK keys from http://egret…/.well-known/jwks.json`) và rơi vào `CrashLoopBackOff`; nó khởi động khi egret trở lại. Worker không bị restart vẫn giữ cache.
+- Bản thân việc rotate không gặp chuyện này: pod mới khởi động với một credential đã xác thực được, khi egret đang chạy.
+
+Vậy mọi lần restart pod khi egret không với tới được đều đưa engine đó về từ-chối-tất-cả (StarRocks) hoặc ngừng chạy (Trino JWT) cho tới khi egret trở lại. **Còn mở, chưa quyết:** mount một `emptyDir` ở thư mục cache (sống qua restart container, không sống qua xoá pod hay reschedule), mount một PVC nhỏ ở đó (sống qua cả hai, đổi lại mỗi pod một volume), hoặc chấp nhận rủi ro như mô tả ở đây.
 
 ## Xử lý sự cố
 
@@ -213,6 +219,7 @@ Chưa đo (lần live check trên kind, một bước riêng, sẽ ghi lại):
 | 404 | `/ranger/service/roles/secure/download/...` | Bình thường với plugin đã xác thực; egret không phục vụ roles và plugin vẫn chạy tiếp. |
 | 404 | một lần tải, sau khi xác thực | Không có profile nào tên đó. |
 | 404 | mọi thứ dưới `/ranger` | Ranger đang tắt trên egret này (`ranger.enabled`). |
+| 200 `text/html` | mọi thứ dưới `/ranger` | Không phải egret: một proxy hay ingress chuyển `/ranger` sang web console, và console trả 200 cho mọi request. Route prefix `/ranger` tới backend của egret (ingress của Helm và nginx của console làm việc này từ bản này). |
 | 500 | `/ranger/service/...` | egret không kiểm được credential (database hoặc secret store). Log ghi "ranger: engine credential check failed" kèm engine id. |
 
 Các câu trả lời của control plane:
@@ -231,7 +238,7 @@ Các câu trả lời của control plane:
 - **Operator external làm mất password mới trước khi cài thì bị kẹt** (xem trên). Không có route để huỷ một credential đang pending.
 - **Bộ gộp lỗi không có negative cache** cho engine id không tồn tại, nên một đợt dồn id ngẫu nhiên có thể che lần bị từ chối đầu tiên của engine thật tới 10 s.
 - **Mọi user có `engine:read` thấy `credentialId` hiện tại của mỗi engine.** Tự nó không cấp gì: retire cần `engine:update`, và giao diện không bao giờ tự gửi id đó.
-- **Plugin còn ấm tiếp tục cưỡng chế policy đã cache qua các lần 401, nhưng plugin lạnh từ chối mọi thứ.** Xem trên.
+- **Plugin còn ấm tiếp tục cưỡng chế policy đã cache qua các lần 401, nhưng plugin lạnh từ chối mọi thứ,** và cache không sống qua một lần restart pod. Pod restart khi egret sập thì từ chối mọi thứ (StarRocks) hoặc không khởi động (Trino JWT) cho tới khi egret trở lại. Xem [phần trên](#khi-egret-không-với-tới-được-hoặc-từ-chối-plugin).
 
 ## Ghi chú nâng cấp
 
@@ -246,6 +253,8 @@ Các câu trả lời của control plane:
 - **StarRocks của dev-compose** (`deploy/docker-compose.dev.yml`) mount một XML viết tay không có credential và nhận 401. Hoặc đăng ký nó là engine external gắn với `sr1` rồi thêm hai property với credential vào `deploy/starrocks/ranger/ranger-starrocks-security.xml`, hoặc chạy egret trên host với `EGRET_RANGER__AUTH_MODE=anonymous` (chỉ cho phát triển cục bộ).
 - `just deploy-kind-governance` không còn đặt `ranger.authMode=anonymous`.
 - Đặt `ranger.authMode=anonymous` trong lúc chuyển đổi sẽ khôi phục hành vi cũ, kèm rủi ro lộ dữ liệu nói ở trên.
+
+**Engine Trino đã log password Ranger của nó trước bản sửa này.** Ranger plugin của Trino in mọi property của plugin ở mức INFO lúc khởi động, kể cả password (`AUDIT PROPERTY: ranger.plugin.trino.policy.rest.client.password=…`, logger `org.apache.ranger.audit.provider.AuditProviderFactory`). Dòng đó nằm trong stdout của mọi coordinator và worker, nên ai đọc được log pod (`kubectl logs`, hoặc màn log pod của egret với `engine:read`) đều đọc được credential. egret nay render logger đó ở `WARN` trong `log.properties` của mọi engine Trino đã gắn profile, sau các dòng log của bạn, nên mức bạn đặt cho logger đó bị thay thế. Thay đổi này nằm trong checksum của pod template, nên mỗi engine Trino đã gắn profile roll ở lần apply kế tiếp. Màn log pod của egret và luồng log trực tiếp cũng che các giá trị kiểu `…password=`, `…secret=`. **Rotate credential của mọi engine Trino đã gắn profile chạy trước bản sửa này**: password cũ có thể nằm cả trong kho log ngoài egret. Một lần rotate cũng là một lần apply, nên nó render luôn `log.properties` mới, và pod khởi động với credential mới không log nó. StarRocks không log password.
 
 **Response plugin-config đã đổi.** `GET /api/control-plane/engines/{id}/ranger-plugin-config` báo `authMode` là `engine-credential` hoặc `anonymous`. Giá trị `bearer-configured` không còn. Client ngoài egret nào so khớp giá trị đó phải sửa.
 

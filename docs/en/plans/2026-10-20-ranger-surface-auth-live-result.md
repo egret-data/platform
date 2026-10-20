@@ -70,6 +70,26 @@ Ranked by impact.
    it means a StarRocks engine is unprotected by default while Ranger is on. Record it for the
    follow-up list. In this run the engine was deleted and recreated with `authzServiceId: 3`.
 
+## Addressed after the run
+
+Added on 2026-10-21. The results above are unchanged; none of these fixes has been checked on a
+cluster yet.
+
+- **Finding 1, fixed.** `f6adf09a` renders
+  `org.apache.ranger.audit.provider.AuditProviderFactory=WARN` as the last line of every bound Trino
+  engine's `log.properties` (a user entry for that logger is dropped; the user's other lines are
+  kept). `log.properties` is in the pod-template checksum, so bound engines roll on their next apply.
+  `5c8be53a` also masks `…password=`, `…secret=` style values in egret's pod-logs response and its
+  follow stream. A credential that was already logged still needs a rotation; the guide's upgrade
+  notes say so.
+- **Finding 3, fixed.** `44a8fb2f` adds a `/ranger` Prefix rule to the egret backend in the Helm
+  ingress, and a `location /ranger/` to `frontend/nginx-prod.conf`. The guide's check now reads the
+  content type and the body, and names `200 text/html` as "not egret".
+- **Finding 2, open.** The guide now records the measured behaviour in place of "Not measured yet".
+  Whether to mount an `emptyDir` or a PVC at the cache directory, or to accept the risk, is the
+  user's decision.
+- **Finding 4, open.** A StarRocks engine created without `authzServiceId` is still left unbound.
+
 ## Environment
 
 | Item | Value |

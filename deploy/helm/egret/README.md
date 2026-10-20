@@ -69,7 +69,11 @@ gets 401. Provisioned engines get their credential on their next apply, which ro
 apply each bound engine once (save its settings, or call
 `POST /api/control-plane/engines/{id}/rotate-ranger-credential`). `just deploy-kind-governance` no longer
 sets `ranger.authMode=anonymous`. Set `--set ranger.authMode=anonymous` only for a throwaway
-cluster: anyone who can reach the URL can then download every profile's policies. Details,
+cluster: anyone who can reach the URL can then download every profile's policies. With
+`ingress.enabled=true` the ingress routes `/ranger` to the backend, so an engine outside the
+cluster can use `https://<ingress host>/ranger`. Trino engines from before this release printed
+their Ranger password in their pod logs; rotate each bound Trino engine's credential once (the
+rotation also renders the fixed `log.properties`). Details,
 external engines and troubleshooting: [`docs/en/guides/ranger-surface.md`](../../../docs/en/guides/ranger-surface.md).
 
 ### The bundled object store is RustFS (was MinIO)
