@@ -651,7 +651,7 @@ async fn the_external_shape_check_admits_one_shape_and_names_itself_refusing_the
         "provisioned",
         None,
         None,
-        Some("2.5.0"),
+        Some("2.8.0"),
         None,
     )
     .await;
@@ -740,7 +740,7 @@ async fn a_declared_attachment_holds_nothing_and_the_check_names_itself() {
            (name, type, namespace, spec, status, origin, external_host, external_port, \
             ranger_plugin_version) \
          VALUES ($1, 'trino', '', '{}'::jsonb, 'running', 'external', 'trino.example.com', \
-                 8080, '2.5.0') RETURNING id",
+                 8080, '2.8.0') RETURNING id",
     )
     .bind(format!("ext-decl-{tag}"))
     .fetch_one(&db.pool)

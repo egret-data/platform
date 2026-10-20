@@ -78,7 +78,7 @@ async fn engine(db: &Db, catalog_id: Uuid, ws: Uuid, e: Engine<'_>) {
         sqlx::query_scalar(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
              external_host, external_port, ranger_plugin_version) \
-             VALUES ($1,'trino','','{}'::jsonb,'running','external','h',8443,'2.5.0') RETURNING id",
+             VALUES ($1,'trino','','{}'::jsonb,'running','external','h',8443,'2.8.0') RETURNING id",
         )
         .bind(e.name)
         .fetch_one(pool)

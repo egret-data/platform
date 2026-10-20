@@ -1327,7 +1327,7 @@ mod tests {
         EngineSpec {
             name: "demo".into(),
             namespace: "egret-engines".into(),
-            image_version: "470".into(),
+            image_version: "483".into(),
             config: TrinoConfig {
                 query_max_memory: Some("4GB".into()),
                 log_level: Some("DEBUG".into()),
@@ -1583,7 +1583,7 @@ mod tests {
         let d = trino_deployment(&s, Role::Coordinator);
         assert_eq!(
             d["spec"]["template"]["spec"]["containers"][0]["image"],
-            "trinodb/trino:470"
+            "trinodb/trino:483"
         );
 
         // Override: full image string wins verbatim.
@@ -1969,7 +1969,7 @@ mod tests {
         assert_eq!(d["spec"]["replicas"], 1);
         assert_eq!(
             d["spec"]["template"]["spec"]["containers"][0]["image"],
-            "trinodb/trino:470"
+            "trinodb/trino:483"
         );
         // config checksum annotation present (rolls pods on change)
         assert!(

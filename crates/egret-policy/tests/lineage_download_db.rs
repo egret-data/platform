@@ -76,7 +76,7 @@ async fn setup(db: Db, origin: &str, mode: &str) -> Fx {
         sqlx::query_scalar(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
              external_host, external_port, ranger_plugin_version, authz_service_id) \
-             VALUES ($1,'trino','','{}'::jsonb,'running','external','h',8443,'2.5.0',$2) \
+             VALUES ($1,'trino','','{}'::jsonb,'running','external','h',8443,'2.8.0',$2) \
              RETURNING id",
         )
         .bind(&engine_name)

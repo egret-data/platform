@@ -13,14 +13,7 @@ pub struct KnownEngineImage {
 }
 
 /// Measured: each row's plugin jar was read out of the image itself.
-pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 4] = [
-    KnownEngineImage {
-        engine_type: "trino",
-        repository: "trinodb/trino",
-        tag: "470",
-        digest: "sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67",
-        plugin_version: "2.5.0",
-    },
+pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 3] = [
     KnownEngineImage {
         engine_type: "trino",
         repository: "trinodb/trino",
@@ -133,6 +126,31 @@ pub fn known_image_refs(engine_type: &str) -> Vec<String> {
         .collect()
 }
 
+/// The lowest Ranger plugin release egret supports. Below it a plugin cannot
+/// send the per-engine credential the Ranger surface requires (measured, spec
+/// section 2).
+pub const MIN_SUPPORTED_RANGER_PLUGIN: &str = "2.8.0";
+
+/// Images egret used to run and no longer supports: (engine type, repository,
+/// tag, the plugin release they ship). Not in [`KNOWN_ENGINE_IMAGES`], so they
+/// read as unmeasured; kept here so creating or updating an engine onto one is
+/// refused with the reason rather than accepted as an anonymous custom image.
+pub const DROPPED_ENGINE_IMAGES: [(&str, &str, &str, &str); 1] =
+    [("trino", "trinodb/trino", "470", "2.5.0")];
+
+/// `Some(refusal)` when `image_ref` is an image egret dropped support for.
+pub fn unsupported_engine_image(engine_type: &str, image_ref: &str) -> Option<String> {
+    let (repo, tag, _digest) = parse(image_ref.trim());
+    let (_, _, _, plugin) = DROPPED_ENGINE_IMAGES
+        .iter()
+        .find(|(t, r, g, _)| *t == engine_type && *r == repo && Some(*g) == tag)?;
+    Some(format!(
+        "image \"{image_ref}\" ships Ranger plugin {plugin}, which egret no longer supports: \
+         the floor is {MIN_SUPPORTED_RANGER_PLUGIN}; use one of: {}",
+        known_image_refs(engine_type).join(", ")
+    ))
+}
+
 pub fn plugin_version_for_image(
     engine_type: &str,
     image_ref: &str,
@@ -195,12 +213,26 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("trino", "trinodb/trino", "470", "2.5.0"),
                 ("trino", "trinodb/trino", "483", "2.8.0"),
                 ("starrocks", "starrocks/fe-ubuntu", "4.1.4", "2.8.0"),
                 ("starrocks", "starrocks/fe-ubuntu", "4.1.6", "2.9.0"),
             ]
         );
+    }
+
+    #[test]
+    fn a_dropped_image_is_refused_naming_the_floor_and_the_way_up() {
+        let err = unsupported_engine_image("trino", "trinodb/trino:470").expect("refused");
+        assert!(
+            err.contains("2.8.0") && err.contains("trinodb/trino:483"),
+            "{err}"
+        );
+        assert!(
+            unsupported_engine_image("trino", "docker.io/trinodb/trino:470@sha256:00").is_some()
+        );
+        assert!(unsupported_engine_image("trino", "trinodb/trino:483").is_none());
+        assert!(unsupported_engine_image("starrocks", "trinodb/trino:470").is_none());
+        assert!(plugin_version_for_image("trino", "trinodb/trino:470").is_err());
     }
 
     #[test]
@@ -229,8 +261,8 @@ mod tests {
     #[test]
     fn stored_image_reads_each_engine_types_own_field() {
         assert_eq!(
-            stored_engine_image("trino", &json!({"imageVersion": "470"})),
-            Some("trinodb/trino:470".into())
+            stored_engine_image("trino", &json!({"imageVersion": "483"})),
+            Some("trinodb/trino:483".into())
         );
         assert_eq!(
             stored_engine_image(
@@ -306,9 +338,9 @@ mod tests {
         assert_eq!(
             stored_engine_image(
                 "trino",
-                &json!({"trinoConfig": {"coordinator": {}, "image": "trinodb/trino:470"}})
+                &json!({"trinoConfig": {"coordinator": {}, "image": "trinodb/trino:483"}})
             ),
-            Some("trinodb/trino:470".into())
+            Some("trinodb/trino:483".into())
         );
     }
 
@@ -374,11 +406,6 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (
-                    "trinodb/trino",
-                    "470",
-                    "sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67"
-                ),
                 (
                     "trinodb/trino",
                     "483",

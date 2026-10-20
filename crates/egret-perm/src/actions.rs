@@ -80,8 +80,7 @@ pub struct OverlapRule {
 /// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
 /// the migration gate proves on and the one `explain` evaluates at are ONE
 /// predicate, [`ranger_plugin_is_modelled`].
-pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 4] = [
-    ("trino", "2.5.0"),
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 3] = [
     ("trino", "2.8.0"),
     ("starrocks", "2.8.0"),
     ("starrocks", "2.9.0"),
@@ -104,7 +103,7 @@ pub const EXTERNAL_PLUGIN_ASSUMPTIONS: [&str; 3] = [
     "Plugin audit is off, so egret's policy evaluation is the only decision record.",
 ];
 
-/// The modelled pairs spelled `Trino@2.5.0, StarRocks@2.8.0 and StarRocks@2.9.0`,
+/// The modelled pairs spelled `Trino@2.8.0, StarRocks@2.8.0 and StarRocks@2.9.0`,
 /// for sentences.
 pub fn modelled_ranger_plugins_sentence() -> String {
     let pairs: Vec<String> = MODELLED_RANGER_PLUGINS
@@ -539,5 +538,18 @@ pub fn engine_accesses(a: Action, e: EngineType) -> Result<Vec<&'static str>, Co
         (Action::Read, EngineType::StarRocks) => Ok(vec!["select"]),
         (Action::Write, EngineType::Trino) => Ok(vec!["insert", "delete"]),
         (Action::Write, EngineType::StarRocks) => Ok(vec!["insert", "update", "delete"]),
+    }
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::ranger_plugin_is_modelled;
+
+    #[test]
+    fn plugin_2_5_0_is_not_modelled_and_the_floor_is_2_8_0() {
+        assert!(!ranger_plugin_is_modelled("trino", "2.5.0"));
+        assert!(ranger_plugin_is_modelled("trino", "2.8.0"));
+        assert!(ranger_plugin_is_modelled("starrocks", "2.8.0"));
+        assert!(ranger_plugin_is_modelled("starrocks", "2.9.0"));
     }
 }

@@ -5303,8 +5303,8 @@ mod engine_plugin_version_tests {
     #[test]
     fn an_external_engine_maps_its_declared_version() {
         assert_eq!(
-            engine_plugin_version("e", "external", "trino", Some("2.5.0"), &NO_SPEC),
-            Ok(PluginVersion::Ranger2_5_0)
+            engine_plugin_version("e", "external", "trino", Some("2.8.0"), &NO_SPEC),
+            Ok(PluginVersion::Ranger2_8_0)
         );
         assert_eq!(
             engine_plugin_version("e", "external", "starrocks", Some("2.8.0"), &NO_SPEC),
@@ -5314,11 +5314,14 @@ mod engine_plugin_version_tests {
 
     #[test]
     fn a_provisioned_engine_resolves_through_its_exact_image() {
-        let trino470 = serde_json::json!({"imageVersion": "470"});
+        let trino483 = serde_json::json!({"imageVersion": "483"});
         assert_eq!(
-            engine_plugin_version("e", "provisioned", "trino", None, &trino470),
-            Ok(PluginVersion::Ranger2_5_0)
+            engine_plugin_version("e", "provisioned", "trino", None, &trino483),
+            Ok(PluginVersion::Ranger2_8_0)
         );
+        // Trino 470 (plugin 2.5.0) is dropped: a row that still runs it is refused.
+        let trino470 = serde_json::json!({"imageVersion": "470"});
+        assert!(engine_plugin_version("e", "provisioned", "trino", None, &trino470).is_err());
         let sr414 =
             serde_json::json!({"starrocksConfig": {"feImage": "starrocks/fe-ubuntu:4.1.4"}});
         assert_eq!(
@@ -5395,7 +5398,7 @@ mod engine_plugin_version_tests {
     #[test]
     fn only_the_proved_pairs_are_modelled() {
         for (t, v, modelled) in [
-            ("trino", "2.5.0", true),
+            ("trino", "2.5.0", false),
             ("trino", "2.8.0", true),
             ("trino", "2.9.0", false),
             ("starrocks", "2.5.0", false),

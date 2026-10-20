@@ -34,10 +34,10 @@ fn ranger_engine_enforces_egret_policies() {
     }
     let dir = env!("CARGO_MANIFEST_DIR").to_string() + "/../../tests/ranger";
     // Both versions, because a gate at one version certifies one engine:
-    // Trino 470 loads 2.5.0 and StarRocks fe-ubuntu:4.1.4 loads 2.8.0, measured
-    // on the running pods (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`);
-    // fe-ubuntu:4.1.6 loads 2.9.0 (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`).
-    for version in ["2.5.0", "2.8.0", "2.9.0"] {
+    // Trino 483 and StarRocks fe-ubuntu:4.1.4 load 2.8.0, measured on the running
+    // pods (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`); plugin 2.5.0
+    // (Trino 470) is no longer supported, so it is no longer run. fe-ubuntu:4.1.6 loads 2.9.0 (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`).
+    for version in ["2.8.0", "2.9.0"] {
         // No `-q`: the per-class summary line this gate reads is logged at
         // INFO, and `-q` suppresses it. That is the whole reason the flag is
         // gone.

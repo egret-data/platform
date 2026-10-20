@@ -3027,6 +3027,31 @@ async fn attach_extra_catalogs(
     failures
 }
 
+/// 400 when a Trino create/update body names an image egret no longer supports
+/// (`trinodb/trino:470`, Ranger plugin 2.5.0): such an engine can never hold the
+/// credential the Ranger surface requires. Checks the image the body asks for,
+/// both `imageVersion` and a `trinoConfig.image` override.
+fn refuse_dropped_trino_image(b: &CreateEngineBody) -> Result<(), CpError> {
+    let from_version = b
+        .image_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(egret_perm::trino_image_ref);
+    let from_override = b
+        .trino_config
+        .as_ref()
+        .and_then(|tc| tc.get("image"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    for image in from_version.into_iter().chain(from_override) {
+        if let Some(why) = egret_perm::unsupported_engine_image("trino", &image) {
+            return Err(CpError::BadRequest(why));
+        }
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines",
@@ -3047,6 +3072,11 @@ async fn create_engine(
     Json(b): Json<CreateEngineBody>,
 ) -> Result<(StatusCode, Json<CreateEngineResponse>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
+    if egret_engine_mgmt_api::EngineKind::parse(&b.kind)
+        == Some(egret_engine_mgmt_api::EngineKind::Trino)
+    {
+        refuse_dropped_trino_image(&b)?;
+    }
 
     // 1. Resolve the warehouse the engine row still needs — from `catalogs`'
     //    primary, or from a legacy bare `warehouseId` — and with it the other
@@ -5557,6 +5587,9 @@ async fn update_engine(
     if st.engine_provisioner.is_none() {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     }
+    if engine.r#type == "trino" {
+        refuse_dropped_trino_image(&b)?;
+    }
     if engine.r#type == "starrocks" {
         let sr_body = b.starrocks.clone().unwrap_or_default();
         validate_sr_delegation_mode(&sr_body)?;
@@ -7276,7 +7309,7 @@ mod tests {
         for (raw, expected) in [
             ("", None),
             ("   ", None),
-            ("  trinodb/trino:470  ", Some("trinodb/trino:470")),
+            ("  trinodb/trino:483  ", Some("trinodb/trino:483")),
             ("registry.corp/x:1", Some("registry.corp/x:1")),
         ] {
             let spec = serde_json::json!({
@@ -8621,7 +8654,7 @@ mod tests {
                 &engine_name,
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -8675,7 +8708,7 @@ mod tests {
                 &engine_name,
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": trino_config }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": trino_config }),
                 None,
             )
             .await
@@ -8981,7 +9014,7 @@ mod tests {
                (name, type, namespace, spec, status, origin, external_host, external_port, \
                 ranger_plugin_version, authz_service_id) \
              VALUES ($1, 'trino', '', '{}'::jsonb, 'running', 'external', 'trino.example', 8443, \
-                     '2.5.0', $2) \
+                     '2.8.0', $2) \
              RETURNING id",
         )
         .bind(format!("trino-ext-{}", Uuid::new_v4().simple()))
@@ -9444,7 +9477,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": {} }),
                 Some(cert_ref),
             )
             .await
@@ -11915,7 +11948,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11995,7 +12028,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -12118,7 +12151,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -12175,7 +12208,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -12254,7 +12287,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -12472,7 +12505,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -12583,7 +12616,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -12693,7 +12726,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": {} }),
                 None,
             )
             .await

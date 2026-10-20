@@ -1173,7 +1173,7 @@ async fn two_profile_catalog(f: &Fixture, tag: &str) -> (i64, i64, Uuid) {
     .expect("warehouse");
     let trino_engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(&format!("{tag}_trino_eng")))
     .bind(trino_service.id)
@@ -2406,7 +2406,7 @@ async fn extra_trino_profile(f: &Fixture, tag: &str) -> i64 {
         .expect("create trino service");
     sqlx::query(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2)",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2)",
     )
     .bind(unique(tag))
     .bind(service.id)

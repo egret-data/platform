@@ -662,7 +662,9 @@ impl EngineType {
     /// deployment declaring any other version is refused, never evaluated.
     pub fn modelled_versions(self) -> &'static [PluginVersion] {
         match self {
-            EngineType::Trino => &[PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0],
+            // Plugin 2.5.0 (Trino 470) is no longer supported: its arm stays in
+            // this crate as history, but a deployment declaring it is refused.
+            EngineType::Trino => &[PluginVersion::Ranger2_8_0],
             EngineType::StarRocks => &[PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0],
         }
     }

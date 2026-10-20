@@ -561,7 +561,8 @@ const WRITES: [&str; 8] = [
     "insert", "delete", "create", "drop", "alter", "grant", "revoke", "show",
 ];
 
-const PLUGINS: [PluginVersion; 2] = [PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0];
+// Trino at 2.8.0 only: plugin 2.5.0 (Trino 470) is no longer a supported pair.
+const PLUGINS: [PluginVersion; 1] = [PluginVersion::Ranger2_8_0];
 
 /// The download a provisioned JWT-mode Trino engine receives lets
 /// `egret-lineage` read every governed column unchanged: through the

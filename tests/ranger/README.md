@@ -4,7 +4,7 @@ Proves Egret's ServicePolicies enforce in the real Apache Ranger policy engine
 (the same RangerPolicyEngineImpl the Trino plugin runs).
 
 Requires: JDK 11+, Maven, network (pulls
-`org.apache.ranger:ranger-plugins-common:2.5.0` from Maven Central, unless
+`org.apache.ranger:ranger-plugins-common:2.8.0` from Maven Central, unless
 already cached under `~/.m2`).
 
 Two things run here, and they are deliberately different claims.
@@ -51,29 +51,27 @@ curl -s -H "Authorization: Bearer devtoken" \
 
 The anchors assert: alice select allowed; bob denied; column email →
 MASK_HASH; row filter "country = 'US'". (Default `ranger-plugins-common`:
-**2.5.0**; the differential gate runs **both** 2.5.0 and 2.8.0 every time.)
+**2.8.0**; the differential gate runs **both** 2.8.0 and 2.9.0 every time.)
 
 `EgretPluginAuthTest` pins what a stock plugin SENDS to its admin: from 2.8.0 on, with
 `policy.rest.client.username/password` set, it sends `Authorization: Basic ...` to
 `/service/plugins/secure/policies/download/<svc>`; 2.5.0 ignores those keys and sends no
-header. Run it per version: `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest`.
+header, which is why 2.5.0 is no longer supported. Run it per version: `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest`.
 Egret's surface-auth design rests on it.
 
-## Why 2.5.0 is the default
+## Why 2.8.0 is the floor
 
-The harness's default (`tests/ranger/pom.xml` `<ranger.version>`) is pinned to
-**2.5.0** because that is the `ranger-plugins-common` version the Trino
-coordinator egret actually provisions loads at runtime
-(`trinodb/trino:470`), measured directly from a live pod's plugin directory —
-see `docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`. It is not
-2.4.0 (the harness's old, unverified pin) and not 2.8.0 (a figure earlier
-misread from `trinodb/trino:latest`, an image egret does not provision).
+The harness's default (`tests/ranger/pom.xml` `<ranger.version>`) is **2.8.0**,
+the lowest `ranger-plugins-common` egret supports. It was 2.5.0, the version
+`trinodb/trino:470` loads; egret dropped that plugin and image because a 2.5.0
+plugin cannot send the per-engine credential the Ranger surface requires:
+`EgretPluginAuthTest` sends no `Authorization` header at 2.5.0 and `Basic ...`
+from 2.8.0 on (`docs/en/plans/2026-10-20-ranger-surface-auth-measurements.md`,
+"Floor"). Trino 483 and StarRocks `fe-ubuntu:4.1.4` load 2.8.0; `fe-ubuntu:4.1.6`
+loads 2.9.0, so the gates run **2.8.0 and 2.9.0**. 2.5.0 is no longer run.
 
-That same result doc also measured StarRocks's `fe-ubuntu:4.1` image, which
-loads `ranger-plugins-common-2.8.0` — a different version from Trino's. The
-harness is runnable at 2.8.0 via `-Dranger.version=2.8.0` for that reason,
-but 2.5.0 stays the default because Trino is the primary/only engine this
-evaluator package targets per the SP4d-1 brief.
+The figures recorded below were taken when the gate also ran 2.5.0 and are kept
+as history.
 
 Both versions were run clean (`mvn clean test`) against the unmodified
 harness and produced **`Tests run: 5, Failures: 0, Errors: 0, Skipped: 1`**

@@ -35,8 +35,9 @@ pub use engine_grants::{
     update_engine_grant_in_tx, EngineGrant,
 };
 pub use engine_images::{
-    plugin_version_for_image, stored_engine_image, trino_image_ref, DefaultEngineImages,
-    KnownEngineImage, DEFAULT_ENGINE_IMAGES, KNOWN_ENGINE_IMAGES,
+    plugin_version_for_image, stored_engine_image, trino_image_ref, unsupported_engine_image,
+    DefaultEngineImages, KnownEngineImage, DEFAULT_ENGINE_IMAGES, DROPPED_ENGINE_IMAGES,
+    KNOWN_ENGINE_IMAGES, MIN_SUPPORTED_RANGER_PLUGIN,
 };
 pub use error::PermError;
 pub use plugin_report::{ranger_plugin_report, PluginReport};
