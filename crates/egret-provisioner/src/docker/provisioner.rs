@@ -7,7 +7,7 @@
 
 use super::api::{ContainerInfo, ContainerState, DockerApi};
 use super::plan::{plan_trino, ContainerPlan, PlanOptions};
-use crate::spec::{EngineKind, EngineSpec, EngineStatus, PodStatus};
+use crate::spec::{EngineKind, EngineSpec, EngineStatus, PodStatus, RangerRollout};
 use egret_engine_mgmt_api::EngineProvisioningPort;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -147,6 +147,37 @@ fn pod_of(c: &ContainerInfo) -> PodStatus {
     }
 }
 
+/// Whether every container of an engine runs with Ranger credential
+/// `expected` (spec 2026-10-20-ranger-surface-auth A10, Docker form).
+///
+/// A container's files are written once, at create, from the plan whose
+/// `egret/ranger-credential` label it carries; an update replaces every
+/// container. So the rollout of `expected` is complete when there is at least
+/// one container, each carries that label, and each is running and not
+/// unhealthy. Fails closed: no container, a container without the label or with
+/// another credential's, or one not running is `Pending`.
+fn docker_rollout(containers: &[ContainerInfo], expected: &str) -> RangerRollout {
+    if containers.is_empty() {
+        return RangerRollout::Pending("no container".into());
+    }
+    for c in containers {
+        let label = c
+            .labels
+            .get(crate::rollout::RANGER_CREDENTIAL_ANNOTATION)
+            .map(String::as_str);
+        if label != Some(expected) {
+            return RangerRollout::Pending(format!(
+                "container {}: not created with the current credential",
+                c.name
+            ));
+        }
+        if !matches!(c.state, ContainerState::Running { healthy } if healthy != Some(false)) {
+            return RangerRollout::Pending(format!("container {}: not running", c.name));
+        }
+    }
+    RangerRollout::Complete
+}
+
 #[async_trait::async_trait]
 impl EngineProvisioningPort for DockerEngineProvisioner {
     async fn provision(&self, spec: &EngineSpec) -> Result<(), String> {
@@ -245,6 +276,30 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
             self.api.restart(&c.name).await?;
         }
         Ok(())
+    }
+
+    async fn ranger_rollout(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<RangerRollout, String> {
+        Self::require_trino(kind)?;
+        let containers = self.engine_containers(namespace, name).await?;
+        Ok(docker_rollout(&containers, credential_id))
+    }
+
+    /// Docker keeps no per-credential object: the retired credential's XML
+    /// lived only in the files of containers an update already removed.
+    async fn delete_ranger_secret(
+        &self,
+        kind: &str,
+        _namespace: &str,
+        _name: &str,
+        _credential_id: &str,
+    ) -> Result<(), String> {
+        Self::require_trino(kind)
     }
 }
 
@@ -687,6 +742,133 @@ mod tests {
         assert_eq!(fake.names().len(), 3);
         // Provision must not mistake the look-alikes for this engine's containers.
         p.provision(&spec_with("e1", 0)).await.unwrap();
+    }
+
+    const C1: &str = "0b5ad7e2-0000-4000-8000-0000000000c1";
+    const C2: &str = "0b5ad7e2-0000-4000-8000-0000000000c2";
+
+    fn bound_spec(name: &str, workers: u32, credential_id: &str) -> EngineSpec {
+        let mut s = spec_with(name, workers);
+        s.ranger = Some(crate::spec::RangerBinding {
+            service_name: name.into(),
+            egret_url: "http://egret:8080".into(),
+            poll_interval_ms: 30_000,
+            credential: Some(
+                crate::ranger_config::RenderableCredential::new(
+                    credential_id,
+                    format!("egret-engine-{name}"),
+                    "pw-for-tests",
+                )
+                .unwrap(),
+            ),
+        });
+        s
+    }
+
+    #[tokio::test]
+    async fn a_ranger_rollout_is_complete_once_every_container_runs_the_credential() {
+        let (fake, p) = setup();
+        p.provision(&bound_spec("e1", 1, C1)).await.unwrap();
+        assert_eq!(
+            p.ranger_rollout("trino", NS, "e1", C1).await.unwrap(),
+            RangerRollout::Complete
+        );
+        // An older rollout never answers for a newer credential.
+        assert!(matches!(
+            p.ranger_rollout("trino", NS, "e1", C2).await.unwrap(),
+            RangerRollout::Pending(_)
+        ));
+        // A rotation's apply replaces every container: now C2, never C1.
+        p.update(&bound_spec("e1", 1, C2)).await.unwrap();
+        assert_eq!(
+            p.ranger_rollout("trino", NS, "e1", C2).await.unwrap(),
+            RangerRollout::Complete
+        );
+        assert!(matches!(
+            p.ranger_rollout("trino", NS, "e1", C1).await.unwrap(),
+            RangerRollout::Pending(_)
+        ));
+        // The XML each container got is the current credential's.
+        let xml = fake
+            .plan_of(&worker("e1", 0))
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|f| f.path == "/etc/trino/ranger-trino-security.xml")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&xml.content).contains("pw-for-tests"));
+        assert_eq!(xml.mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_ranger_rollout_fails_closed() {
+        let (fake, p) = setup();
+        // No container at all.
+        let r = p.ranger_rollout("trino", NS, "e1", C1).await.unwrap();
+        assert!(matches!(r, RangerRollout::Pending(_)), "{r:?}");
+
+        // One container not running (or unhealthy) keeps it pending.
+        p.provision(&bound_spec("e1", 1, C1)).await.unwrap();
+        for state in [
+            ContainerState::Created,
+            ContainerState::Restarting,
+            ContainerState::Running {
+                healthy: Some(false),
+            },
+            ContainerState::Exited { code: 0 },
+            ContainerState::Dead,
+        ] {
+            fake.set_state(&worker("e1", 0), state.clone());
+            let r = p.ranger_rollout("trino", NS, "e1", C1).await.unwrap();
+            assert!(matches!(r, RangerRollout::Pending(_)), "{state:?}: {r:?}");
+        }
+        fake.set_state(
+            &worker("e1", 0),
+            ContainerState::Running {
+                healthy: Some(true),
+            },
+        );
+        assert_eq!(
+            p.ranger_rollout("trino", NS, "e1", C1).await.unwrap(),
+            RangerRollout::Complete
+        );
+
+        // A container without the label (created before credentialing).
+        let (_fake2, p2) = setup();
+        p2.provision(&spec_with("e2", 0)).await.unwrap();
+        let r = p2.ranger_rollout("trino", NS, "e2", C1).await.unwrap();
+        assert!(matches!(r, RangerRollout::Pending(_)), "{r:?}");
+
+        // A failed read is an error, not a verdict.
+        fake.fail_next("list");
+        assert!(p.ranger_rollout("trino", NS, "e1", C1).await.is_err());
+        // Not Trino: refused.
+        assert!(p.ranger_rollout("starrocks", NS, "e1", C1).await.is_err());
+    }
+
+    /// A look-alike container (another project) with the label does not make
+    /// a missing engine look rolled out.
+    #[tokio::test]
+    async fn a_ranger_rollout_ignores_containers_that_are_not_this_engines() {
+        let (fake, p) = setup();
+        let mut labels = foreign_labels("someone-else", "true");
+        labels.push((
+            crate::rollout::RANGER_CREDENTIAL_ANNOTATION.to_string(),
+            C1.to_string(),
+        ));
+        add_foreign(&fake, "other-project-e1", labels);
+        fake.list_ignores_filter();
+        let r = p.ranger_rollout("trino", NS, "e1", C1).await.unwrap();
+        assert!(matches!(r, RangerRollout::Pending(_)), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_retired_ranger_secret_is_a_no_op_on_docker() {
+        let (fake, p) = setup();
+        p.provision(&bound_spec("e1", 0, C2)).await.unwrap();
+        p.delete_ranger_secret("trino", NS, "e1", C1).await.unwrap();
+        assert!(fake.calls_to("stop_and_remove").is_empty());
+        assert_eq!(fake.names(), vec![coord("e1")]);
     }
 
     #[tokio::test]
