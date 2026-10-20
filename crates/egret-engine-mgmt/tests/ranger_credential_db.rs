@@ -208,35 +208,122 @@ async fn retiring_a_stale_previous_id_deletes_nothing() {
 }
 
 #[tokio::test]
-async fn a_second_rotation_before_retiring_deletes_the_older_previous() {
+async fn a_second_rotation_before_retiring_is_refused_and_changes_nothing() {
     let f = harness_or_skip!();
     let e = seed_engine(&f).await;
     let p1 = f.creds.ensure(&e).await.expect("ensure");
-    let p1_id = reload(&f, e.id).await.ranger_secret_id.unwrap();
     let p2 = f
         .creds
         .rotate(&reload(&f, e.id).await)
         .await
         .expect("rotate");
-    let p2_id = reload(&f, e.id).await.ranger_secret_id.unwrap();
+    let before = reload(&f, e.id).await;
+    let rows_before = ranger_secret_rows(&f, e.id).await;
+
+    let refused = f.creds.rotate(&before).await;
+
+    // The cluster may still hold p1 (no successful apply has retired it), so a
+    // second rotation must not push it out of the window.
+    match refused {
+        Err(egret_engine_mgmt::EngineHttpError::Conflict(msg)) => {
+            assert!(msg.contains("pending"), "message: {msg}")
+        }
+        other => panic!("expected a 409 Conflict, got {other:?}"),
+    }
+    let after = reload(&f, e.id).await;
+    assert_eq!(after.ranger_secret_id, before.ranger_secret_id);
+    assert_eq!(after.ranger_secret_prev_id, before.ranger_secret_prev_id);
+    assert_eq!(ranger_secret_rows(&f, e.id).await, rows_before);
+    assert!(verifies(&f, e.id, &p1.password).await);
+    assert!(verifies(&f, e.id, &p2.password).await);
+}
+
+/// Once the previous credential is retired, rotating again is allowed.
+#[tokio::test]
+async fn a_rotation_after_retiring_is_allowed() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    f.creds.ensure(&e).await.expect("ensure");
+    let p2 = f
+        .creds
+        .rotate(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    f.creds.retire_previous(e.id).await;
 
     let p3 = f
         .creds
         .rotate(&reload(&f, e.id).await)
         .await
-        .expect("rotate again");
+        .expect("rotate after retire");
 
-    let row = reload(&f, e.id).await;
-    assert_eq!(row.ranger_secret_prev_id, Some(p2_id));
-    let p3_id = row.ranger_secret_id.unwrap();
-    assert!(!verifies(&f, e.id, &p1.password).await);
     assert!(verifies(&f, e.id, &p2.password).await);
     assert!(verifies(&f, e.id, &p3.password).await);
-    let mut expected = vec![p2_id, p3_id];
-    expected.sort();
-    let rows = ranger_secret_rows(&f, e.id).await;
-    assert!(!rows.contains(&p1_id));
-    assert_eq!(rows, expected);
+}
+
+/// A previous id whose secret is already gone (dangling) does not block a
+/// rotation: nothing can present it, so it is overwritten.
+#[tokio::test]
+async fn a_dangling_previous_id_does_not_block_a_rotation() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    f.creds.ensure(&e).await.expect("ensure");
+    let p2 = f
+        .creds
+        .rotate(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    let row = reload(&f, e.id).await;
+    sqlx::query("DELETE FROM workspace_secrets WHERE id = $1")
+        .bind(row.ranger_secret_prev_id.unwrap())
+        .execute(&f.db.pool)
+        .await
+        .expect("delete previous out of band");
+
+    let p3 = f
+        .creds
+        .rotate(&row)
+        .await
+        .expect("rotate over a dangling previous");
+
+    let after = reload(&f, e.id).await;
+    assert_eq!(after.ranger_secret_prev_id, row.ranger_secret_id);
+    assert!(verifies(&f, e.id, &p2.password).await);
+    assert!(verifies(&f, e.id, &p3.password).await);
+}
+
+/// `ensure`'s compare-and-set covers the previous column too: a caller holding
+/// a stale read (taken before `retire_previous` cleared and deleted the
+/// previous credential) must not write that retired id back onto the row.
+#[tokio::test]
+async fn ensure_with_a_stale_read_never_writes_back_a_retired_previous_id() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    f.creds.ensure(&e).await.expect("ensure");
+    f.creds
+        .rotate(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    let stale = reload(&f, e.id).await;
+    let retired = stale.ranger_secret_prev_id.unwrap();
+    // The current secret vanishes, so `ensure` must mint (and so write).
+    sqlx::query("DELETE FROM workspace_secrets WHERE id = $1")
+        .bind(stale.ranger_secret_id.unwrap())
+        .execute(&f.db.pool)
+        .await
+        .expect("delete current out of band");
+    f.creds.retire_previous(e.id).await;
+
+    let p = f
+        .creds
+        .ensure(&stale)
+        .await
+        .expect("ensure from a stale read");
+
+    let row = reload(&f, e.id).await;
+    assert_ne!(row.ranger_secret_prev_id, Some(retired));
+    assert_eq!(row.ranger_secret_prev_id, None);
+    assert!(verifies(&f, e.id, &p.password).await);
 }
 
 #[tokio::test]

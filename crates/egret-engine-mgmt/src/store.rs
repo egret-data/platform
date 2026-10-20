@@ -473,24 +473,28 @@ impl EngineMgmtStore {
         Ok(res.rows_affected() == 1)
     }
 
-    /// Record a Ranger plugin credential pair, compare-and-set against the
-    /// CURRENT id the caller read (`expected_current`, `IS NOT DISTINCT FROM`
-    /// so two `NULL`s match). Returns `false` and writes nothing when a
-    /// concurrent writer moved the column first — the same shape as
-    /// [`Self::set_internal_secret_ids`].
+    /// Record a Ranger plugin credential pair, compare-and-set against BOTH
+    /// ids the caller read (`IS NOT DISTINCT FROM`, so two `NULL`s match).
+    /// Returns `false` and writes nothing when a concurrent writer moved either
+    /// column first — the same shape as [`Self::set_internal_secret_ids`].
+    /// Covering the previous column too means a writer holding a stale read
+    /// can never write back a previous id that has since been retired.
     pub async fn set_ranger_secret_ids(
         &self,
         engine_id: Uuid,
         expected_current: Option<Uuid>,
+        expected_previous: Option<Uuid>,
         current: Uuid,
         previous: Option<Uuid>,
     ) -> Result<bool, EngineMgmtError> {
         let res = sqlx::query(
-            "UPDATE engine_mgmt.engines SET ranger_secret_id = $3, ranger_secret_prev_id = $4 \
-             WHERE id = $1 AND ranger_secret_id IS NOT DISTINCT FROM $2",
+            "UPDATE engine_mgmt.engines SET ranger_secret_id = $4, ranger_secret_prev_id = $5 \
+             WHERE id = $1 AND ranger_secret_id IS NOT DISTINCT FROM $2 \
+             AND ranger_secret_prev_id IS NOT DISTINCT FROM $3",
         )
         .bind(engine_id)
         .bind(expected_current)
+        .bind(expected_previous)
         .bind(current)
         .bind(previous)
         .execute(self.pool())
