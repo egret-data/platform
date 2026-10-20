@@ -3600,6 +3600,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bollard",
  "bytes",
  "chrono",
  "egret-engine-mgmt-api",

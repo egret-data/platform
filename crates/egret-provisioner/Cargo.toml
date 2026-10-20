@@ -24,6 +24,13 @@ futures-util.workspace = true
 bytes.workspace = true
 tokio-util = { workspace = true, features = ["io", "compat"] }
 tar.workspace = true
+bollard.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# Runs WITHOUT libtest so a run without EGRET_TEST_DOCKER=1 reports its tests
+# IGNORED, never passed (same contract as egret-workflow's container_docker_live).
+[[test]]
+name = "docker_live"
+harness = false
