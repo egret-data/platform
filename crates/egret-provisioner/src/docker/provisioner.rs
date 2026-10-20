@@ -210,7 +210,17 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
 
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
         Self::require_trino(kind)?;
-        for c in self.engine_containers(namespace, name).await? {
+        let current = self.engine_containers(namespace, name).await?;
+        // Restart cannot recreate containers (it has no spec). Saying "ok" here
+        // left an engine whose containers were removed outside egret (for
+        // example by the demo's `just demo-down`) at "provisioning" for good.
+        if current.is_empty() {
+            return Err(format!(
+                "engine {name} has no containers to restart (they were removed outside egret); \
+                 delete the engine and add it again"
+            ));
+        }
+        for c in current {
             self.api.restart(&c.name).await?;
         }
         Ok(())
@@ -577,6 +587,14 @@ mod tests {
                 format!("restart:{}", worker("e1", 1)),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn restart_without_containers_is_an_error_not_a_silent_success() {
+        let (fake, p) = setup();
+        let err = p.restart("trino", NS, "gone").await.unwrap_err();
+        assert!(err.contains("engine gone has no containers"), "{err}");
+        assert!(fake.calls_to("restart").is_empty());
     }
 
     // Defence in depth: even when the daemon ignores the label filter, the
