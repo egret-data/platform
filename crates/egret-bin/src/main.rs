@@ -2311,9 +2311,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // queries work; an admin who explicitly picks an `authz_service_id` still
         // binds regardless.
         ranger_enabled: config.ranger.enabled,
-        // The FACT only: the page for an external engine states the auth mode and
-        // must have no path to the token.
-        ranger_bearer_configured: !config.ranger.auth_token.is_empty(),
+        // The mode the `/ranger` surface runs in; the page for an external
+        // engine states it.
+        ranger_surface_mode: match config.ranger.auth_mode {
+            egret_config::RangerAuthMode::Required => {
+                egret_engine_mgmt::state::RangerSurfaceMode::Required
+            }
+            egret_config::RangerAuthMode::Anonymous => {
+                egret_engine_mgmt::state::RangerSurfaceMode::Anonymous
+            }
+        },
         // The compiled-in pinned JDBC driver table with this deployment's
         // `[starrocks.jdbc_drivers]` overrides applied (design D5).
         sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default()

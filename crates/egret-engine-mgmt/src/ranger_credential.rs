@@ -317,8 +317,66 @@ impl RangerCredentialStore {
         }))
     }
 
+    /// Mint a credential for an engine row that does not exist yet, WITHOUT
+    /// recording it anywhere: the caller writes the returned id into the row
+    /// it inserts (external registration, so the row and its credential commit
+    /// together), and calls [`Self::discard_unrecorded`] if that insert does
+    /// not commit. Nobody has been handed the password until the caller does.
+    pub(crate) async fn mint_unrecorded(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<(Uuid, PluginCredential), CpError> {
+        let password = mint_password();
+        let id = self
+            .secrets
+            .create(
+                None,
+                &secret_name(engine_id),
+                Some("Ranger plugin credential"),
+                &password,
+            )
+            .await
+            .map_err(|e| CpError::BadRequest(format!("store ranger credential: {e}")))?;
+        Ok((
+            id,
+            PluginCredential {
+                username: plugin_username(engine_id),
+                password,
+            },
+        ))
+    }
+
+    /// The operator's confirmation that an EXTERNAL engine's plugin now runs
+    /// with the current credential: retire the previous one by its exact id
+    /// (read from the row, then compare-and-set, as [`Self::retire_previous_if`]).
+    /// `Ok(())` when nothing is pending (idempotent). A lost compare-and-set
+    /// means the slot changed under this call: `409`, nothing deleted.
+    ///
+    /// Unlike the after-apply retire, a failure to clear the column is
+    /// returned: the operator asked for this and must know it did not happen.
+    /// Once the column is cleared the credential no longer verifies; a failed
+    /// delete of its secret only leaves an orphan for the engine-delete sweep.
+    pub async fn retire_previous_confirmed(&self, engine: &Engine) -> Result<(), CpError> {
+        let Some(prev) = engine.ranger_secret_prev_id else {
+            return Ok(());
+        };
+        if !self.store.clear_ranger_prev(engine.id, prev).await? {
+            return Err(CpError::Conflict(
+                "the engine's ranger credentials changed while the previous one was being \
+                 retired; re-read the engine and retry"
+                    .into(),
+            ));
+        }
+        match self.secrets.delete(None, prev).await {
+            Ok(()) | Err(SecretsError::NotFound) => {}
+            Err(err) => tracing::warn!(engine_id = %engine.id, secret_id = %prev, error = %err,
+                "could not delete a retired ranger credential; the engine-delete sweep will"),
+        }
+        Ok(())
+    }
+
     /// Delete a credential this call minted but never recorded on the row.
-    async fn discard_unrecorded(&self, engine_id: Uuid, id: Uuid) {
+    pub(crate) async fn discard_unrecorded(&self, engine_id: Uuid, id: Uuid) {
         if let Err(e) = self.secrets.delete(None, id).await {
             tracing::warn!(%engine_id, secret_id = %id, error = %e,
                 "could not delete an unrecorded ranger credential");

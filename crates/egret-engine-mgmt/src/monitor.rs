@@ -557,7 +557,7 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
-            ranger_bearer_configured: false,
+            ranger_surface_mode: crate::state::RangerSurfaceMode::Required,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,

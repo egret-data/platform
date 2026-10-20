@@ -7,6 +7,18 @@ use std::sync::Arc;
 
 use crate::{EngineAssignmentService, EngineMgmtStore};
 
+/// Whether egret's `/ranger` plugin surface requires a credential: this
+/// crate's mirror of `egret_config::RangerAuthMode` (the seam does not depend
+/// on the config crate; the composition root maps one onto the other).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RangerSurfaceMode {
+    /// Every request needs an engine Basic credential or the operator bearer.
+    #[default]
+    Required,
+    /// Anyone who can reach the surface is served (chosen explicitly).
+    Anonymous,
+}
+
 #[derive(Clone)]
 pub struct EngineMgmtState {
     /// Its own data (E1b) — engines/engine_catalogs CRUD.
@@ -74,11 +86,10 @@ pub struct EngineMgmtState {
     /// makes per-user delegated impersonation queries work. An admin explicitly
     /// passing `authz_service_id` still binds regardless of this flag.
     pub ranger_enabled: bool,
-    /// Whether egret's Ranger `/service` surface requires a bearer token
-    /// (`config.ranger.auth_token` is non-empty). Only the FACT is carried, never
-    /// the token: the external plugin-config page states the auth mode and must
-    /// not be able to leak the secret.
-    pub ranger_bearer_configured: bool,
+    /// The mode egret's `/ranger` plugin surface runs in (`config.ranger.auth_mode`).
+    /// The external plugin-config page states it: `Required` means the
+    /// engine's plugin must present its Ranger credential.
+    pub ranger_surface_mode: RangerSurfaceMode,
     /// The JDBC drivers a StarRocks `jdbc` catalog makes the FE download
     /// (design D5): the compiled-in pinned table with this deployment's
     /// `[starrocks.jdbc_drivers]` overrides applied. Populated from config in

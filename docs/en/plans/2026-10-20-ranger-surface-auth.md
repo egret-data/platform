@@ -752,7 +752,7 @@ git commit -m "feat(provisioner): give each engine its Ranger credential through
 
 **Interfaces:**
 - Consumes: `ranger_credential::{ensure, rotate}`, `PASSWORD_PLACEHOLDER`.
-- Produces: registration response gains `rangerCredential: { username, password }` **exactly once**; `POST /engines/{id}/rotate-ranger-credential` on an external engine returns `200 { username, password }` (and demotes the old one; it stays valid until the next rotation, since no apply can prove the operator re-installed it); `GET …/ranger-plugin-config` renders the files with `PASSWORD_PLACEHOLDER` and a warning that the real password was shown once.
+- Produces: registration response gains `rangerCredential: { username, password }` **exactly once**; `POST /engines/{id}/rotate-ranger-credential` on an external engine returns `200 { username, password }` (and demotes the old one; it stays valid until the operator confirms with `POST /engines/{id}/retire-previous-ranger-credential`, since no apply can prove the operator re-installed it; a further rotation is refused with 409 while it is pending — the standing rule, see spec A10); `GET …/ranger-plugin-config` renders the files with `PASSWORD_PLACEHOLDER` and a warning that the real password was shown once.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -768,7 +768,7 @@ git commit -m "feat(provisioner): give each engine its Ranger credential through
 
 - [ ] **Step 3: Implement**
 
-Registration: after the row is inserted, `let cred = ranger_credential::ensure(&st, &engine).await?;` and add `ranger_credential: Option<PluginCredentialDto>` (`#[serde(skip_serializing_if = "Option::is_none")]`, `ToSchema`) to the registration response DTO only — **not** to `EngineDto`, so no list/get ever carries it. Rotation: extend the Task 6 handler: for an external engine call `ranger_credential::rotate` and return `Json(PluginCredentialDto)` with 200 (no apply, no `retire_previous`).
+Registration: after the row is inserted, `let cred = ranger_credential::ensure(&st, &engine).await?;` and add `ranger_credential: Option<PluginCredentialDto>` (`#[serde(skip_serializing_if = "Option::is_none")]`, `ToSchema`) to the registration response DTO only — **not** to `EngineDto`, so no list/get ever carries it. Rotation: extend the Task 6 handler: for an external engine call `ranger_credential::rotate` and return `Json(PluginCredentialDto)` with 200 (no apply, no `retire_previous`). Retirement of an external engine's previous credential is a separate, operator-confirmed route, `POST /engines/{id}/retire-previous-ranger-credential` (`engine:update`, external only, idempotent 204; provisioned engines 409), which retires by the exact previous id read from the row (compare-and-set).
 
 `plugin_config_judgements`: rewrite the `auth_mode` block — the surface is now always authenticated unless egret runs `anonymous`:
 

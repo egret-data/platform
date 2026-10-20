@@ -213,7 +213,7 @@ fn build_app(
     starrocks_ddl: FakeStarRocksDdl,
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
 ) -> axum::Router {
-    build_app_with_bearer(
+    build_app_with_surface_mode(
         db,
         sessions,
         engine_provisioner,
@@ -222,13 +222,13 @@ fn build_app(
         ranger_enabled,
         starrocks_ddl,
         perm_compiler,
-        false,
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
     )
 }
 
-/// `build_app`, with whether egret's Ranger `/service` requires a bearer token.
+/// `build_app`, with the mode egret's `/ranger` plugin surface runs in.
 #[allow(clippy::too_many_arguments)]
-fn build_app_with_bearer(
+fn build_app_with_surface_mode(
     db: &Db,
     sessions: &SessionService,
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
@@ -237,7 +237,7 @@ fn build_app_with_bearer(
     ranger_enabled: bool,
     starrocks_ddl: FakeStarRocksDdl,
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
-    ranger_bearer_configured: bool,
+    ranger_surface_mode: egret_engine_mgmt::state::RangerSurfaceMode,
 ) -> axum::Router {
     engine_mgmt_router()
         .merge(egret_engine_mgmt::workspace_engines_router())
@@ -250,7 +250,7 @@ fn build_app_with_bearer(
             ranger_enabled,
             starrocks_ddl,
             perm_compiler,
-            ranger_bearer_configured,
+            ranger_surface_mode,
         ))
 }
 
@@ -266,7 +266,7 @@ fn engine_state(
     ranger_enabled: bool,
     starrocks_ddl: FakeStarRocksDdl,
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
-    ranger_bearer_configured: bool,
+    ranger_surface_mode: egret_engine_mgmt::state::RangerSurfaceMode,
 ) -> EngineMgmtState {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -294,7 +294,7 @@ fn engine_state(
         engine_jwks_uri: "https://idp/jwks".into(),
         engine_oidc_issuer: "https://idp/realms/egret".into(),
         ranger_enabled,
-        ranger_bearer_configured,
+        ranger_surface_mode,
         sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
         starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
         perm_compiler,
@@ -13145,7 +13145,9 @@ async fn restart_and_rotate_on_an_external_engine_are_409() {
     };
     let token = session_for(&f, "ext_restart_admin", true).await;
     let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
-    for path in ["restart", "rotate-secrets", "rotate-ranger-credential"] {
+    // `rotate-ranger-credential` is NOT here: an external engine's Ranger
+    // credential is rotated by egret's row alone (it reaches no cluster).
+    for path in ["restart", "rotate-secrets"] {
         assert_refused_as_external(
             &f,
             &token,
@@ -13855,12 +13857,13 @@ async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_w
             .ends_with(&format!("/service/plugins/policies/download/{service}")),
         "{j}"
     );
-    assert_eq!(j["authMode"], "anonymous");
+    // `ranger.auth_mode` defaults to `required`.
+    assert_eq!(j["authMode"], "engine-credential");
     assert_eq!(j["rangerPluginVersion"], "2.8.0");
     assert_eq!(j["rangerPluginVersionModelled"], true);
     let warnings = j["warnings"].to_string();
     assert!(warnings.contains("public_url"), "default-URL warning: {j}");
-    assert!(warnings.contains("every profile's policies"), "{j}");
+    assert!(!warnings.contains("every profile's policies"), "{j}");
     assert_eq!(j["assumptions"].as_array().unwrap().len(), 3);
     let names: Vec<&str> = j["files"]
         .as_array()
@@ -13876,19 +13879,27 @@ async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_w
             "ranger-starrocks-audit.xml"
         ]
     );
-    // The security file is the renderer's, for this profile and this egret URL.
+    // The security file is the renderer's, for this profile and this egret
+    // URL, with the engine's username and the password placeholder.
+    let username = format!("engine-{id}");
     let want = egret_provisioner::ranger_plugin_files(
         egret_engine_mgmt_api::EngineKind::StarRocks,
         &service,
         "http://egret:8080",
         egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
-        None,
+        Some(
+            egret_engine_mgmt_api::ranger_config::PluginCredentialRef::new(
+                &username,
+                egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+            )
+            .unwrap(),
+        ),
     );
     assert_eq!(
         j["files"][1]["content"].as_str().unwrap(),
         want.get("ranger-starrocks-security.xml").unwrap()
     );
-    // No credential anywhere in the answer.
+    // No secret value anywhere in the answer.
     assert!(!j.to_string().to_lowercase().contains("secret"), "{j}");
 }
 
@@ -13952,16 +13963,362 @@ async fn the_plugin_config_of_a_provisioned_or_unbound_engine_is_409_and_needs_e
     assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
 }
 
+// ---------------------------------------------------------------------------
+// External engines: the Ranger credential, shown once (ranger-surface-auth
+// Task 7, spec A10/A11)
+// ---------------------------------------------------------------------------
+
+/// Register an external engine and return its id and the WHOLE 201 body.
+async fn external_credential_register(
+    f: &Fixture,
+    token: &str,
+    kind: &str,
+    authz: Option<i64>,
+) -> (Uuid, serde_json::Value) {
+    let (status, j) = call(
+        f,
+        "POST",
+        "/engines/external",
+        token,
+        Some(register_body(
+            &external_name("ext-cred"),
+            kind,
+            "2.8.0",
+            authz,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    (Uuid::parse_str(j["id"].as_str().unwrap()).unwrap(), j)
+}
+
+fn credential_of(j: &serde_json::Value) -> (String, String) {
+    let c = &j["rangerCredential"];
+    (
+        c["username"].as_str().expect("username").to_string(),
+        c["password"].as_str().expect("password").to_string(),
+    )
+}
+
+async fn secret_exists(f: &Fixture, id: Uuid) -> bool {
+    match secret_store(f).resolve_plaintext(None, id).await {
+        Ok(_) => true,
+        Err(egret_secrets::SecretsError::NotFound) => false,
+        Err(e) => panic!("resolve secret {id}: {e}"),
+    }
+}
+
 #[tokio::test]
-async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is_not() {
+async fn external_credential_registration_returns_it_once_and_nothing_else_does() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_once_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, j) = external_credential_register(&f, &token, "starrocks", Some(profile)).await;
+    let (username, password) = credential_of(&j);
+    assert_eq!(username, format!("engine-{id}"), "{j}");
+    assert_eq!(password.len(), 43, "a minted password");
+    // The engine's own fields are still there, flattened.
+    assert_eq!(j["origin"], "external", "{j}");
+
+    // Every other answer about this engine: never the password, never the field.
+    let mut seen = Vec::new();
+    for (method, uri) in [
+        ("GET", format!("/engines/{id}")),
+        ("GET", "/engines".to_string()),
+        ("GET", format!("/engines/{id}/ranger-plugin-config")),
+    ] {
+        let (status, body) = call(&f, method, &uri, &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri}: {body}");
+        seen.push((uri, body));
+    }
+    let (status, body) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "port": 9031 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    seen.push(("PATCH".into(), body));
+    for (uri, body) in &seen {
+        let text = body.to_string();
+        assert!(!text.contains(&password), "{uri} carries the password");
+        assert!(!text.contains("rangerCredential"), "{uri}: {text}");
+    }
+    // Not `assert_cluster_untouched`: the list asks the status of every
+    // PROVISIONED engine in the shared test database.
+    assert_nothing_provisioned(&port);
+    assert!(kube.applied.lock().unwrap().is_empty(), "kube applied");
+}
+
+#[tokio::test]
+async fn external_credential_returned_at_registration_authenticates_against_the_verifier() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_verify_admin", true).await;
+    // An unbound engine gets its credential too: binding later needs no step.
+    let (id, j) = external_credential_register(&f, &token, "trino", None).await;
+    let (_, password) = credential_of(&j);
+    assert!(ranger_verifies(&f, id, &password).await);
+    assert!(!ranger_verifies(&f, id, "not-the-password").await);
+    assert!(
+        !ranger_verifies(&f, Uuid::new_v4(), &password).await,
+        "bound to this engine id only"
+    );
+    let (current, prev) = ranger_slots(&f, id).await;
+    assert!(current.is_some() && prev.is_none());
+}
+
+#[tokio::test]
+async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_until_retired() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_rotate_admin", true).await;
+    let (id, j) = external_credential_register(&f, &token, "trino", None).await;
+    let (_, old) = credential_of(&j);
+    let (old_id, _) = ranger_slots(&f, id).await;
+
+    let rotate = format!("/engines/{id}/rotate-ranger-credential");
+    let retire = format!("/engines/{id}/retire-previous-ranger-credential");
+    let (status, r) = call(&f, "POST", &rotate, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["username"], format!("engine-{id}"), "{r}");
+    let new = r["password"].as_str().expect("password").to_string();
+    assert_ne!(new, old);
+    assert!(ranger_verifies(&f, id, &new).await, "the new one verifies");
+    assert!(
+        ranger_verifies(&f, id, &old).await,
+        "the old one stays valid: no apply proves the operator re-installed it"
+    );
+    assert_eq!(
+        ranger_slots(&f, id).await.1,
+        old_id,
+        "old demoted to previous"
+    );
+
+    // A second rotation would push a credential the cluster may hold out of
+    // the window: refused, and nothing changes.
+    let slots = ranger_slots(&f, id).await;
+    let (status, e) = call(&f, "POST", &rotate, &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("pending"), "{e}");
+    assert!(!e.to_string().contains(&new), "{e}");
+    assert_eq!(ranger_slots(&f, id).await, slots);
+
+    // The operator confirms the new one is installed: the old one is retired.
+    let (status, b) = call(&f, "POST", &retire, &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+    assert!(
+        !ranger_verifies(&f, id, &old).await,
+        "the old one is retired"
+    );
+    assert!(ranger_verifies(&f, id, &new).await, "the new one is kept");
+    assert!(
+        !secret_exists(&f, old_id.unwrap()).await,
+        "its secret is gone"
+    );
+    assert_eq!(ranger_slots(&f, id).await.1, None);
+    // Idempotent: nothing pending is a 204 that deletes nothing.
+    let (status, b) = call(&f, "POST", &retire, &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+    assert!(ranger_verifies(&f, id, &new).await);
+
+    // Rotation is allowed again.
+    let (status, r) = call(&f, "POST", &rotate, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn external_credential_rotation_mints_one_for_an_engine_registered_without() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_legacy_admin", true).await;
+    // An engine registered before credentials existed: no slot at all.
+    let (id, _) = external_credential_register(&f, &token, "starrocks", None).await;
+    let (cur, _) = ranger_slots(&f, id).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET ranger_secret_id = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    secret_store(&f).delete(None, cur.unwrap()).await.unwrap();
+
+    let (status, r) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-ranger-credential"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let password = r["password"].as_str().unwrap();
+    assert!(ranger_verifies(&f, id, password).await);
+    assert_eq!(ranger_slots(&f, id).await.1, None, "nothing to demote");
+}
+
+#[tokio::test]
+async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised() {
     let Some(mut f) = external_fixture(None, None).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let token = session_for(&f, "ext_cfg_bearer_admin", true).await;
+    let admin = session_for(&f, "ext_cred_retire_admin", true).await;
+    let reader = session_for_with_permission(&f, "ext_cred_retire_reader", "engine:read").await;
+    let updater = session_for_with_permission(&f, "ext_cred_retire_updater", "engine:update").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (id, j) = external_credential_register(&f, &admin, "trino", None).await;
+    let (_, old) = credential_of(&j);
+
+    let path = |id: Uuid, what: &str| format!("/engines/{id}/{what}");
+    // Provisioned engines retire automatically after an accepted apply.
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(provisioned, "retire-previous-ranger-credential"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{e}");
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(Uuid::new_v4(), "retire-previous-ranger-credential"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{e}");
+    for what in [
+        "rotate-ranger-credential",
+        "retire-previous-ranger-credential",
+    ] {
+        let (status, e) = call(&f, "POST", &path(id, what), &reader, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what}: {e}");
+    }
+    assert_eq!(
+        ranger_slots(&f, id).await.1,
+        None,
+        "the reader rotated nothing"
+    );
+    let (status, r) = call(
+        &f,
+        "POST",
+        &path(id, "rotate-ranger-credential"),
+        &updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(id, "retire-previous-ranger-credential"),
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{e}");
+    assert!(
+        ranger_verifies(&f, id, &old).await,
+        "the reader retired nothing"
+    );
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(id, "retire-previous-ranger-credential"),
+        &updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{e}");
+    assert!(!ranger_verifies(&f, id, &old).await);
+}
+
+#[tokio::test]
+async fn external_credential_plugin_config_renders_the_placeholder_never_the_password() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_cfg_admin", true).await;
     let profile = starrocks_profile(&f).await;
-    let (id, _name) = register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[]).await;
-    f.app = build_app_with_bearer(
+    let service = profile_name(&f, profile).await;
+    let (id, j) = external_credential_register(&f, &token, "starrocks", Some(profile)).await;
+    let (username, password) = credential_of(&j);
+
+    let (status, cfg) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cfg}");
+    let text = cfg.to_string();
+    assert!(!text.contains(&password), "the password is never re-shown");
+    assert!(
+        cfg["downloadUrl"]
+            .as_str()
+            .unwrap()
+            .contains("/ranger/service/plugins/policies/download/"),
+        "{cfg}"
+    );
+    assert_eq!(cfg["authMode"], "engine-credential", "{cfg}");
+    assert!(
+        cfg["adminMustSupply"].to_string().contains("shown once"),
+        "{cfg}"
+    );
+    assert!(!cfg["warnings"].to_string().contains("bearer"), "{cfg}");
+    // The security file is the renderer's, with the engine's username and the
+    // placeholder in place of the password.
+    let placeholder = egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER;
+    let want = egret_provisioner::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::StarRocks,
+        &service,
+        "http://egret:8080",
+        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+        Some(
+            egret_engine_mgmt_api::ranger_config::PluginCredentialRef::new(&username, placeholder)
+                .unwrap(),
+        ),
+    );
+    let security = cfg["files"][1]["content"].as_str().unwrap();
+    assert_eq!(security, want.get("ranger-starrocks-security.xml").unwrap());
+    assert!(security.contains(placeholder), "{security}");
+    assert!(security.contains(&username), "{security}");
+}
+
+#[tokio::test]
+async fn external_credential_anonymous_surface_is_reported_and_warned() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_anon_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, _) = external_credential_register(&f, &token, "starrocks", Some(profile)).await;
+    f.app = build_app_with_surface_mode(
         &f.db,
         &f.sessions,
         f.engine_provisioner.clone(),
@@ -13970,7 +14327,7 @@ async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is
         f.ranger_enabled,
         f.starrocks_ddl.clone(),
         f.perm_compiler.clone(),
-        true,
+        egret_engine_mgmt::state::RangerSurfaceMode::Anonymous,
     );
     let (status, j) = call(
         &f,
@@ -13981,18 +14338,81 @@ async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{j}");
-    assert_eq!(j["authMode"], "bearer-configured", "{j}");
-    assert!(j["warnings"].to_string().contains("cannot send"), "{j}");
+    assert_eq!(j["authMode"], "anonymous", "{j}");
     assert!(
-        j["adminMustSupply"].to_string().contains("bearer token"),
+        j["warnings"]
+            .to_string()
+            .contains("every profile's policies"),
         "{j}"
     );
-    assert!(!j["warnings"].to_string().contains("anonymous"), "{j}");
-    // The plugin files carry no credential in either mode.
+}
+
+#[tokio::test]
+async fn external_credential_engine_delete_removes_its_credentials_and_only_its() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_delete_admin", true).await;
+    let (id, _) = external_credential_register(&f, &token, "trino", None).await;
+    let (other, other_j) = external_credential_register(&f, &token, "trino", None).await;
+    let (_, other_password) = credential_of(&other_j);
+    // Current AND previous on the engine being deleted.
+    let (status, r) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-ranger-credential"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let (cur, prev) = ranger_slots(&f, id).await;
+    let (cur, prev) = (cur.unwrap(), prev.unwrap());
+    let store = secret_store(&f);
+    // An orphan generation the row no longer names: swept by its prefix.
+    let orphan = store
+        .create(None, &format!("engine-ranger-{id}-orphan"), None, "x")
+        .await
+        .unwrap();
+    // Names that look alike but are not this engine's credential prefix.
+    let lookalikes = [
+        store
+            .create(None, &format!("engine-ranger-{id}"), None, "x")
+            .await
+            .unwrap(),
+        store
+            .create(None, &format!("x-engine-ranger-{id}-1"), None, "x")
+            .await
+            .unwrap(),
+    ];
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    for (what, sid) in [("current", cur), ("previous", prev), ("orphan", orphan)] {
+        assert!(!secret_exists(&f, sid).await, "{what} credential deleted");
+    }
+    for sid in lookalikes {
+        assert!(secret_exists(&f, sid).await, "a lookalike name survives");
+    }
     assert!(
-        !j["files"].to_string().to_lowercase().contains("bearer"),
-        "{j}"
+        ranger_verifies(&f, other, &other_password).await,
+        "another engine's credential survives"
     );
+    for sid in lookalikes {
+        store.delete(None, sid).await.unwrap();
+    }
+}
+
+#[test]
+fn external_credential_debug_of_the_dtos_redacts_the_password() {
+    let dto = egret_engine_mgmt::external::RangerCredentialDto {
+        username: "engine-1".into(),
+        password: "s3cr3t-value".into(),
+    };
+    let shown = format!("{dto:?}");
+    assert!(!shown.contains("s3cr3t-value"), "{shown}");
+    assert!(shown.contains("engine-1"), "{shown}");
 }
 
 // ---- list_materialized_views (view governance A4; Task 4b review C-1, M-3) ----
@@ -14008,7 +14428,7 @@ fn mv_state(f: &Fixture) -> EngineMgmtState {
         false,
         f.starrocks_ddl.clone(),
         None,
-        false,
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
     )
 }
 

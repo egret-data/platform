@@ -114,6 +114,10 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/rotate-ranger-credential",
             post(rotate_ranger_credential),
         )
+        .route(
+            "/engines/{id}/retire-previous-ranger-credential",
+            post(retire_previous_ranger_credential),
+        )
         // Engine↔workspace assignment (P1): list + set-full-assignment-set.
         .route(
             "/engines/{id}/workspaces",
@@ -6163,12 +6167,18 @@ async fn delete_engine(
 /// declared attachments and its profile binding (the profile itself stays, as
 /// for a provisioned engine). **Never calls the provisioner.**
 ///
-/// An external engine owns no secret (`engines_external_shape` keeps every
-/// secret column NULL) and a declared attachment minted no client
-/// (`attachments_declared_holds_nothing`), so there is nothing for
-/// [`cleanup_deleted_engine`] to remove, and a secret the cluster might still
-/// hold must never be deleted. That is asserted here rather than assumed: a row
-/// that somehow carries one is refused untouched.
+/// An external engine owns no secret egret connects WITH
+/// (`engines_external_shape` keeps every such column NULL) and a declared
+/// attachment minted no client (`attachments_declared_holds_nothing`), so there
+/// is nothing for [`cleanup_deleted_engine`] to remove, and a secret the
+/// cluster might still hold must never be deleted. That is asserted here rather
+/// than assumed: a row that somehow carries one is refused untouched.
+///
+/// The one exception is the engine's Ranger plugin credential (spec
+/// 2026-10-20-ranger-surface-auth A11), which only authenticates THIS engine
+/// to egret: once the row is gone it verifies for nobody, so it is deleted
+/// with the row ([`delete_ranger_credentials`]). It is deliberately not in
+/// the guard above.
 async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusCode, CpError> {
     let attachments = st
         .engine_mgmt
@@ -6197,6 +6207,7 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
         DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
         DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
     }
+    delete_ranger_credentials(st, engine).await;
     // The profile this engine was bound to loses its engine with the row. Its
     // catalog grants stay the profile's own; its ENGINE grants cascaded with
     // the row, so a profile another engine still binds is recompiled (spec E10).
@@ -6204,6 +6215,59 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
     tracing::info!(engine = %engine.name,
         "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// After an engine's row is deleted: its Ranger plugin credentials, by the
+/// exact ids the row named (current and previous) and then by the engine's
+/// own name prefix `engine-ranger-{id}-` (generations a lost compare-and-set
+/// or a failed delete left behind). The prefix ends in the full engine id and
+/// a hyphen, so it cannot match another engine's credential. Failures are
+/// logged: the row is already gone, so none of these verifies any more.
+async fn delete_ranger_credentials(st: &CpState, engine: &Engine) {
+    delete_secret_ids(st, engine, engine_ranger_secret_ids(engine)).await;
+    sweep_secret_prefixes(
+        st,
+        engine,
+        &[crate::ranger_credential::secret_name_prefix(engine.id)],
+    )
+    .await;
+}
+
+/// Delete each of `ids` from the global secret scope; a missing one is fine.
+async fn delete_secret_ids(st: &CpState, engine: &Engine, ids: impl IntoIterator<Item = Uuid>) {
+    for sid in ids {
+        match st.secrets.delete(None, sid).await {
+            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
+            }
+        }
+    }
+}
+
+/// Delete every global secret whose name starts with one of `prefixes`
+/// (plain `starts_with`, never SQL `LIKE`). Engine delete only: see
+/// [`cleanup_deleted_engine`] for why a sweep is safe there and nowhere else.
+async fn sweep_secret_prefixes(st: &CpState, engine: &Engine, prefixes: &[String]) {
+    match st.secrets.list(None).await {
+        Ok(all) => {
+            for meta in all {
+                if !prefixes.iter().any(|p| meta.name.starts_with(p.as_str())) {
+                    continue;
+                }
+                match st.secrets.delete(None, meta.id).await {
+                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
+                            "delete orphaned engine secret generation failed")
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
+        }
+    }
 }
 
 /// What an engine leaves outside its own tables. Each seam owns its own pool, so
@@ -6223,17 +6287,14 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // `tls_cert_secret_ref`: admin-provided and possibly shared with other
     // engines.
     // The Ranger plugin credential (current and previous) goes with them.
-    for sid in engine_owned_secret_ids(engine)
-        .into_iter()
-        .chain(engine_ranger_secret_ids(engine))
-    {
-        match st.secrets.delete(None, sid).await {
-            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
-            Err(e) => {
-                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
-            }
-        }
-    }
+    delete_secret_ids(
+        st,
+        engine,
+        engine_owned_secret_ids(engine)
+            .into_iter()
+            .chain(engine_ranger_secret_ids(engine)),
+    )
+    .await;
     // Orphan generations a failed rotation leaves behind. `commit_internal_secrets`
     // mints a fresh `engine-internal-{id}-{generation}` / `engine-monitor-{id}-
     // {generation}` pair on every rotation; when the apply that carried it never
@@ -6250,31 +6311,16 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // compare-and-set or a failed delete left behind (see
     // `crate::ranger_credential`); after the row is gone no plugin can
     // authenticate with any of them anyway.
-    let internal_prefix = format!("engine-internal-{}-", engine.id);
-    let monitor_prefix = format!("engine-monitor-{}-", engine.id);
-    let ranger_prefix = crate::ranger_credential::secret_name_prefix(engine.id);
-    match st.secrets.list(None).await {
-        Ok(all) => {
-            for meta in all {
-                if !meta.name.starts_with(&internal_prefix)
-                    && !meta.name.starts_with(&monitor_prefix)
-                    && !meta.name.starts_with(&ranger_prefix)
-                {
-                    continue;
-                }
-                match st.secrets.delete(None, meta.id).await {
-                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
-                    Err(e) => {
-                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
-                            "delete orphaned engine secret generation failed")
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
-        }
-    }
+    sweep_secret_prefixes(
+        st,
+        engine,
+        &[
+            format!("engine-internal-{}-", engine.id),
+            format!("engine-monitor-{}-", engine.id),
+            crate::ranger_credential::secret_name_prefix(engine.id),
+        ],
+    )
+    .await;
 }
 
 /// `POST /engines/{id}/restart` — roll the engine's pods without changing config
@@ -6405,29 +6451,37 @@ async fn rotate_engine_secrets(
 }
 
 /// `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
-/// credential for a provisioned engine (Trino or StarRocks) and re-apply it
-/// (the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
-/// credential is committed and the old one demoted BEFORE the apply, so both
-/// authenticate until the apply is accepted. The old one is deleted by its
-/// exact id as soon as Kubernetes ACCEPTS the apply — which can be before the
-/// pods have finished rolling, so a pod still running with the old password
-/// can be refused by `/ranger` until it is replaced. A failed apply deletes
-/// nothing — the cluster may still hold either — and a further rotation is
-/// refused (409) until an accepted apply has retired the previous one; any
-/// later accepted apply does.
+/// credential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential
+/// is committed and the old one demoted to previous; both authenticate until
+/// the previous one is retired. A rotation is refused (409) while a previous
+/// one is still pending, so a rotation never deletes a credential.
+///
+/// **Provisioned engine** (Trino or StarRocks): the new credential is applied
+/// (the pods roll) and the old one is deleted by its exact id as soon as
+/// Kubernetes ACCEPTS the apply — which can be before the pods have finished
+/// rolling, so a pod still running with the old password can be refused by
+/// `/ranger` until it is replaced. A failed apply deletes nothing, and any
+/// later accepted apply retires the previous one. Answers 204.
+///
+/// **External engine**: nothing is applied (egret never touches its cluster).
+/// The answer is 200 with the new credential — **shown once** — for the
+/// operator to install. No apply can prove they did, so the previous one stays
+/// valid until the operator confirms with
+/// `POST /engines/{id}/retire-previous-ranger-credential`.
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/rotate-ranger-credential",
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"),
-        (status = 400, description = "The engine is bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
+        (status = 200, description = "External engine: the new Ranger plugin credential, shown only here. The previous credential still authenticates until `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` retires it; until then a further rotation is refused", body = crate::external::RangerCredentialDto),
+        (status = 204, description = "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"),
+        (status = 400, description = "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "Nothing was applied, for one of three reasons: a previous rotation is still pending (its credential has not been retired by an accepted apply yet; any accepted apply retires it); the engine changed concurrently (e.g. a delete in progress); or the engine is external (`code` = `engine_is_external`), and egret does not rotate an external engine's credential here", body = ErrorBody),
-        (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it", body = ErrorBody),
+        (status = 409, description = "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: its credential has not been retired by an accepted apply yet, and any accepted apply retires it; external: retire it with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` once the new one is installed); or the engine changed concurrently (e.g. a delete in progress)", body = ErrorBody),
+        (status = 502, description = "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6435,14 +6489,28 @@ async fn rotate_ranger_credential(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<Response, CpError> {
+    use axum::response::IntoResponse as _;
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    crate::external::refuse_if_external(&engine, "rotate its ranger credential")?;
+    if crate::external::is_external(&engine) {
+        // The row alone: an external engine's cluster is never touched. An
+        // engine registered before credentials existed has no current one, so
+        // this mints its first.
+        let credential = crate::ranger_credential::rotate(&st, &engine).await?;
+        tracing::info!(engine = %engine.name,
+            "external engine's ranger credential rotated; the previous one stays valid until \
+             the operator retires it");
+        return Ok(Json(crate::external::RangerCredentialDto {
+            username: credential.username.clone(),
+            password: credential.password.clone(),
+        })
+        .into_response());
+    }
     if engine.status == crate::engine_status::DELETING {
         return Err(apply_conflict());
     }
@@ -6475,6 +6543,56 @@ async fn rotate_ranger_credential(
             ApplyBuiltError::Conflict => apply_conflict(),
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
+/// confirmation that an EXTERNAL engine's plugin now runs with the credential
+/// the last rotation returned: the previous one is deleted by its exact id
+/// (compare-and-set on the row) and stops authenticating. Standing rule: egret
+/// never deletes a credential the cluster may still hold, and for an external
+/// engine only its operator can say it no longer does.
+///
+/// Idempotent: with no previous credential pending it answers 204 and deletes
+/// nothing. A provisioned engine retires automatically after an accepted apply,
+/// so it is refused (409).
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/retire-previous-ranger-credential",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 204, description = "The previous Ranger plugin credential is retired (it no longer authenticates), or none was pending; the current one is untouched. A further rotation is allowed again"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is provisioned (egret retires its previous credential itself once Kubernetes accepts an apply), or its credentials changed concurrently (re-read and retry); nothing was retired", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn retire_previous_ranger_credential(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !crate::external::is_external(&engine) {
+        return Err(CpError::Conflict(format!(
+            "engine {} is provisioned: egret retires its previous ranger credential itself once \
+             Kubernetes accepts an apply",
+            engine.name
+        )));
+    }
+    crate::ranger_credential::RangerCredentialStore::from_state(&st)
+        .retire_previous_confirmed(&engine)
+        .await?;
+    tracing::info!(engine = %engine.name,
+        "external engine's previous ranger credential retired on the operator's confirmation");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -7369,6 +7487,7 @@ async fn bridge_exec(
         restart_engine,
         rotate_engine_secrets,
         rotate_ranger_credential,
+        retire_previous_ranger_credential,
         list_engine_workspaces,
         set_engine_workspaces,
         list_workspace_engines,
@@ -8365,7 +8484,7 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
-            ranger_bearer_configured: false,
+            ranger_surface_mode: crate::state::RangerSurfaceMode::Required,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,

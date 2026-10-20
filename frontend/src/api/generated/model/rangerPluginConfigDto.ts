@@ -20,8 +20,10 @@ export interface RangerPluginConfigDto {
      */
   downloadUrl: string;
   /**
-     * `anonymous`, or `bearer-configured` (egret requires a bearer token on
-     * `/ranger`; the token is never shown here).
+     * `engine-credential` (egret's `/ranger` surface requires the engine's own
+     * Ranger credential, shown once at registration or rotation; the files
+     * carry a placeholder in place of its password) or `anonymous` (egret
+     * serves the surface to anyone who can reach it).
      */
   authMode: string;
   /**
@@ -42,8 +44,8 @@ export interface RangerPluginConfigDto {
      */
   assumptions: string[];
   /**
-     * What the admin must supply themselves. egret renders no credential and
-     * invents none.
+     * What the admin must supply themselves, the credential's password among
+     * them: egret shows it only once and renders a placeholder here.
      */
   adminMustSupply: string[];
   files: RangerPluginFileDto[];

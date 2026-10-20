@@ -4103,11 +4103,11 @@
         },
         "responses": {
           "201": {
-            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version",
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EngineDto"
+                  "$ref": "#/components/schemas/RegisteredExternalEngineDto"
                 }
               }
             }
@@ -5655,7 +5655,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. No credential is included or minted",
+            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The security XML carries the engine's username and a placeholder in place of its password: the password was shown once (registration or rotation) and is never returned here. Nothing is minted",
             "content": {
               "application/json": {
                 "schema": {
@@ -5803,13 +5803,14 @@
         }
       }
     },
-    "/api/control-plane/engines/{id}/rotate-ranger-credential": {
+    "/api/control-plane/engines/{id}/retire-previous-ranger-credential": {
       "post": {
         "tags": [
           "control-plane-engines"
         ],
-        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential for a provisioned engine (Trino or StarRocks) and re-apply it\n(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new\ncredential is committed and the old one demoted BEFORE the apply, so both\nauthenticate until the apply is accepted. The old one is deleted by its\nexact id as soon as Kubernetes ACCEPTS the apply — which can be before the\npods have finished rolling, so a pod still running with the old password\ncan be refused by `/ranger` until it is replaced. A failed apply deletes\nnothing — the cluster may still hold either — and a further rotation is\nrefused (409) until an accepted apply has retired the previous one; any\nlater accepted apply does.",
-        "operationId": "rotate_ranger_credential",
+        "summary": "`POST /engines/{id}/retire-previous-ranger-credential` — the operator's\nconfirmation that an EXTERNAL engine's plugin now runs with the credential\nthe last rotation returned: the previous one is deleted by its exact id\n(compare-and-set on the row) and stops authenticating. Standing rule: egret\nnever deletes a credential the cluster may still hold, and for an external\nengine only its operator can say it no longer does.",
+        "description": "Idempotent: with no previous credential pending it answers 204 and deletes\nnothing. A provisioned engine retires automatically after an accepted apply,\nso it is refused (409).",
+        "operationId": "retire_previous_ranger_credential",
         "parameters": [
           {
             "name": "id",
@@ -5824,10 +5825,97 @@
         ],
         "responses": {
           "204": {
-            "description": "Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"
+            "description": "The previous Ranger plugin credential is retired (it no longer authenticates), or none was pending; the current one is untouched. A further rotation is allowed again"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is provisioned (egret retires its previous credential itself once Kubernetes accepts an apply), or its credentials changed concurrently (re-read and retry); nothing was retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/rotate-ranger-credential": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential\nis committed and the old one demoted to previous; both authenticate until\nthe previous one is retired. A rotation is refused (409) while a previous\none is still pending, so a rotation never deletes a credential.",
+        "description": "**Provisioned engine** (Trino or StarRocks): the new credential is applied\n(the pods roll) and the old one is deleted by its exact id as soon as\nKubernetes ACCEPTS the apply — which can be before the pods have finished\nrolling, so a pod still running with the old password can be refused by\n`/ranger` until it is replaced. A failed apply deletes nothing, and any\nlater accepted apply retires the previous one. Answers 204.\n\n**External engine**: nothing is applied (egret never touches its cluster).\nThe answer is 200 with the new credential — **shown once** — for the\noperator to install. No apply can prove they did, so the previous one stays\nvalid until the operator confirms with\n`POST /engines/{id}/retire-previous-ranger-credential`.",
+        "operationId": "rotate_ranger_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "External engine: the new Ranger plugin credential, shown only here. The previous credential still authenticates until `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` retires it; until then a further rotation is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerCredentialDto"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"
           },
           "400": {
-            "description": "The engine is bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
+            "description": "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -5867,7 +5955,7 @@
             }
           },
           "409": {
-            "description": "Nothing was applied, for one of three reasons: a previous rotation is still pending (its credential has not been retired by an accepted apply yet; any accepted apply retires it); the engine changed concurrently (e.g. a delete in progress); or the engine is external (`code` = `engine_is_external`), and egret does not rotate an external engine's credential here",
+            "description": "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: its credential has not been retired by an accepted apply yet, and any accepted apply retires it; external: retire it with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` once the new one is installed); or the engine changed concurrently (e.g. a delete in progress)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5887,7 +5975,7 @@
             }
           },
           "502": {
-            "description": "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it",
+            "description": "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it",
             "content": {
               "application/json": {
                 "schema": {
@@ -49389,6 +49477,24 @@
           }
         }
       },
+      "RangerCredentialDto": {
+        "type": "object",
+        "description": "An engine's Ranger plugin credential, shown ONCE: in the registration\nresponse and in the answer to an external engine's rotation. No other\nresponse, log line or `Debug` carries the password.",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "`engine-<engine id>`."
+          },
+          "password": {
+            "type": "string",
+            "description": "The password. egret does not show it again."
+          }
+        }
+      },
       "RangerErrorBody": {
         "type": "object",
         "description": "Doc-only mirror of the Ranger error envelope (`{ msg, statusCode }`), which\ndiffers from the control-plane `ErrorBody` shape.",
@@ -49431,7 +49537,8 @@
           },
           "authMode": {
             "type": "string",
-            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/ranger`; the token is never shown here)."
+            "description": "`engine-credential` (egret's `/ranger` surface requires the engine's own\nRanger credential, shown once at registration or rotation; the files\ncarry a placeholder in place of its password) or `anonymous` (egret\nserves the surface to anyone who can reach it).",
+            "example": "engine-credential"
           },
           "rangerPluginVersion": {
             "type": [
@@ -49463,7 +49570,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What the admin must supply themselves. egret renders no credential and\ninvents none."
+            "description": "What the admin must supply themselves, the credential's password among\nthem: egret shows it only once and renders a placeholder here."
           },
           "files": {
             "type": "array",
@@ -50069,6 +50176,26 @@
             "description": "Registry catalogs to declare attached. Nothing is applied to the engine."
           }
         }
+      },
+      "RegisteredExternalEngineDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EngineDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "rangerCredential"
+            ],
+            "properties": {
+              "rangerCredential": {
+                "$ref": "#/components/schemas/RangerCredentialDto",
+                "description": "The credential the engine's Ranger plugin presents to egret's `/ranger`\nsurface (HTTP Basic). **Shown once**: egret never returns this password\nagain; a lost one is replaced with\n`POST /api/control-plane/engines/{id}/rotate-ranger-credential`."
+              }
+            }
+          }
+        ],
+        "description": "`POST /api/control-plane/engines/external`'s 201 body: the engine,\nflattened, plus its Ranger credential. Its own type, NOT a field on\n[`EngineDto`]: GET, the list and PATCH return `EngineDto`, so no other\nanswer can ever carry the password."
       },
       "RegistryCatalogDto": {
         "type": "object",
