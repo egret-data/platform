@@ -60,6 +60,18 @@ services.
 
 ## Upgrade notes
 
+### The Ranger surface moved to `/ranger` and requires a credential
+
+With `ranger.enabled=true`, engine plugins poll egret at `<egret>/ranger` (the root `/service`
+prefix is gone, with no alias), and `ranger.authMode` (rendered as `EGRET_RANGER__AUTH_MODE`)
+defaults to `required`: every plugin must present its engine's own HTTP Basic credential, or it
+gets 401. Provisioned engines get their credential on their next apply, which rolls their pods;
+apply each bound engine once (save its settings, or call
+`POST /api/control-plane/engines/{id}/rotate-ranger-credential`). `just deploy-kind-governance` no longer
+sets `ranger.authMode=anonymous`. Set `--set ranger.authMode=anonymous` only for a throwaway
+cluster: anyone who can reach the URL can then download every profile's policies. Details,
+external engines and troubleshooting: [`docs/en/guides/ranger-surface.md`](../../../docs/en/guides/ranger-surface.md).
+
 ### The bundled object store is RustFS (was MinIO)
 
 MinIO withdrew its public images, so the bundled S3 server is now RustFS. Everything that named

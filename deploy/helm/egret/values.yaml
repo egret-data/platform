@@ -180,10 +180,13 @@ workflow:
 ranger:
   enabled: false
   # How egret's Ranger plugin surface (`/ranger/service/...`) treats a request
-  # without a valid credential. `required` (default): 401 — engine plugins
+  # without a valid credential. Rendered as EGRET_RANGER__AUTH_MODE (config key
+  # `ranger.auth_mode`). `required` (default): 401 — engine plugins
   # authenticate with their own per-engine HTTP Basic credential, operators
-  # with the bearer token. `anonymous`: serve everyone (any engine can read any
-  # profile's policies); choose it explicitly, never by default.
+  # with the bearer token (EGRET_RANGER__AUTH_TOKEN, empty in this chart, so no
+  # bearer is accepted). `anonymous`: serve everyone — anyone who can reach the
+  # URL can download every profile's policies; throwaway local stacks only.
+  # See docs/en/guides/ranger-surface.md.
   authMode: required
 deps:
   enabled: true

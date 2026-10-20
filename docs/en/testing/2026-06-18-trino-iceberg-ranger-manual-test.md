@@ -46,7 +46,7 @@ docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=egret -e AWS_SECRET_ACCESS
 
 ## 2. Run Egret with catalog + ranger enabled
 
-`ranger.auth_token = ""` selects **anonymous `/service`** — the stock Trino Ranger plugin authenticates out-of-band (not via bearer), so it cannot use a token-protected endpoint.
+`ranger.auth_mode = "anonymous"` lets the hand-written plugin XML below poll `/ranger` without a credential. Use it only on this throwaway stack: in anonymous mode anyone who can reach egret can download every profile's policies. The default, `required`, makes every plugin present its engine's own credential ([`docs/en/guides/ranger-surface.md`](../guides/ranger-surface.md)); `auth_token = ""` accepts no operator bearer.
 
 ```bash
 mkdir -p /tmp/egret-itest
@@ -71,6 +71,7 @@ path_style = true
 [ranger]
 enabled = true
 auth_token = ""
+auth_mode = "anonymous"
 EOF
 
 BIN=$(pwd)/../target/debug/egret
@@ -78,9 +79,9 @@ BIN=$(pwd)/../target/debug/egret
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
 curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
-curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
+curl -s -o /dev/null -w "anon /ranger: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
 ```
-Expect: `healthz 200`, a `/v1/config` JSON whose `overrides` include `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (omitting `?warehouse` returns signer keys only, no prefix), `anon /service: 200`.
+Expect: `healthz 200`, a `/v1/config` JSON whose `overrides` include `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (omitting `?warehouse` returns signer keys only, no prefix), `anon /ranger: 200` (`401` means egret is not in anonymous mode).
 
 ## 3. Configure + start Trino
 
@@ -206,12 +207,14 @@ rm -f trino/catalog/iceberg.properties   # host-specific; never commit
 1. **Reserved table properties** — Trino sends `format-version` in `CREATE TABLE`; Egret must strip `iceberg`'s `RESERVED_PROPERTIES` before building metadata, or it 400s.
 2. **Empty-location guard** — Egret must NOT pre-write `metadata.json` on create; Trino verifies the table location is empty. The DB jsonb is the source of truth; the artifact is written on first commit.
 3. **Policy `id` in download** — the real Ranger engine NPEs on `RangerPolicy.getId()==null`; the download must inject the DB-assigned `id`/`version`/`isEnabled`.
-4. **Anonymous `/service`** — stock Ranger plugins authenticate out-of-band; an empty `ranger.auth_token` opens `/service` for them. Set a token to require bearer.
+4. **Anonymous `/ranger`, for this test only** — the hand-written plugin XML carries no credential, so this test runs `ranger.auth_mode = "anonymous"`. With the default `required`, a plugin must present its engine's credential (`ranger.plugin.trino.policy.rest.client.username` / `.password`, plugin 2.8.0 or later) or it gets 401.
 5. **Networking** — one shared host IP keeps Egret's SSRF host-check, Trino's S3 endpoint, and the signed URLs consistent.
 
 ---
 
 ## 7. The evaluator check (SP4d-1) — predict first, then query
+
+> **Since the Ranger surface requires credentials (2026-10-20):** the egret on kind runs `ranger.authMode=required` by default, and the hand-made pods below carry no credential, so their plugins (and the in-pod `curl` of the download) get 401. For this check either deploy egret with `--set ranger.authMode=anonymous` (a throwaway cluster only), or register each hand-made engine as an external engine bound to its profile and add `ranger.plugin.<trino|starrocks>.policy.rest.client.username` / `.password` with the credential egret shows once (then `curl -u 'engine-<id>:<password>'` the `/ranger/service/plugins/secure/policies/download/<profile>` path). See [`docs/en/guides/ranger-surface.md`](../guides/ranger-surface.md).
 
 Added 2026-09-28. Sections 1-6 prove that **Egret's policies reach a real Trino and are
 enforced**. This section proves something else: that `egret-ranger-eval`, the Rust evaluator

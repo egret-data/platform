@@ -45,7 +45,7 @@ docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=egret -e AWS_SECRET_ACCESS
 
 ## 2. Chạy Egret bật catalog + ranger
 
-`ranger.auth_token = ""` chọn **`/service` ẩn danh** — plugin Ranger gốc của Trino xác thực ngoài-luồng (không qua bearer), nên không dùng được endpoint bảo vệ bằng token.
+`ranger.auth_mode = "anonymous"` cho XML plugin viết tay bên dưới poll `/ranger` mà không cần credential. Chỉ dùng trên stack dùng-rồi-bỏ này: ở chế độ anonymous, ai với tới egret cũng tải được policy của mọi profile. Mặc định `required` buộc mỗi plugin trình credential riêng của engine nó ([`docs/vi/guides/ranger-surface.md`](../guides/ranger-surface.md)); `auth_token = ""` không nhận bearer operator nào.
 
 ```bash
 mkdir -p /tmp/egret-itest
@@ -70,6 +70,7 @@ path_style = true
 [ranger]
 enabled = true
 auth_token = ""
+auth_mode = "anonymous"
 EOF
 
 BIN=$(pwd)/../target/debug/egret
@@ -77,9 +78,9 @@ BIN=$(pwd)/../target/debug/egret
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
 curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
-curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
+curl -s -o /dev/null -w "anon /ranger: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
 ```
-Kỳ vọng: `healthz 200`, JSON `/v1/config` có `overrides` chứa `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (bỏ `?warehouse` thì chỉ trả về khóa signer, không có prefix), `anon /service: 200`.
+Kỳ vọng: `healthz 200`, JSON `/v1/config` có `overrides` chứa `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (bỏ `?warehouse` thì chỉ trả về khóa signer, không có prefix), `anon /ranger: 200` (`401` nghĩa là egret không ở chế độ anonymous).
 
 ## 3. Cấu hình + khởi động Trino
 
@@ -203,12 +204,14 @@ rm -f trino/catalog/iceberg.properties   # host-specific; không bao giờ commi
 1. **Reserved table properties** — Trino gửi `format-version` trong `CREATE TABLE`; Egret phải strip `RESERVED_PROPERTIES` của `iceberg` trước khi build metadata, nếu không sẽ 400.
 2. **Guard empty-location** — Egret KHÔNG được ghi sẵn `metadata.json` lúc create; Trino kiểm location của bảng phải rỗng. DB jsonb là nguồn sự thật; artifact ghi ở commit đầu.
 3. **Policy `id` trong download** — engine Ranger thật NPE khi `RangerPolicy.getId()==null`; download phải inject `id`/`version`/`isEnabled` từ DB.
-4. **`/service` ẩn danh** — plugin Ranger gốc xác thực ngoài-luồng; `ranger.auth_token` rỗng mở `/service` cho chúng. Đặt token để bắt buộc bearer.
+4. **`/ranger` ẩn danh, chỉ cho bài test này** — XML plugin viết tay không mang credential, nên bài test chạy `ranger.auth_mode = "anonymous"`. Với mặc định `required`, plugin phải trình credential của engine (`ranger.plugin.trino.policy.rest.client.username` / `.password`, plugin 2.8.0 trở lên), nếu không sẽ nhận 401.
 5. **Mạng** — một IP host chung giữ nhất quán kiểm SSRF của Egret, S3 endpoint của Trino, và URL đã ký.
 
 ---
 
 ## 7. Kiểm evaluator (SP4d-1) — DỰ ĐOÁN TRƯỚC, rồi mới chạy query
+
+> **Từ khi bề mặt Ranger đòi credential (2026-10-20):** egret trên kind mặc định chạy `ranger.authMode=required`, còn các pod dựng tay bên dưới không mang credential, nên plugin của chúng (và lệnh `curl` tải policy trong pod) nhận 401. Cho bài kiểm này, hoặc deploy egret với `--set ranger.authMode=anonymous` (chỉ cluster dùng-rồi-bỏ), hoặc đăng ký mỗi engine dựng tay là external engine gắn với profile của nó và thêm `ranger.plugin.<trino|starrocks>.policy.rest.client.username` / `.password` bằng credential egret hiện một lần (rồi `curl -u 'engine-<id>:<password>'` đường `/ranger/service/plugins/secure/policies/download/<profile>`). Xem [`docs/vi/guides/ranger-surface.md`](../guides/ranger-surface.md).
 
 Thêm 2026-09-28. Mục 1-6 chứng minh **policy của Egret tới được Trino thật và được cưỡng chế**.
 Mục này chứng minh chuyện khác: `egret-ranger-eval` — bộ đánh giá Rust trả lời "cái này có được
