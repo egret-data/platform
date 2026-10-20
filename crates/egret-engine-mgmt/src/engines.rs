@@ -850,10 +850,10 @@ pub(crate) enum ApplyBuiltError {
     /// it to check failed outright. Either way `apply_built` cannot confirm
     /// it is still safe to call the provisioner, so it never does.
     Conflict,
-    /// The Ranger credential this request renders is neither the row's
-    /// current nor its previous one any more (a rotation and retire landed
-    /// while it was built): applying it would put a retired credential on the
-    /// cluster. Nothing was applied.
+    /// The Ranger credential this request renders is no longer the row's
+    /// CURRENT one (a rotation landed while it was built): applying it would
+    /// roll the cluster back to the previous credential, or put a retired one
+    /// on it. Nothing was applied.
     CredentialChanged,
     Failed(String),
 }
