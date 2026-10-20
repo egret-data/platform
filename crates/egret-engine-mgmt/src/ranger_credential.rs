@@ -27,7 +27,10 @@
 //! retires the previous one, by its exact id, in one compare-and-set on both
 //! columns (current = the id the rollout was observed for, previous = the id
 //! read). A rollout observed for an older credential therefore never retires
-//! the previous one of a newer rotation. It runs on a periodic sweep
+//! the previous one of a newer rotation. Each credential is rendered into its own
+//! Kubernetes Secret, `{name}-ranger-{id}`, so a pod of a template that names a
+//! credential can only mount that credential's content; the retired one's
+//! Secret is deleted by exact name after the retire. It runs on a periodic sweep
 //! ([`spawn_ranger_retire_sweeper`]) and on every read of the engine; anything
 //! absent, unknown, partial or failing keeps the previous credential.
 //!
@@ -239,10 +242,12 @@ impl RangerCredentialStore {
     }
 
     /// Delete the previous credential's secret and clear its column,
-    /// UNCONDITIONALLY — whatever the cluster holds. No route or sweep calls
+    /// UNCONDITIONALLY — whatever the cluster holds. Test-only (feature
+    /// `test-util`), so no production path can call it. No route or sweep calls
     /// it: a provisioned engine retires through
     /// [`Self::retire_previous_if_rolled_out`], an external one through
     /// [`Self::retire_previous_confirmed`]. Failures are logged, never returned.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn retire_previous(&self, engine_id: Uuid) {
         let prev = match self.store.get_engine(engine_id).await {
             Ok(Some(e)) => e.ranger_secret_prev_id,
@@ -295,15 +300,18 @@ impl RangerCredentialStore {
         let Some(current) = engine.ranger_secret_id else {
             return RolloutRetire::Kept("the engine names no current credential".into());
         };
-        match port
-            .ranger_rollout(
+        let probe = tokio::time::timeout(
+            KUBE_CALL_TIMEOUT,
+            port.ranger_rollout(
                 &engine.r#type,
                 &engine.namespace,
                 &engine.name,
                 &current.to_string(),
-            )
-            .await
-        {
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err("the rollout probe timed out".into()));
+        match probe {
             Ok(RangerRollout::Complete) => {}
             Ok(RangerRollout::Pending(reason)) => return RolloutRetire::Kept(reason),
             Err(err) => {
@@ -333,15 +341,37 @@ impl RangerCredentialStore {
             Err(err) => tracing::warn!(engine = %engine.name, secret_id = %prev, error = %err,
                 "could not delete a retired ranger credential; the engine-delete sweep will"),
         }
+        // Its Kubernetes Secret (`{name}-ranger-{prev}`): no pod mounts it, the
+        // rollout of the current one's having just been observed complete.
+        let deleted = tokio::time::timeout(
+            KUBE_CALL_TIMEOUT,
+            port.delete_ranger_secret(
+                &engine.r#type,
+                &engine.namespace,
+                &engine.name,
+                &prev.to_string(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err("timed out".into()));
+        if let Err(err) = deleted {
+            tracing::warn!(engine = %engine.name, secret_id = %prev, error = %err,
+                "could not delete a retired ranger credential's Kubernetes Secret; engine \
+                 delete removes it");
+        }
         tracing::info!(engine = %engine.name, secret_id = %prev,
             "the rollout of the current ranger credential is complete; the previous one is retired");
         RolloutRetire::Retired(prev)
     }
 
+    /// Test-only (feature `test-util`), like [`Self::retire_previous`]: it
+    /// is just as blind to what the cluster holds.
+    ///
     /// The compare-and-set half of [`Self::retire_previous`]: clear the column
     /// only while it still names `prev`, and delete `prev` only when that clear
     /// won. A lost clear means a newer rotation owns the column (and `prev` may
     /// now be someone's current credential), so nothing is deleted.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn retire_previous_if(&self, engine_id: Uuid, prev: Uuid) {
         match self.store.clear_ranger_prev(engine_id, prev).await {
             Ok(true) => match self.secrets.delete(None, prev).await {
@@ -542,19 +572,23 @@ pub enum RolloutRetire {
     Kept(String),
 }
 
+/// The bound on each Kubernetes call of a retire (the probe, the Secret
+/// delete): a hung API server keeps the credential, it never stalls the sweep.
+const KUBE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// How often [`spawn_ranger_retire_sweeper`] looks at the engines whose
 /// previous credential is pending.
 pub const RANGER_RETIRE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One pass of the sweep: every provisioned engine whose previous credential is
-/// pending gets [`RangerCredentialStore::retire_previous_if_rolled_out`].
+/// pending (selected in SQL) gets [`RangerCredentialStore::retire_previous_if_rolled_out`].
 /// Returns how many were retired. Every replica may run it: the retire is a
 /// compare-and-set, so two passes over one engine retire it once.
 pub async fn retire_rolled_out_previous_credentials(st: &CpState) -> usize {
     let Some(port) = st.engine_provisioner.as_ref() else {
         return 0;
     };
-    let engines = match st.engine_mgmt.list_engines().await {
+    let engines = match st.engine_mgmt.list_engines_with_pending_ranger_prev().await {
         Ok(engines) => engines,
         Err(err) => {
             tracing::warn!(error = %err,
@@ -564,15 +598,22 @@ pub async fn retire_rolled_out_previous_credentials(st: &CpState) -> usize {
     };
     let creds = RangerCredentialStore::from_state(st);
     let mut retired = 0;
-    for engine in engines.iter().filter(|e| e.ranger_secret_prev_id.is_some()) {
-        match creds
-            .retire_previous_if_rolled_out(engine, port.as_ref())
-            .await
-        {
-            RolloutRetire::Retired(_) => retired += 1,
-            RolloutRetire::Kept(reason) => tracing::debug!(engine = %engine.name, %reason,
+    for engine in engines {
+        // One task per engine: a panic in one engine's pass is caught at its
+        // join and never ends the sweep (or the loop that runs it).
+        let (creds, port, name) = (creds.clone(), port.clone(), engine.name.clone());
+        let pass = tokio::spawn(async move {
+            creds
+                .retire_previous_if_rolled_out(&engine, port.as_ref())
+                .await
+        });
+        match pass.await {
+            Ok(RolloutRetire::Retired(_)) => retired += 1,
+            Ok(RolloutRetire::Kept(reason)) => tracing::debug!(engine = %name, %reason,
                 "the previous ranger credential is kept: rollout not observed complete"),
-            RolloutRetire::NothingPending => {}
+            Ok(RolloutRetire::NothingPending) => {}
+            Err(err) => tracing::error!(engine = %name, error = %err,
+                "the ranger credential retire pass failed; the previous credential is kept"),
         }
     }
     retired

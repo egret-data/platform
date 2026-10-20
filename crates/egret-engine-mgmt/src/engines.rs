@@ -5136,7 +5136,7 @@ fn spawn_starrocks_catalog_wire(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "The engine row flattened with live Kubernetes status", body = EngineDetailDto),
+        (status = 200, description = "The engine row flattened with live Kubernetes status. Side effect: when a provisioned engine's previous Ranger credential is pending and the rollout of the current one is observed complete, this read retires the previous one", body = EngineDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),

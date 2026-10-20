@@ -433,6 +433,8 @@ struct FakeRollout {
     error: std::sync::Mutex<Option<String>>,
     /// The credential id of every probe, in order.
     asked: std::sync::Mutex<Vec<String>>,
+    /// The credential id of every Kubernetes Secret delete.
+    deleted: std::sync::Mutex<Vec<String>>,
 }
 
 impl FakeRollout {
@@ -482,6 +484,16 @@ impl EngineProvisioningPort for FakeRollout {
             other => RangerRollout::Pending(format!("the pods run {other:?}")),
         })
     }
+    async fn delete_ranger_secret(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        credential_id: &str,
+    ) -> Result<(), String> {
+        self.deleted.lock().unwrap().push(credential_id.to_string());
+        Ok(())
+    }
 }
 
 /// `ensure` c1 then `rotate` to c2: returns (c1 id, c1 password, c2 id).
@@ -529,6 +541,10 @@ async fn a_stalled_rollout_keeps_the_previous_through_every_sweep() {
 
     assert_kept(&f, &e, c1, &p1).await;
     assert_eq!(cluster.asked(), vec![c2.to_string(); 3], "asked about c2");
+    assert!(
+        cluster.deleted.lock().unwrap().is_empty(),
+        "no Secret deleted"
+    );
 }
 
 /// The completed rollout of the CURRENT credential retires the previous one,
@@ -548,6 +564,11 @@ async fn a_completed_rollout_retires_the_previous_by_exact_id_once() {
         .await;
 
     assert_eq!(outcome, RolloutRetire::Retired(c1));
+    assert_eq!(
+        *cluster.deleted.lock().unwrap(),
+        vec![c1.to_string()],
+        "exactly the retired credential's Kubernetes Secret"
+    );
     let row = reload(&f, e.id).await;
     assert_eq!(row.ranger_secret_prev_id, None);
     assert_eq!(row.ranger_secret_id, Some(c2));
@@ -566,6 +587,7 @@ async fn a_completed_rollout_retires_the_previous_by_exact_id_once() {
         RolloutRetire::Kept(_)
     ));
     assert_eq!(ranger_secret_rows(&f, e.id).await, vec![c2], "c2 untouched");
+    assert_eq!(cluster.deleted.lock().unwrap().len(), 1, "deleted once");
 }
 
 /// A rollout that completed for an OLDER credential never retires the
@@ -614,6 +636,11 @@ async fn a_rollout_of_an_older_credential_never_retires_a_newer_rotations_previo
         (Some(c3), Some(c2))
     );
     assert!(ranger_secret_rows(&f, e.id).await.contains(&c2));
+    assert_eq!(
+        cluster.deleted.lock().unwrap().len(),
+        1,
+        "only c1's Secret, at its retire"
+    );
 }
 
 /// A probe that fails keeps the previous credential.

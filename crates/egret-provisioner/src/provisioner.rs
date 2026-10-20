@@ -19,4 +19,13 @@ pub trait EngineProvisioner: Send + Sync {
         name: &str,
         credential_id: &str,
     ) -> anyhow::Result<RangerRollout>;
+    /// Delete the Secret of the RETIRED credential `credential_id` (exact
+    /// name), and the legacy-named one. Only after its retire, which follows an
+    /// observed-complete rollout of the current one.
+    async fn delete_ranger_secret(
+        &self,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<()>;
 }

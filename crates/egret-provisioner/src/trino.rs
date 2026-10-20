@@ -354,7 +354,7 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
 
     if let Some(r) = &spec.ranger {
         // The access-control selector only. The security XML carries the
-        // plugin's credential, so it lives in `{name}-ranger-secret`
+        // plugin's credential, so it lives in `{name}-ranger-{credential id}`
         // ([`trino_ranger_secret`]), never in this ConfigMap.
         let rendered = crate::ranger_config::ranger_plugin_files(
             egret_engine_mgmt_api::EngineKind::Trino,
@@ -442,11 +442,13 @@ pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
 /// `subPath` it is mounted by.
 const TRINO_RANGER_SECURITY_XML: &str = crate::ranger_config::TRINO_SECURITY_XML;
 
-/// The `{name}-ranger-secret` Secret: the Ranger plugin's security XML, which
-/// carries the engine's `/ranger` credential (spec 2026-10-20-ranger-surface-auth
-/// A9). `None` unless the engine is bound to a profile. Mounted by `subPath` into
-/// both roles, so a change reaches a pod only when it is replaced:
-/// [`config_checksum`] hashes this Secret for exactly that reason.
+/// The `{name}-ranger-{credential id}` Secret ([`crate::rollout::ranger_secret_name`]):
+/// the Ranger plugin's security XML, which carries the engine's `/ranger`
+/// credential (spec 2026-10-20-ranger-surface-auth A9). One per credential, so
+/// a pod of a template that names a credential can only mount that one's
+/// content. `None` unless the engine is bound to a profile. Mounted by
+/// `subPath` into both roles, so a change reaches a pod only when it is
+/// replaced: [`config_checksum`] hashes this Secret for exactly that reason.
 pub fn trino_ranger_secret(spec: &EngineSpec) -> Option<Value> {
     let r = spec.ranger.as_ref()?;
     let rendered = crate::ranger_config::ranger_plugin_files(
@@ -461,8 +463,9 @@ pub fn trino_ranger_secret(spec: &EngineSpec) -> Option<Value> {
         .expect("the renderer emits it");
     let mut secret = json!({
         "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-        "metadata": { "name": format!("{}-ranger-secret", spec.name), "namespace": spec.namespace,
-                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "metadata": { "name": crate::rollout::spec_ranger_secret_name(spec), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name,
+                                  "egret/component": crate::rollout::RANGER_SECRET_COMPONENT } },
         "stringData": { TRINO_RANGER_SECURITY_XML: xml }
     });
     // Which credential this Secret now holds (its non-secret id), so a rollout
@@ -817,11 +820,11 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         ]
     });
     // Both roles run the Ranger plugin, so both mount its security XML from the
-    // `{name}-ranger-secret` Secret.
+    // credential's own Secret (`crate::rollout::ranger_secret_name`).
     if spec.ranger.is_some() {
         pod_spec["volumes"].as_array_mut().unwrap().push(json!({
             "name": "ranger-secret",
-            "secret": { "secretName": format!("{}-ranger-secret", spec.name) }
+            "secret": { "secretName": crate::rollout::spec_ranger_secret_name(spec) }
         }));
     }
     // Coordinator-only HTTPS keystore volume, sourced from the `{name}-tls` Secret.
@@ -1278,6 +1281,15 @@ impl EngineProvisioner for TrinoProvisioner {
             pods: pod_status,
         })
     }
+    async fn delete_ranger_secret(
+        &self,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<()> {
+        crate::rollout::delete_retired_ranger_secret(&*self.kube, namespace, name, credential_id)
+            .await
+    }
     async fn ranger_rollout(
         &self,
         namespace: &str,
@@ -1288,7 +1300,7 @@ impl EngineProvisioner for TrinoProvisioner {
         crate::rollout::observe(
             &*self.kube,
             namespace,
-            &format!("{name}-ranger-secret"),
+            name,
             &[
                 Workload::Deployment(format!("{name}-coordinator")),
                 Workload::Deployment(format!("{name}-worker")),
@@ -1326,18 +1338,15 @@ impl EngineProvisioner for TrinoProvisioner {
                 )
                 .await;
         }
-        // Unbinding the profile drops the mount; the Secret egret rendered for
-        // it would otherwise linger. Best-effort, like the ingress TLS above.
+        // Unbinding the profile drops the mount; the Secrets egret rendered
+        // for it would otherwise linger. Best-effort, like the ingress TLS above.
         if spec.ranger.is_none() {
-            let _ = self
-                .kube
-                .delete(
-                    "v1",
-                    "Secret",
-                    &spec.namespace,
-                    &format!("{}-ranger-secret", spec.name),
-                )
-                .await;
+            crate::rollout::delete_all_ranger_secrets_best_effort(
+                &*self.kube,
+                &spec.namespace,
+                &spec.name,
+            )
+            .await;
         }
         // Likewise, `apply_all` only applies the autoscaler for the current mode.
         // Best-effort delete the stale object when autoscaling is off or the mode
@@ -1393,7 +1402,7 @@ impl EngineProvisioner for TrinoProvisioner {
             ),
             ("keda.sh/v1alpha1", "ScaledObject", format!("{name}-worker")),
         ];
-        crate::kube_client::delete_objects(&*self.kube, namespace, &objects).await
+        crate::rollout::delete_with_ranger_secrets(&*self.kube, namespace, name, &objects).await
     }
 }
 
@@ -1461,13 +1470,16 @@ mod tests {
     const TEST_CREDENTIAL_ID: &str = "0b5ad7e2-0000-4000-8000-00000000c0de";
 
     fn bound(credential: Option<(&str, &str)>) -> RangerBinding {
+        bound_as(TEST_CREDENTIAL_ID, credential)
+    }
+
+    fn bound_as(id: &str, credential: Option<(&str, &str)>) -> RangerBinding {
         RangerBinding {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             credential: credential.map(|(u, p)| {
-                crate::ranger_config::RenderableCredential::new(TEST_CREDENTIAL_ID, u, p)
-                    .expect("renderable")
+                crate::ranger_config::RenderableCredential::new(id, u, p).expect("renderable")
             }),
         }
     }
@@ -1513,7 +1525,7 @@ mod tests {
         );
     }
 
-    /// A9: the credential is in the `{name}-ranger-secret` Secret and nowhere
+    /// A9: the credential is in the `{name}-ranger-{credential id}` Secret and nowhere
     /// else — not the ConfigMap, not the env Secret, not a pod template.
     #[test]
     fn the_credential_is_rendered_only_into_the_ranger_secret() {
@@ -1527,7 +1539,10 @@ mod tests {
         let secret = trino_ranger_secret(&spec).unwrap();
         assert_eq!(secret["kind"], "Secret");
         assert_eq!(secret["type"], "Opaque");
-        assert_eq!(secret["metadata"]["name"], "demo-ranger-secret");
+        assert_eq!(
+            secret["metadata"]["name"],
+            format!("demo-ranger-{TEST_CREDENTIAL_ID}")
+        );
         assert_eq!(secret["metadata"]["namespace"], "egret-engines");
         assert_eq!(secret["metadata"]["labels"]["egret/engine"], "demo");
         let xml = secret["stringData"]["ranger-trino-security.xml"]
@@ -1568,7 +1583,10 @@ mod tests {
                 .iter()
                 .find(|v| v["name"] == "ranger-secret")
                 .expect("a ranger-secret volume");
-            assert_eq!(volume["secret"]["secretName"], "demo-ranger-secret");
+            assert_eq!(
+                volume["secret"]["secretName"],
+                format!("demo-ranger-{TEST_CREDENTIAL_ID}")
+            );
             let mount = pod["containers"][0]["volumeMounts"]
                 .as_array()
                 .unwrap()
@@ -1627,7 +1645,7 @@ mod tests {
             .expect_err("the Deployment apply fails");
         let applied = kube.applied.lock().unwrap();
         assert!(
-            applied.contains_key("Secret/demo-ranger-secret"),
+            applied.contains_key(&format!("Secret/demo-ranger-{TEST_CREDENTIAL_ID}")),
             "the Secret must exist before any pod mounts it"
         );
         assert!(!applied.contains_key("Deployment/demo-coordinator"));
@@ -1638,12 +1656,16 @@ mod tests {
         use crate::kube_client::FakeKube;
         let kube = std::sync::Arc::new(FakeKube::default());
         let p = TrinoProvisioner::new(kube.clone());
+        let mut bound_spec = sample_spec();
+        bound_spec.ranger = Some(bound(Some(("engine-1", "pw"))));
+        p.update(&bound_spec).await.unwrap();
         p.update(&sample_spec()).await.unwrap();
-        assert!(kube
-            .deleted
-            .lock()
-            .unwrap()
-            .contains(&"Secret/demo-ranger-secret".to_string()));
+        let deleted = kube.deleted.lock().unwrap();
+        assert!(deleted.contains(&"Secret/demo-ranger-secret".to_string()));
+        assert!(
+            deleted.contains(&format!("Secret/demo-ranger-{TEST_CREDENTIAL_ID}")),
+            "{deleted:?}"
+        );
     }
 
     #[test]
@@ -2940,7 +2962,7 @@ mod tests {
     /// The live cluster of a fully rolled Trino engine `demo` on `cred`.
     fn rolled_trino(kube: &crate::kube_client::FakeKube, cred: &str) {
         use crate::rollout::tests::{ready_pod, rolled_deployment, secret};
-        kube.set_live(secret("demo-ranger-secret", cred));
+        kube.set_live(secret(&format!("demo-ranger-{cred}"), cred));
         kube.set_live(rolled_deployment("demo-coordinator", cred));
         kube.set_live(rolled_deployment("demo-worker", cred));
         let labels = json!({ "app.kubernetes.io/instance": "demo" });
@@ -3019,5 +3041,106 @@ mod tests {
             .ranger_rollout("egret-engines", "demo", "c2")
             .await
             .is_err());
+    }
+
+    /// Each credential is rendered into its OWN Secret, which both roles mount:
+    /// a pod built from a template that names a credential can only mount that
+    /// credential's content (review round 1 of Task 6b).
+    #[test]
+    fn each_credential_has_its_own_secret_which_both_roles_mount() {
+        let spec_for = |id: &str| {
+            let mut spec = sample_spec();
+            spec.ranger = Some(bound_as(id, Some(("engine-1", "pw"))));
+            spec
+        };
+        let (a, b) = (spec_for("cred-1"), spec_for("cred-2"));
+        let name = |s: &EngineSpec| {
+            trino_ranger_secret(s).unwrap()["metadata"]["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(name(&a), "demo-ranger-cred-1");
+        assert_eq!(name(&b), "demo-ranger-cred-2");
+        assert_eq!(name(&a), name(&spec_for("cred-1")), "deterministic");
+        let secret = trino_ranger_secret(&a).unwrap();
+        assert_eq!(
+            secret["metadata"]["labels"]["egret/component"],
+            crate::rollout::RANGER_SECRET_COMPONENT
+        );
+        for role in [Role::Coordinator, Role::Worker] {
+            let dep = trino_deployment(&a, role);
+            let volume = dep["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == "ranger-secret")
+                .cloned()
+                .unwrap();
+            assert_eq!(volume["secret"]["secretName"], "demo-ranger-cred-1");
+        }
+    }
+
+    /// The interleave the per-credential name closes: the Deployments and pods
+    /// name c2, but only c1's Secret was ever written. The pods cannot be
+    /// running c2's content, so the rollout is not complete.
+    #[tokio::test]
+    async fn pods_of_the_new_template_without_its_secret_are_not_rolled_out() {
+        use crate::kube_client::FakeKube;
+        use crate::rollout::tests::secret;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        rolled_trino(&kube, "c2");
+        kube.live.lock().unwrap().remove("Secret/demo-ranger-c2");
+        kube.set_live(secret("demo-ranger-c1", "c1"));
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "demo", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
+    }
+
+    /// Engine delete removes every Ranger Secret of THIS engine — listed by its
+    /// labels, plus the legacy name — and none of another engine whose name
+    /// starts the same.
+    #[tokio::test]
+    async fn delete_removes_every_ranger_secret_of_this_engine_only() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        for (engine, id) in [("demo", "c1"), ("demo", "c2"), ("demo-x", "c3")] {
+            let mut spec = sample_spec();
+            spec.name = engine.into();
+            spec.ranger = Some(bound_as(id, Some(("engine-1", "pw"))));
+            kube.apply(&trino_ranger_secret(&spec).unwrap())
+                .await
+                .unwrap();
+        }
+        p.delete("egret-engines", "demo").await.unwrap();
+        let deleted = kube.deleted.lock().unwrap();
+        for gone in ["demo-ranger-c1", "demo-ranger-c2", "demo-ranger-secret"] {
+            assert!(deleted.contains(&format!("Secret/{gone}")), "{deleted:?}");
+        }
+        assert!(!deleted.contains(&"Secret/demo-x-ranger-c3".to_string()));
+    }
+
+    /// The retire of a credential deletes exactly its Secret (and the legacy
+    /// one), never the current credential's.
+    #[tokio::test]
+    async fn retiring_deletes_exactly_the_retired_credentials_secret() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        p.delete_ranger_secret("egret-engines", "demo", "c1")
+            .await
+            .unwrap();
+        assert_eq!(
+            *kube.deleted.lock().unwrap(),
+            vec![
+                "Secret/demo-ranger-c1".to_string(),
+                "Secret/demo-ranger-secret".to_string()
+            ]
+        );
     }
 }

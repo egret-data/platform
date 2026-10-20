@@ -81,6 +81,16 @@ pub trait KubeClient: Send + Sync {
         name: &str,
     ) -> anyhow::Result<Option<Value>>;
 
+    /// The names of the objects of one kind matching a label selector in the
+    /// namespace (metadata only: listing Secrets never transfers their data).
+    async fn list_object_names(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>>;
+
     /// The whole Pod objects matching a label selector in the namespace — the
     /// pod-level half of a rollout observation (annotations, deletion
     /// timestamp, phase and conditions).
@@ -311,27 +321,43 @@ impl KubeClient for FakeKube {
             .map(|o| serde_json::json!({ "metadata": o["metadata"] })))
     }
 
+    async fn list_object_names(
+        &self,
+        _api_version: &str,
+        kind: &str,
+        _namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        self.read_failure()?;
+        let wanted = parse_selector(label_selector);
+        let deleted = self.deleted.lock().unwrap().clone();
+        Ok(self
+            .applied
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, o)| {
+                o["kind"].as_str() == Some(kind)
+                    && !deleted.contains(key)
+                    && matches_selector(o, &wanted)
+            })
+            .map(|(_, o)| o["metadata"]["name"].as_str().unwrap_or("").to_string())
+            .collect())
+    }
+
     async fn list_pod_objects(
         &self,
         _namespace: &str,
         label_selector: &str,
     ) -> anyhow::Result<Vec<Value>> {
         self.read_failure()?;
-        // Equality selectors only (`k=v[,k=v]`), which is all egret uses.
-        let wanted: Vec<(&str, &str)> = label_selector
-            .split(',')
-            .filter_map(|kv| kv.split_once('='))
-            .collect();
+        let wanted = parse_selector(label_selector);
         Ok(self
             .live_pods
             .lock()
             .unwrap()
             .iter()
-            .filter(|p| {
-                wanted
-                    .iter()
-                    .all(|(k, v)| p["metadata"]["labels"][*k].as_str() == Some(*v))
-            })
+            .filter(|p| matches_selector(p, &wanted))
             .cloned()
             .collect())
     }
@@ -390,6 +416,20 @@ impl KubeClient for FakeKube {
     ) -> anyhow::Result<kube::api::AttachedProcess> {
         anyhow::bail!("exec not supported in fake kube")
     }
+}
+
+/// Equality selectors only (`k=v[,k=v]`), which is all egret uses.
+fn parse_selector(selector: &str) -> Vec<(&str, &str)> {
+    selector
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .collect()
+}
+
+fn matches_selector(obj: &Value, wanted: &[(&str, &str)]) -> bool {
+    wanted
+        .iter()
+        .all(|(k, v)| obj["metadata"]["labels"][*k].as_str() == Some(*v))
 }
 
 /// True for the API server's "not found" answer. A missing object and a resource
@@ -618,6 +658,28 @@ impl KubeClient for LiveKube {
             Some(meta) => Ok(Some(serde_json::json!({ "metadata": meta.metadata }))),
             None => Ok(None),
         }
+    }
+
+    async fn list_object_names(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        use kube::api::{Api, ListParams};
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let list = api
+            .list_metadata(&ListParams::default().labels(label_selector))
+            .await?;
+        Ok(list
+            .items
+            .into_iter()
+            .filter_map(|o| o.metadata.name)
+            .collect())
     }
 
     async fn list_pod_objects(

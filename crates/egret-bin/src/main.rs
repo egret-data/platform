@@ -795,6 +795,19 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
             .map_err(|e| format!("{e:#}"))
     }
 
+    async fn delete_ranger_secret(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<(), String> {
+        self.for_kind(kind)
+            .delete_ranger_secret(namespace, name, credential_id)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
         if kind == "starrocks" {
             // StarRocks pods are owned by the kube-starrocks operator (not plain

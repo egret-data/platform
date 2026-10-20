@@ -10,8 +10,10 @@
 //!
 //! **Tied to one credential.** The provisioners stamp the credential's
 //! non-secret id ([`RANGER_CREDENTIAL_ANNOTATION`]) on the pod template of
-//! every workload that runs the plugin, and on the `{name}-ranger-secret` the
-//! password is rendered into. A probe asks about ONE id, so a rollout that
+//! every workload that runs the plugin, and the password is rendered into a
+//! Secret of its own, `{name}-ranger-{id}` ([`ranger_secret_name`]), which
+//! those pod templates mount: a pod can only hold the content of the
+//! credential its template names. A probe asks about ONE id, so a rollout that
 //! completed for an older apply (an older credential) never answers for a
 //! newer rotation.
 //!
@@ -22,8 +24,8 @@
 //!
 //! What counts as complete:
 //!
-//! * the Secret carries the id (a concurrent apply of an older credential that
-//!   rewrote it after ours did is caught here);
+//! * the current credential's own Secret exists (and names the id): pods of
+//!   its template cannot have started before it was written;
 //! * each workload (Trino: the coordinator and worker Deployments; StarRocks:
 //!   the FE StatefulSet — the CN runs no plugin) has the id on its pod
 //!   template, its status reflects its latest spec (`observedGeneration ==
@@ -46,12 +48,136 @@ use crate::spec::{EngineSpec, RangerRollout};
 /// pods were rendered with: its non-secret id, never the password.
 pub const RANGER_CREDENTIAL_ANNOTATION: &str = "egret/ranger-credential";
 
+/// The `egret/component` label value of every per-credential Ranger Secret, so
+/// an engine's teardown can list exactly its own (with `egret/engine={name}`).
+pub const RANGER_SECRET_COMPONENT: &str = "ranger-credential";
+
+/// The Secret an engine bound WITHOUT a credential is rendered into, and the
+/// one every engine used before the Secret was named per credential (Task 6b).
+pub fn legacy_ranger_secret_name(engine: &str) -> String {
+    format!("{engine}-ranger-secret")
+}
+
+/// The Secret the plugin's security XML is rendered into: one PER CREDENTIAL,
+/// `{engine}-ranger-{credential id}` (the id is not secret).
+///
+/// Per credential because the XML is mounted by `subPath`, which keeps the
+/// content a pod saw at start: with one shared name, two interleaved applies
+/// could leave pods of the NEW credential's template mounting the OLD
+/// credential's content, and a later re-apply could rewrite the Secret without
+/// rolling them — the probe would then say complete while every pod still held
+/// the previous credential. A pod built from a template that names credential
+/// X can only ever mount X's Secret, which is written once with X's content.
+pub fn ranger_secret_name(engine: &str, credential_id: Option<&str>) -> String {
+    match credential_id {
+        Some(id) => format!("{engine}-ranger-{id}"),
+        None => legacy_ranger_secret_name(engine),
+    }
+}
+
 /// The id of the credential `spec` renders, if it renders one.
 pub(crate) fn ranger_credential_id(spec: &EngineSpec) -> Option<&str> {
     spec.ranger
         .as_ref()
         .and_then(|r| r.credential.as_ref())
         .map(|c| c.id())
+}
+
+/// [`ranger_secret_name`] of what `spec` renders.
+pub(crate) fn spec_ranger_secret_name(spec: &EngineSpec) -> String {
+    ranger_secret_name(&spec.name, ranger_credential_id(spec))
+}
+
+/// Every Ranger Secret of engine `engine` in `namespace`: the per-credential
+/// ones, listed by their labels (`egret/engine={engine}` exactly, never a name
+/// prefix another engine's name could share), and the legacy name.
+pub(crate) async fn all_ranger_secret_names(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    engine: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut names = kube
+        .list_object_names(
+            "v1",
+            "Secret",
+            namespace,
+            &format!("egret/engine={engine},egret/component={RANGER_SECRET_COMPONENT}"),
+        )
+        .await?;
+    let legacy = legacy_ranger_secret_name(engine);
+    if !names.contains(&legacy) {
+        names.push(legacy);
+    }
+    Ok(names)
+}
+
+/// Unbind: delete every Ranger Secret of `engine`, best-effort (logged).
+pub(crate) async fn delete_all_ranger_secrets_best_effort(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    engine: &str,
+) {
+    let names = all_ranger_secret_names(kube, namespace, engine)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(engine, error = %e, "could not list the engine's ranger Secrets");
+            vec![legacy_ranger_secret_name(engine)]
+        });
+    for name in names {
+        let _ = kube.delete("v1", "Secret", namespace, &name).await;
+    }
+}
+
+/// Engine delete: `objects` plus every Ranger Secret of `engine`. All are
+/// attempted; a failure to list them is an error too, after the rest.
+pub(crate) async fn delete_with_ranger_secrets(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    engine: &str,
+    objects: &[(&str, &str, String)],
+) -> anyhow::Result<()> {
+    let mut all = objects.to_vec();
+    let listed = all_ranger_secret_names(kube, namespace, engine).await;
+    if let Ok(names) = &listed {
+        for name in names {
+            if !all.iter().any(|(_, k, n)| *k == "Secret" && n == name) {
+                all.push(("v1", "Secret", name.clone()));
+            }
+        }
+    }
+    let deleted = crate::kube_client::delete_objects(kube, namespace, &all).await;
+    match listed {
+        Ok(_) => deleted,
+        Err(e) => Err(match deleted {
+            Ok(()) => e.context("could not list the engine's ranger Secrets"),
+            Err(d) => d.context(format!("could not list the engine's ranger Secrets: {e:#}")),
+        }),
+    }
+}
+
+/// Delete the Secret of a RETIRED credential, `credential_id`, by its exact
+/// name — and the legacy-named Secret, which no pod mounts once a rollout of a
+/// per-credential Secret has been observed complete. Called only after that
+/// observation (`EngineProvisioner::delete_ranger_secret`).
+pub(crate) async fn delete_retired_ranger_secret(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    engine: &str,
+    credential_id: &str,
+) -> anyhow::Result<()> {
+    crate::kube_client::delete_objects(
+        kube,
+        namespace,
+        &[
+            (
+                "v1",
+                "Secret",
+                ranger_secret_name(engine, Some(credential_id)),
+            ),
+            ("v1", "Secret", legacy_ranger_secret_name(engine)),
+        ],
+    )
+    .await
 }
 
 fn name_of(obj: &Value) -> &str {
@@ -101,7 +227,7 @@ fn check_template_and_generation<'a>(
 
 /// The Secret's check: it was last written with credential `expected`.
 pub(crate) fn check_secret(obj: Option<&Value>, expected: &str) -> Result<(), String> {
-    let obj = obj.ok_or("the ranger Secret not found")?;
+    let obj = obj.ok_or("the current credential's ranger Secret not found")?;
     if annotated(&obj["metadata"]["annotations"]) != Some(expected) {
         return Err(format!(
             "Secret {}: it does not hold the current credential",
@@ -196,18 +322,23 @@ pub(crate) enum Workload {
     StatefulSet(String),
 }
 
-/// Read the Secret, the workloads and the pods, and judge them all against
-/// `expected`. The first check that does not hold is the `Pending` reason.
+/// Read the current credential's Secret (`{engine}-ranger-{expected}`), the
+/// workloads and the pods, and judge them all against `expected`. The first check that does not hold is the `Pending` reason.
 pub(crate) async fn observe(
     kube: &dyn KubeClient,
     namespace: &str,
-    secret_name: &str,
+    engine: &str,
     workloads: &[Workload],
     pod_selector: &str,
     expected: &str,
 ) -> anyhow::Result<RangerRollout> {
     let secret = kube
-        .get_object_metadata("v1", "Secret", namespace, secret_name)
+        .get_object_metadata(
+            "v1",
+            "Secret",
+            namespace,
+            &ranger_secret_name(engine, Some(expected)),
+        )
         .await?;
     let mut verdict = check_secret(secret.as_ref(), expected);
     for w in workloads {

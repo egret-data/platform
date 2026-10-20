@@ -528,13 +528,15 @@ pub struct PluginCredential { pub username: String, pub password: String }   // 
 pub(crate) async fn ensure(st: &CpState, engine: &Engine) -> Result<PluginCredential, CpError>;
 /// Mint a new current credential, demote the old to "previous", return the new one.
 pub(crate) async fn rotate(st: &CpState, engine: &Engine) -> Result<PluginCredential, CpError>;
-/// After a successful apply: delete the previous credential's secret and clear the column.
-pub(crate) async fn retire_previous(st: &CpState, engine_id: Uuid);
+/// (Superseded by Task 6b.) Retire the previous credential only once the rollout of
+/// the current one is OBSERVED complete: exact id, compare-and-set on both columns;
+/// the unconditional `retire_previous` exists only behind the `test-util` feature.
+pub async fn retire_previous_if_rolled_out(&self, engine: &Engine, port: &dyn EngineProvisioningPort) -> RolloutRetire;
 pub struct DbVerifier { /* engine store + secrets */ }
 impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant time */ }
 ```
 
-**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
+**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left; each credential rendered into its own Secret `{name}-ranger-{id}`, deleted by exact name after its retire), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
 
 - [ ] **Step 1: Migration**
 

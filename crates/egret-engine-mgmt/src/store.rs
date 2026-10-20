@@ -263,6 +263,20 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// The PROVISIONED engines whose previous Ranger credential is pending
+    /// retirement — all the rollout-retire sweep looks at.
+    pub async fn list_engines_with_pending_ranger_prev(
+        &self,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
+             FROM engine_mgmt.engines \
+             WHERE ranger_secret_prev_id IS NOT NULL AND origin = 'provisioned' ORDER BY created_at",
+        )
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
             "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \

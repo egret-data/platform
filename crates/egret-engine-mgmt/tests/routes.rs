@@ -719,17 +719,42 @@ struct FakeEnginePort {
     /// with (`None`: nothing observed). `ranger_rollout` is `Complete` only
     /// when asked about exactly this id — as the real probe, which reads the
     /// id the apply stamped on the pod templates.
-    rolled_out: Arc<std::sync::Mutex<Option<String>>>,
+    rolled_out: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// When `Some`, `ranger_rollout` fails with it.
     rollout_error: Arc<std::sync::Mutex<Option<String>>>,
     /// `(engine name, credential id)` per `ranger_rollout` call.
     rollout_calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// An engine name whose `ranger_rollout` PANICS — a bug in one engine's
+    /// pass, which must not stop the sweep.
+    rollout_panic_for: Arc<std::sync::Mutex<Option<String>>>,
+    /// `(engine name, credential id)` per `delete_ranger_secret` call.
+    deleted_ranger_secrets: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl FakeEnginePort {
-    /// The fake cluster's pods now all run the credential `id`.
+    /// The fake cluster's pods now all run the credential `id` (and no
+    /// other credential is rolled out anywhere).
     fn roll_out(&self, id: Option<Uuid>) {
-        *self.rolled_out.lock().unwrap() = id.map(|i| i.to_string());
+        let mut set = self.rolled_out.lock().unwrap();
+        set.clear();
+        set.extend(id.map(|i| i.to_string()));
+    }
+    /// Another engine's pods have rolled out `id` too.
+    fn also_roll_out(&self, id: Option<Uuid>) {
+        self.rolled_out
+            .lock()
+            .unwrap()
+            .extend(id.map(|i| i.to_string()));
+    }
+    /// The `delete_ranger_secret` calls for engine `name`.
+    fn ranger_secret_deletes(&self, name: &str) -> Vec<String> {
+        self.deleted_ranger_secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, id)| id.clone())
+            .collect()
     }
     fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
         *self.status_response.lock().unwrap() = Some(status);
@@ -838,15 +863,30 @@ impl EngineProvisioningPort for FakeEnginePort {
             .lock()
             .unwrap()
             .push((name.to_string(), credential_id.to_string()));
+        if self.rollout_panic_for.lock().unwrap().as_deref() == Some(name) {
+            panic!("injected panic in the rollout probe of {name}");
+        }
         if let Some(e) = self.rollout_error.lock().unwrap().clone() {
             return Err(e);
         }
-        Ok(match self.rolled_out.lock().unwrap().as_deref() {
-            Some(id) if id == credential_id => egret_engine_mgmt_api::RangerRollout::Complete,
-            other => egret_engine_mgmt_api::RangerRollout::Pending(format!(
-                "the fake pods run {other:?}"
-            )),
+        Ok(if self.rolled_out.lock().unwrap().contains(credential_id) {
+            egret_engine_mgmt_api::RangerRollout::Complete
+        } else {
+            egret_engine_mgmt_api::RangerRollout::Pending("the fake pods run another".into())
         })
+    }
+    async fn delete_ranger_secret(
+        &self,
+        _kind: &str,
+        _ns: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<(), String> {
+        self.deleted_ranger_secrets
+            .lock()
+            .unwrap()
+            .push((name.to_string(), credential_id.to_string()));
+        Ok(())
     }
 }
 
@@ -5797,13 +5837,25 @@ async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observe
     }
     assert_eq!(ranger_slots(&f, id).await, (c2, c1));
     assert!(ranger_verifies(&f, id, &p1).await);
-    assert!(port
+    let asked: Vec<String> = port
         .rollout_calls
         .lock()
         .unwrap()
         .iter()
         .filter(|(n, _)| *n == name)
-        .all(|(_, asked)| Some(asked.as_str()) == c2.map(|c| c.to_string()).as_deref()));
+        .map(|(_, id)| id.clone())
+        .collect();
+    assert!(asked.len() >= 6, "3 sweeps and 3 reads probed: {asked:?}");
+    assert!(
+        asked
+            .iter()
+            .all(|id| Some(id.clone()) == c2.map(|c| c.to_string())),
+        "every probe asked about the CURRENT credential: {asked:?}"
+    );
+    assert!(
+        port.ranger_secret_deletes(&name).is_empty(),
+        "no Secret deleted"
+    );
 
     // 3. Meanwhile a rotation is refused BEFORE any apply, naming the rollout.
     let updates_before = port.updated.lock().unwrap().len();
@@ -5830,9 +5882,15 @@ async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observe
         secret_store(&f).resolve_plaintext(None, c1.unwrap()).await,
         Err(egret_secrets::SecretsError::NotFound)
     ));
+    assert_eq!(
+        port.ranger_secret_deletes(&name),
+        vec![c1.unwrap().to_string()],
+        "exactly the retired credential's Kubernetes Secret"
+    );
     sweep_ranger_retire(&f).await;
     assert_eq!(ranger_slots(&f, id).await, (c2, None));
     assert!(ranger_verifies(&f, id, &p2).await, "c2 untouched");
+    assert_eq!(port.ranger_secret_deletes(&name).len(), 1, "once");
 
     // 5. A rotation whose apply fails keeps both, and the pods — which still
     //    run c2, fully rolled out — never retire them.
@@ -5931,6 +5989,50 @@ async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
 
     assert_eq!(ranger_slots(&f, id).await, (c2, c1));
     assert!(ranger_verifies(&f, id, &p1).await);
+}
+
+/// A panic in one engine's retire pass is caught: the sweep goes on and
+/// retires another engine's previous credential (Task 6b review round 1).
+#[tokio::test]
+async fn a_panicking_retire_pass_does_not_stop_the_sweep() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_sweep_panic_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let mut engines = Vec::new();
+    for _ in 0..2 {
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let (status, j) =
+            create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+        let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+        let resp = f
+            .app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        port.also_roll_out(ranger_slots(&f, id).await.0);
+        engines.push((name, id));
+    }
+    *port.rollout_panic_for.lock().unwrap() = Some(engines[0].0.clone());
+
+    // Whichever engine the sweep reaches first, the healthy one is retired
+    // and the panicking one keeps its previous credential.
+    sweep_ranger_retire(&f).await;
+
+    assert!(ranger_slots(&f, engines[0].1).await.1.is_some(), "kept");
+    assert_eq!(ranger_slots(&f, engines[1].1).await.1, None, "retired");
 }
 
 /// A credential minted before Task 6 could contain `--`, which the renderer

@@ -740,6 +740,19 @@ pub trait EngineProvisioningPort: Send + Sync {
     ) -> Result<RangerRollout, String> {
         Err("this provisioner cannot observe a rollout".into())
     }
+    /// Delete the Kubernetes Secret of the RETIRED Ranger credential
+    /// `credential_id` (the credentials are rendered one Secret each), called
+    /// only after that credential was retired. Best-effort for the caller: an
+    /// orphan is removed at engine delete.
+    async fn delete_ranger_secret(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        _credential_id: &str,
+    ) -> Result<(), String> {
+        Err("this provisioner cannot delete a ranger Secret".into())
+    }
 }
 
 #[cfg(test)]

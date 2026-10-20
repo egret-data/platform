@@ -178,7 +178,7 @@ pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
 /// [`starrocks_cluster_cr`]) — never as a directory mount, which would
 /// shadow `fe.conf` and stop the FE booting.
 const FE_CONF_DIR: &str = "/opt/starrocks/fe/conf";
-/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-secret`.
+/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-{credential id}`.
 const RANGER_SECURITY_XML_KEY: &str = crate::ranger_config::STARROCKS_SECURITY_XML;
 /// Key (and file name) of the Ranger plugin audit config in `{name}-ranger-cm`.
 const RANGER_AUDIT_XML_KEY: &str = crate::ranger_config::STARROCKS_AUDIT_XML;
@@ -217,9 +217,11 @@ pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
-/// The `{name}-ranger-secret` Secret: the Ranger plugin's security XML, which
-/// carries the engine's `/ranger` credential (spec 2026-10-20-ranger-surface-auth
-/// A9). `None` unless `spec.ranger` is bound. Mounted into the FE by `subPath`
+/// The `{name}-ranger-{credential id}` Secret ([`crate::rollout::ranger_secret_name`]):
+/// the Ranger plugin's security XML, which carries the engine's `/ranger`
+/// credential (spec 2026-10-20-ranger-surface-auth A9). One per credential, so
+/// an FE pod of a template that names a credential can only mount that one's
+/// content. `None` unless `spec.ranger` is bound. Mounted into the FE by `subPath`
 /// through the CR's `secrets` field, so [`fe_config_checksum`] hashes it.
 pub fn starrocks_ranger_secret(spec: &EngineSpec) -> Option<Value> {
     let rendered = ranger_files(spec)?;
@@ -228,8 +230,9 @@ pub fn starrocks_ranger_secret(spec: &EngineSpec) -> Option<Value> {
         .expect("the renderer emits it");
     let mut secret = json!({
         "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-        "metadata": { "name": format!("{}-ranger-secret", spec.name), "namespace": spec.namespace,
-                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "metadata": { "name": crate::rollout::spec_ranger_secret_name(spec), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name,
+                                  "egret/component": crate::rollout::RANGER_SECRET_COMPONENT } },
         "stringData": { RANGER_SECURITY_XML_KEY: security_xml }
     });
     // Which credential this Secret now holds (its non-secret id), so a rollout
@@ -445,7 +448,7 @@ const RESTART_STAMP_KEY: &str = "egret.io/restarted-at";
 /// Pod-template annotation carrying a hash of every rendered config the FE
 /// **mounts**: `{name}-fe-cm` (`fe.conf`, via `configMapInfo`),
 /// `{name}-ranger-cm` (the Ranger audit XML, via `configMaps` + `subPath`) and
-/// `{name}-ranger-secret` (the security XML and its credential, via `secrets` +
+/// `{name}-ranger-{credential id}` (the security XML and its credential, via `secrets` +
 /// `subPath`).
 ///
 /// **This is what makes a config change reach the FE.** Neither mount is
@@ -657,7 +660,7 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // operator had no reason to roll anything.
     //
     // The audit XML comes from `{name}-ranger-cm`; the security XML carries the
-    // plugin's credential, so it comes from the `{name}-ranger-secret` Secret
+    // plugin's credential, so it comes from the `{name}-ranger-{credential id}` Secret
     // through the CR's `secrets` field (the same name+mountPath+subPath shape;
     // the operator names the pod volume itself, which no one here references).
     let mut extra_config_maps: Vec<Value> = Vec::new();
@@ -669,7 +672,7 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             "subPath": RANGER_AUDIT_XML_KEY,
         }));
         extra_secrets.push(json!({
-            "name": format!("{}-ranger-secret", spec.name),
+            "name": crate::rollout::spec_ranger_secret_name(spec),
             "mountPath": format!("{FE_CONF_DIR}/{RANGER_SECURITY_XML_KEY}"),
             "subPath": RANGER_SECURITY_XML_KEY,
         }));
@@ -1095,7 +1098,7 @@ impl EngineProvisioner for StarRocksProvisioner {
         self.apply_all(spec).await?;
         // `apply_all` only applies the Ranger ConfigMap and Secret when bound, so
         // toggling a RangerBinding OFF would otherwise leave `{name}-ranger-cm` and
-        // `{name}-ranger-secret` orphaned (the CR's mounts are dropped, but the
+        // `{name}-ranger-{credential id}` orphaned (the CR's mounts are dropped, but the
         // objects linger).
         // Best-effort delete it when Ranger is absent.
         if spec.ranger.is_none() {
@@ -1108,15 +1111,12 @@ impl EngineProvisioner for StarRocksProvisioner {
                     &format!("{}-ranger-cm", spec.name),
                 )
                 .await;
-            let _ = self
-                .kube
-                .delete(
-                    "v1",
-                    "Secret",
-                    &spec.namespace,
-                    &format!("{}-ranger-secret", spec.name),
-                )
-                .await;
+            crate::rollout::delete_all_ranger_secrets_best_effort(
+                &*self.kube,
+                &spec.namespace,
+                &spec.name,
+            )
+            .await;
         }
         // `apply_all` only applies the CN ConfigMap when `cn_config` is
         // non-empty, so clearing all CN overrides would otherwise orphan
@@ -1161,6 +1161,15 @@ impl EngineProvisioner for StarRocksProvisioner {
         }
         Ok(())
     }
+    async fn delete_ranger_secret(
+        &self,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<()> {
+        crate::rollout::delete_retired_ranger_secret(&*self.kube, namespace, name, credential_id)
+            .await
+    }
     async fn ranger_rollout(
         &self,
         namespace: &str,
@@ -1174,7 +1183,7 @@ impl EngineProvisioner for StarRocksProvisioner {
         crate::rollout::observe(
             &*self.kube,
             namespace,
-            &format!("{name}-ranger-secret"),
+            name,
             &[Workload::StatefulSet(format!("{name}-fe"))],
             &format!("app.starrocks.ownerreference/name={name}-fe"),
             credential_id,
@@ -1239,7 +1248,7 @@ impl EngineProvisioner for StarRocksProvisioner {
             ("networking.k8s.io/v1", "Ingress", format!("{name}-fe")),
             ("v1", "Secret", format!("{name}-ingress-tls")),
         ];
-        crate::kube_client::delete_objects(&*self.kube, namespace, &objects).await
+        crate::rollout::delete_with_ranger_secrets(&*self.kube, namespace, name, &objects).await
     }
 }
 
@@ -1640,7 +1649,7 @@ mod tests {
         spec
     }
 
-    /// A9: the credential is in `{name}-ranger-secret` and in no ConfigMap, CR
+    /// A9: the credential is in `{name}-ranger-{credential id}` and in no ConfigMap, CR
     /// or Debug output.
     #[test]
     fn the_credential_is_rendered_only_into_the_ranger_secret() {
@@ -1648,7 +1657,10 @@ mod tests {
         let secret = starrocks_ranger_secret(&spec).unwrap();
         assert_eq!(secret["kind"], "Secret");
         assert_eq!(secret["type"], "Opaque");
-        assert_eq!(secret["metadata"]["name"], "sr1-ranger-secret");
+        assert_eq!(
+            secret["metadata"]["name"],
+            format!("sr1-ranger-{TEST_CREDENTIAL_ID}")
+        );
         assert_eq!(secret["metadata"]["labels"]["egret/engine"], "sr1");
         assert!(secret["stringData"]["ranger-starrocks-security.xml"]
             .as_str()
@@ -1705,7 +1717,7 @@ mod tests {
             .await
             .expect_err("the CR apply fails");
         let applied = kube.applied.lock().unwrap();
-        assert!(applied.contains_key("Secret/sr1-ranger-secret"));
+        assert!(applied.contains_key(&format!("Secret/sr1-ranger-{TEST_CREDENTIAL_ID}")));
         assert!(!applied.contains_key("StarRocksCluster/sr1"));
     }
 
@@ -2773,7 +2785,7 @@ mod tests {
     /// CN pod still carries an OLD annotation, which must not matter.
     fn rolled_sr(kube: &crate::kube_client::FakeKube, cred: &str) {
         use crate::rollout::tests::{ready_pod, rolled_statefulset, secret};
-        kube.set_live(secret("sr1-ranger-secret", cred));
+        kube.set_live(secret(&format!("sr1-ranger-{cred}"), cred));
         kube.set_live(rolled_statefulset("sr1-fe", cred));
         *kube.live_pods.lock().unwrap() = vec![
             ready_pod("sr1-fe-0", fe_labels(), cred),
@@ -2831,5 +2843,71 @@ mod tests {
             .ranger_rollout("egret-engines", "sr1", "c2")
             .await
             .is_err());
+    }
+
+    /// Each credential has its own Secret, and the FE mounts exactly it; the
+    /// retire deletes exactly the retired one's; engine delete removes every
+    /// Ranger Secret of this engine and none of `sr1-x`'s (Task 6b round 1).
+    #[tokio::test]
+    async fn each_credential_has_its_own_secret_which_the_fe_mounts() {
+        use crate::kube_client::FakeKube;
+        let spec = bound_sr(Some(("engine-1", "pw")));
+        let name = format!("sr1-ranger-{TEST_CREDENTIAL_ID}");
+        assert_eq!(
+            starrocks_ranger_secret(&spec).unwrap()["metadata"]["name"],
+            name
+        );
+        let cr = starrocks_cluster_cr(&spec);
+        let secrets = cr["spec"]["starRocksFeSpec"]["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0]["name"], name);
+
+        let kube = Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        p.delete_ranger_secret("egret-engines", "sr1", "c1")
+            .await
+            .unwrap();
+        assert_eq!(
+            *kube.deleted.lock().unwrap(),
+            vec![
+                "Secret/sr1-ranger-c1".to_string(),
+                "Secret/sr1-ranger-secret".to_string()
+            ]
+        );
+
+        let kube = Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        let mut other = bound_sr(Some(("engine-2", "pw")));
+        other.name = "sr1-x".into();
+        kube.apply(&starrocks_ranger_secret(&spec).unwrap())
+            .await
+            .unwrap();
+        kube.apply(&starrocks_ranger_secret(&other).unwrap())
+            .await
+            .unwrap();
+        p.delete("egret-engines", "sr1").await.unwrap();
+        let deleted = kube.deleted.lock().unwrap();
+        assert!(deleted.contains(&format!("Secret/{name}")), "{deleted:?}");
+        assert!(deleted.contains(&"Secret/sr1-ranger-secret".to_string()));
+        assert!(!deleted.contains(&format!("Secret/sr1-x-ranger-{TEST_CREDENTIAL_ID}")));
+    }
+
+    /// The FE StatefulSet and its pod name c2, but only c1's Secret exists:
+    /// not complete.
+    #[tokio::test]
+    async fn an_fe_of_the_new_template_without_its_secret_is_not_rolled_out() {
+        use crate::kube_client::FakeKube;
+        use crate::rollout::tests::secret;
+        let kube = Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        rolled_sr(&kube, "c2");
+        kube.live.lock().unwrap().remove("Secret/sr1-ranger-c2");
+        kube.set_live(secret("sr1-ranger-c1", "c1"));
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "sr1", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
     }
 }

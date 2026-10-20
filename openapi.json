@@ -4238,7 +4238,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The engine row flattened with live Kubernetes status",
+            "description": "The engine row flattened with live Kubernetes status. Side effect: when a provisioned engine's previous Ranger credential is pending and the rollout of the current one is observed complete, this read retires the previous one",
             "content": {
               "application/json": {
                 "schema": {
