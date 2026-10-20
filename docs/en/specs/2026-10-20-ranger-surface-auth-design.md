@@ -70,9 +70,9 @@ Not measured (plan Task 1 must measure before relying on them):
 | A7 | New config `ranger.auth_mode`: `required` (**default**) \| `anonymous`. In `required` an unauthenticated request gets 401. `anonymous` is an explicit opt-out for throwaway local stacks only; it logs a `warn!` at startup and on each anonymous download names the exposure. |
 | A8 | **Decided (user): plugin 2.5.0 / Trino 470 is no longer supported; the floor is 2.8.0.** No internal listener, no anonymous carve-out. Details and the inventory of what changes are in §4.6. |
 | A9 | The credential goes into a **Kubernetes Secret**, never a ConfigMap, and is mounted into the plugin config path. ❓ Task 1 must read how the provisioner mounts the plugin xml today; if it is a ConfigMap that is a prerequisite change (small, but it comes first). |
-| A10 | **Rotation** follows the standing rule *never delete a secret value the cluster may still hold*: on rotate, egret accepts **old and new** until the engine reports (via its next poll) that it is running with the new one, or until an operator-set expiry. Because plugins read the xml only at start (to be measured), rotate = new secret + rolling restart of the engine pods. |
+| A10 | **Rotation** follows the standing rule *never delete a secret value the cluster may still hold*. Each engine row keeps a **current** and one **previous** credential (`ranger_secret_id`, `ranger_secret_prev_id`); both verify. Rotating commits the new current and demotes the old one **before** the apply; the previous one is deleted by exact id only after a successful apply (provisioned engines) or at the next rotation (external engines, where no apply can prove the operator re-installed it). Never a prefix sweep except at engine delete. Plugins read the XML only at start (Task 1 re-measures this), so a rotation is a rolling restart of the engine pods. |
 | A11 | **External engines** (registered, operator-run, SP4d-4 Part C) get the same credential, displayed once at registration/rotation. Their operator pastes it into their own plugin config. |
-| A12 | Auth failures are **logged and counted** (`governance` Overview "plugin" signal gains `auth_failed`), and a 401/403 poll is recorded in the same table as successful polls (`record_plugin_download`) so drift reporting does not read a locked-out engine as "never connected". |
+| A12 | Auth failures are **logged and counted** per engine (`policy.ranger_auth_failures`, only for engines that exist, so a caller cannot grow the table by inventing ids), and Overview shows an `engine_auth_failing` item when an engine's latest failure is newer than its latest successful download. (The earlier idea of recording the failed poll in `ranger_plugin_downloads` is dropped: that table is keyed by a verified service and a rejected request has none.) |
 | A13 | Out of scope: mTLS, Kerberos, JWT (present in master `RangerRESTClient` but not measured in the shipped jars), per-profile credentials shared by several engines, serving roles/tags/userstore endpoints. |
 
 ## 4. Design
@@ -93,8 +93,9 @@ also compare against the previous secret during A10 overlap). The download handl
 `anonymous` mode keeps today's behaviour, with a startup `warn!` naming the exposure.
 
 ### 4.3 Storage
-One secret per engine, `egret-ranger-{engine_id}`, in the existing secret store used for engine secrets. No new table if
-`engines` already carries secret references for `egret-internal-{id}`; otherwise one migration adds the reference column.
+Secrets live in the existing secret store, named `engine-ranger-{engine_id}-{generation}`. The engine row references them with two new
+columns (`ranger_secret_id`, `ranger_secret_prev_id`). The existing `internal_secret_id`/`monitor_secret_id` pair is **Trino-only**
+(`rotate_engine_secrets` refuses StarRocks), so it cannot be reused. External engines may carry the columns (migration 0184's CHECK does not name them).
 Migration number to be reserved at implementation time (`git ls-tree origin/main migrations/`; main tops out at 0199 today).
 
 ### 4.4 Provisioner (`egret-engine-mgmt-api/src/ranger_config.rs`)

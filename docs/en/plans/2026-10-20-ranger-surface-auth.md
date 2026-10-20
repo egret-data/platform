@@ -763,7 +763,7 @@ git commit -m "feat(provisioner): give each engine its Ranger credential through
     /* body does not contain the password; contains PASSWORD_PLACEHOLDER and "/ranger/service/plugins/policies/download/" */ }
 ```
 
-- [ ] **Step 2: Run to confirm failure** — `cargo test -p engine-mgmt …` as appropriate: `cargo test -p egret-engine-mgmt --test routes external_credential` ⇒ FAIL.
+- [ ] **Step 2: Run to confirm failure** — `cargo test -p egret-engine-mgmt --test routes external_credential` ⇒ FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -880,7 +880,7 @@ git commit -m "docs(ranger): the authenticated surface, its lifecycle and the li
 
 **Spec coverage:** A1 prefix → T3; A2 `/service` removed → T3 (test `the_old_root_service_prefix_is_gone`); A3 Basic per engine → T4/T5; A4 both paths → T3; A5 binding + tag service + crud 403 → T4; A6 Bearer kept → T4; A7 `required` default, `anonymous` opt-out → T4; A8 2.5.0 dropped → T2; A9 Secret not ConfigMap → T6; A10 rotation window → T5/T6; A11 external credential → T7; A12 failures logged/counted/Overview → T8 (the ledger-row half of A12 — recording a failed poll in `ranger_plugin_downloads` — is **not** implemented: that table's key is `(service_id, plugin_id, kind)` and a rejected request has no verified service, so a separate counter table is used instead; amend spec A12 accordingly when merging); A13 out of scope → nothing built. §5 verification → T1, T9; measurements → T1.
 
-**Spec amendments this plan forces (apply to the spec in the same PR):** (1) the engine credential uses its own two columns because the existing internal-secret pair is Trino-only; (2) rotation keeps exactly one previous credential (not "old and new until the engine reports"); (3) A12 as above.
+**Spec amendments this plan forces (already applied to the spec):** (1) the engine credential uses its own two columns because the existing internal-secret pair is Trino-only; (2) rotation keeps exactly one previous credential (not "old and new until the engine reports"); (3) A12 as above.
 
 **Type consistency:** `EngineIdentity`, `EngineCredentialVerifier`, `plugin_username`, `engine_id_from_username` (T4) are the names used in T5/T7; `PluginCredential` (T5) vs `PluginCredentialRef` (T6, borrowed view) vs `PluginCredentialDto` (T7, wire); `ensure`/`rotate`/`retire_previous` (T5) are the names called in T6/T7; `ranger_surface`, `RANGER_SURFACE_PREFIX`, `plugin_base_url` (T3) used in T4/T6/T7.
 
