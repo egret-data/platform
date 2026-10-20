@@ -2,7 +2,7 @@
 
 > **Demo only. Never expose to a network.** This stack uses fixed, public development secrets and credentials. It is not a production topology.
 
-One command starts the whole platform on Docker, with no Kubernetes: Egret, Postgres, an S3-compatible object store, Keycloak for SSO, a Trino engine, Data Apps (marimo), a mail catcher, a PDF/PNG renderer, and a sample workspace with a dataset, three charts and a dashboard.
+One command starts the whole platform on Docker, with no Kubernetes: Egret, Postgres, an S3-compatible object store, Keycloak for SSO, a Trino engine, Data Apps (marimo), a mail catcher, a PDF/PNG renderer, and a sample workspace with a dataset, three charts, a dashboard and an Iceberg warehouse. *Add engine* starts more Trino engines as Docker containers.
 
 ```bash
 just demo-up
@@ -17,15 +17,16 @@ just demo-up
 | Data Apps (marimo editor and published apps, opened from the UI) | `http://apps.localtest.me:8080` (a sibling hostname behind the same edge port; you do not open it directly) | same login as Egret |
 | Mailpit (every mail the demo sends) | `http://localhost:8025` | none |
 | Trino | internal only, registered in workspace `default` as database `trino-demo` | catalogs `tpch` and `memory` |
+| *Add engine* (Control Plane → Engines) | Trino engines egret starts as containers on this machine's Docker, internal only (see "Engines") | Trino only; the first use pulls `trinodb/trino:483`; about 1.5 to 2 GB of RAM per engine |
 
 Behind the one port, an edge nginx serves the frontend and Keycloak (`/auth`) on `egret.localtest.me`, and the Data Apps on `apps.localtest.me`, so the browser and the backend see the same OIDC issuer. Postgres, the object store (bucket `warehouse`), the renderer and Trino are not published to the host. The two published ports (the edge and Mailpit) bind to `127.0.0.1` only. On a remote VM, reach them through an SSH tunnel, for example `ssh -L 8080:localhost:8080 -L 8025:localhost:8025 user@vm`; the browser address stays `http://egret.localtest.me:8080`, which resolves to `127.0.0.1` on your own machine.
 
-The seed creates, in workspace `default`: database `trino-demo`, dataset `orders` (TPC-H `tpch.tiny.orders`) with metrics `revenue` and `order_count`, charts "Revenue by order status", "Revenue by month" and "Orders by priority", the dashboard "Sales overview", and a workspace SMTP setting that points at Mailpit.
+The seed creates, in workspace `default`: database `trino-demo`, dataset `orders` (TPC-H `tpch.tiny.orders`) with metrics `revenue` and `order_count`, charts "Revenue by order status", "Revenue by month" and "Orders by priority", the dashboard "Sales overview", a workspace SMTP setting that points at Mailpit, and for engines a storage connection `demo-rustfs` (the demo object store, bucket `warehouse`) with the warehouse `demo-warehouse`, whose registry catalog is `demo_warehouse`.
 
 ## Requirements
 
 - Docker with Compose v2, [`just`](https://github.com/casey/just), `curl` and `python3` (the seed and readiness scripts use them).
-- About 6 to 8 GB of RAM free for Docker.
+- About 6 to 8 GB of RAM free for Docker, plus about 1.5 to 2 GB for each engine you add (a single-node engine measured 1.5 GB resident with its default 1 GB heap).
 - The first `just demo-up` builds the backend (a Rust compile) and takes 20 to 40 minutes. The first build also pip-installs the Data Apps payload (marimo, duckdb, polars, pyarrow, plotly and more; the backend image is about 1.5 GB). Later runs reuse the cached images.
 - `*.localtest.me` resolves to `127.0.0.1` through public DNS. On an offline machine add this line to `/etc/hosts`:
 
@@ -70,6 +71,39 @@ In workspace `default`, open Apps, choose "+ App", name it, and the marimo edito
 - The editor has **no autocomplete** in this stack: Egret's proxy refuses marimo's language server (`/api/lsp`) by design.
 - To check the whole lifecycle in a browser (create, edit, run a cell, publish, open as a viewer), run `just demo-verify-apps` with the stack up. It needs Node and Playwright: install it (`npm i playwright` and `npx playwright install chromium`) or set `PLAYWRIGHT_MODULE_DIR` to the folder that holds `node_modules/playwright`. Set `DEMO_PORT` (and `DEMO_APPS_URL`) if you changed the port. It prints `OK <step>` per step and exits 0, or exits 1 with a screenshot path.
 
+## Engines (Add engine)
+
+*Add engine* works in this stack without Kubernetes: Egret starts each engine as Docker containers through the `docker-proxy` service (read "Safety" first). To try it:
+
+1. Control Plane → Engines → *Add engine*. Keep the type Trino, enter a name, and mark `demo_warehouse` primary.
+2. For a single node, open *Worker* in the configuration and set *Replicas* to `0` (left blank, the engine gets one worker container). Leave per-user delegation at its default: it resolves to JWT, and the engine fetches Egret's signing keys from `http://egret:8080`.
+3. *Create engine*. The status turns from `provisioning` to `running`: measured 25 to 60 s with the image already present. The first engine pulls `trinodb/trino:483` first, which adds a minute or more.
+4. On the engine's *Workspaces* tab, *Add workspace* → `Default`. The engine then shows in SQL Lab as a database with the engine's name; queries run as the signed-in user.
+5. To remove it, use the engine's `⋯` menu → *Delete engine*. Its containers are removed.
+
+Each engine is a container named `egret-engine-egret-engines-<name>-coordinator` (and `…-worker-<i>`), labelled `egret.managed=true` and `egret.project=egret-demo`, on the network `egret-demo_default`, with no published ports, no mounts and all capabilities dropped. `just demo-down` and `just demo-reset` remove them.
+
+Under Docker, the following are Kubernetes-only and not available:
+
+- An engine's pod logs, log follow and exec (the *Logs* and *Exec* buttons answer "not available with the Docker engine provisioner"). Read the logs with `docker logs egret-engine-egret-engines-<name>-coordinator`. A failed engine's status message carries its last log lines.
+- Ingress, autoscaling, extra config or secret mounts, init and extra containers, image pull secrets, additional exposed ports, a shared process namespace, and StarRocks engines: the create or save fails with an error that names them.
+- CPU and memory requests, probes and placement settings have no Docker meaning. CPU and memory *limits* become container limits; left blank, the container has none.
+
+To check the whole flow in a browser (add an engine, wait for `running`, assign it, run `SELECT 1` and a write and read on `demo_warehouse` in SQL Lab, open its monitor, delete it, check that its containers are gone), run `just demo-verify-engine` with the stack up. It needs Node, Playwright (as for `demo-verify-apps`) and the `docker` CLI, and takes about two minutes. It prints `OK <step>` per step and exits 0, or exits 1 naming the step, with a screenshot. `DELEGATION=impersonate` runs it with impersonation delegation instead, `KEEP_ENGINE=1` leaves the engine running, and `STRICT_MONITOR=1` makes the monitor step fail while the monitor does not list the query (see Known behaviour).
+
+### Engine settings
+
+The demo sets these in `deploy/docker-compose.demo.yml`. They live in the `[engines]` section (environment variables `EGRET_ENGINES__…`):
+
+| Key | Demo value | Meaning |
+|---|---|---|
+| `EGRET_ENGINES__PROVISIONER` | `docker` | `auto` (default: Kubernetes in cluster or from a kubeconfig, else none), `kubernetes`, `docker` or `none`. `docker` is never chosen by `auto`. `none` builds no Kubernetes client, so it also turns off the engine logs, exec and monitor routes. |
+| `EGRET_ENGINES__DOCKER__HOST` | `tcp://docker-proxy:2375` | Docker API endpoint, `unix://` or `tcp://`. Default `unix:///var/run/docker.sock`. |
+| `EGRET_ENGINES__DOCKER__NETWORK` | `egret-demo_default` | Network the engine containers join. Required with `docker`. |
+| `EGRET_ENGINES__DOCKER__PROJECT` | `egret-demo` | Value of the `egret.project` label. Egret never touches a container without `egret.managed=true` or with another project. |
+| `EGRET_ENGINES__DOCKER__CALLBACK_URL` | unset | URL the engines use to reach Egret, when it differs from the default (derived from `catalog.public_url`, here `http://egret:8080`). The JWT signing keys are always fetched from `catalog.public_url`. |
+| `EGRET_ENGINES__DOCKER__ALLOWED_IMAGES` | unset (`["trinodb/trino"]`) | Image repositories an engine may use, exact match without the tag, as a JSON array. |
+
 ## Stop and reset
 
 | Command | Effect |
@@ -100,7 +134,7 @@ Mailpit stays on `http://localhost:8025`.
 
 ## What is not in this stack yet
 
-- **Engine provisioning** (*Add engine*) runs on Docker: see "Safety" below. The first *Add engine* pulls `trinodb/trino:483`, so it takes longer than later ones; `just demo-up` does not pre-pull it.
+- **Engine provisioning** (*Add engine*) runs on Docker, Trino only: see "Engines" and "Safety". The first *Add engine* pulls `trinodb/trino:483`, so it takes longer than later ones; `just demo-up` does not pre-pull it.
 - Workflow tasks that run containers (the container runner) are not configured. Plain tasks such as `Log` run; container and script tasks are expected to fail.
 - Only the Trino engine is included. StarRocks and RisingWave are not.
 
@@ -129,4 +163,10 @@ Mailpit stays on `http://localhost:8025`.
   - The 403 on `/api/lsp/health` and "Language server initialization failed" in the console are expected (see Data Apps).
   - After you publish, the Versions dialog can still say "Nothing has been published yet" until you reload the page.
   - Publish right after Ctrl+S can answer 409 (the header refreshes the draft revision every 5 s); wait a few seconds and publish again.
+- **An engine stays `provisioning`**: list its containers with `docker ps -a --filter label=egret.engine=<name>` and read the log with `docker logs egret-engine-egret-engines-<name>-coordinator`. An engine with no container at all was removed outside Egret (for example by `just demo-down`): delete it in the UI and add it again. If the container exited, Docker may be short of memory: on Docker Desktop raise the memory limit (Settings → Resources), give each engine 1.5 to 2 GB, and prefer single-node engines (worker replicas `0`).
+- **Known behaviour, engines** (product issues found while checking this stack; they are not specific to Docker):
+  - The engine's *Monitor* tab shows "Engine not reachable — is a coordinator running?" and lists no queries. The cluster summary calls Trino's `GET /v1/node`, which answers 404 on Trino 483; an engine with JWT delegation (the default) gets no `egret-monitor` sign-in at all; and with impersonation the monitor signs in but Ranger lets it see no other user's queries.
+  - After `just demo-down` and `just demo-up`, an engine that was running stays listed as `provisioning` with no containers: the containers are gone and nothing recreates them. *Restart* answers that the engine has no containers; delete the engine and add it again. Restarting only Egret (`docker compose … restart egret`) leaves the engines running, and they report `running` again as soon as Egret is back.
+  - The delete dialog says "This destroys the engine's Kubernetes cluster"; it removes the engine's containers. After a delete the Engines list can keep showing the engine until you reload the page.
+  - The engine's log repeats every 30 s "Error getting Roles; service not found … response=404" from the Ranger plugin. Queries are not affected.
 - **The login is `admin-sso` and nothing shows**: that is the "No workspaces yet" screen. See "Run it".

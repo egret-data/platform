@@ -60,6 +60,16 @@ demo-verify-apps:
     [ -z "$CALLER_APPS_URL" ] || DEMO_APPS_URL="$CALLER_APPS_URL"
     exec node deploy/demo/verify-apps.mjs
 
+# Browser check of Add engine: add a Trino engine, query it, delete it (needs Node, Playwright and docker; see deploy/demo/verify-engine.mjs)
+demo-verify-engine:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # demo.env supplies the defaults; values the caller exported win (as in deploy/demo/wait.sh).
+    CALLER_PORT="${DEMO_PORT:-}"
+    set -a; . deploy/demo/demo.env; set +a
+    [ -z "$CALLER_PORT" ] || DEMO_PORT="$CALLER_PORT"
+    exec node deploy/demo/verify-engine.mjs
+
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
 #
 # `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
