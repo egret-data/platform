@@ -3,25 +3,33 @@
 // open its editor (marimo, served from the apps origin inside an iframe), run a cell, publish,
 // open the published app as a viewer. Prints "OK <step>" per step; exits 1 with a screenshot.
 //   DEMO_PORT=18080 node deploy/demo/verify-apps.mjs
+// Env: BASE, DEMO_PORT, DEMO_APPS_URL (or DEMO_APPS_HOST; set DEMO_APPS_URL when BASE is not on localtest.me).
 // STATE (session cookies) and SHOT_DIR default to the system temp dir, never the repo.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 
-const MOD = process.env.PLAYWRIGHT_MODULE_DIR ?? "/Users/1pro-l4r8/Documents/github/data-portal/docs/node_modules";
+// Playwright is resolved from this script's folders, then the current directory, then PLAYWRIGHT_MODULE_DIR
+// (a folder that holds node_modules/playwright).
 let chromium;
-try {
-  ({ chromium } = createRequire(path.join(MOD, "noop.js"))("playwright"));
-} catch (e) {
-  console.error(`playwright not found under ${MOD} (set PLAYWRIGHT_MODULE_DIR): ${e.message}`);
+const lookups = [import.meta.url, path.join(process.cwd(), "noop.js")];
+if (process.env.PLAYWRIGHT_MODULE_DIR) lookups.push(path.join(process.env.PLAYWRIGHT_MODULE_DIR, "noop.js"));
+for (const from of lookups) {
+  try {
+    ({ chromium } = createRequire(from)("playwright"));
+    break;
+  } catch {}
+}
+if (!chromium) {
+  console.error("playwright not found: run `npm i playwright` (and `npx playwright install chromium`) or set PLAYWRIGHT_MODULE_DIR");
   process.exit(2);
 }
 
 const BASE = process.env.BASE ?? `http://egret.localtest.me:${process.env.DEMO_PORT ?? "8080"}`;
-const APPS = new URL(
-  process.env.DEMO_APPS_URL ?? `${new URL(BASE).protocol}//${process.env.DEMO_APPS_HOST ?? "apps.localtest.me"}:${new URL(BASE).port}`,
-).host;
+const baseUrl = new URL(BASE);
+// Apps origin: DEMO_APPS_URL, else DEMO_APPS_HOST (default apps.localtest.me) on BASE's port.
+const APPS = new URL(process.env.DEMO_APPS_URL ?? `${baseUrl.protocol}//${process.env.DEMO_APPS_HOST ?? "apps.localtest.me"}${baseUrl.port ? `:${baseUrl.port}` : ""}`).host;
 const STATE = process.env.STATE ?? path.join(os.tmpdir(), "egret-demo-verify-apps-state.json");
 const SHOT_DIR = process.env.SHOT_DIR ?? os.tmpdir();
 const EMAIL = process.env.EGRET_ADMIN_EMAIL ?? "admin@egret.local";

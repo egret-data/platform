@@ -68,7 +68,7 @@ just demo-logs egret
 In workspace `default`, open Apps, choose "+ App", name it, and the marimo editor opens in the page. Publish creates a version that viewers open from the Apps list. Each author and each viewer gets their own marimo process; they live inside the Egret container, so they stop with it.
 
 - The editor has **no autocomplete** in this stack: Egret's proxy refuses marimo's language server (`/api/lsp`) by design.
-- To check the whole lifecycle in a browser (create, edit, run a cell, publish, open as a viewer), run `just demo-verify-apps` with the stack up. It needs Node and a Playwright install; set `PLAYWRIGHT_MODULE_DIR` to the folder that holds `node_modules/playwright`, and `DEMO_PORT` (and `DEMO_APPS_URL`) if you changed the port. It prints `OK <step>` per step and exits 0, or exits 1 with a screenshot path.
+- To check the whole lifecycle in a browser (create, edit, run a cell, publish, open as a viewer), run `just demo-verify-apps` with the stack up. It needs Node and Playwright: install it (`npm i playwright` and `npx playwright install chromium`) or set `PLAYWRIGHT_MODULE_DIR` to the folder that holds `node_modules/playwright`. Set `DEMO_PORT` (and `DEMO_APPS_URL`) if you changed the port. It prints `OK <step>` per step and exits 0, or exits 1 with a screenshot path.
 
 ## Stop and reset
 
@@ -87,7 +87,7 @@ DEMO_URL=http://egret.localtest.me:18080
 DEMO_APPS_URL=http://apps.localtest.me:18080
 ```
 
-`DEMO_PORT` is the port the stack publishes. `DEMO_URL` is what egret, Keycloak and the browser use as the public address, so a mismatch breaks SSO. `DEMO_APPS_URL` is the Data Apps address: the same port, host `apps.localtest.me`. Then run `just demo-reset && just demo-up`, because Keycloak and egret read the address when they first start.
+`DEMO_PORT` is the port the stack publishes. `DEMO_URL` is what egret, Keycloak and the browser use as the public address, so a mismatch breaks SSO. `DEMO_APPS_URL` is the Data Apps address: the same port, host `apps.localtest.me`. The verify script derives the apps host from `DEMO_APPS_URL`, else from `DEMO_APPS_HOST` (default `apps.localtest.me`) on the port of `BASE`; if you point `BASE` at another host, also set `DEMO_APPS_URL`. Then run `just demo-reset && just demo-up`, because Keycloak and egret read the address when they first start.
 
 To try another port without editing the file, export both in the shell before the command (shell values win over `demo.env`):
 
