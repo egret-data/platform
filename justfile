@@ -19,6 +19,33 @@ up:
 down:
     docker compose -f deploy/docker-compose.dev.yml down
 
+# ---- Demo stack: the whole platform on Docker, no Kubernetes (see docs/en/guides/demo-stack.md) ----
+demo_compose := "docker compose --env-file deploy/demo/demo.env -f deploy/docker-compose.demo.yml"
+
+# Build, start, seed, and print the URL and credentials
+demo-up:
+    {{demo_compose}} up -d --build
+    ./deploy/demo/wait.sh
+    ./deploy/demo/seed.sh
+
+# Stop the demo; removes engine containers egret provisioned (label egret.managed=true); keeps data volumes
+demo-down:
+    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    {{demo_compose}} down
+
+# Stop the demo and DELETE its data volumes
+demo-reset:
+    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    {{demo_compose}} down -v
+
+# Re-run the idempotent seed
+demo-seed:
+    ./deploy/demo/seed.sh
+
+# Follow the demo's logs (optionally one service: just demo-logs egret)
+demo-logs service="":
+    {{demo_compose}} logs -f {{service}}
+
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
 #
 # `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
