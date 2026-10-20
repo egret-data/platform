@@ -56,7 +56,10 @@ MASK_HASH; row filter "country = 'US'". (Default `ranger-plugins-common`:
 `EgretPluginAuthTest` pins what a stock plugin SENDS to its admin: from 2.8.0 on, with
 `policy.rest.client.username/password` set, it sends `Authorization: Basic ...` to
 `/service/plugins/secure/policies/download/<svc>`; 2.5.0 ignores those keys and sends no
-header, which is why 2.5.0 is no longer supported. Run it per version: `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest`.
+header, which is why 2.5.0 is no longer supported. The same switch applies to the tag download
+(`/service/tags/secure/download/<svc>`), roles (`/service/roles/secure/download/<svc>`) and the user store
+(`/service/xusers/secure/download/<svc>`); the test pins the tag paths both ways and records roles and userstore
+(measurements doc, Q4). Run it per version: `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest`.
 Egret's surface-auth design rests on it.
 
 ## Why 2.8.0 is the floor
