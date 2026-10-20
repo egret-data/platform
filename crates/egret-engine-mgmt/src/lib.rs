@@ -13,6 +13,7 @@ pub mod http_error;
 pub mod monitor;
 pub mod probe;
 pub mod profile_compiler;
+pub mod ranger_credential;
 pub mod starrocks_ddl;
 pub mod state;
 pub mod store;

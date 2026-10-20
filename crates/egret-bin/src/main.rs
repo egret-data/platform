@@ -1437,9 +1437,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
             mode,
-            // No engine credential verifier yet (surface-auth Task 5): in
-            // `required` mode only the operator bearer authenticates.
-            verifier: None,
+            // Engine plugins authenticate with their per-engine credential
+            // (current or previous, `egret_engine_mgmt::ranger_credential`),
+            // read from the same engine rows and secret store the engine-mgmt
+            // seam writes them to.
+            verifier: Some(std::sync::Arc::new(
+                egret_engine_mgmt::ranger_credential::DbVerifier::new(
+                    egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+                        egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+                        workspace_secrets.clone(),
+                    ),
+                ),
+            )),
         })
     } else {
         None

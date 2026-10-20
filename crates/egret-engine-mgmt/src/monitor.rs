@@ -447,6 +447,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,

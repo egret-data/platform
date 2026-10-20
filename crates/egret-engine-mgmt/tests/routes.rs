@@ -5424,6 +5424,101 @@ async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
     );
 }
 
+/// Engine delete removes the engine's Ranger plugin credential — the current
+/// AND the previous one the row names — and sweeps any `engine-ranger-{id}-*`
+/// row the row no longer names (spec 2026-10-20-ranger-surface-auth §4.3).
+/// Another engine's credential, and a name that only contains the prefix,
+/// survive.
+#[tokio::test]
+async fn delete_engine_removes_its_ranger_credentials() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_ranger_cred_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let (status, j) = create_engine_via_api(
+            &f,
+            &token,
+            &format!("trino-{}", Uuid::new_v4().simple()),
+            wh_id,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+        ids.push(Uuid::parse_str(j["id"].as_str().unwrap()).unwrap());
+    }
+    let (id_a, id_b) = (ids[0], ids[1]);
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    let secrets = secret_store(&f);
+    let creds = egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+        store.clone(),
+        secrets.clone(),
+    );
+    let row = |id| {
+        let store = store.clone();
+        async move { store.get_engine(id).await.unwrap().unwrap() }
+    };
+    creds.ensure(&row(id_a).await).await.expect("ensure a");
+    creds.rotate(&row(id_a).await).await.expect("rotate a");
+    creds.ensure(&row(id_b).await).await.expect("ensure b");
+    let a = row(id_a).await;
+    let (a_current, a_prev) = (
+        a.ranger_secret_id.unwrap(),
+        a.ranger_secret_prev_id.unwrap(),
+    );
+    let b_current = row(id_b).await.ranger_secret_id.unwrap();
+    let orphan = secrets
+        .create(
+            None,
+            &format!("engine-ranger-{id_a}-orphan"),
+            None,
+            "orphan-value",
+        )
+        .await
+        .expect("mint orphan");
+    let lookalike = secrets
+        .create(
+            None,
+            &format!("x-engine-ranger-{id_a}-x"),
+            None,
+            "lookalike-value",
+        )
+        .await
+        .expect("mint lookalike");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/engines/{id_a}"), &token, None))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    for sid in [a_current, a_prev, orphan] {
+        assert!(
+            matches!(
+                secrets.resolve_plaintext(None, sid).await,
+                Err(egret_secrets::SecretsError::NotFound)
+            ),
+            "ranger credential {sid} must be deleted with the engine"
+        );
+    }
+    for sid in [b_current, lookalike] {
+        assert!(
+            secrets.resolve_plaintext(None, sid).await.is_ok(),
+            "secret {sid} must survive engine A's delete"
+        );
+    }
+}
+
 // ── SP3a: engine catalogs over the registry ──────────────────────────────────
 
 /// Attach `wh_id`'s own registry catalog (created alongside the warehouse) to

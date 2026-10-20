@@ -1940,7 +1940,7 @@ impl std::fmt::Debug for EngineInternalSecrets {
 
 /// 32 random bytes, URL-safe base64 without padding — no `:`, so it is also
 /// safe as a Basic-auth password.
-fn random_internal_secret() -> String {
+pub(crate) fn random_internal_secret() -> String {
     use base64::Engine as _;
     use rand::RngCore;
     let mut b = [0u8; 32];
@@ -2583,6 +2583,19 @@ fn engine_owned_secret_ids(engine: &Engine) -> Vec<Uuid> {
     .collect()
 }
 
+/// The engine's Ranger plugin credentials (current and previous, see
+/// [`crate::ranger_credential`]). Kept OUT of [`engine_owned_secret_ids`] on
+/// purpose: that list doubles as `delete_external_engine`'s "an external row
+/// holds no secret" guard, and an external engine may carry this credential
+/// (spec 2026-10-20-ranger-surface-auth §4.3). The provisioned delete path and
+/// create compensation delete these too.
+fn engine_ranger_secret_ids(engine: &Engine) -> Vec<Uuid> {
+    [engine.ranger_secret_id, engine.ranger_secret_prev_id]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// Undo a failed engine create. Every step logs its own failure and continues,
 /// with ONE exception: if the cluster delete itself fails, this stops right
 /// there (mirroring the real `DELETE /engines/{id}` handler, which returns
@@ -2646,7 +2659,8 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     if let Some(engine_id) = undo.engine_id {
         match st.engine_mgmt.get_engine(engine_id).await {
             Ok(Some(engine)) => {
-                let owned = engine_owned_secret_ids(&engine);
+                let mut owned = engine_owned_secret_ids(&engine);
+                owned.extend(engine_ranger_secret_ids(&engine));
                 match st.engine_mgmt.delete_engine(engine_id).await {
                     Ok(()) => {
                         for secret_id in owned {
@@ -6116,7 +6130,11 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // covers `internal_secret_id`/`monitor_secret_id` (Task 6). Never
     // `tls_cert_secret_ref`: admin-provided and possibly shared with other
     // engines.
-    for sid in engine_owned_secret_ids(engine) {
+    // The Ranger plugin credential (current and previous) goes with them.
+    for sid in engine_owned_secret_ids(engine)
+        .into_iter()
+        .chain(engine_ranger_secret_ids(engine))
+    {
         match st.secrets.delete(None, sid).await {
             Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
             Err(e) => {
@@ -6135,13 +6153,20 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // HERE and ONLY here: the engine row is already gone and its delete already
     // went through `deleting`, so no apply for this engine id can still be in
     // flight to race this sweep.
+    //
+    // The same holds for `engine-ranger-{id}-*`: a credential a lost
+    // compare-and-set or a failed delete left behind (see
+    // `crate::ranger_credential`); after the row is gone no plugin can
+    // authenticate with any of them anyway.
     let internal_prefix = format!("engine-internal-{}-", engine.id);
     let monitor_prefix = format!("engine-monitor-{}-", engine.id);
+    let ranger_prefix = crate::ranger_credential::secret_name_prefix(engine.id);
     match st.secrets.list(None).await {
         Ok(all) => {
             for meta in all {
                 if !meta.name.starts_with(&internal_prefix)
                     && !meta.name.starts_with(&monitor_prefix)
+                    && !meta.name.starts_with(&ranger_prefix)
                 {
                     continue;
                 }
@@ -7260,6 +7285,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: origin.into(),
             external_host: None,
@@ -8120,6 +8147,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
