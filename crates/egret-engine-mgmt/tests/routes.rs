@@ -5523,12 +5523,14 @@ async fn delete_engine_removes_its_ranger_credentials() {
 
 /// The `(username, password)` an apply rendered into the Ranger binding.
 fn rendered_ranger_credential(spec: &egret_engine_mgmt_api::EngineSpec) -> (String, String) {
-    spec.ranger
+    let c = spec
+        .ranger
         .as_ref()
         .expect("the engine is bound to a profile")
         .credential
-        .clone()
-        .expect("a bound engine is applied with its ranger credential")
+        .as_ref()
+        .expect("a bound engine is applied with its ranger credential");
+    (c.username().to_string(), c.password().to_string())
 }
 
 /// Whether `/ranger` would accept `password` for `engine_id` (A10: current OR
@@ -5789,6 +5791,87 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// A credential minted before Task 6 could contain `--`, which the renderer
+/// refuses in every build. An apply must then fail LOUDLY (409, naming the
+/// rotation route) and apply nothing; rotating replaces it with a renderable one.
+#[tokio::test]
+async fn an_unrenderable_stored_credential_fails_the_apply_until_rotated() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_unrenderable_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let legacy = secret_store(&f)
+        .create(
+            None,
+            &format!("engine-ranger-{id}-legacy"),
+            None,
+            "pre-task-6--value",
+        )
+        .await
+        .expect("mint legacy credential");
+    sqlx::query("UPDATE engine_mgmt.engines SET ranger_secret_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(legacy)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/engines/{id}/rotate-secrets"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("rotate-ranger-credential"), "body={j}");
+    assert!(
+        !msg.contains("pre-task-6--value"),
+        "the value must not be echoed"
+    );
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "nothing applied"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (_, pw) = rendered_ranger_credential(&port.last_updated());
+    assert!(!pw.contains("--"));
+    assert!(ranger_verifies(&f, id, &pw).await);
+    assert!(
+        !ranger_verifies(&f, id, "pre-task-6--value").await,
+        "retired"
+    );
 }
 
 /// An engine bound to no profile has no credential to rotate; an unknown

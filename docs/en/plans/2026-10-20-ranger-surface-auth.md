@@ -534,7 +534,7 @@ pub struct DbVerifier { /* engine store + secrets */ }
 impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant time */ }
 ```
 
-**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; pods still on the old password keep authenticating during the roll; `retire_previous` deletes only that exact id after a successful apply — never a prefix sweep (standing rule).
+**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate until the apply is accepted; the previous one is deleted (by exact id) once Kubernetes accepts the apply, which can be before the pods have finished rolling — never a prefix sweep (standing rule).
 
 - [ ] **Step 1: Migration**
 

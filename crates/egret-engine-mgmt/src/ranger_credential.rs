@@ -13,9 +13,12 @@
 //!   rotation.
 //!
 //! **Both verify.** A rotation commits the new current and demotes the old one
-//! to previous BEFORE the apply that renders it, so pods still running with the
-//! old password keep authenticating while they roll. The previous one is deleted
-//! by its exact id only after a successful apply ([`retire_previous`]) — never by
+//! to previous BEFORE the apply that renders it, so both authenticate until that
+//! apply is accepted. The previous one is deleted by its exact id once
+//! Kubernetes ACCEPTS an apply that rendered the current one
+//! ([`RangerCredentialStore::retire_previous_rendered`]) — which can be before
+//! the pods have finished rolling, so a pod still running with the old password
+//! can be refused until it is replaced. Never by
 //! a prefix sweep (that happens only at engine delete, when no apply can still
 //! be in flight). A rotation is REFUSED while the previous credential is still
 //! pending retirement, so nothing ever pushes a credential the cluster may hold

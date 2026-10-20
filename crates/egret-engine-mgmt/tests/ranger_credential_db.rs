@@ -419,3 +419,40 @@ fn the_debug_output_never_carries_the_password() {
     assert!(dbg.contains("engine-x"));
     assert!(!dbg.contains("s3cr3t-value"));
 }
+
+/// `retire_previous_rendered`'s KEEP branch: an apply that rendered a credential
+/// which is no longer current (a rotation committed a newer one after the apply
+/// was built) must not retire the previous slot — that slot may hold exactly
+/// what this apply just put on the cluster.
+#[tokio::test]
+async fn retiring_after_an_apply_of_a_superseded_credential_keeps_the_previous() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let c1 = f.creds.ensure(&e).await.expect("ensure");
+    let c1_id = reload(&f, e.id).await.ranger_secret_id.unwrap();
+    let c2 = f
+        .creds
+        .rotate(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    assert_ne!(c1.password, c2.password);
+    let row = reload(&f, e.id).await;
+    assert_eq!(row.ranger_secret_prev_id, Some(c1_id));
+
+    // The apply that lands rendered c1, the now-previous credential.
+    f.creds.retire_previous_rendered(e.id, &c1.password).await;
+
+    let after = reload(&f, e.id).await;
+    assert_eq!(after.ranger_secret_prev_id, Some(c1_id), "previous kept");
+    assert_eq!(after.ranger_secret_id, row.ranger_secret_id);
+    assert!(
+        ranger_secret_rows(&f, e.id).await.contains(&c1_id),
+        "the previous credential's secret still exists"
+    );
+    assert!(verifies(&f, e.id, &c1.password).await);
+
+    // Control: the apply that rendered the current one does retire it.
+    f.creds.retire_previous_rendered(e.id, &c2.password).await;
+    assert_eq!(reload(&f, e.id).await.ranger_secret_prev_id, None);
+    assert!(!ranger_secret_rows(&f, e.id).await.contains(&c1_id));
+}

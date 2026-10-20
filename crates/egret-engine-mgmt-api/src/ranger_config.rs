@@ -40,12 +40,98 @@ pub const STARROCKS_ACCESS_CONTROL_LINE: &str = "access_control = ranger\n";
 /// Shown in the files an operator installs by hand when the password is not repeated.
 pub const PASSWORD_PLACEHOLDER: &str = "REPLACE_WITH_THE_ENGINE_PASSWORD";
 
-/// The credential an engine's plugin presents to egret's `/ranger` surface.
-/// Borrowed so the renderer never owns (or `Debug`s) a password.
+/// Why a credential cannot be rendered: it is written UNESCAPED into the
+/// plugin's security XML, so it must not carry `<` or `&` (markup), nor `--`
+/// (StarRocks' FE refuses a double hyphen in its config XML).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnrenderableCredential {
+    /// `"username"` or `"password"` — never the value.
+    pub field: &'static str,
+}
+
+impl std::fmt::Display for UnrenderableCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the plugin credential's {} contains `--`, `<` or `&`, so it cannot be rendered \
+             into the Ranger plugin's XML",
+            self.field
+        )
+    }
+}
+
+impl std::error::Error for UnrenderableCredential {}
+
+fn check_renderable(username: &str, password: &str) -> Result<(), UnrenderableCredential> {
+    let bad = |v: &str| v.contains('<') || v.contains('&') || v.contains("--");
+    if bad(username) {
+        return Err(UnrenderableCredential { field: "username" });
+    }
+    if bad(password) {
+        return Err(UnrenderableCredential { field: "password" });
+    }
+    Ok(())
+}
+
+/// The credential an engine's plugin presents to egret's `/ranger` surface,
+/// checked renderable ([`UnrenderableCredential`]) in every build: the only way
+/// to make one is [`RenderableCredential::new`], so the renderer can never be
+/// handed a value it would have to escape. Its `Debug` redacts the password.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RenderableCredential {
+    username: String,
+    password: String,
+}
+
+impl RenderableCredential {
+    pub fn new(
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Result<Self, UnrenderableCredential> {
+        let (username, password) = (username.into(), password.into());
+        check_renderable(&username, &password)?;
+        Ok(Self { username, password })
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
+    /// The borrowed form [`ranger_plugin_files`] takes.
+    pub fn as_ref(&self) -> PluginCredentialRef<'_> {
+        PluginCredentialRef {
+            username: &self.username,
+            password: &self.password,
+        }
+    }
+}
+
+impl std::fmt::Debug for RenderableCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderableCredential")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// A borrowed, already-checked credential for [`ranger_plugin_files`]. Built by
+/// [`PluginCredentialRef::new`] (checked) or [`RenderableCredential::as_ref`].
 #[derive(Clone, Copy)]
 pub struct PluginCredentialRef<'a> {
-    pub username: &'a str,
-    pub password: &'a str,
+    username: &'a str,
+    password: &'a str,
+}
+
+impl<'a> PluginCredentialRef<'a> {
+    pub fn new(username: &'a str, password: &'a str) -> Result<Self, UnrenderableCredential> {
+        check_renderable(username, password)?;
+        Ok(Self { username, password })
+    }
 }
 
 impl std::fmt::Debug for PluginCredentialRef<'_> {
@@ -169,17 +255,10 @@ fn security_xml(
     credential: Option<PluginCredentialRef<'_>>,
 ) -> String {
     let base = plugin_base_url(url);
-    // Nothing is escaped: the username is `engine-<uuid>` and the password is
-    // URL-safe base64, so neither can carry XML markup, and neither a `--`
-    // (StarRocks' FE refuses a config containing one).
+    // Nothing is escaped: a `PluginCredentialRef` can only be built checked
+    // (`check_renderable`), so neither value carries XML markup or a `--`.
     let creds = credential
         .map(|c| {
-            debug_assert!(
-                [c.username, c.password]
-                    .iter()
-                    .all(|v| !v.contains('<') && !v.contains('&') && !v.contains("--")),
-                "a plugin credential must not need XML escaping"
-            );
             format!(
                 "<property><name>ranger.plugin.{plugin}.policy.rest.client.username</name><value>{u}</value></property>\n\
 <property><name>ranger.plugin.{plugin}.policy.rest.client.password</name><value>{p}</value></property>\n",
@@ -263,10 +342,13 @@ mod tests {
         // credential is URL-safe base64 (`-` and `_` occur, never `--`).
         for credential in [
             None,
-            Some(PluginCredentialRef {
-                username: "engine-0b6f6c9e-3f5e-4c1a-9a43-2b1d1f3c4e5a",
-                password: "a-b_c-d_e-F0-9_zZ",
-            }),
+            Some(
+                PluginCredentialRef::new(
+                    "engine-0b6f6c9e-3f5e-4c1a-9a43-2b1d1f3c4e5a",
+                    "a-b_c-d_e-F0-9_zZ",
+                )
+                .unwrap(),
+            ),
         ] {
             let s = ranger_plugin_files(EngineKind::StarRocks, "sr1", URL, 1, credential);
             for (name, content) in &s.files {
@@ -288,10 +370,7 @@ mod tests {
             "svc",
             "http://e",
             30_000,
-            Some(PluginCredentialRef {
-                username: "engine-1",
-                password: "pw",
-            }),
+            Some(PluginCredentialRef::new("engine-1", "pw").unwrap()),
         );
         let xml = with.get(TRINO_SECURITY_XML).unwrap();
         assert!(xml.contains(
@@ -310,10 +389,7 @@ mod tests {
     /// files are byte-identical with and without it.
     #[test]
     fn the_credential_changes_only_the_security_xml() {
-        let cred = PluginCredentialRef {
-            username: "engine-1",
-            password: "pw",
-        };
+        let cred = PluginCredentialRef::new("engine-1", "pw").unwrap();
         for (kind, security) in [
             (EngineKind::Trino, TRINO_SECURITY_XML),
             (EngineKind::StarRocks, STARROCKS_SECURITY_XML),
@@ -338,6 +414,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The check holds in every build, not only under `debug_assertions`: a
+    /// credential that would need escaping is an error, never rendered.
+    #[test]
+    fn a_credential_that_would_need_escaping_is_refused_not_rendered() {
+        for (u, p, field) in [
+            ("engine-1", "abc--def", "password"),
+            ("engine-1", "a<b", "password"),
+            ("engine-1", "a&b", "password"),
+            ("engine--1", "pw", "username"),
+        ] {
+            assert_eq!(
+                RenderableCredential::new(u, p).unwrap_err(),
+                UnrenderableCredential { field },
+                "{u} / {p}"
+            );
+            assert_eq!(
+                PluginCredentialRef::new(u, p).unwrap_err(),
+                UnrenderableCredential { field }
+            );
+        }
+        let err = RenderableCredential::new("engine-1", "s3cr3t--x").unwrap_err();
+        assert!(
+            !err.to_string().contains("s3cr3t"),
+            "no value in the message"
+        );
+        let ok = RenderableCredential::new("engine-1", "a-b_c").unwrap();
+        assert_eq!((ok.username(), ok.password()), ("engine-1", "a-b_c"));
+        assert!(!format!("{ok:?}").contains("a-b_c"));
     }
 
     #[test]

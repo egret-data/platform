@@ -955,17 +955,34 @@ async fn ranger_binding(
     } else {
         crate::ranger_credential::ensure(st, engine).await?
     };
+    // Checked in every build: a credential the renderer would have to escape
+    // (only a pre-Task-6 one can be: `mint_password` re-draws a `--`) fails
+    // the apply loudly instead of rendering. Rotating mints a renderable one.
+    let credential =
+        egret_engine_mgmt_api::ranger_config::RenderableCredential::new(
+            credential.username,
+            credential.password,
+        )
+        .map_err(|e| {
+            tracing::error!(engine = %engine.name, error = %e,
+                "the engine's ranger credential cannot be rendered; rotate it");
+            CpError::Conflict(format!(
+                "engine {}: {e}. Rotate it with POST /api/control-plane/engines/{}/rotate-ranger-credential",
+                engine.name, engine.id
+            ))
+        })?;
     Ok(Some(egret_engine_mgmt_api::RangerBinding {
         service_name,
         egret_url: st.engine_egret_url.clone(),
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
-        credential: Some((credential.username, credential.password)),
+        credential: Some(credential),
     }))
 }
 
-/// After a SUCCESSFUL apply of `req`: the cluster now holds the credential
-/// `req` rendered, so the previous one may be retired — by exact id, and only
-/// while that credential is still the row's current one
+/// After a SUCCESSFUL apply of `req` — i.e. Kubernetes ACCEPTED it, which can be
+/// before the pods have finished rolling — retire the previous credential, by
+/// exact id, and only while the credential `req` rendered is still the row's
+/// current one
 /// ([`crate::ranger_credential::RangerCredentialStore::retire_previous_rendered`]).
 /// Never called after a failed apply: the cluster may still hold the previous
 /// credential (standing rule).
@@ -974,8 +991,9 @@ pub(crate) async fn retire_ranger_previous_after_apply(
     engine_id: Uuid,
     req: &EngineProvisionReq,
 ) {
-    if let Some((_, password)) = req.ranger.as_ref().and_then(|r| r.credential.as_ref()) {
-        crate::ranger_credential::retire_previous_rendered(st, engine_id, password).await;
+    if let Some(credential) = req.ranger.as_ref().and_then(|r| r.credential.as_ref()) {
+        crate::ranger_credential::retire_previous_rendered(st, engine_id, credential.password())
+            .await;
     }
 }
 
@@ -6390,23 +6408,26 @@ async fn rotate_engine_secrets(
 /// credential for a provisioned engine (Trino or StarRocks) and re-apply it
 /// (the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
 /// credential is committed and the old one demoted BEFORE the apply, so both
-/// authenticate while the pods roll; the old one is deleted by its exact id only
-/// after a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may
-/// still hold either — and a further rotation is refused (409) until a
-/// successful apply has retired the previous one; any later apply does.
+/// authenticate until the apply is accepted. The old one is deleted by its
+/// exact id as soon as Kubernetes ACCEPTS the apply — which can be before the
+/// pods have finished rolling, so a pod still running with the old password
+/// can be refused by `/ranger` until it is replaced. A failed apply deletes
+/// nothing — the cluster may still hold either — and a further rotation is
+/// refused (409) until an accepted apply has retired the previous one; any
+/// later accepted apply does.
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/rotate-ranger-credential",
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "A new Ranger plugin credential is applied; the engine's pods restart, and the previous credential is retired"),
+        (status = 204, description = "Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"),
         (status = 400, description = "The engine is bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "A previous rotation is still pending (its credential has not been retired by a successful apply yet; any successful apply retires it), or the engine changed concurrently (e.g. a delete in progress); nothing was applied. The engine is external (`code` = `engine_is_external`): egret does not rotate the credential of it here", body = ErrorBody),
-        (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later successful apply retires it", body = ErrorBody),
+        (status = 409, description = "Nothing was applied, for one of three reasons: a previous rotation is still pending (its credential has not been retired by an accepted apply yet; any accepted apply retires it); the engine changed concurrently (e.g. a delete in progress); or the engine is external (`code` = `engine_is_external`), and egret does not rotate an external engine's credential here", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

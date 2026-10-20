@@ -1428,7 +1428,9 @@ mod tests {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
-            credential: credential.map(|(u, p)| (u.to_string(), p.to_string())),
+            credential: credential.map(|(u, p)| {
+                crate::ranger_config::RenderableCredential::new(u, p).expect("renderable")
+            }),
         }
     }
 

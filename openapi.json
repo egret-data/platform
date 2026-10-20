@@ -5808,7 +5808,7 @@
         "tags": [
           "control-plane-engines"
         ],
-        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential for a provisioned engine (Trino or StarRocks) and re-apply it\n(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new\ncredential is committed and the old one demoted BEFORE the apply, so both\nauthenticate while the pods roll; the old one is deleted by its exact id only\nafter a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may\nstill hold either — and a further rotation is refused (409) until a\nsuccessful apply has retired the previous one; any later apply does.",
+        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential for a provisioned engine (Trino or StarRocks) and re-apply it\n(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new\ncredential is committed and the old one demoted BEFORE the apply, so both\nauthenticate until the apply is accepted. The old one is deleted by its\nexact id as soon as Kubernetes ACCEPTS the apply — which can be before the\npods have finished rolling, so a pod still running with the old password\ncan be refused by `/ranger` until it is replaced. A failed apply deletes\nnothing — the cluster may still hold either — and a further rotation is\nrefused (409) until an accepted apply has retired the previous one; any\nlater accepted apply does.",
         "operationId": "rotate_ranger_credential",
         "parameters": [
           {
@@ -5824,7 +5824,7 @@
         ],
         "responses": {
           "204": {
-            "description": "A new Ranger plugin credential is applied; the engine's pods restart, and the previous credential is retired"
+            "description": "Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"
           },
           "400": {
             "description": "The engine is bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
@@ -5867,7 +5867,7 @@
             }
           },
           "409": {
-            "description": "A previous rotation is still pending (its credential has not been retired by a successful apply yet; any successful apply retires it), or the engine changed concurrently (e.g. a delete in progress); nothing was applied. The engine is external (`code` = `engine_is_external`): egret does not rotate the credential of it here",
+            "description": "Nothing was applied, for one of three reasons: a previous rotation is still pending (its credential has not been retired by an accepted apply yet; any accepted apply retires it); the engine changed concurrently (e.g. a delete in progress); or the engine is external (`code` = `engine_is_external`), and egret does not rotate an external engine's credential here",
             "content": {
               "application/json": {
                 "schema": {
@@ -5887,7 +5887,7 @@
             }
           },
           "502": {
-            "description": "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later successful apply retires it",
+            "description": "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it",
             "content": {
               "application/json": {
                 "schema": {

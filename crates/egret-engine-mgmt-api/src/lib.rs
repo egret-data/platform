@@ -403,7 +403,7 @@ pub struct CatalogSpec {
 /// `apache-ranger` plugin polls egret's Ranger-Admin `/ranger` download API.
 ///
 /// Its `Debug` never prints the credential's password.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RangerBinding {
     /// `ranger.service.name` — the bound trino profile's name.
     pub service_name: String,
@@ -412,11 +412,11 @@ pub struct RangerBinding {
     pub egret_url: String,
     /// Policy/tag poll interval in ms (default 30_000).
     pub poll_interval_ms: u32,
-    /// `(username, password)` the plugin presents to egret's `/ranger` surface
-    /// (spec 2026-10-20-ranger-surface-auth A9). The provisioners render it
-    /// into the `{name}-ranger-secret` Secret, never a ConfigMap. `None`
-    /// renders no credential.
-    pub credential: Option<(String, String)>,
+    /// The credential the plugin presents to egret's `/ranger` surface (spec
+    /// 2026-10-20-ranger-surface-auth A9), checked renderable when it was made.
+    /// The provisioners render it into the `{name}-ranger-secret` Secret, never
+    /// a ConfigMap. `None` renders no credential.
+    pub credential: Option<ranger_config::RenderableCredential>,
 }
 
 impl RangerBinding {
@@ -424,21 +424,7 @@ impl RangerBinding {
     pub fn credential_ref(&self) -> Option<ranger_config::PluginCredentialRef<'_>> {
         self.credential
             .as_ref()
-            .map(|(username, password)| ranger_config::PluginCredentialRef { username, password })
-    }
-}
-
-impl std::fmt::Debug for RangerBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RangerBinding")
-            .field("service_name", &self.service_name)
-            .field("egret_url", &self.egret_url)
-            .field("poll_interval_ms", &self.poll_interval_ms)
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|(u, _)| (u, "<redacted>")),
-            )
-            .finish()
+            .map(ranger_config::RenderableCredential::as_ref)
     }
 }
 

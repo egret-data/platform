@@ -2850,10 +2850,13 @@ export const getControlPlaneEnginesRotateRangerCredentialUrl = (id: string,) => 
 credential for a provisioned engine (Trino or StarRocks) and re-apply it
 (the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
 credential is committed and the old one demoted BEFORE the apply, so both
-authenticate while the pods roll; the old one is deleted by its exact id only
-after a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may
-still hold either — and a further rotation is refused (409) until a
-successful apply has retired the previous one; any later apply does.
+authenticate until the apply is accepted. The old one is deleted by its
+exact id as soon as Kubernetes ACCEPTS the apply — which can be before the
+pods have finished rolling, so a pod still running with the old password
+can be refused by `/ranger` until it is replaced. A failed apply deletes
+nothing — the cluster may still hold either — and a further rotation is
+refused (409) until an accepted apply has retired the previous one; any
+later accepted apply does.
  */
 export const controlPlaneEnginesRotateRangerCredential = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateRangerCredentialResponse> => {
 
@@ -2906,10 +2909,13 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 credential for a provisioned engine (Trino or StarRocks) and re-apply it
 (the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
 credential is committed and the old one demoted BEFORE the apply, so both
-authenticate while the pods roll; the old one is deleted by its exact id only
-after a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may
-still hold either — and a further rotation is refused (409) until a
-successful apply has retired the previous one; any later apply does.
+authenticate until the apply is accepted. The old one is deleted by its
+exact id as soon as Kubernetes ACCEPTS the apply — which can be before the
+pods have finished rolling, so a pod still running with the old password
+can be refused by `/ranger` until it is replaced. A failed apply deletes
+nothing — the cluster may still hold either — and a further rotation is
+refused (409) until an accepted apply has retired the previous one; any
+later accepted apply does.
  */
 export const useControlPlaneEnginesRotateRangerCredential = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
