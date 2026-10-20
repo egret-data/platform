@@ -405,9 +405,40 @@ mod tests {
         (child, stdin)
     }
 
-    fn group_exists(pgid: u32) -> bool {
-        // SAFETY: signal 0 only checks that the group exists.
-        unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 }
+    /// Does the group still have a LIVE member? A process that has died but is waiting for its
+    /// parent to reap it (a zombie) does not count: where nothing reaps orphans, such as a
+    /// container whose first process is not an init, the zombies keep `killpg(pgid, 0)` succeeding
+    /// for ever. Linux reads `/proc`; elsewhere `killpg(pgid, 0)` is the best there is.
+    fn group_alive(pgid: u32) -> bool {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            // SAFETY: signal 0 only checks that the group exists.
+            return unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 };
+        };
+        dir.flatten().any(|e| {
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                return false;
+            };
+            // `pid (comm) state ppid pgrp ...`: `comm` may hold spaces and parentheses, so
+            // split after the LAST `)`.
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+                return false;
+            };
+            let mut f = rest.split_whitespace();
+            let (state, _ppid, pgrp) = (f.next(), f.next(), f.next());
+            pgrp == Some(&pgid.to_string()) && state != Some("Z")
+        })
+    }
+
+    /// `kill_group` returns once the leader is reaped; the leader's children get the same signal
+    /// at the same moment but may still be dying, so poll.
+    async fn group_gone(pgid: u32) -> bool {
+        for _ in 0..60 {
+            if !group_alive(pgid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
     }
 
     #[tokio::test]
@@ -416,11 +447,14 @@ mod tests {
         let pid = child.id().expect("pid");
         // Let `sh` fork its `sleep` before the group is signalled.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(group_exists(pid));
+        assert!(group_alive(pid));
 
         kill_group(&mut child, Duration::from_secs(5)).await;
 
-        assert!(!group_exists(pid), "the leader's group still has members");
+        assert!(
+            group_gone(pid).await,
+            "the leader's group still has members"
+        );
     }
 
     #[tokio::test]
@@ -441,6 +475,6 @@ mod tests {
         kill_group(&mut child, Duration::from_millis(500)).await;
 
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(!group_exists(pid));
+        assert!(group_gone(pid).await);
     }
 }
