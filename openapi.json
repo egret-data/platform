@@ -5803,6 +5803,102 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/rotate-ranger-credential": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential for a provisioned engine (Trino or StarRocks) and re-apply it\n(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new\ncredential is committed and the old one demoted BEFORE the apply, so both\nauthenticate while the pods roll; the old one is deleted by its exact id only\nafter a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may\nstill hold either — and a further rotation is refused (409) until a\nsuccessful apply has retired the previous one; any later apply does.",
+        "operationId": "rotate_ranger_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "A new Ranger plugin credential is applied; the engine's pods restart, and the previous credential is retired"
+          },
+          "400": {
+            "description": "The engine is bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A previous rotation is still pending (its credential has not been retired by a successful apply yet; any successful apply retires it), or the engine changed concurrently (e.g. a delete in progress); nothing was applied. The engine is external (`code` = `engine_is_external`): egret does not rotate the credential of it here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later successful apply retires it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/rotate-secrets": {
       "post": {
         "tags": [

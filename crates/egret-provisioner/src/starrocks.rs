@@ -177,41 +177,59 @@ pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
 /// [`starrocks_cluster_cr`]) — never as a directory mount, which would
 /// shadow `fe.conf` and stop the FE booting.
 const FE_CONF_DIR: &str = "/opt/starrocks/fe/conf";
-/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-cm`.
+/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-secret`.
 const RANGER_SECURITY_XML_KEY: &str = crate::ranger_config::STARROCKS_SECURITY_XML;
 /// Key (and file name) of the Ranger plugin audit config in `{name}-ranger-cm`.
 const RANGER_AUDIT_XML_KEY: &str = crate::ranger_config::STARROCKS_AUDIT_XML;
 
-/// The Ranger plugin's `ranger-starrocks-security.xml` + audit ConfigMap
-/// (`{name}-ranger-cm`). `None` unless `spec.ranger` is bound.
+/// The Ranger plugin's files for `spec`, `None` unless `spec.ranger` is bound.
+fn ranger_files(spec: &EngineSpec) -> Option<crate::ranger_config::RangerPluginFiles> {
+    let r = spec.ranger.as_ref()?;
+    Some(crate::ranger_config::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::StarRocks,
+        &r.service_name,
+        &r.egret_url,
+        r.poll_interval_ms.into(),
+        r.credential_ref(),
+    ))
+}
+
+/// The Ranger plugin's audit ConfigMap (`{name}-ranger-cm`). `None` unless
+/// `spec.ranger` is bound. The security XML is NOT here: it carries the
+/// plugin's credential, so it is in [`starrocks_ranger_secret`].
 ///
 /// CRITICAL: no XML comment here may contain a `--` (double-hyphen) sequence
 /// — that crashes the StarRocks FE boot (proven live in an earlier slice).
 /// This renderer emits no comments at all to stay safe by construction.
 pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
-    let r = spec.ranger.as_ref()?;
-    let rendered = crate::ranger_config::ranger_plugin_files(
-        egret_engine_mgmt_api::EngineKind::StarRocks,
-        &r.service_name,
-        &r.egret_url,
-        r.poll_interval_ms.into(),
-    );
-    let file = |name: &str| {
-        rendered
-            .get(name)
-            .expect("the renderer emits it")
-            .to_string()
-    };
-    let security_xml = file(RANGER_SECURITY_XML_KEY);
-    let audit_xml = file(RANGER_AUDIT_XML_KEY);
+    let rendered = ranger_files(spec)?;
+    let audit_xml = rendered
+        .get(RANGER_AUDIT_XML_KEY)
+        .expect("the renderer emits it");
     Some(json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-ranger-cm", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "data": {
-            RANGER_SECURITY_XML_KEY: security_xml,
             RANGER_AUDIT_XML_KEY: audit_xml,
         }
+    }))
+}
+
+/// The `{name}-ranger-secret` Secret: the Ranger plugin's security XML, which
+/// carries the engine's `/ranger` credential (spec 2026-10-20-ranger-surface-auth
+/// A9). `None` unless `spec.ranger` is bound. Mounted into the FE by `subPath`
+/// through the CR's `secrets` field, so [`fe_config_checksum`] hashes it.
+pub fn starrocks_ranger_secret(spec: &EngineSpec) -> Option<Value> {
+    let rendered = ranger_files(spec)?;
+    let security_xml = rendered
+        .get(RANGER_SECURITY_XML_KEY)
+        .expect("the renderer emits it");
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+        "metadata": { "name": format!("{}-ranger-secret", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { RANGER_SECURITY_XML_KEY: security_xml }
     }))
 }
 
@@ -417,8 +435,10 @@ const FE_META_MOUNT_PATH: &str = "/opt/starrocks/fe/meta";
 const RESTART_STAMP_KEY: &str = "egret.io/restarted-at";
 
 /// Pod-template annotation carrying a hash of every rendered config the FE
-/// **mounts**: `{name}-fe-cm` (`fe.conf`, via `configMapInfo`) and
-/// `{name}-ranger-cm` (the Ranger plugin XML, via `configMaps` + `subPath`).
+/// **mounts**: `{name}-fe-cm` (`fe.conf`, via `configMapInfo`),
+/// `{name}-ranger-cm` (the Ranger audit XML, via `configMaps` + `subPath`) and
+/// `{name}-ranger-secret` (the security XML and its credential, via `secrets` +
+/// `subPath`).
 ///
 /// **This is what makes a config change reach the FE.** Neither mount is
 /// self-refreshing: `configMapInfo` is resolved at boot, and a `subPath`
@@ -442,7 +462,7 @@ const RESTART_STAMP_KEY: &str = "egret.io/restarted-at";
 /// role's pod-template `ObjectMeta` (see [`RESTART_STAMP_KEY`] for the
 /// operator-source citation), so changing it rolls the StatefulSet.
 ///
-/// FE-only by design: both hashed ConfigMaps are FE mounts. The CN's own
+/// FE-only by design: every hashed object is an FE mount. The CN's own
 /// `{name}-cn-cm` is a separate surface this does not claim to cover.
 const CONFIG_CHECKSUM_KEY: &str = "egret/config-checksum";
 
@@ -456,6 +476,12 @@ fn fe_config_checksum(spec: &EngineSpec) -> String {
     // profile renders an empty string here.
     starrocks_ranger_configmap(spec)
         .map(|cm| cm.to_string())
+        .unwrap_or_default()
+        .hash(&mut h);
+    // The security XML, credential included: a rotation changes only this
+    // Secret, and its `subPath` mount is never refreshed in a running FE.
+    starrocks_ranger_secret(spec)
+        .map(|s| s.to_string())
         .unwrap_or_default()
         .hash(&mut h);
     format!("{:016x}", h.finish())
@@ -565,8 +591,9 @@ fn append_array(spec: &mut Value, key: &str, add: Option<&Value>) {
 }
 
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
-/// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus the Ranger
-/// XML ConfigMap under `configMaps` when a binding is present. When
+/// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus, when a
+/// binding is present, the Ranger audit XML ConfigMap under `configMaps` and the
+/// security XML Secret under `secrets`. When
 /// delegation TLS is enabled it also gets the TLS cert+key source Secret (via
 /// `secrets`), a build-keystore `initContainers` entry, and a writable
 /// `storageVolumes` keystore volume (see the T2c comment block below for the
@@ -620,19 +647,30 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // consumed only as `is_some()`, and the service name lives solely inside
     // `{name}-ranger-cm`), so nothing in the pod template changed and the
     // operator had no reason to roll anything.
+    //
+    // The audit XML comes from `{name}-ranger-cm`; the security XML carries the
+    // plugin's credential, so it comes from the `{name}-ranger-secret` Secret
+    // through the CR's `secrets` field (the same name+mountPath+subPath shape;
+    // the operator names the pod volume itself, which no one here references).
     let mut extra_config_maps: Vec<Value> = Vec::new();
+    let mut extra_secrets: Vec<Value> = Vec::new();
     if spec.ranger.is_some() {
-        let cm_name = format!("{}-ranger-cm", spec.name);
-        for key in [RANGER_SECURITY_XML_KEY, RANGER_AUDIT_XML_KEY] {
-            extra_config_maps.push(json!({
-                "name": cm_name,
-                "mountPath": format!("{FE_CONF_DIR}/{key}"),
-                "subPath": key,
-            }));
-        }
+        extra_config_maps.push(json!({
+            "name": format!("{}-ranger-cm", spec.name),
+            "mountPath": format!("{FE_CONF_DIR}/{RANGER_AUDIT_XML_KEY}"),
+            "subPath": RANGER_AUDIT_XML_KEY,
+        }));
+        extra_secrets.push(json!({
+            "name": format!("{}-ranger-secret", spec.name),
+            "mountPath": format!("{FE_CONF_DIR}/{RANGER_SECURITY_XML_KEY}"),
+            "subPath": RANGER_SECURITY_XML_KEY,
+        }));
     }
     if !extra_config_maps.is_empty() {
         fe_spec["configMaps"] = json!(extra_config_maps);
+    }
+    if !extra_secrets.is_empty() {
+        fe_spec["secrets"] = json!(extra_secrets);
     }
     // T2c: build the Java keystore `ssl_keystore_location` needs, from the
     // cert+key PEM the `{name}-ssl-secret` Secret carries (`fe.pem`).
@@ -929,8 +967,8 @@ pub fn starrocks_ingress(spec: &EngineSpec) -> Option<Value> {
 }
 
 /// Provisions a StarRocks engine (shared-data mode) via the kube-starrocks
-/// operator: an `fe.conf` ConfigMap, an optional Ranger XML ConfigMap, and the
-/// `StarRocksCluster` CR. The operator owns the FE/CN StatefulSets and pods.
+/// operator: an `fe.conf` ConfigMap, the optional Ranger audit ConfigMap and
+/// credential Secret, and the `StarRocksCluster` CR. The operator owns the FE/CN StatefulSets and pods.
 pub struct StarRocksProvisioner {
     kube: Arc<dyn KubeClient>,
 }
@@ -951,6 +989,10 @@ impl StarRocksProvisioner {
         }
         if let Some(cm) = starrocks_ranger_configmap(spec) {
             self.kube.apply(&cm).await?;
+        }
+        // Before the CR that mounts it.
+        if let Some(secret) = starrocks_ranger_secret(spec) {
+            self.kube.apply(&secret).await?;
         }
         if let Some(cm) = starrocks_ssl_configmap(spec) {
             self.kube.apply(&cm).await?;
@@ -1037,9 +1079,10 @@ impl EngineProvisioner for StarRocksProvisioner {
         // brand-new engine, but on an update it would tear down a running cluster
         // because one manifest was rejected. The caller restores the stored spec.
         self.apply_all(spec).await?;
-        // `apply_all` only applies the Ranger ConfigMap when bound, so toggling a
-        // RangerBinding OFF would otherwise leave `{name}-ranger-cm` orphaned (the
-        // CR's `configMaps` mount is dropped, but the ConfigMap lingers).
+        // `apply_all` only applies the Ranger ConfigMap and Secret when bound, so
+        // toggling a RangerBinding OFF would otherwise leave `{name}-ranger-cm` and
+        // `{name}-ranger-secret` orphaned (the CR's mounts are dropped, but the
+        // objects linger).
         // Best-effort delete it when Ranger is absent.
         if spec.ranger.is_none() {
             let _ = self
@@ -1049,6 +1092,15 @@ impl EngineProvisioner for StarRocksProvisioner {
                     "ConfigMap",
                     &spec.namespace,
                     &format!("{}-ranger-cm", spec.name),
+                )
+                .await;
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "Secret",
+                    &spec.namespace,
+                    &format!("{}-ranger-secret", spec.name),
                 )
                 .await;
         }
@@ -1144,6 +1196,7 @@ impl EngineProvisioner for StarRocksProvisioner {
             ("v1", "ConfigMap", format!("{name}-fe-cm")),
             ("v1", "ConfigMap", format!("{name}-cn-cm")),
             ("v1", "ConfigMap", format!("{name}-ranger-cm")),
+            ("v1", "Secret", format!("{name}-ranger-secret")),
             ("v1", "ConfigMap", format!("{name}-ssl-cm")),
             ("v1", "Secret", format!("{name}-ssl-secret")),
             ("batch/v1", "Job", format!("{name}-initpwd")),
@@ -1362,23 +1415,31 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         let rendered = ranger_plugin_files(
             egret_engine_mgmt_api::EngineKind::StarRocks,
             "sr1",
             "http://host.docker.internal:8080",
             egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+            None,
         );
         let cm = starrocks_ranger_configmap(&spec).unwrap();
-        for k in [RANGER_SECURITY_XML_KEY, RANGER_AUDIT_XML_KEY] {
-            assert_eq!(
-                cm["data"][k].as_str().unwrap(),
-                rendered.get(k).unwrap(),
-                "{k}"
-            );
-        }
+        let secret = starrocks_ranger_secret(&spec).unwrap();
         assert_eq!(
-            cm["data"][RANGER_SECURITY_XML_KEY].as_str().unwrap(),
+            cm["data"][RANGER_AUDIT_XML_KEY].as_str().unwrap(),
+            rendered.get(RANGER_AUDIT_XML_KEY).unwrap()
+        );
+        assert_eq!(
+            secret["stringData"][RANGER_SECURITY_XML_KEY]
+                .as_str()
+                .unwrap(),
+            rendered.get(RANGER_SECURITY_XML_KEY).unwrap()
+        );
+        assert_eq!(
+            secret["stringData"][RANGER_SECURITY_XML_KEY]
+                .as_str()
+                .unwrap(),
             include_str!(
                 "../../egret-engine-mgmt-api/tests/golden/starrocks.ranger-starrocks-security.xml"
             )
@@ -1408,6 +1469,7 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
             .as_str()
@@ -1415,12 +1477,13 @@ mod tests {
             .to_string();
         assert!(conf.contains("access_control = ranger"));
         let xml_cm = starrocks_ranger_configmap(&spec).unwrap();
-        let xml = xml_cm["data"]["ranger-starrocks-security.xml"]
+        let secret = starrocks_ranger_secret(&spec).unwrap();
+        let xml = secret["stringData"]["ranger-starrocks-security.xml"]
             .as_str()
             .unwrap();
         assert!(xml.contains("<name>ranger.plugin.starrocks.service.name</name>"));
         assert!(xml.contains("<value>sr1</value>"));
-        assert!(xml.contains("http://host.docker.internal:8080"));
+        assert!(xml.contains("http://host.docker.internal:8080/ranger"));
         let cr = starrocks_cluster_cr(&spec);
         let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
             .as_array()
@@ -1444,6 +1507,7 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         let cr = starrocks_cluster_cr(&spec);
         let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
@@ -1468,33 +1532,155 @@ mod tests {
             );
         }
 
-        // Positive: each ConfigMap key is mounted at its own full path, and
-        // the key mounted there is the key the ConfigMap actually carries.
+        // Positive: the audit key is mounted from the ConfigMap and the
+        // security key — it carries the credential — from the Secret, each at
+        // its own full path, and the key mounted is the key the object carries.
+        let secret_mounts = cr["spec"]["starRocksFeSpec"]["secrets"]
+            .as_array()
+            .expect("the security XML is mounted from a Secret")
+            .clone();
+        for m in &secret_mounts {
+            assert_ne!(m["mountPath"].as_str().unwrap(), "/opt/starrocks/fe/conf");
+            assert!(m["subPath"].as_str().is_some_and(|p| !p.is_empty()));
+        }
         let cm = starrocks_ranger_configmap(&spec).unwrap();
-        for key in [
-            "ranger-starrocks-security.xml",
-            "ranger-starrocks-audit.xml",
+        let secret = starrocks_ranger_secret(&spec).unwrap();
+        for (key, object, mounted, data) in [
+            (
+                "ranger-starrocks-audit.xml",
+                "sr1-ranger-cm",
+                &mounts,
+                &cm["data"],
+            ),
+            (
+                "ranger-starrocks-security.xml",
+                "sr1-ranger-secret",
+                &secret_mounts,
+                &secret["stringData"],
+            ),
         ] {
-            assert!(
-                cm["data"].get(key).is_some(),
-                "ConfigMap is missing key {key}"
-            );
-            let m = mounts
+            assert!(data.get(key).is_some(), "{object} is missing key {key}");
+            let m = mounted
                 .iter()
                 .find(|m| m["subPath"] == key)
                 .unwrap_or_else(|| panic!("no subPath mount for {key}"));
-            assert_eq!(m["name"], "sr1-ranger-cm");
+            assert_eq!(m["name"], object);
             assert_eq!(
                 m["mountPath"].as_str().unwrap(),
                 format!("/opt/starrocks/fe/conf/{key}")
             );
         }
-        assert_eq!(mounts.len(), 2, "exactly one mount per ConfigMap key");
+        assert_eq!(mounts.len(), 1, "the ConfigMap mounts the audit key only");
+        assert_eq!(
+            secret_mounts.len(),
+            1,
+            "the Secret mounts the security key only"
+        );
+        assert!(
+            cm["data"].get("ranger-starrocks-security.xml").is_none(),
+            "the security XML left the ConfigMap"
+        );
     }
 
     #[test]
     fn no_ranger_binding_omits_xml_configmap() {
         assert!(starrocks_ranger_configmap(&sample_sr_spec()).is_none());
+        assert!(starrocks_ranger_secret(&sample_sr_spec()).is_none());
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(cr["spec"]["starRocksFeSpec"].get("secrets").is_none());
+    }
+
+    fn bound_sr(credential: Option<(&str, &str)>) -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "sr1".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: credential.map(|(u, p)| (u.to_string(), p.to_string())),
+        });
+        spec
+    }
+
+    /// A9: the credential is in `{name}-ranger-secret` and in no ConfigMap, CR
+    /// or Debug output.
+    #[test]
+    fn the_credential_is_rendered_only_into_the_ranger_secret() {
+        let spec = bound_sr(Some(("engine-1", "Pw_only-in-the-secret")));
+        let secret = starrocks_ranger_secret(&spec).unwrap();
+        assert_eq!(secret["kind"], "Secret");
+        assert_eq!(secret["type"], "Opaque");
+        assert_eq!(secret["metadata"]["name"], "sr1-ranger-secret");
+        assert_eq!(secret["metadata"]["labels"]["egret/engine"], "sr1");
+        assert!(secret["stringData"]["ranger-starrocks-security.xml"]
+            .as_str()
+            .unwrap()
+            .contains(
+                "<name>ranger.plugin.starrocks.policy.rest.client.password</name><value>Pw_only-in-the-secret</value>"
+            ));
+        assert_eq!(
+            secret["stringData"].as_object().unwrap().len(),
+            1,
+            "the Secret holds the security XML only"
+        );
+        for obj in [
+            Some(starrocks_fe_configmap(&spec)),
+            starrocks_cn_configmap(&spec),
+            starrocks_ranger_configmap(&spec),
+            Some(starrocks_cluster_cr(&spec)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                !obj.to_string().contains("Pw_only-in-the-secret"),
+                "{} {} carries the password",
+                obj["kind"],
+                obj["metadata"]["name"]
+            );
+        }
+        assert!(!format!("{spec:?}").contains("Pw_only-in-the-secret"));
+    }
+
+    /// A rotation changes only the Secret; the FE mounts it by `subPath`,
+    /// which is copied at container start, so the checksum must move.
+    #[test]
+    fn a_new_ranger_password_rolls_the_fe_and_the_same_one_does_not() {
+        let ck = |pw: &str| {
+            starrocks_cluster_cr(&bound_sr(Some(("engine-1", pw))))["spec"]["starRocksFeSpec"]
+                ["annotations"]["egret/config-checksum"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(ck("pw-one"), ck("pw-one"), "deterministic");
+        assert_ne!(ck("pw-one"), ck("pw-two"), "the FE would not roll");
+    }
+
+    #[tokio::test]
+    async fn the_ranger_secret_is_applied_before_the_cluster() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        *kube.fail_apply_kind.lock().unwrap() = Some("StarRocksCluster".into());
+        let p = StarRocksProvisioner::new(kube.clone());
+        p.update(&bound_sr(Some(("engine-1", "pw"))))
+            .await
+            .expect_err("the CR apply fails");
+        let applied = kube.applied.lock().unwrap();
+        assert!(applied.contains_key("Secret/sr1-ranger-secret"));
+        assert!(!applied.contains_key("StarRocksCluster/sr1"));
+    }
+
+    #[tokio::test]
+    async fn unbinding_removes_the_ranger_secret_on_update() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        p.update(&sample_sr_spec()).await.unwrap();
+        assert!(kube
+            .deleted
+            .lock()
+            .unwrap()
+            .contains(&"Secret/sr1-ranger-secret".to_string()));
     }
 
     /// TDD (T2 step 2): `ssl_*` keys appear ONLY when `delegation.tls_enabled`.
@@ -1781,6 +1967,7 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         for cm in [
             Some(starrocks_fe_configmap(&spec)),
@@ -1856,21 +2043,25 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         let cr = starrocks_cluster_cr(&spec);
         let cm_mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
             .as_array()
             .unwrap();
-        // One mount per Ranger XML key (each a `subPath` file mount), nothing else.
-        assert_eq!(cm_mounts.len(), 2);
+        // The audit XML (a `subPath` file mount), nothing else.
+        assert_eq!(cm_mounts.len(), 1);
         assert!(cm_mounts.iter().all(|m| m["name"] == "sr1-ranger-cm"));
         assert!(
             !cm_mounts.iter().any(|m| m["name"] == "sr1-ssl-cm"),
             "cert-only ssl-cm is not mounted into the FE"
         );
 
-        // No `secrets` volume mount; the key reaches the init-container via env.
-        assert!(cr["spec"]["starRocksFeSpec"].get("secrets").is_none());
+        // The only `secrets` mount is the Ranger security XML; the TLS key
+        // reaches the init-container via env.
+        let secrets = cr["spec"]["starRocksFeSpec"]["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0]["name"], "sr1-ranger-secret");
         let init = &cr["spec"]["starRocksFeSpec"]["initContainers"][0];
         assert!(init["env"]
             .as_array()
@@ -2087,6 +2278,10 @@ mod tests {
         assert!(deleted.contains(&"Job/sr1-initpwd".to_string()));
         assert!(deleted.contains(&"ConfigMap/sr1-initpwd-shell".to_string()));
         assert!(deleted.contains(&"Secret/sr1-initpwd-secret".to_string()));
+        assert!(
+            deleted.contains(&"Secret/sr1-ranger-secret".to_string()),
+            "engine teardown removes the Ranger credential Secret"
+        );
     }
 
     /// D5/D6: a failed CR delete surfaces, and no longer aborts the cleanup of the
@@ -2103,7 +2298,7 @@ mod tests {
             .expect_err("the CR delete failure must surface");
         assert!(format!("{err:#}").contains("StarRocksCluster/sr1: forbidden"));
         let deleted = kube.deleted.lock().unwrap();
-        assert_eq!(deleted.len(), 10, "{deleted:?}");
+        assert_eq!(deleted.len(), 11, "{deleted:?}");
         assert!(
             deleted.contains(&"ConfigMap/sr1-fe-cm".to_string()),
             "{deleted:?}"
@@ -2157,6 +2352,7 @@ mod tests {
                 service_name: svc.into(),
                 egret_url: "http://host.docker.internal:8080".into(),
                 poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+                credential: None,
             });
             starrocks_cluster_cr(&spec)
         };
@@ -2215,6 +2411,7 @@ mod tests {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: None,
         });
         let ck = |spec: &EngineSpec| {
             starrocks_cluster_cr(spec)["spec"]["starRocksFeSpec"]["annotations"]

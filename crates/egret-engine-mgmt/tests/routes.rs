@@ -5519,6 +5519,337 @@ async fn delete_engine_removes_its_ranger_credentials() {
     }
 }
 
+// ── Ranger surface auth Task 6: the plugin credential reaches the engine ─────
+
+/// The `(username, password)` an apply rendered into the Ranger binding.
+fn rendered_ranger_credential(spec: &egret_engine_mgmt_api::EngineSpec) -> (String, String) {
+    spec.ranger
+        .as_ref()
+        .expect("the engine is bound to a profile")
+        .credential
+        .clone()
+        .expect("a bound engine is applied with its ranger credential")
+}
+
+/// Whether `/ranger` would accept `password` for `engine_id` (A10: current OR
+/// previous credential).
+async fn ranger_verifies(f: &Fixture, engine_id: Uuid, password: &str) -> bool {
+    use egret_engine_mgmt_api::credential::EngineCredentialVerifier;
+    let creds = egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+        egret_engine_mgmt::EngineMgmtStore::new(f.db.clone()),
+        secret_store(f),
+    );
+    egret_engine_mgmt::ranger_credential::DbVerifier::new(creds)
+        .verify(engine_id, password)
+        .await
+        .expect("verify")
+        .is_some()
+}
+
+async fn ranger_slots(f: &Fixture, engine_id: Uuid) -> (Option<Uuid>, Option<Uuid>) {
+    let e = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .get_engine(engine_id)
+        .await
+        .unwrap()
+        .unwrap();
+    (e.ranger_secret_id, e.ranger_secret_prev_id)
+}
+
+fn rotate_ranger_req(id: impl std::fmt::Display, token: &str) -> HttpRequest<Body> {
+    req(
+        "POST",
+        &format!("/engines/{id}/rotate-ranger-credential"),
+        token,
+        None,
+    )
+}
+
+/// A9: a bound Trino engine is provisioned with `engine-<uuid>` and a password
+/// `/ranger` accepts; a second apply reuses it (no rotation by accident).
+#[tokio::test]
+async fn a_bound_trino_engine_is_applied_with_a_ranger_credential_that_verifies() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_cred_trino_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (user, pw) = rendered_ranger_credential(&port.last_provisioned());
+    assert_eq!(user, egret_engine_mgmt_api::credential::plugin_username(id));
+    assert!(ranger_verifies(&f, id, &pw).await);
+    assert!(!ranger_verifies(&f, id, "not-the-password").await);
+    assert!(
+        !j.to_string().contains(&pw),
+        "the password must not appear in an API response"
+    );
+    let (current, prev) = ranger_slots(&f, id).await;
+    assert!(current.is_some());
+    assert_eq!(prev, None);
+
+    // An ordinary apply re-renders the SAME credential.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(rendered_ranger_credential(&port.last_updated()), (user, pw));
+    assert_eq!(ranger_slots(&f, id).await, (current, None));
+}
+
+/// The StarRocks path builds its request separately; it must carry the
+/// credential too.
+#[tokio::test]
+async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verifies() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_cred_sr_admin", true).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let profile = seed_typed_profile(&f, &name, "starrocks").await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks", "authzServiceId": profile,
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (user, pw) = rendered_ranger_credential(&port.last_provisioned());
+    assert_eq!(user, egret_engine_mgmt_api::credential::plugin_username(id));
+    assert!(ranger_verifies(&f, id, &pw).await);
+
+    // Rotation works for StarRocks too, and the old one is retired by the
+    // successful apply.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (_, pw2) = rendered_ranger_credential(&port.last_updated());
+    assert_ne!(pw2, pw);
+    assert!(ranger_verifies(&f, id, &pw2).await);
+    assert!(!ranger_verifies(&f, id, &pw).await);
+    assert_eq!(ranger_slots(&f, id).await.1, None);
+}
+
+/// A10 through the route: rotate mints a new current, the apply renders it, and
+/// only the SUCCESSFUL apply retires the old one. While a failed rotation's
+/// previous credential is pending, a second rotation is a 409 that applies
+/// nothing; a later successful apply retires it and rotation is allowed again.
+#[tokio::test]
+async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_rotate_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (_, p1) = rendered_ranger_credential(&port.last_provisioned());
+    let (c1, _) = ranger_slots(&f, id).await;
+
+    // 1. A successful rotation: new password applied, old one retired.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (_, p2) = rendered_ranger_credential(&port.last_updated());
+    assert_ne!(p2, p1);
+    assert!(ranger_verifies(&f, id, &p2).await);
+    assert!(
+        !ranger_verifies(&f, id, &p1).await,
+        "retired after the apply"
+    );
+    let (c2, prev) = ranger_slots(&f, id).await;
+    assert_ne!(c2, c1);
+    assert_eq!(prev, None);
+    assert!(matches!(
+        secret_store(&f).resolve_plaintext(None, c1.unwrap()).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+
+    // 2. A rotation whose apply fails keeps BOTH (the cluster may hold either).
+    port.set_fail_update(true);
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    let (_, p3) = rendered_ranger_credential(&port.last_updated());
+    assert!(
+        ranger_verifies(&f, id, &p2).await,
+        "the previous one is kept"
+    );
+    assert!(ranger_verifies(&f, id, &p3).await);
+    let (c3, prev) = ranger_slots(&f, id).await;
+    assert_ne!(c3, c2);
+    assert_eq!(
+        prev, c2,
+        "the failed rotation's previous credential stays pending"
+    );
+
+    // 3. While that previous one is pending, a rotation is refused BEFORE any
+    // apply and changes nothing.
+    port.set_fail_update(false);
+    let updates_before = port.updated.lock().unwrap().len();
+    let slots_before = ranger_slots(&f, id).await;
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "nothing applied"
+    );
+    assert_eq!(ranger_slots(&f, id).await, slots_before);
+    assert!(ranger_verifies(&f, id, &p2).await);
+    assert!(ranger_verifies(&f, id, &p3).await);
+
+    // 4. Any later successful apply renders the current one and retires the
+    // previous; a rotation is allowed again.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(rendered_ranger_credential(&port.last_updated()).1, p3);
+    assert!(!ranger_verifies(&f, id, &p2).await);
+    assert_eq!(ranger_slots(&f, id).await.1, None);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// An engine bound to no profile has no credential to rotate; an unknown
+/// engine is a 404; the permission is `engine:update`.
+#[tokio::test]
+async fn rotate_ranger_credential_refuses_unbound_unknown_and_unauthorised() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_rotate_unbound_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    assert!(port.last_provisioned().ranger.is_none());
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before);
+    assert_eq!(ranger_slots(&f, id).await, (None, None), "nothing minted");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(Uuid::new_v4(), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let reader =
+        session_for_with_permission(&f, "engine_ranger_rotate_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &reader))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "engine:read alone must not rotate the ranger credential (needs engine:update)"
+    );
+}
+
 // ── SP3a: engine catalogs over the registry ──────────────────────────────────
 
 /// Attach `wh_id`'s own registry catalog (created alongside the warehouse) to
@@ -12731,7 +13062,7 @@ async fn restart_and_rotate_on_an_external_engine_are_409() {
     };
     let token = session_for(&f, "ext_restart_admin", true).await;
     let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
-    for path in ["restart", "rotate-secrets"] {
+    for path in ["restart", "rotate-secrets", "rotate-ranger-credential"] {
         assert_refused_as_external(
             &f,
             &token,
@@ -13468,6 +13799,7 @@ async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_w
         &service,
         "http://egret:8080",
         egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+        None,
     );
     assert_eq!(
         j["files"][1]["content"].as_str().unwrap(),

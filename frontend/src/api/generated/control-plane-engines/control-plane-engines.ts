@@ -2788,6 +2788,139 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
       > => {
       return useMutation(getControlPlaneEnginesRestartEngineMutationOptions(options), queryClient);
     }
+    export type controlPlaneEnginesRotateRangerCredentialResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponseSuccess = (controlPlaneEnginesRotateRangerCredentialResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRotateRangerCredentialResponseError = (controlPlaneEnginesRotateRangerCredentialResponse400 | controlPlaneEnginesRotateRangerCredentialResponse401 | controlPlaneEnginesRotateRangerCredentialResponse403 | controlPlaneEnginesRotateRangerCredentialResponse404 | controlPlaneEnginesRotateRangerCredentialResponse409 | controlPlaneEnginesRotateRangerCredentialResponse500 | controlPlaneEnginesRotateRangerCredentialResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRotateRangerCredentialResponse = (controlPlaneEnginesRotateRangerCredentialResponseSuccess | controlPlaneEnginesRotateRangerCredentialResponseError)
+
+export const getControlPlaneEnginesRotateRangerCredentialUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/rotate-ranger-credential`
+}
+
+/**
+ * @summary `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
+credential for a provisioned engine (Trino or StarRocks) and re-apply it
+(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
+credential is committed and the old one demoted BEFORE the apply, so both
+authenticate while the pods roll; the old one is deleted by its exact id only
+after a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may
+still hold either — and a further rotation is refused (409) until a
+successful apply has retired the previous one; any later apply does.
+ */
+export const controlPlaneEnginesRotateRangerCredential = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateRangerCredentialResponse> => {
+
+  return customInstance<controlPlaneEnginesRotateRangerCredentialResponse>(getControlPlaneEnginesRotateRangerCredentialUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRotateRangerCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRotateRangerCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesRotateRangerCredential(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRotateRangerCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>>
+
+    export type ControlPlaneEnginesRotateRangerCredentialMutationError = ErrorBody
+
+    /**
+ * @summary `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
+credential for a provisioned engine (Trino or StarRocks) and re-apply it
+(the pods roll). Spec 2026-10-20-ranger-surface-auth A10: the new
+credential is committed and the old one demoted BEFORE the apply, so both
+authenticate while the pods roll; the old one is deleted by its exact id only
+after a SUCCESSFUL apply. A failed apply deletes nothing — the cluster may
+still hold either — and a further rotation is refused (409) until a
+successful apply has retired the previous one; any later apply does.
+ */
+export const useControlPlaneEnginesRotateRangerCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRotateRangerCredentialMutationOptions(options), queryClient);
+    }
     export type controlPlaneEnginesRotateEngineSecretsResponse204 = {
   data: void
   status: 204

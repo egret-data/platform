@@ -784,6 +784,7 @@ async fn ranger_plugin_config(
         &service_name,
         &st.engine_egret_url,
         egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+        None,
     );
     let (auth_mode, warnings, admin_must_supply, modelled) =
         plugin_config_judgements(&PluginConfigFacts {

@@ -400,15 +400,46 @@ pub struct CatalogSpec {
 /// Ranger tag/policy enforcement wiring (Access P3.2). `Some` when the engine is
 /// bound to a policy profile; the provisioner then templates
 /// `access-control.properties` + `ranger-trino-security.xml` so the bundled
-/// `apache-ranger` plugin polls egret's Ranger-Admin `/service` download API.
-#[derive(Clone, Debug)]
+/// `apache-ranger` plugin polls egret's Ranger-Admin `/ranger` download API.
+///
+/// Its `Debug` never prints the credential's password.
+#[derive(Clone)]
 pub struct RangerBinding {
     /// `ranger.service.name` — the bound trino profile's name.
     pub service_name: String,
-    /// Base URL the plugin polls; egret appends `/service/...`. Reuse `engine_egret_url`.
+    /// egret's own URL; the plugin is configured with
+    /// [`ranger_config::plugin_base_url`] of it. Reuse `engine_egret_url`.
     pub egret_url: String,
     /// Policy/tag poll interval in ms (default 30_000).
     pub poll_interval_ms: u32,
+    /// `(username, password)` the plugin presents to egret's `/ranger` surface
+    /// (spec 2026-10-20-ranger-surface-auth A9). The provisioners render it
+    /// into the `{name}-ranger-secret` Secret, never a ConfigMap. `None`
+    /// renders no credential.
+    pub credential: Option<(String, String)>,
+}
+
+impl RangerBinding {
+    /// The credential as the renderer takes it.
+    pub fn credential_ref(&self) -> Option<ranger_config::PluginCredentialRef<'_>> {
+        self.credential
+            .as_ref()
+            .map(|(username, password)| ranger_config::PluginCredentialRef { username, password })
+    }
+}
+
+impl std::fmt::Debug for RangerBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RangerBinding")
+            .field("service_name", &self.service_name)
+            .field("egret_url", &self.egret_url)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|(u, _)| (u, "<redacted>")),
+            )
+            .finish()
+    }
 }
 
 /// Which query engine an `EngineSpec` describes. Selects the provisioner.

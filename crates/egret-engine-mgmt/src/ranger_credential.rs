@@ -57,6 +57,22 @@ fn secret_name(engine_id: Uuid) -> String {
     )
 }
 
+/// A fresh credential password: 32 random bytes, URL-safe base64 (43 chars).
+///
+/// It is rendered UNESCAPED into the plugin's security XML, so it is re-drawn
+/// while it contains `--` (about one draw in a hundred): the renderer refuses
+/// one, and StarRocks' FE refuses a double hyphen in its config XML. The
+/// alphabet already excludes `<` and `&`. The re-draw costs well under a bit of
+/// the 256 bits of entropy.
+pub(crate) fn mint_password() -> String {
+    loop {
+        let password = crate::engines::random_internal_secret();
+        if !password.contains("--") {
+            return password;
+        }
+    }
+}
+
 /// The credential to render into an engine's plugin config.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PluginCredential {
@@ -169,6 +185,38 @@ impl RangerCredentialStore {
         }
     }
 
+    /// After a successful apply that rendered `rendered` (a password): retire
+    /// the previous credential, but ONLY while the row's current credential is
+    /// still the one that apply rendered. If a rotation committed a newer
+    /// current after this apply was built, this apply put an older credential
+    /// on the cluster — the one now in the previous slot, possibly — so
+    /// nothing is retired; the apply that renders the newer one will.
+    /// Failures are logged, never returned (see [`Self::retire_previous`]).
+    pub async fn retire_previous_rendered(&self, engine_id: Uuid, rendered: &str) {
+        let row = match self.store.get_engine(engine_id).await {
+            Ok(Some(e)) => e,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(%engine_id, error = %err,
+                    "could not read the engine to retire its previous ranger credential");
+                return;
+            }
+        };
+        let Some(prev) = row.ranger_secret_prev_id else {
+            return;
+        };
+        match self.resolve_current(&row).await {
+            Ok(Some(current)) if current.password == rendered => {
+                self.retire_previous_if(engine_id, prev).await;
+            }
+            Ok(_) => tracing::info!(%engine_id,
+                "the apply rendered a ranger credential that is no longer current; \
+                 the previous one is kept for the apply that renders the current one"),
+            Err(err) => tracing::warn!(%engine_id, error = %err,
+                "could not read the current ranger credential; the previous one is kept"),
+        }
+    }
+
     /// The compare-and-set half of [`Self::retire_previous`]: clear the column
     /// only while it still names `prev`, and delete `prev` only when that clear
     /// won. A lost clear means a newer rotation owns the column (and `prev` may
@@ -223,7 +271,7 @@ impl RangerCredentialStore {
         engine: &Engine,
         demote: bool,
     ) -> Result<Option<PluginCredential>, CpError> {
-        let password = crate::engines::random_internal_secret();
+        let password = mint_password();
         let new_id = self
             .secrets
             .create(
@@ -289,6 +337,13 @@ pub async fn rotate(st: &CpState, engine: &Engine) -> Result<PluginCredential, C
 pub async fn retire_previous(st: &CpState, engine_id: Uuid) {
     RangerCredentialStore::from_state(st)
         .retire_previous(engine_id)
+        .await
+}
+
+/// [`RangerCredentialStore::retire_previous_rendered`] on the seam's state.
+pub async fn retire_previous_rendered(st: &CpState, engine_id: Uuid, rendered: &str) {
+    RangerCredentialStore::from_state(st)
+        .retire_previous_rendered(engine_id, rendered)
         .await
 }
 
@@ -387,10 +442,7 @@ mod tests {
 
     #[test]
     fn the_dummy_has_the_length_of_a_real_credential() {
-        assert_eq!(
-            DUMMY_CREDENTIAL.len(),
-            crate::engines::random_internal_secret().len()
-        );
+        assert_eq!(DUMMY_CREDENTIAL.len(), mint_password().len());
     }
 
     #[test]
@@ -400,5 +452,20 @@ mod tests {
         assert!(a.starts_with(&secret_name_prefix(id)));
         assert!(b.starts_with(&secret_name_prefix(id)));
         assert_ne!(a, b);
+    }
+
+    /// The password is rendered unescaped into the plugin's security XML. URL-
+    /// safe base64 never carries `<` or `&`, but about one 43-character draw in
+    /// a hundred contains `--`, which the renderer refuses (StarRocks' FE and
+    /// the renderer's debug assertion). 5000 draws without the re-draw would
+    /// all but certainly hit one.
+    #[test]
+    fn a_minted_password_never_needs_escaping_in_the_plugin_xml() {
+        for _ in 0..5000 {
+            let p = mint_password();
+            assert!(!p.contains("--"), "{p}");
+            assert!(!p.contains('<') && !p.contains('&'));
+            assert_eq!(p.len(), DUMMY_CREDENTIAL.len());
+        }
     }
 }

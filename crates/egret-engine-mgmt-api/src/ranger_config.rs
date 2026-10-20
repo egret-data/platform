@@ -10,8 +10,10 @@
 //! containing `--`; the renderer emits no comments at all, so it is safe by
 //! construction (`no_starrocks_file_contains_a_double_hyphen`).
 //!
-//! The files carry no credential: the plugin is configured with a URL and a
-//! service name only. egret's optional bearer token is never rendered here.
+//! The security XML carries the engine's plugin credential (HTTP Basic
+//! `engine-<uuid>` + its password, spec 2026-10-20-ranger-surface-auth A9) only
+//! when the caller passes one. egret's own engines get it through a Kubernetes
+//! Secret, never a ConfigMap. egret's optional bearer token is never rendered.
 
 use crate::EngineKind;
 
@@ -35,11 +37,49 @@ pub const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
 /// The `fe.conf` line that switches StarRocks' access control to Ranger.
 pub const STARROCKS_ACCESS_CONTROL_LINE: &str = "access_control = ranger\n";
 
+/// Shown in the files an operator installs by hand when the password is not repeated.
+pub const PASSWORD_PLACEHOLDER: &str = "REPLACE_WITH_THE_ENGINE_PASSWORD";
+
+/// The credential an engine's plugin presents to egret's `/ranger` surface.
+/// Borrowed so the renderer never owns (or `Debug`s) a password.
+#[derive(Clone, Copy)]
+pub struct PluginCredentialRef<'a> {
+    pub username: &'a str,
+    pub password: &'a str,
+}
+
+impl std::fmt::Debug for PluginCredentialRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginCredentialRef")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 /// The files of one engine's Ranger plugin, in a stable order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Its `Debug` prints the file names only: the security XML may carry a
+/// password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RangerPluginFiles {
     /// `(name, content)`.
     pub files: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for RangerPluginFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RangerPluginFiles")
+            .field(
+                "files",
+                &self
+                    .files
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl RangerPluginFiles {
@@ -71,11 +111,15 @@ pub fn plugin_base_url(egret_url: &str) -> String {
 /// `egret_url` is egret's own URL; the plugin is configured with
 /// [`plugin_base_url`] of it and appends
 /// `/service/plugins/policies/download/{service}` itself.
+///
+/// `credential`, when `Some`, adds `policy.rest.client.username` and
+/// `.password` to the security XML; no other file changes.
 pub fn ranger_plugin_files(
     kind: EngineKind,
     service_name: &str,
     egret_url: &str,
     poll_interval_ms: u64,
+    credential: Option<PluginCredentialRef<'_>>,
 ) -> RangerPluginFiles {
     let files = match kind {
         EngineKind::Trino => vec![
@@ -87,7 +131,7 @@ pub fn ranger_plugin_files(
             ),
             (
                 TRINO_SECURITY_XML.to_string(),
-                security_xml("trino", service_name, egret_url, poll_interval_ms),
+                security_xml("trino", service_name, egret_url, poll_interval_ms, credential),
             ),
         ],
         EngineKind::StarRocks => vec![
@@ -97,7 +141,13 @@ pub fn ranger_plugin_files(
             ),
             (
                 STARROCKS_SECURITY_XML.to_string(),
-                security_xml("starrocks", service_name, egret_url, poll_interval_ms),
+                security_xml(
+                    "starrocks",
+                    service_name,
+                    egret_url,
+                    poll_interval_ms,
+                    credential,
+                ),
             ),
             (
                 STARROCKS_AUDIT_XML.to_string(),
@@ -111,8 +161,33 @@ pub fn ranger_plugin_files(
     RangerPluginFiles { files }
 }
 
-fn security_xml(plugin: &str, svc: &str, url: &str, poll: u64) -> String {
+fn security_xml(
+    plugin: &str,
+    svc: &str,
+    url: &str,
+    poll: u64,
+    credential: Option<PluginCredentialRef<'_>>,
+) -> String {
     let base = plugin_base_url(url);
+    // Nothing is escaped: the username is `engine-<uuid>` and the password is
+    // URL-safe base64, so neither can carry XML markup, and neither a `--`
+    // (StarRocks' FE refuses a config containing one).
+    let creds = credential
+        .map(|c| {
+            debug_assert!(
+                [c.username, c.password]
+                    .iter()
+                    .all(|v| !v.contains('<') && !v.contains('&') && !v.contains("--")),
+                "a plugin credential must not need XML escaping"
+            );
+            format!(
+                "<property><name>ranger.plugin.{plugin}.policy.rest.client.username</name><value>{u}</value></property>\n\
+<property><name>ranger.plugin.{plugin}.policy.rest.client.password</name><value>{p}</value></property>\n",
+                u = c.username,
+                p = c.password
+            )
+        })
+        .unwrap_or_default();
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
   <property><name>ranger.plugin.{plugin}.service.name</name><value>{svc}</value></property>\n\
@@ -122,7 +197,7 @@ fn security_xml(plugin: &str, svc: &str, url: &str, poll: u64) -> String {
   <property><name>ranger.plugin.{plugin}.policy.pollIntervalMs</name><value>{poll}</value></property>\n\
   <property><name>ranger.plugin.{plugin}.policy.rest.client.connection.timeoutMs</name><value>120000</value></property>\n\
   <property><name>ranger.plugin.{plugin}.policy.rest.client.read.timeoutMs</name><value>30000</value></property>\n\
-</configuration>\n"
+{creds}</configuration>\n"
     )
 }
 
@@ -138,6 +213,7 @@ mod tests {
             "demo2",
             URL,
             RANGER_POLL_INTERVAL_MS.into(),
+            None,
         )
     }
     fn starrocks() -> RangerPluginFiles {
@@ -146,6 +222,7 @@ mod tests {
             "sr1",
             URL,
             RANGER_POLL_INTERVAL_MS.into(),
+            None,
         )
     }
 
@@ -182,12 +259,94 @@ mod tests {
     #[test]
     fn no_starrocks_file_contains_a_double_hyphen() {
         // Hostile-looking inputs must not introduce one either: the renderer
-        // emits no comment, and the inputs are egret's own names and URL.
-        let s = ranger_plugin_files(EngineKind::StarRocks, "sr1", URL, 1);
-        for (name, content) in &s.files {
-            assert!(!content.contains("--"), "{name} contains a double hyphen");
-            assert!(!content.contains("<!--"), "{name} contains an XML comment");
+        // emits no comment, and the inputs are egret's own names and URL. A
+        // credential is URL-safe base64 (`-` and `_` occur, never `--`).
+        for credential in [
+            None,
+            Some(PluginCredentialRef {
+                username: "engine-0b6f6c9e-3f5e-4c1a-9a43-2b1d1f3c4e5a",
+                password: "a-b_c-d_e-F0-9_zZ",
+            }),
+        ] {
+            let s = ranger_plugin_files(EngineKind::StarRocks, "sr1", URL, 1, credential);
+            for (name, content) in &s.files {
+                assert!(!content.contains("--"), "{name} contains a double hyphen");
+                assert!(!content.contains("<!--"), "{name} contains an XML comment");
+            }
         }
+    }
+
+    #[test]
+    fn the_security_xml_carries_the_credential_only_when_given() {
+        let none = ranger_plugin_files(EngineKind::Trino, "svc", "http://e", 30_000, None);
+        assert!(!none
+            .get(TRINO_SECURITY_XML)
+            .unwrap()
+            .contains("rest.client.password"));
+        let with = ranger_plugin_files(
+            EngineKind::Trino,
+            "svc",
+            "http://e",
+            30_000,
+            Some(PluginCredentialRef {
+                username: "engine-1",
+                password: "pw",
+            }),
+        );
+        let xml = with.get(TRINO_SECURITY_XML).unwrap();
+        assert!(xml.contains(
+            "<name>ranger.plugin.trino.policy.rest.client.username</name><value>engine-1</value>"
+        ));
+        assert!(xml.contains(
+            "<name>ranger.plugin.trino.policy.rest.client.password</name><value>pw</value>"
+        ));
+        assert!(xml.contains("<value>http://e/ranger</value>"));
+        // Still well-formed: the two properties sit inside `<configuration>`.
+        assert!(xml.ends_with("</configuration>\n"));
+        assert_eq!(xml.matches("</configuration>").count(), 1);
+    }
+
+    /// The credential changes the security XML and NOTHING else: the other
+    /// files are byte-identical with and without it.
+    #[test]
+    fn the_credential_changes_only_the_security_xml() {
+        let cred = PluginCredentialRef {
+            username: "engine-1",
+            password: "pw",
+        };
+        for (kind, security) in [
+            (EngineKind::Trino, TRINO_SECURITY_XML),
+            (EngineKind::StarRocks, STARROCKS_SECURITY_XML),
+        ] {
+            let a = ranger_plugin_files(kind, "svc", URL, 1, None);
+            let b = ranger_plugin_files(kind, "svc", URL, 1, Some(cred));
+            assert_eq!(a.files.len(), b.files.len());
+            for ((na, ca), (nb, cb)) in a.files.iter().zip(&b.files) {
+                assert_eq!(na, nb);
+                if na == security {
+                    assert_ne!(ca, cb);
+                    let plugin = if kind == EngineKind::Trino {
+                        "trino"
+                    } else {
+                        "starrocks"
+                    };
+                    assert!(cb.contains(&format!(
+                        "<name>ranger.plugin.{plugin}.policy.rest.client.username</name>"
+                    )));
+                } else {
+                    assert_eq!(ca, cb, "{na} changed with a credential");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_placeholder_is_not_a_plausible_password() {
+        // It is shown in place of the password; it must never pass for one.
+        assert!(PASSWORD_PLACEHOLDER
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_'));
+        assert!(!PASSWORD_PLACEHOLDER.contains("--"));
     }
 
     #[test]
@@ -270,6 +429,7 @@ mod tests {
             DEPLOY_SERVICE,
             DEPLOY_URL,
             RANGER_POLL_INTERVAL_MS.into(),
+            None,
         );
         assert_eq!(
             comparable(DEPLOY_SECURITY_XML),

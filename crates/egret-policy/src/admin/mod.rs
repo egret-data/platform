@@ -1024,6 +1024,7 @@ async fn trino_config(
         &service,
         &st.engine_egret_url,
         egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+        None,
     );
     Ok(Json(
         rendered
