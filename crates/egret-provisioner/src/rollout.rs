@@ -295,8 +295,8 @@ pub(crate) fn check_statefulset(obj: Option<&Value>, expected: &str) -> Result<(
     let (obj, want) = check_template_and_generation("StatefulSet", obj, expected)?;
     let name = name_of(obj);
     let current = obj["status"]["currentRevision"].as_str();
-    let update = obj["status"]["updateRevision"].as_str();
-    if current.is_none() || current != update {
+    let target = obj["status"]["updateRevision"].as_str();
+    if current.is_none() || current != target {
         return Err(format!(
             "StatefulSet {name}: its pods are not all on the latest revision"
         ));
