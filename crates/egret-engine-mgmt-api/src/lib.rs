@@ -3,7 +3,12 @@
 //! `egret-provisioner` (k8s rendering) depend on these — neither owns the model.
 //! Kube-free by construction: this crate has no dependencies.
 
+pub mod credential;
 pub mod ranger_config;
+
+pub use credential::{
+    engine_id_from_username, plugin_username, EngineCredentialVerifier, EngineIdentity,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

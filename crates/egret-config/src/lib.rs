@@ -133,7 +133,22 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RangerSettings {
     pub enabled: bool,
+    /// Operator bearer token for the `/ranger` surface; empty accepts no bearer.
     pub auth_token: String,
+    /// `required` (default): every request on the `/ranger` surface needs an
+    /// engine Basic credential or the operator bearer. `anonymous`: serve
+    /// everyone — must be chosen explicitly.
+    #[serde(default)]
+    pub auth_mode: RangerAuthMode,
+}
+
+/// Whether the `/ranger` plugin surface requires a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RangerAuthMode {
+    #[default]
+    Required,
+    Anonymous,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1685,6 +1700,7 @@ impl Default for Config {
             ranger: RangerSettings {
                 enabled: false,
                 auth_token: String::new(),
+                auth_mode: RangerAuthMode::Required,
             },
             secrets: SecretsConfig {
                 master_key: String::new(),
@@ -1760,8 +1776,8 @@ impl Config {
                 return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
-        // ranger.auth_token may be empty: that selects anonymous `/service` access for stock
-        // Ranger plugins (e.g. Trino) that authenticate out-of-band. Set a token to require bearer.
+        // ranger.auth_token may be empty: an empty token is fine; engines authenticate with
+        // their own credentials; `anonymous` (ranger.auth_mode) must be chosen explicitly.
         if !self.secrets.master_key.is_empty() {
             use base64::Engine;
             let key_len = base64::engine::general_purpose::STANDARD
@@ -2987,11 +3003,28 @@ values = { allowed-images = [] }
         cfg.storage.bucket = "test-bucket".into();
         cfg.storage.access_key = "test-key".into();
         cfg.storage.secret_key = "test-secret".into();
-        // Empty token = anonymous /service (for stock Ranger plugins). Valid.
+        // Empty token: no operator bearer; engines use their own credentials. Valid.
         assert!(cfg.validate().is_ok());
-        // A configured token is also valid (requires bearer).
+        // A configured token is also valid (the operator bearer).
         cfg.ranger.auth_token = "t".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ranger_auth_mode_defaults_to_required_and_parses_anonymous() {
+        figment::Jail::expect_with(|jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.ranger.auth_mode, RangerAuthMode::Required);
+            jail.set_env("EGRET_RANGER__AUTH_MODE", "anonymous");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.ranger.auth_mode, RangerAuthMode::Anonymous);
+            jail.set_env("EGRET_RANGER__AUTH_MODE", "open");
+            assert!(
+                Config::figment().extract::<Config>().is_err(),
+                "an unknown mode must not silently become `required` or `anonymous`"
+            );
+            Ok(())
+        });
     }
 
     #[test]

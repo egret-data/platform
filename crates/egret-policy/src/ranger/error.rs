@@ -5,17 +5,39 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-pub struct RangerError(pub PolicyStoreError);
+pub enum RangerError {
+    Store(PolicyStoreError),
+    /// The caller authenticated but may not read this resource (an engine
+    /// credential asking for a profile its engine is not bound to).
+    Forbidden,
+}
+
+impl RangerError {
+    pub fn forbidden() -> Self {
+        Self::Forbidden
+    }
+}
 
 impl From<PolicyStoreError> for RangerError {
     fn from(e: PolicyStoreError) -> Self {
-        Self(e)
+        Self::Store(e)
     }
 }
 
 impl IntoResponse for RangerError {
     fn into_response(self) -> Response {
-        let (status, msg) = match &self.0 {
+        let store_err = match self {
+            Self::Store(e) => e,
+            Self::Forbidden => {
+                let status = StatusCode::FORBIDDEN;
+                return (
+                    status,
+                    Json(serde_json::json!({ "msg": "forbidden", "statusCode": status.as_u16() })),
+                )
+                    .into_response();
+            }
+        };
+        let (status, msg) = match &store_err {
             PolicyStoreError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             PolicyStoreError::AlreadyExists(m) => (StatusCode::CONFLICT, m.clone()),
             PolicyStoreError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),

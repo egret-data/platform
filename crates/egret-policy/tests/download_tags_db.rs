@@ -27,6 +27,8 @@ fn app(store: PolicyStore) -> axum::Router {
     ranger_router(RangerState {
         store,
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     })
 }
 

@@ -1,15 +1,24 @@
 //! HTTP state + the Ranger Admin `ranger_router()` (axum 0.8).
 
 use super::api;
+use super::auth::AuthMode;
 use crate::PolicyStore;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{any, get};
 use axum::Router;
+use egret_engine_mgmt_api::credential::EngineCredentialVerifier;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RangerState {
     pub store: PolicyStore,
+    /// The operator bearer token; empty means no operator bearer is accepted.
     pub auth_token: Arc<str>,
+    /// Whether a request without a valid credential is refused (default) or served.
+    pub mode: AuthMode,
+    /// Checks engine plugin Basic credentials; `None` means no engine credential
+    /// ever authenticates.
+    pub verifier: Option<Arc<dyn EngineCredentialVerifier>>,
 }
 
 pub fn ranger_router(state: RangerState) -> Router {
@@ -26,10 +35,24 @@ pub fn ranger_router(state: RangerState) -> Router {
             "/tags/download/{service}",
             get(api::download::download_tags),
         )
-        .merge(api::crud_routes())
+        // The CRUD routes are operator-only: an engine credential reads only
+        // its own profile's downloads. Layered BEFORE the merge so it wraps
+        // these routes alone.
+        .merge(api::crud_routes().layer(axum::middleware::from_fn(super::auth::require_operator)))
+        // Every unserved path sits INSIDE the auth layer: a stock 2.8.0 plugin
+        // also polls `/service/roles/secure/download/<svc>`, which egret does
+        // not serve. Without credentials that must be a 401 like every other
+        // path here, and only an authenticated caller learns it is a 404.
+        //
+        // A catch-all ROUTE, not `.fallback(..)`: with a `.fallback(..)` here,
+        // the router nested by `ranger_surface` answered an unserved path 404
+        // WITHOUT running the layer (measured by
+        // `an_unserved_route_under_the_surface_is_401_not_404_without_credentials`). A route is matched like any other, after
+        // every static route above, and the layer below wraps it.
+        .route("/{*unserved}", any(|| async { StatusCode::NOT_FOUND }))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            super::auth::require_bearer,
+            super::auth::require_surface_auth,
         ))
         .with_state(state)
 }

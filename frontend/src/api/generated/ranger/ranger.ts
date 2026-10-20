@@ -64,6 +64,11 @@ export type rangerListDefsResponse401 = {
   status: 401
 }
 
+export type rangerListDefsResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerListDefsResponse500 = {
   data: RangerErrorBody
   status: 500
@@ -72,7 +77,7 @@ export type rangerListDefsResponse500 = {
 export type rangerListDefsResponseSuccess = (rangerListDefsResponse200) & {
   headers: Headers;
 };
-export type rangerListDefsResponseError = (rangerListDefsResponse401 | rangerListDefsResponse500) & {
+export type rangerListDefsResponseError = (rangerListDefsResponse401 | rangerListDefsResponse403 | rangerListDefsResponse500) & {
   headers: Headers;
 };
 
@@ -182,6 +187,11 @@ export type rangerGetDefResponse401 = {
   status: 401
 }
 
+export type rangerGetDefResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerGetDefResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -195,7 +205,7 @@ export type rangerGetDefResponse500 = {
 export type rangerGetDefResponseSuccess = (rangerGetDefResponse200) & {
   headers: Headers;
 };
-export type rangerGetDefResponseError = (rangerGetDefResponse401 | rangerGetDefResponse404 | rangerGetDefResponse500) & {
+export type rangerGetDefResponseError = (rangerGetDefResponse401 | rangerGetDefResponse403 | rangerGetDefResponse404 | rangerGetDefResponse500) & {
   headers: Headers;
 };
 
@@ -310,6 +320,11 @@ export type rangerDownloadPoliciesResponse401 = {
   status: 401
 }
 
+export type rangerDownloadPoliciesResponse403 = {
+  data: RangerErrorBody
+  status: 403
+}
+
 export type rangerDownloadPoliciesResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -323,7 +338,7 @@ export type rangerDownloadPoliciesResponse500 = {
 export type rangerDownloadPoliciesResponseSuccess = (rangerDownloadPoliciesResponse200) & {
   headers: Headers;
 };
-export type rangerDownloadPoliciesResponseError = (rangerDownloadPoliciesResponse304 | rangerDownloadPoliciesResponse401 | rangerDownloadPoliciesResponse404 | rangerDownloadPoliciesResponse500) & {
+export type rangerDownloadPoliciesResponseError = (rangerDownloadPoliciesResponse304 | rangerDownloadPoliciesResponse401 | rangerDownloadPoliciesResponse403 | rangerDownloadPoliciesResponse404 | rangerDownloadPoliciesResponse500) & {
   headers: Headers;
 };
 
@@ -455,6 +470,11 @@ export type rangerGetPolicyResponse401 = {
   status: 401
 }
 
+export type rangerGetPolicyResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerGetPolicyResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -468,7 +488,7 @@ export type rangerGetPolicyResponse500 = {
 export type rangerGetPolicyResponseSuccess = (rangerGetPolicyResponse200) & {
   headers: Headers;
 };
-export type rangerGetPolicyResponseError = (rangerGetPolicyResponse401 | rangerGetPolicyResponse404 | rangerGetPolicyResponse500) & {
+export type rangerGetPolicyResponseError = (rangerGetPolicyResponse401 | rangerGetPolicyResponse403 | rangerGetPolicyResponse404 | rangerGetPolicyResponse500) & {
   headers: Headers;
 };
 
@@ -578,6 +598,11 @@ export type rangerListServicesResponse401 = {
   status: 401
 }
 
+export type rangerListServicesResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerListServicesResponse500 = {
   data: RangerErrorBody
   status: 500
@@ -586,7 +611,7 @@ export type rangerListServicesResponse500 = {
 export type rangerListServicesResponseSuccess = (rangerListServicesResponse200) & {
   headers: Headers;
 };
-export type rangerListServicesResponseError = (rangerListServicesResponse401 | rangerListServicesResponse500) & {
+export type rangerListServicesResponseError = (rangerListServicesResponse401 | rangerListServicesResponse403 | rangerListServicesResponse500) & {
   headers: Headers;
 };
 
@@ -701,6 +726,11 @@ export type rangerDownloadTagsResponse401 = {
   status: 401
 }
 
+export type rangerDownloadTagsResponse403 = {
+  data: RangerErrorBody
+  status: 403
+}
+
 export type rangerDownloadTagsResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -714,7 +744,7 @@ export type rangerDownloadTagsResponse500 = {
 export type rangerDownloadTagsResponseSuccess = (rangerDownloadTagsResponse200) & {
   headers: Headers;
 };
-export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse304 | rangerDownloadTagsResponse401 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
+export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse304 | rangerDownloadTagsResponse401 | rangerDownloadTagsResponse403 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
   headers: Headers;
 };
 

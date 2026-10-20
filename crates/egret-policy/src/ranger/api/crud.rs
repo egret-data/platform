@@ -8,6 +8,10 @@
 //! `/service` surface (open when `ranger.auth_token` is empty) was pure liability;
 //! only these read-only endpoints remain, so an empty token exposes reads, never
 //! writes. Re-add behind auth if external Ranger-Admin write compat is ever needed.
+//!
+//! Surface auth (2026-10): these routes sit behind `auth::require_operator` —
+//! the operator bearer (or anyone in `anonymous` mode) reads them; an engine
+//! credential gets 403, since it may read only its own profile's downloads.
 use crate::ranger::error::RangerError;
 use crate::ranger::routes::{RangerErrorBody, RangerServiceDefs, RangerServiceRef, RangerState};
 use axum::extract::{Path, State};
@@ -29,7 +33,8 @@ pub fn crud_routes() -> Router<RangerState> {
     tag = "ranger",
     responses(
         (status = 200, description = "All stored Ranger service-definitions", body = RangerServiceDefs),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential: these routes are for the operator bearer only"),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]
@@ -51,7 +56,8 @@ pub async fn list_defs(State(s): State<RangerState>) -> Result<Json<Value>, Rang
     params(("name" = String, Path, description = "Service-definition name (e.g. `trino`)")),
     responses(
         (status = 200, description = "The raw Ranger service-definition", body = Object),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential: these routes are for the operator bearer only"),
         (status = 404, description = "No such service-definition", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
@@ -69,7 +75,8 @@ pub async fn get_def(
     tag = "ranger",
     responses(
         (status = 200, description = "All policy profiles (Ranger services)", body = Vec<RangerServiceRef>),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential: these routes are for the operator bearer only"),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]
@@ -100,7 +107,8 @@ pub async fn list_services(State(s): State<RangerState>) -> Result<Json<Value>, 
     params(("id" = i64, Path, description = "Policy id")),
     responses(
         (status = 200, description = "The raw stored Ranger policy body (with id)", body = Object),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential: these routes are for the operator bearer only"),
         (status = 404, description = "No such policy", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),

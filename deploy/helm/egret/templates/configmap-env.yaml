@@ -15,6 +15,7 @@ data:
   EGRET_OIDC__CLIENT_ID: "{{ .Values.oidc.clientId }}"
   EGRET_OIDC__REDIRECT_URL: "{{ include "egret.externalUrl" . }}/api/auth/oidc/callback"
   EGRET_RANGER__ENABLED: "{{ .Values.ranger.enabled }}"
+  EGRET_RANGER__AUTH_MODE: {{ .Values.ranger.authMode | default "required" | quote }}
   # **The anonymous webhook surface, OFF by default.**
   #
   # `POST /workflows/v1/{ws}/executions/webhook/{ns}/{flow}/{key}` is

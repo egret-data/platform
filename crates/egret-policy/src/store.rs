@@ -912,6 +912,22 @@ impl PolicyStore {
         get_service_by_id_via(&mut conn, id).await
     }
 
+    /// The id of the tag service profile `profile_id` names in its
+    /// [`TAG_SERVICE_CONFIG_KEY`], or `None` when it names none, or names a
+    /// profile that does not exist. Used by the Ranger surface to let an engine
+    /// credential bound to `profile_id` read that tag service too.
+    pub async fn tag_service_of(&self, profile_id: i64) -> Result<Option<i64>, PolicyStoreError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            r#"SELECT t.id FROM policy.authz_services p
+               JOIN policy.authz_services t ON t.name = p.config_jsonb->>$2
+               WHERE p.id = $1"#,
+        )
+        .bind(profile_id)
+        .bind(TAG_SERVICE_CONFIG_KEY)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,

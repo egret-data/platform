@@ -24,6 +24,8 @@ egret-audit.workspace = true
 # calls it.
 egret-ranger-eval.workspace = true
 async-trait.workspace = true
+# HTTP Basic decoding of engine plugin credentials on the Ranger surface.
+base64.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true

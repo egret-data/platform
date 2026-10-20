@@ -1,13 +1,14 @@
 //! Policy download + tags download endpoints (Ranger plugin polling protocol).
 
 use crate::plugin_downloads::DownloadKind;
+use crate::ranger::auth::Caller;
 use crate::ranger::dto::{ServicePolicies, ServiceTags, TagAssignment};
 use crate::ranger::error::RangerError;
 use crate::ranger::routes::{
     RangerErrorBody, RangerServicePolicies, RangerServiceTags, RangerState,
 };
 use crate::PolicyStore;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -72,6 +73,30 @@ async fn record_poll(
     }
 }
 
+/// 403 unless `caller` may read `svc`: an engine credential reads only the profile its engine is bound to,
+/// plus the tag service that profile names. Operators and anonymous-mode callers read anything.
+async fn authorize_service(
+    store: &PolicyStore,
+    caller: &Caller,
+    svc: &crate::ServiceRow,
+) -> Result<(), RangerError> {
+    let Caller::Engine(id) = caller else {
+        return Ok(());
+    };
+    let Some(bound) = id.authz_service_id else {
+        tracing::warn!(engine_id = %id.engine_id, requested = %svc.name, "engine credential bound to no profile asked for a service");
+        return Err(RangerError::forbidden());
+    };
+    if bound == svc.id {
+        return Ok(());
+    }
+    if store.tag_service_of(bound).await? == Some(svc.id) {
+        return Ok(());
+    }
+    tracing::warn!(engine_id = %id.engine_id, requested = %svc.name, "engine credential asked for a service it is not bound to");
+    Err(RangerError::forbidden())
+}
+
 /// `GET /plugins/policies/download/{service}?lastKnownVersion=N`
 ///
 /// Returns 304 when the plugin's cached version matches; 200 + `ServicePolicies` otherwise.
@@ -86,18 +111,21 @@ async fn record_poll(
     responses(
         (status = 200, description = "The service's enabled policies + service-def (plugin download envelope)", body = RangerServicePolicies),
         (status = 304, description = "Not modified — the plugin's lastKnownVersion matches the current policy version"),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential asked for a profile its engine is not bound to", body = RangerErrorBody),
         (status = 404, description = "No such policy profile", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]
 pub async fn download_policies(
     State(s): State<RangerState>,
+    Extension(caller): Extension<Caller>,
     Path(service): Path<String>,
     Query(q): Query<DownloadParams>,
     Query(p): Query<PluginParams>,
 ) -> Result<Response, RangerError> {
     let svc = s.store.get_service(&service).await?; // 404 if unknown
+    authorize_service(&s.store, &caller, &svc).await?;
     let not_modified = q.last_known_version == Some(svc.policy_version);
     record_poll(
         &s.store,
@@ -239,18 +267,21 @@ pub async fn download_policies(
     responses(
         (status = 200, description = "The service's catalog tag assignments (plugin tag-download envelope)", body = RangerServiceTags),
         (status = 304, description = "Not modified — the plugin's lastKnownVersion matches the current tag version"),
-        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 401, description = "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"),
+        (status = 403, description = "An engine credential asked for a profile its engine is not bound to", body = RangerErrorBody),
         (status = 404, description = "No such policy profile", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]
 pub async fn download_tags(
     State(s): State<RangerState>,
+    Extension(caller): Extension<Caller>,
     Path(service): Path<String>,
     Query(q): Query<DownloadParams>,
     Query(p): Query<PluginParams>,
 ) -> Result<Response, RangerError> {
     let svc = s.store.get_service(&service).await?; // 404 if unknown
+    authorize_service(&s.store, &caller, &svc).await?;
     let not_modified = q.last_known_version == Some(svc.tag_version);
     // Keyed by the service the poll names: Trino polls tags under its RESOURCE
     // service, not under the tag service.

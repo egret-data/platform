@@ -483,11 +483,14 @@ e2e-kind: deploy-kind-oidc
       npx playwright test dataplane-kind
 
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
-# (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
+# (egret embeds the Ranger admin at /ranger/service). For the governance enforcement e2e.
+# `ranger.authMode=anonymous` ONLY until provisioned engines carry their own
+# Ranger credential (surface-auth Task 6 removes this exception).
 deploy-kind-governance: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
+      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true \
+      --set ranger.authMode=anonymous
     just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"
 

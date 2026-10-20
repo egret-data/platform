@@ -1423,9 +1423,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_policy::seed_starrocks(&store)
             .await
             .map_err(anyhow::Error::from)?;
+        let mode = match config.ranger.auth_mode {
+            egret_config::RangerAuthMode::Required => egret_policy::ranger::AuthMode::Required,
+            egret_config::RangerAuthMode::Anonymous => {
+                tracing::warn!(
+                    "ranger.auth_mode = anonymous: the /ranger plugin surface serves every \
+                     caller without a credential, so any engine can read any profile's policies"
+                );
+                egret_policy::ranger::AuthMode::Anonymous
+            }
+        };
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
+            mode,
+            // No engine credential verifier yet (surface-auth Task 5): in
+            // `required` mode only the operator bearer authenticates.
+            verifier: None,
         })
     } else {
         None

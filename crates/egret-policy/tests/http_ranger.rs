@@ -31,6 +31,8 @@ async fn app() -> Option<(axum::Router, String, PolicyStore)> {
     let state = RangerState {
         store: store.clone(),
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     };
     Some((ranger_router(state), svc, store))
 }
@@ -69,6 +71,8 @@ async fn anonymous_mode_allows_download_without_bearer() {
     let app = ranger_router(RangerState {
         store,
         auth_token: Arc::from(""),
+        mode: egret_policy::ranger::AuthMode::Anonymous,
+        verifier: None,
     });
     // download (no bearer) → 200 in anonymous mode.
     let r = app
@@ -299,6 +303,8 @@ async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
     let app = ranger_router(RangerState {
         store: store.clone(),
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     });
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -425,6 +431,8 @@ async fn the_tag_block_carries_the_tag_def_even_for_a_trino_typed_tag_service() 
     let app = ranger_router(RangerState {
         store: store.clone(),
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     });
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -504,6 +512,8 @@ async fn anonymous_surface() -> Option<(axum::Router, String)> {
     let app = ranger_surface(RangerState {
         store,
         auth_token: Arc::from(""),
+        mode: egret_policy::ranger::AuthMode::Anonymous,
+        verifier: None,
     });
     Some((app, svc))
 }

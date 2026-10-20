@@ -36553,7 +36553,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "500": {
             "description": "Internal error",
@@ -36597,7 +36600,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "404": {
             "description": "No such service-definition",
@@ -36666,7 +36672,17 @@
             "description": "Not modified — the plugin's lastKnownVersion matches the current policy version"
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential asked for a profile its engine is not bound to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such policy profile",
@@ -36721,7 +36737,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "404": {
             "description": "No such policy",
@@ -36767,7 +36786,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "500": {
             "description": "Internal error",
@@ -36826,7 +36848,17 @@
             "description": "Not modified — the plugin's lastKnownVersion matches the current tag version"
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential asked for a profile its engine is not bound to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such policy profile",
