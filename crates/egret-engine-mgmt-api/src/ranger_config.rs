@@ -611,4 +611,69 @@ mod tests {
             "<?xml?>\n<a/>\n"
         );
     }
+
+    /// The paths of the first (the `egret`) Ingress object, each as
+    /// `(path, pathType, backend service)`, in order.
+    fn helm_ingress_paths() -> Vec<(String, String, String)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/ingress.yaml"
+        );
+        let chart = std::fs::read_to_string(path).expect("ingress.yaml missing");
+        let first = chart.split("\n---").next().unwrap();
+        first
+            .split("- path: ")
+            .skip(1)
+            .map(|entry| {
+                let field = |key: &str| {
+                    entry
+                        .lines()
+                        .find_map(|l| l.trim().strip_prefix(key))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                };
+                (
+                    entry.lines().next().unwrap().trim().to_string(),
+                    field("pathType:"),
+                    field("name:"),
+                )
+            })
+            .collect()
+    }
+
+    /// Live result 2026-10-20 finding 3: without a rule the ingress handed
+    /// `/ranger/...` to the SPA (200 text/html), so an external engine
+    /// pointed at `https://<egret host>/ranger` never reached egret.
+    #[test]
+    fn the_helm_ingress_routes_the_ranger_surface_to_the_backend() {
+        let paths = helm_ingress_paths();
+        let at = |p: &str| paths.iter().position(|(path, ..)| path == p);
+        let ranger = at(RANGER_SURFACE_PREFIX).expect("the egret Ingress routes /ranger");
+        assert_eq!(paths[ranger].1, "Prefix");
+        assert_eq!(paths[ranger].2, "egret", "to the backend Service");
+        assert!(
+            ranger < at("/").expect("the SPA catch-all"),
+            "listed before the `/` catch-all"
+        );
+    }
+
+    /// The same for deployments fronted by the SPA's own nginx (compose, the
+    /// demo edge): a `location /ranger/` that proxies to the backend.
+    #[test]
+    fn the_spa_nginx_proxies_the_ranger_surface_to_the_backend() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/nginx-prod.conf"
+        );
+        let conf = std::fs::read_to_string(path).expect("nginx-prod.conf missing");
+        let open = format!("location {RANGER_SURFACE_PREFIX}/ {{");
+        let at = conf.find(&open).expect("a location block for /ranger/");
+        let block = &conf[at..at + conf[at..].find('}').unwrap()];
+        assert!(block.contains("proxy_pass http://egret:8080;"), "{block}");
+        assert!(
+            block.contains("proxy_set_header Authorization $http_authorization;"),
+            "the plugin's Basic credential is passed on: {block}"
+        );
+    }
 }
