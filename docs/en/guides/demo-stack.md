@@ -98,10 +98,10 @@ The demo sets these in `deploy/docker-compose.demo.yml`. They live in the `[engi
 | Key | Demo value | Meaning |
 |---|---|---|
 | `EGRET_ENGINES__PROVISIONER` | `docker` | `auto` (default: Kubernetes in cluster or from a kubeconfig, else none), `kubernetes`, `docker` or `none`. `docker` is never chosen by `auto`. `none` builds no Kubernetes client, so it also turns off the engine logs, exec and monitor routes. |
-| `EGRET_ENGINES__DOCKER__HOST` | `tcp://docker-proxy:2375` | Docker API endpoint, `unix://` or `tcp://`. Default `unix:///var/run/docker.sock`. |
+| `EGRET_ENGINES__DOCKER__HOST` | `tcp://docker-proxy:2375` | Docker API endpoint, `unix://`, `tcp://` or `http://`. Default `unix:///var/run/docker.sock`. |
 | `EGRET_ENGINES__DOCKER__NETWORK` | `egret-demo_default` | Network the engine containers join. Required with `docker`. |
-| `EGRET_ENGINES__DOCKER__PROJECT` | `egret-demo` | Value of the `egret.project` label. Egret never touches a container without `egret.managed=true` or with another project. |
-| `EGRET_ENGINES__DOCKER__CALLBACK_URL` | unset | URL the engines use to reach Egret, when it differs from the default (derived from `catalog.public_url`, here `http://egret:8080`). The JWT signing keys are always fetched from `catalog.public_url`. |
+| `EGRET_ENGINES__DOCKER__PROJECT` | `egret-demo` | Value of the `egret.project` label. Required with `docker`. Egret never touches a container without `egret.managed=true` or with another project. |
+| `EGRET_ENGINES__DOCKER__CALLBACK_URL` | unset | URL the engines use to reach Egret, when it differs from the default (derived from `catalog.public_url`, here `http://egret:8080`). An empty value is refused. The JWT signing keys are always fetched from `catalog.public_url`. |
 | `EGRET_ENGINES__DOCKER__ALLOWED_IMAGES` | unset (`["trinodb/trino"]`) | Image repositories an engine may use, exact match without the tag, as a JSON array. |
 
 ## Stop and reset

@@ -557,7 +557,7 @@ pub enum Provisioner {
 /// arrays, e.g. `EGRET_ENGINES__DOCKER__ALLOWED_IMAGES='["trinodb/trino"]'`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnginesDockerConfig {
-    /// Docker daemon endpoint (`unix://` or `tcp://`). Default
+    /// Docker daemon endpoint (`unix://`, `tcp://` or `http://`). Default
     /// `unix:///var/run/docker.sock`; env `EGRET_ENGINES__DOCKER__HOST`.
     #[serde(default = "default_docker_host")]
     pub host: String,
@@ -566,12 +566,14 @@ pub struct EnginesDockerConfig {
     #[serde(default)]
     pub network: String,
     /// Value of the `egret.project` label on every container; egret never
-    /// touches containers carrying another project. Default empty; env
-    /// `EGRET_ENGINES__DOCKER__PROJECT`.
+    /// touches containers carrying another project. Required (non-empty) when
+    /// `provisioner = "docker"`: it is the only boundary between two egret
+    /// instances on one daemon. Env `EGRET_ENGINES__DOCKER__PROJECT`.
     #[serde(default)]
     pub project: String,
     /// URL engine containers use to reach egret, when it differs from the
-    /// default. Default unset; env `EGRET_ENGINES__DOCKER__CALLBACK_URL`.
+    /// default. Default unset; an empty value is refused. Env
+    /// `EGRET_ENGINES__DOCKER__CALLBACK_URL`.
     #[serde(default)]
     pub callback_url: Option<String>,
     /// Image repositories (exact match, tag excluded) an engine may use.
@@ -618,12 +620,45 @@ impl EnginesConfig {
             return Ok(());
         }
         let d = &self.docker;
+        // Values are used as written, so surrounding whitespace is refused
+        // rather than trimmed in one place and not in another.
+        let padded = |key: &str, v: &str| {
+            (v.trim() != v)
+                .then(|| format!("engines.docker.{key} has surrounding whitespace: {v:?}"))
+        };
         if d.network.trim().is_empty() {
             return Err("engines.provisioner = \"docker\" requires engines.docker.network".into());
         }
-        if !(d.host.starts_with("unix://") || d.host.starts_with("tcp://")) {
+        // The project label is the only boundary between two egret instances
+        // on one Docker daemon: without it they would act on each other's engines.
+        if d.project.trim().is_empty() {
+            return Err("engines.provisioner = \"docker\" requires engines.docker.project".into());
+        }
+        if let Some(url) = &d.callback_url {
+            if url.trim().is_empty() {
+                return Err(
+                    "engines.docker.callback_url is set but empty; unset it to use the default"
+                        .into(),
+                );
+            }
+        }
+        for (key, v) in [
+            ("network", Some(d.network.as_str())),
+            ("project", Some(d.project.as_str())),
+            ("host", Some(d.host.as_str())),
+            ("callback_url", d.callback_url.as_deref()),
+        ] {
+            if let Some(err) = v.and_then(|v| padded(key, v)) {
+                return Err(err);
+            }
+        }
+        // The same schemes `BollardDocker::connect` accepts.
+        if !["unix://", "tcp://", "http://"]
+            .iter()
+            .any(|p| d.host.starts_with(p))
+        {
             return Err(format!(
-                "engines.docker.host must start with unix:// or tcp://, not \"{}\"",
+                "engines.docker.host must start with unix://, tcp:// or http://, not \"{}\"",
                 d.host
             ));
         }
@@ -3172,6 +3207,7 @@ values = { allowed-images = [] }
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_ENGINES__PROVISIONER", "docker");
             jail.set_env("EGRET_ENGINES__DOCKER__NETWORK", "egret-demo_default");
+            jail.set_env("EGRET_ENGINES__DOCKER__PROJECT", "egret-demo");
             let mut cfg: Config = Config::figment().extract()?;
             engines_valid_base(&mut cfg);
             assert!(cfg.validate().is_ok());
@@ -3209,6 +3245,7 @@ values = { allowed-images = [] }
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_ENGINES__PROVISIONER", "docker");
             jail.set_env("EGRET_ENGINES__DOCKER__NETWORK", "n");
+            jail.set_env("EGRET_ENGINES__DOCKER__PROJECT", "p");
             jail.set_env("EGRET_ENGINES__DOCKER__HOST", "ftp://x");
             let mut cfg: Config = Config::figment().extract()?;
             engines_valid_base(&mut cfg);
@@ -3221,6 +3258,68 @@ values = { allowed-images = [] }
             assert!(err.contains("allowed_images"), "{err}");
             Ok(())
         });
+    }
+
+    fn docker_engines_ok() -> Config {
+        let mut cfg = Config::default();
+        engines_valid_base(&mut cfg);
+        cfg.engines.provisioner = Provisioner::Docker;
+        cfg.engines.docker.network = "n".into();
+        cfg.engines.docker.project = "p".into();
+        assert!(cfg.validate().is_ok());
+        cfg
+    }
+
+    #[test]
+    fn engines_docker_requires_a_project() {
+        let mut cfg = docker_engines_ok();
+        cfg.engines.docker.project = " ".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("requires engines.docker.project"), "{err}");
+    }
+
+    #[test]
+    fn engines_docker_rejects_an_empty_callback_url() {
+        let mut cfg = docker_engines_ok();
+        cfg.engines.docker.callback_url = Some(String::new());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("callback_url is set but empty"), "{err}");
+        cfg.engines.docker.callback_url = Some("http://egret:8080".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn engines_docker_refuses_padded_values() {
+        for key in ["network", "project", "host", "callback_url"] {
+            let mut cfg = docker_engines_ok();
+            let d = &mut cfg.engines.docker;
+            match key {
+                "network" => d.network = "n ".into(),
+                "project" => d.project = " p".into(),
+                "host" => d.host = "tcp://docker:2375 ".into(),
+                _ => d.callback_url = Some(" http://egret:8080".into()),
+            }
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.contains(&format!("engines.docker.{key} has surrounding whitespace")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn engines_docker_host_schemes_match_the_client() {
+        let mut cfg = docker_engines_ok();
+        for ok in [
+            "unix:///var/run/docker.sock",
+            "tcp://docker:2375",
+            "http://docker:2375",
+        ] {
+            cfg.engines.docker.host = ok.into();
+            assert!(cfg.validate().is_ok(), "{ok}");
+        }
+        cfg.engines.docker.host = "https://docker:2376".into();
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

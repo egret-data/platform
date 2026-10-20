@@ -44,7 +44,7 @@ impl BollardDocker {
             Docker::connect_with_http(host, CLIENT_TIMEOUT_SECS, API_DEFAULT_VERSION)
         } else {
             return Err(format!(
-                "unsupported docker host {host:?}: use unix:///path or tcp://host:port"
+                "unsupported docker host {host:?}: use unix:///path, tcp://host:port or http://host:port"
             ));
         }
         .map_err(|e| format!("connecting to docker at {host}: {e}"))?;
