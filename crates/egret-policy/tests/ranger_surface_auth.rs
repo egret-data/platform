@@ -377,3 +377,56 @@ async fn the_tag_service_of_the_bound_profile_is_allowed() {
         StatusCode::FORBIDDEN
     );
 }
+
+/// Anonymous mode serves everyone, but a VALID engine credential still makes
+/// the caller that engine: bound to profile X, it reads X (200) and is refused
+/// profile Y (403), while a request with no credential reads both.
+#[tokio::test]
+async fn anonymous_mode_still_binds_a_valid_engine_credential_to_its_profile() {
+    let Some((store, x, x_id)) = store_with_profile().await else {
+        eprintln!("skip");
+        return;
+    };
+    let y = store
+        .create_service(
+            &format!("trino_{}", Uuid::new_v4().simple()),
+            "trino",
+            &json!({}),
+        )
+        .await
+        .expect("create other profile");
+    let engine = Uuid::new_v4();
+    let v = Arc::new(Stub {
+        good: (engine, ENGINE_PW),
+        bound_to: Some(x_id),
+    });
+    let app = surface(store, AuthMode::Anonymous, Some(v));
+    let auth = basic(&engine_user(engine), ENGINE_PW);
+    let status = |uri: String, auth: Option<String>| {
+        let app = app.clone();
+        async move {
+            app.oneshot(get(&uri, auth.as_deref()))
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(
+        status(download(&x), Some(auth.clone())).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(download(&y.name), Some(auth.clone())).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        status(
+            format!("/ranger/service/tags/download/{}", y.name),
+            Some(auth)
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(status(download(&x), None).await, StatusCode::OK);
+    assert_eq!(status(download(&y.name), None).await, StatusCode::OK);
+}
