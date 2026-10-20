@@ -321,11 +321,11 @@ Expected: `egret` reaches `healthy`. If `egret migrate` fails with `the apps API
 Run:
 
 ```bash
-docker compose -f deploy/docker-compose.demo.yml exec egret bash -c \
-  'exec 3<>/dev/tcp/127.0.0.1/8080; printf "POST /api/auth/login HTTP/1.0\r\ncontent-type: application/json\r\ncontent-length: 56\r\n\r\n{\"email\":\"admin@egret.local\",\"password\":\"Admin12345!\"}" >&3; head -1 <&3'
+docker compose -f deploy/docker-compose.demo.yml exec -T egret bash -c \
+  'exec 3<>/dev/tcp/127.0.0.1/8080; printf "POST /api/auth/login HTTP/1.0\r\ncontent-type: application/json\r\ncontent-length: 54\r\n\r\n{\"email\":\"admin@egret.local\",\"password\":\"Admin12345!\"}" >&3; head -1 <&3'
 ```
 
-Expected: `HTTP/1.0 200 OK`. (`content-length` must equal the body's byte length, 56 for that body; recompute if the body changes.)
+Expected: `HTTP/1.0 200 OK`. (`content-length` must equal the body's byte length, 54 for that body; recompute if the body changes.)
 Also: `docker compose -f deploy/docker-compose.demo.yml logs egret | grep -i "password"` must not print the admin password a second time on restart (`init` no-ops when an admin exists). Restart `egret` and confirm.
 
 - [ ] **Step 5: Commit**
