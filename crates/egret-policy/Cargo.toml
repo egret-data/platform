@@ -33,8 +33,9 @@ chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# `wait_for_tag_version` sleeps between polls of the ledger.
-tokio = { workspace = true, features = ["time"] }
+# `wait_for_tag_version` sleeps between polls of the ledger; the Ranger
+# surface records rejected credentials in spawned, semaphore-bounded tasks.
+tokio = { workspace = true, features = ["time", "rt", "sync"] }
 axum.workspace = true
 # OpenAPI emit (E0·P4b-5): `#[utoipa::path]` on the policy-admin + ranger routers'
 # handlers + per-router `#[derive(utoipa::OpenApi)]` doc structs, merged into

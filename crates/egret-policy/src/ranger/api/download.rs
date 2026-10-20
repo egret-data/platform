@@ -75,6 +75,7 @@ async fn record_poll(
 
 /// 403 unless `caller` may read `svc`: an engine credential reads only the profile its engine is bound to,
 /// plus the tag service that profile names. Operators and anonymous-mode callers read anything.
+/// An engine let through is recorded as having downloaded (A12).
 async fn authorize_service(
     store: &PolicyStore,
     caller: &Caller,
@@ -87,10 +88,9 @@ async fn authorize_service(
         tracing::warn!(engine_id = %id.engine_id, requested = %svc.name, "engine credential bound to no profile asked for a service");
         return Err(RangerError::forbidden());
     };
-    if bound == svc.id {
-        return Ok(());
-    }
-    if store.tag_service_of(bound).await? == Some(svc.id) {
+    if bound == svc.id || store.tag_service_of(bound).await? == Some(svc.id) {
+        // Clears an outstanding `engine_auth_failing` (A12); off the request path.
+        crate::auth_failures::note_download(store, id.engine_id);
         return Ok(());
     }
     tracing::warn!(engine_id = %id.engine_id, requested = %svc.name, "engine credential asked for a service it is not bound to");

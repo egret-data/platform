@@ -202,6 +202,41 @@ describe("Needs attention", () => {
     expect(screen.getByText("Not checked for you: classification clearances (needs `tag:read`).")).toBeInTheDocument();
   });
 
+  // Spec 2026-10-20-ranger-surface-auth A12: an engine whose Ranger credential is rejected.
+  it("names the engine credential check and links a rejected engine to its page", async () => {
+    serve(
+      ok(
+        response({
+          findings: [
+            finding({
+              kind: "engine_auth_failing",
+              severity: "critical",
+              count: 2,
+              sentence: "The Ranger credential of 2 engines is being rejected.",
+              ref: { type: "engines" },
+              sample: [
+                {
+                  label: "trino-prod",
+                  detail: "42 rejected credentials, the last at 2026-10-20 10:00:00 UTC; no successful download since.",
+                  ref: { type: "engine", id: "e1", name: "trino-prod" },
+                },
+              ],
+            }),
+          ],
+          notChecked: [{ kind: "engine_auth_failing", requires: ["engine:read"], any: false }],
+        }),
+      ),
+    );
+    openOverview();
+    const row = (await screen.findByText("The Ranger credential of 2 engines is being rejected.")).closest("li")!;
+    expect(within(row).getByText("Critical")).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: "trino-prod" })).toHaveAttribute("href", "/control-plane/engines/e1");
+    expect(within(row).getByText(/42 rejected credentials/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Not checked for you: engine Ranger credentials (needs `engine:read`)."),
+    ).toBeInTheDocument();
+  });
+
   it("links the fixed Not checked here line to Classifications only for a tag:read reader", async () => {
     serve(ok(response()));
     openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });

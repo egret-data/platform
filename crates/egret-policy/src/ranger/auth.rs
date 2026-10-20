@@ -15,6 +15,10 @@
 //! cause (absent, malformed, unknown user, wrong secret, wrong token), so a
 //! refusal never says which part was wrong. Neither the header nor the secret
 //! is ever logged.
+//!
+//! A refused `engine-<uuid>` credential is counted for that engine
+//! (`crate::auth_failures`, spec A12): best-effort, off the request path, and
+//! coalesced per engine, so it never changes or delays the 401.
 
 use super::routes::RangerState;
 use axum::body::Body;
@@ -69,7 +73,14 @@ pub async fn require_surface_auth(
     {
         match (engine_id_from_username(&user), state.verifier.as_ref()) {
             (Some(id), Some(v)) => match v.verify(id, &pw).await {
-                Ok(found) => found.map(Caller::Engine),
+                Ok(Some(found)) => Some(Caller::Engine(found)),
+                Ok(None) => {
+                    // Counted per engine for the Overview (A12), in the
+                    // background and coalesced; never the password. Also in
+                    // anonymous mode: the engine's credential is still wrong.
+                    crate::auth_failures::note_rejected(&state.store, id);
+                    None
+                }
                 Err(e) => {
                     tracing::error!(engine_id = %id, error = %e, "ranger: engine credential check failed");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();

@@ -65,7 +65,8 @@ async fn setup() -> Option<Fixture> {
     egret_policy::seed_tag(&policy).await.expect("seed tag");
     // Start from nothing the sources read: this database is this process's.
     sqlx::query(
-        "TRUNCATE engine_mgmt.engines, policy.ranger_plugin_downloads, perm.compile_runs, \
+        "TRUNCATE engine_mgmt.engines, policy.ranger_plugin_downloads, policy.ranger_auth_failures, \
+                  perm.compile_runs, \
                   view_lineage_state, tags, registry.engine_catalog_attachments, \
                   registry.catalogs, perm.grants, perm.rules, policy.authz_services CASCADE",
     )
@@ -1125,4 +1126,130 @@ async fn a_tag_poll_gone_quiet_is_reported_as_quiet_not_behind() {
         finding(&body, "plugin_quiet").unwrap()["sentence"],
         "No plugin has polled the tags of profile t_tags_quiet for 10 minutes, while its policies are polled."
     );
+}
+
+// ── rejected engine credentials (spec 2026-10-20-ranger-surface-auth A12) ──
+
+/// A rejection row for `engine`: `count`, the last rejection `last_ago` seconds
+/// ago, the last successful download `ok_ago` seconds ago (or never).
+async fn rejected(f: &Fixture, engine: Uuid, count: i64, last_ago: i64, ok_ago: Option<i64>) {
+    sqlx::query(
+        "INSERT INTO policy.ranger_auth_failures (engine_id, count, last_at, ok_at) \
+         VALUES ($1, $2, now() - make_interval(secs => $3), \
+                 now() - make_interval(secs => $4))",
+    )
+    .bind(engine)
+    .bind(count)
+    .bind(last_ago as f64)
+    .bind(ok_ago.map(|s| s as f64))
+    .execute(&f.db.pool)
+    .await
+    .expect("rejection row");
+}
+
+#[tokio::test]
+async fn overview_flags_an_engine_whose_failure_is_newer_than_its_last_download() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let sid = profile(&f, "a_shared", "trino").await;
+    // Two engines share one profile: the healthy one's downloads do not hide
+    // the failing one (the ledger is per profile; this is per engine).
+    let failing = engine(
+        &f,
+        "a_failing",
+        "trino",
+        "provisioned",
+        "running",
+        Some(sid),
+    )
+    .await;
+    let healthy = engine(
+        &f,
+        "a_healthy",
+        "trino",
+        "provisioned",
+        "running",
+        Some(sid),
+    )
+    .await;
+    poll(&f, sid, "trino@p-a_shared", "policies", 1, 5).await;
+    rejected(&f, failing, 42, 30, None).await;
+    // Rejected, then downloaded: cleared, the row kept.
+    rejected(&f, healthy, 3, 600, Some(60)).await;
+    // Downloaded once, rejected since.
+    let again = engine(&f, "a_again", "starrocks", "provisioned", "running", None).await;
+    rejected(&f, again, 2, 10, Some(300)).await;
+    // The last rejection over 24 h ago: the engine stopped presenting it.
+    let stale = engine(&f, "a_stale", "trino", "external", "running", None).await;
+    rejected(&f, stale, 9, 25 * 3600, None).await;
+
+    let reader = session(&f, &["policy:read", "engine:read"]).await;
+    let policy_only = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        labels(&body, "engine_auth_failing"),
+        ["a_again", "a_failing"],
+        "{body}"
+    );
+    let fnd = finding(&body, "engine_auth_failing").unwrap();
+    assert_eq!(fnd["severity"], "critical");
+    assert_eq!(fnd["count"], 2);
+    assert_eq!(fnd["ref"], json!({"type": "engines"}));
+    assert_eq!(
+        fnd["sample"][1]["ref"],
+        json!({"type": "engine", "id": failing, "name": "a_failing"})
+    );
+    let detail = fnd["sample"][1]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("42 rejected credentials, the last at ")
+            && detail.ends_with("; no successful download since."),
+        "{detail}"
+    );
+    assert_eq!(
+        fnd["sentence"],
+        "The Ranger credential of 2 engines is being rejected, so their plugins cannot download \
+         policies and run on their last cached copy, if any."
+    );
+
+    // One engine: the sentence names it and links it.
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
+        .bind(again)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (_, body) = attention(&st, &reader).await;
+    let fnd = finding(&body, "engine_auth_failing").expect("engine_auth_failing");
+    assert_eq!(fnd["count"], 1, "{body}");
+    assert_eq!(
+        fnd["ref"],
+        json!({"type": "engine", "id": failing, "name": "a_failing"})
+    );
+    assert!(
+        fnd["sentence"]
+            .as_str()
+            .unwrap()
+            .starts_with("The Ranger credential of engine a_failing is being rejected"),
+        "{body}"
+    );
+
+    // Needs engine:read.
+    let (_, body) = attention(&st, &policy_only).await;
+    assert!(finding(&body, "engine_auth_failing").is_none(), "{body}");
+    assert!(
+        not_checked(&body).contains(&("engine_auth_failing".to_string(), json!(["engine:read"]))),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_rejection_row_whose_engine_is_gone_is_not_reported() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    // Written behind the trigger's back (the trigger removes it on delete).
+    rejected(&f, Uuid::new_v4(), 5, 10, None).await;
+    let st = state(&f).await;
+    let (_, body) = attention(&st, &session(&f, &["platform_admin"]).await).await;
+    assert!(finding(&body, "engine_auth_failing").is_none(), "{body}");
 }
