@@ -33,7 +33,8 @@ for _ in $(seq 1 180); do
   Mail       http://localhost:8025    (Mailpit: every mail the demo sends)
   Trino      database "trino-demo" in workspace "default" (catalogs tpch, memory)
   Engines    "Add engine" is on: it starts Trino containers on this machine's Docker (first use pulls trinodb/trino:483)
-             Risk: egret reaches Docker through a socket proxy that can still create and start containers; demo only.
+             Risk: Data Apps author code runs inside Egret and can call the Docker proxy, so any app author can get root on this
+             machine's Docker host. Do not give app access to anyone you do not trust with this machine.
 
   DEMO ONLY: public development secrets, never expose this to a network.
 EOT

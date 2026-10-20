@@ -30,11 +30,13 @@ demo-up:
 
 # Stop the demo; removes engine containers egret provisioned (labels egret.managed=true and egret.project=egret-demo); keeps data volumes
 demo-down:
+    -{{demo_compose}} stop egret
     -./deploy/demo/remove-engines.sh
     {{demo_compose}} down
 
 # Stop the demo and DELETE its data volumes
 demo-reset:
+    -{{demo_compose}} stop egret
     -./deploy/demo/remove-engines.sh
     {{demo_compose}} down -v
 
