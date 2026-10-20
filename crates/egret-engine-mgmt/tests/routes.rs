@@ -730,6 +730,8 @@ struct FakeEnginePort {
     rollout_panic_for: Arc<std::sync::Mutex<Option<String>>>,
     /// `(engine name, credential id)` per `delete_ranger_secret` call.
     deleted_ranger_secrets: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// While set, `ranger_rollout` hangs (a hung API server).
+    rollout_hang: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeEnginePort {
@@ -756,6 +758,10 @@ impl FakeEnginePort {
             .filter(|(n, _)| n == name)
             .map(|(_, id)| id.clone())
             .collect()
+    }
+    fn hang_rollout_probe(&self, hang: bool) {
+        self.rollout_hang
+            .store(hang, std::sync::atomic::Ordering::SeqCst);
     }
     fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
         *self.status_response.lock().unwrap() = Some(status);
@@ -866,6 +872,9 @@ impl EngineProvisioningPort for FakeEnginePort {
             .push((name.to_string(), credential_id.to_string()));
         if self.rollout_panic_for.lock().unwrap().as_deref() == Some(name) {
             panic!("injected panic in the rollout probe of {name}");
+        }
+        if self.rollout_hang.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
         if let Some(e) = self.rollout_error.lock().unwrap().clone() {
             return Err(e);
@@ -5642,6 +5651,23 @@ async fn ranger_slots(f: &Fixture, engine_id: Uuid) -> (Option<Uuid>, Option<Uui
     (e.ranger_secret_id, e.ranger_secret_prev_id)
 }
 
+/// Wait (up to 10 s) until the engine's credential slots are `want`: a read
+/// of the engine retires the previous credential in the background.
+async fn wait_for_ranger_slots(f: &Fixture, engine_id: Uuid, want: (Option<Uuid>, Option<Uuid>)) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let got = ranger_slots(f, engine_id).await;
+        if got == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the read-triggered retire never ran: {got:?}, want {want:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 fn rotate_ranger_req(id: impl std::fmt::Display, token: &str) -> HttpRequest<Body> {
     req(
         "POST",
@@ -6044,7 +6070,8 @@ async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observe
     port.roll_out(c3);
     let (status, _) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(ranger_slots(&f, id).await, (c3, None));
+    // The read retires in the background, so wait for it.
+    wait_for_ranger_slots(&f, id, (c3, None)).await;
     assert!(!ranger_verifies(&f, id, &p2).await);
     let resp = f
         .app
@@ -14673,12 +14700,59 @@ async fn a_provisioned_engine_dto_shows_its_rotation_pending_until_the_rollout_c
     // Accepted, not rolled out: pending, on the detail and in the list.
     assert_credential_state(&engine_reads(&f, &token, id).await, true, c2, &[&p1, &p2]);
 
-    // Rolled out: the read that retires the previous one already says so.
+    // Rolled out: a read starts the retire in the background (it never waits
+    // on the provisioner), so the previous one is retired without a sweep and
+    // the next read says so.
     port.roll_out(c2);
+    let (status, _) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_ranger_slots(&f, id, (c2, None)).await;
     let reads = engine_reads(&f, &token, id).await;
     assert_eq!(reads[0]["rangerCredentialPending"], false, "{}", reads[0]);
     assert_eq!(reads[0]["rangerCredentialId"], c2.unwrap().to_string());
-    assert_eq!(ranger_slots(&f, id).await, (c2, None));
+}
+
+/// The read never waits on the provisioner: a rollout probe that hangs does
+/// not hold up `GET /engines/{id}` (it used to run inline, up to 20 s each).
+#[tokio::test]
+async fn an_engine_read_does_not_wait_on_a_hung_rollout_probe() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_hung_probe_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (c1, _) = ranger_slots(&f, id).await;
+    port.roll_out(c1);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    port.hang_rollout_probe(true);
+    let started = std::time::Instant::now();
+    let (status, one) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{one}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the read waited on the probe: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(one["rangerCredentialPending"], true, "{one}");
+    port.hang_rollout_probe(false);
 }
 
 /// The stale-confirmation sequence: rotate (c2, prev c1), retire with c2,

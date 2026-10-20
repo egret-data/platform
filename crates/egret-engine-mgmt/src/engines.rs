@@ -5340,19 +5340,12 @@ async fn get_engine(
         }
     };
     // Opportunistic: a read of an engine whose previous Ranger credential is
-    // pending checks the rollout too, so it is retired as soon as anyone looks,
-    // not only at the next sweep. It skips external and deleting engines, fails
-    // closed and is a compare-and-set, so a concurrent sweep is harmless.
-    if engine.ranger_secret_prev_id.is_some() {
-        if let Some(prov) = st.engine_provisioner.as_ref() {
-            let outcome = crate::ranger_credential::RangerCredentialStore::from_state(&st)
-                .retire_previous_if_rolled_out(&engine, prov.as_ref())
-                .await;
-            if let crate::ranger_credential::RolloutRetire::Retired(_) = outcome {
-                engine.ranger_secret_prev_id = None;
-            }
-        }
-    }
+    // pending checks the rollout too, so it is retired soon after anyone looks,
+    // not only at the next sweep. In the background, so the read never waits
+    // on the provisioner; this response may still show it pending (the next
+    // read will not). It skips external and deleting engines, fails closed and
+    // is a compare-and-set, so a concurrent sweep is harmless.
+    crate::ranger_credential::spawn_retire_if_rolled_out(&st, engine.clone());
     Ok(Json(EngineDetailDto {
         engine: engine.into(),
         status,

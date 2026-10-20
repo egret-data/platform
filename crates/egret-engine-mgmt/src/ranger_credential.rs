@@ -652,6 +652,53 @@ pub async fn retire_rolled_out_previous_credentials(st: &CpState) -> usize {
     retired
 }
 
+/// The engines a read-triggered retire ([`spawn_retire_if_rolled_out`]) is
+/// running for, so a page polling a hung API server starts one at a time.
+static READ_RETIRES_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The opportunistic retire of `GET /engines/{id}`: run
+/// [`RangerCredentialStore::retire_previous_if_rolled_out`] in the background,
+/// so the read never waits on the provisioner (a probe and two deletes, each up
+/// to [`KUBE_CALL_TIMEOUT`]). Best-effort: at most one per engine at a time,
+/// the outcome logged at debug (the probe logs its own failure), and the read's
+/// DTO may show the previous credential as pending for one more poll.
+pub fn spawn_retire_if_rolled_out(st: &CpState, engine: Engine) {
+    if engine.ranger_secret_prev_id.is_none() {
+        return;
+    }
+    let Some(port) = st.engine_provisioner.clone() else {
+        return;
+    };
+    let id = engine.id;
+    if !READ_RETIRES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id)
+    {
+        return;
+    }
+    let creds = RangerCredentialStore::from_state(st);
+    tokio::spawn(async move {
+        // Removed from the in-flight set even if the pass panics.
+        struct Done(Uuid);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                READ_RETIRES_IN_FLIGHT
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&self.0);
+            }
+        }
+        let _done = Done(id);
+        let outcome = creds
+            .retire_previous_if_rolled_out(&engine, port.as_ref())
+            .await;
+        tracing::debug!(engine = %engine.name, ?outcome, "read-triggered ranger credential retire");
+    });
+}
+
 /// Run [`retire_rolled_out_previous_credentials`] every `period` until
 /// `shutdown` resolves. A pass longer than the period does not cause a burst.
 pub fn spawn_ranger_retire_sweeper(
