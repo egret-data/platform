@@ -54,8 +54,7 @@ Consequences, each of which contradicts a naive "just add a token":
 Not measured (plan Task 1 must measure before relying on them):
 - whether a running plugin re-reads its security xml (assumed **no**, so a credential change needs a pod restart);
 - what a 401 does to a plugin with a warm cache vs. a cold one (assumed: warm keeps serving the cache, cold denies all);
-- the roles / tags / userstore secure endpoints a plugin may call (egret serves none of them today and engines work, so
-  they are out of scope; Task 1 confirms no new call appears in secure mode beyond policies).
+- ~~the roles / tags / userstore secure endpoints a plugin may call~~ **Measured 2026-10-20** (`../plans/2026-10-20-ranger-surface-auth-measurements.md`): in secure mode a 2.8.0 plugin also polls `GET /service/roles/secure/download/<svc>` every interval (no tags or userstore call seen). egret does not serve it and the plugin still enforces on the 404, so serving it stays out of scope; the only consequence is that the auth middleware must cover unmatched routes under `/ranger` (bad credentials ⇒ 401, not 404). Q1 (no XML re-read) and Q2 (warm cache survives a 401, cold cache denies all) agreed with the assumptions above.
 
 ## 3. Decisions
 

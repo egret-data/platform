@@ -146,7 +146,7 @@ Add inside `<includes>` (after `EgretCaseFoldAgreementTest.java`), with a commen
 
 - [ ] **Step 3: Run on 2.8.0 and 2.9.0, expect PASS**
 
-Run (from `tests/ranger`): `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest+EgretSurefireIncludesTest` then the same with `-Dranger.version=2.9.0`.
+Run (from `tests/ranger`): `mvn -q test -Dranger.version=2.8.0 -Dtest='EgretPluginAuthTest,EgretSurefireIncludesTest'` then the same with `-Dranger.version=2.9.0`.
 Expected: `Tests run: …, Failures: 0`. Also run once with `-Dranger.version=2.5.0` and confirm `withCredentialsThePluginSendsBasicOnTheSecurePath` **fails** (the header is null): that is the evidence for the floor. Paste that failure line into the measurements doc.
 
 - [ ] **Step 4: Measure Q1 and Q3 and the warm-cache half of Q2**
@@ -408,6 +408,7 @@ fn basic(user: &str, pw: &str) -> String {
 #[tokio::test] async fn an_engine_credential_cannot_call_the_crud_routes() { /* GET /plugins/services ⇒ 403 */ }
 #[tokio::test] async fn the_operator_bearer_still_works_everywhere() { /* 200 on download and on /plugins/services */ }
 #[tokio::test] async fn anonymous_mode_serves_without_credentials() { /* mode = Anonymous ⇒ 200 */ }
+#[tokio::test] async fn an_unserved_route_under_the_surface_is_401_not_404_without_credentials() { /* GET /ranger/service/roles/secure/download/trino_prod with no/bad credentials in Required mode ⇒ 401 (measured: a 2.8.0 plugin polls this route; egret does not serve it, so valid credentials ⇒ 404) */ }
 #[tokio::test] async fn the_tag_service_of_the_bound_profile_is_allowed() { /* DB-gated: profile P with tagService T ⇒ engine bound to P may download T, not an unrelated tag service */ }
 ```
 Fill each body using the request helper pattern from `http_ranger.rs` (build the app with `ranger_surface(RangerState { store, auth_token, mode, verifier })`, call `tower::ServiceExt::oneshot`). Assert on status codes only plus, for 401, that the response carries `WWW-Authenticate: Basic realm="egret-ranger"`.
@@ -472,7 +473,7 @@ fn unauthorized() -> Response {
 ```
 `decode_basic` base64-decodes and splits at the first `:`. A bad Basic header ⇒ `None` ⇒ 401 (never a 400 that reveals parsing). Keep `ct_eq`. In `Anonymous` mode a *bad* credential is also let through as `Anonymous` — document that in the doc comment ("anonymous mode serves everyone").
 
-`require_operator`: reads `Caller` from extensions; `Engine(_)` ⇒ 403; `Operator`/`Anonymous` ⇒ pass. In `routes.rs` layer `require_surface_auth` over the whole router and `require_operator` over `api::crud_routes()` only (`.merge(api::crud_routes().layer(from_fn(require_operator)))` — the layer must wrap before the merge).
+`require_operator`: reads `Caller` from extensions; `Engine(_)` ⇒ 403; `Operator`/`Anonymous` ⇒ pass. In `routes.rs` layer `require_surface_auth` over the whole router **including its fallback** (Task 1 measured that a 2.8.0 plugin also polls `/service/roles/secure/download/<svc>`, which egret does not serve: bad credentials there must be 401, valid ones 404 — attach the layer so unmatched routes pass through it, e.g. `.fallback(not_found).layer(...)`, and prove it with the test above) and `require_operator` over `api::crud_routes()` only (`.merge(api::crud_routes().layer(from_fn(require_operator)))` — the layer must wrap before the merge).
 
 `download.rs`: add
 
