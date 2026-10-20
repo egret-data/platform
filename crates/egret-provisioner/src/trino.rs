@@ -193,6 +193,20 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     out
 }
 
+/// Ranger loggers a bound engine holds at a level egret sets, whatever the
+/// user's log properties say. `AuditProviderFactory` logs every
+/// `ranger.plugin.trino.*` property at INFO on start (`AUDIT PROPERTY: …`),
+/// `policy.rest.client.password` included, so at INFO the engine's `/ranger`
+/// credential is in every coordinator's and worker's stdout (live result
+/// `docs/en/plans/2026-10-20-ranger-surface-auth-live-result.md`, finding 1).
+/// That run's secret sweep found the password on this line only, and
+/// `RangerRESTClient` (2.8.0 `ranger-plugins-common`) reads it without
+/// logging it.
+const TRINO_RANGER_FORCED_LOG_LEVELS: &[(&str, &str)] = &[(
+    "org.apache.ranger.audit.provider.AuditProviderFactory",
+    "WARN",
+)];
+
 fn log_properties(spec: &EngineSpec) -> String {
     let mut out = String::new();
     // Legacy structured log level → `io.trino=<level>`. New engines carry the
@@ -202,8 +216,23 @@ fn log_properties(spec: &EngineSpec) -> String {
     if let Some(level) = &spec.config.log_level {
         out.push_str(&format!("io.trino={level}\n"));
     }
+    let forced: &[(&str, &str)] = if spec.ranger.is_some() {
+        TRINO_RANGER_FORCED_LOG_LEVELS
+    } else {
+        &[]
+    };
     for (k, v) in &spec.config.additional_log_properties {
+        // The user's entry for a forced logger is dropped rather than left to
+        // be overridden, so the file states one level for it.
+        if forced.iter().any(|(logger, _)| k.trim() == *logger) {
+            continue;
+        }
         out.push_str(&format!("{k}={v}\n"));
+    }
+    // Last, so they win even over a user value that smuggles in a line of its
+    // own (a later key in a properties file replaces an earlier one).
+    for (logger, level) in forced {
+        out.push_str(&format!("{logger}={level}\n"));
     }
     out
 }
@@ -2161,6 +2190,87 @@ mod tests {
         let lp = cm["data"]["log.properties"].as_str().unwrap().to_string();
         assert!(lp.contains("io.trino=WARN"));
         assert_eq!(lp.matches("io.trino=").count(), 1);
+    }
+
+    /// Live result 2026-10-20 finding 1: Ranger's `AuditProviderFactory`
+    /// logs every plugin property at INFO, the REST client password
+    /// included. A bound engine's log.properties holds that logger at WARN,
+    /// after the user's lines, and keeps them.
+    #[test]
+    fn a_bound_engine_silences_the_logger_that_prints_the_ranger_password() {
+        let mut s = sample_spec();
+        s.ranger = Some(bound(Some(("engine-1", "pw"))));
+        s.config
+            .additional_log_properties
+            .insert("io.trino.execution".into(), "DEBUG".into());
+        let lp = trino_config_map(&s)["data"]["log.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(lp.contains("io.trino=DEBUG\n"), "{lp}");
+        assert!(lp.contains("io.trino.execution=DEBUG\n"), "{lp}");
+        assert!(
+            lp.ends_with("org.apache.ranger.audit.provider.AuditProviderFactory=WARN\n"),
+            "{lp}"
+        );
+    }
+
+    /// The user's own value for that logger cannot turn the leak back on: it
+    /// is dropped and egret's line is the only one, and the last.
+    #[test]
+    fn a_user_level_for_the_leaking_logger_does_not_win() {
+        let mut s = sample_spec();
+        s.ranger = Some(bound(Some(("engine-1", "pw"))));
+        s.config.additional_log_properties.insert(
+            "org.apache.ranger.audit.provider.AuditProviderFactory".into(),
+            "DEBUG".into(),
+        );
+        s.config.additional_log_properties.insert(
+            " org.apache.ranger.audit.provider.AuditProviderFactory ".into(),
+            "INFO".into(),
+        );
+        s.config
+            .additional_log_properties
+            .insert("org.apache.ranger".into(), "DEBUG".into());
+        let lp = trino_config_map(&s)["data"]["log.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(lp.matches("AuditProviderFactory").count(), 1, "{lp}");
+        assert!(
+            lp.ends_with("org.apache.ranger.audit.provider.AuditProviderFactory=WARN\n"),
+            "{lp}"
+        );
+        // A parent-logger level is the user's to set: the child's explicit
+        // WARN outranks it.
+        assert!(lp.contains("org.apache.ranger=DEBUG\n"), "{lp}");
+    }
+
+    /// An unbound engine loads no Ranger plugin, so its log.properties is
+    /// unchanged (and so is its checksum: no needless roll).
+    #[test]
+    fn an_unbound_engine_has_no_ranger_logger_line() {
+        let lp = trino_config_map(&sample_spec())["data"]["log.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(lp, "io.trino=DEBUG\n");
+    }
+
+    /// log.properties is in the pod-template checksum, so a change to it (as
+    /// this override on upgrade) rolls the pods.
+    #[test]
+    fn a_log_properties_change_rolls_the_pods() {
+        let checksum = |level: &str| {
+            let mut s = sample_spec();
+            s.config.log_level = Some(level.into());
+            trino_deployment(&s, Role::Coordinator)["spec"]["template"]["metadata"]["annotations"]
+                ["egret/config-checksum"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(checksum("DEBUG"), checksum("INFO"));
     }
 
     #[test]
