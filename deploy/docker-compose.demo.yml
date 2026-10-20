@@ -63,6 +63,44 @@ services:
       timeout: 5s
       retries: 30
 
+  egret:
+    image: egret-demo-backend:dev
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    <<: *demo-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      rustfs-init: { condition: service_completed_successfully }
+    entrypoint: ["/bin/sh", "/demo/egret-entrypoint.sh"]
+    volumes:
+      - ./demo/egret-entrypoint.sh:/demo/egret-entrypoint.sh:ro
+    environment:
+      EGRET_SERVER__HOST: 0.0.0.0
+      EGRET_SERVER__PORT: "8080"
+      EGRET_DATABASE__URL: postgres://egret:egret@postgres:5432/egret
+      EGRET_STORAGE__ENDPOINT: http://rustfs:9000
+      EGRET_STORAGE__BUCKET: warehouse
+      EGRET_STORAGE__REGION: us-east-1
+      EGRET_STORAGE__PATH_STYLE: "true"
+      EGRET_STORAGE__ACCESS_KEY: egret
+      EGRET_STORAGE__SECRET_KEY: egretsecret
+      EGRET_CATALOG__ENABLED: "true"
+      EGRET_CATALOG__WAREHOUSE: s3://warehouse
+      # Address other containers use to reach egret (engines, renderer): the service name.
+      EGRET_CATALOG__PUBLIC_URL: http://egret:8080
+      EGRET_RANGER__ENABLED: "true"
+      EGRET_RANGER__AUTH_TOKEN: ""
+      EGRET_WORKFLOW__WORKER_ENABLED: "true"
+      EGRET_WORKFLOW__SCHEDULER_ENABLED: "true"
+      EGRET_LOG__FILTER: info,egret=debug
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
 volumes:
   demo-pgdata:
   demo-rustfsdata:
