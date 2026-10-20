@@ -29,6 +29,19 @@ pub fn engine_id_from_username(username: &str) -> Option<Uuid> {
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
+/// Constant-time equality of a presented secret with a stored one. The work
+/// depends only on `presented`'s length (the caller's own input), never on
+/// `stored`'s, and a length mismatch is folded into the result instead of
+/// returning early.
+pub fn ct_eq(presented: &[u8], stored: &[u8]) -> bool {
+    let mut diff = presented.len() ^ stored.len();
+    for (i, x) in presented.iter().enumerate() {
+        let y = stored.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    diff == 0
+}
+
 #[async_trait::async_trait]
 pub trait EngineCredentialVerifier: Send + Sync {
     /// `Ok(Some(_))` when `password` is a currently valid credential of `engine_id`;
@@ -44,6 +57,18 @@ pub trait EngineCredentialVerifier: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ct_eq_is_plain_equality() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"abcd"));
+        assert!(!ct_eq(b"abcd", b"abc"));
+        assert!(!ct_eq(b"", b"a"));
+        // A prefix padded with the zero byte the loop substitutes is not equal.
+        assert!(!ct_eq(b"ab\0", b"ab"));
+    }
 
     #[test]
     fn the_username_round_trips() {

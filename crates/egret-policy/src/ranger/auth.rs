@@ -27,7 +27,7 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use egret_engine_mgmt_api::credential::{engine_id_from_username, EngineIdentity};
+use egret_engine_mgmt_api::credential::{ct_eq, engine_id_from_username, EngineIdentity};
 
 /// How the surface treats a request without a valid credential.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -132,17 +132,6 @@ fn decode_basic(b64: &str) -> Option<(String, String)> {
     Some((user.to_owned(), pw.to_owned()))
 }
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut d = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        d |= x ^ y;
-    }
-    d == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,9 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn ct_eq_compares_whole_values() {
+    fn the_operator_token_compare_folds_a_length_mismatch() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+        assert!(!ct_eq(b"ab", b"abc"));
+        assert!(!ct_eq(b"ab\0", b"ab"));
     }
 }
