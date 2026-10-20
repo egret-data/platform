@@ -5,6 +5,7 @@ pub mod api;
 pub mod bollard_api;
 pub mod plan;
 pub mod provisioner;
+pub mod transport;
 
 pub use api::{ContainerInfo, ContainerState, DockerApi};
 pub use bollard_api::BollardDocker;
@@ -13,3 +14,4 @@ pub use plan::{
     PlanFile, PlanOptions, PlanRole,
 };
 pub use provisioner::DockerEngineProvisioner;
+pub use transport::HttpCoordinatorTransport;

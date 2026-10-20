@@ -27,7 +27,7 @@ tar.workspace = true
 bollard.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util"] }
 
 # Runs WITHOUT libtest so a run without EGRET_TEST_DOCKER=1 reports its tests
 # IGNORED, never passed (same contract as egret-workflow's container_docker_live).

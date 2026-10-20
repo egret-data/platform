@@ -243,14 +243,47 @@ pub(crate) async fn coordinator_call(
     if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
         return Ok(resp);
     }
-    let kube = st
-        .kube
-        .as_ref()
-        .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
     let service = format!("{}-trino", engine.name);
-    kube.coordinator_request(&engine.namespace, &service, method, path, &headers, body)
-        .await
-        .map_err(|_| CpError::BadGateway)
+    dispatch_coordinator(
+        st.kube.as_deref(),
+        st.coordinator_transport.as_deref(),
+        &engine.namespace,
+        &service,
+        method,
+        path,
+        &headers,
+        body,
+    )
+    .await
+}
+
+/// The seam fallback of [`coordinator_call`]: the kube client when there is
+/// one (unchanged), else the plain-HTTP transport (Docker), else the old
+/// "not configured" error.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_coordinator(
+    kube: Option<&dyn egret_provisioner::KubeClient>,
+    transport: Option<&dyn egret_engine_mgmt_api::CoordinatorTransport>,
+    namespace: &str,
+    service: &str,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+) -> Result<(u16, Vec<u8>), CpError> {
+    if let Some(kube) = kube {
+        return kube
+            .coordinator_request(namespace, service, method, path, headers, body)
+            .await
+            .map_err(|_| CpError::BadGateway);
+    }
+    if let Some(transport) = transport {
+        return transport
+            .request(namespace, service, method, path, headers, body)
+            .await
+            .map_err(|_| CpError::BadGateway);
+    }
+    Err(CpError::BadRequest("kubernetes not configured".into()))
 }
 
 /// Call the coordinator and parse a 2xx JSON body; any non-2xx status or
@@ -404,6 +437,84 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[derive(Default)]
+    struct FakeTransport {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::CoordinatorTransport for FakeTransport {
+        async fn request(
+            &self,
+            namespace: &str,
+            service: &str,
+            method: &str,
+            path: &str,
+            headers: &[(String, String)],
+            body: Option<Vec<u8>>,
+        ) -> Result<(u16, Vec<u8>), String> {
+            self.calls.lock().unwrap().push(format!(
+                "{namespace}|{service}|{method}|{path}|{headers:?}|{body:?}"
+            ));
+            Ok((207, b"from-transport".to_vec()))
+        }
+    }
+
+    fn hdrs() -> Vec<(String, String)> {
+        vec![("X-Trino-User".into(), "monitor".into())]
+    }
+
+    #[tokio::test]
+    async fn dispatch_uses_the_transport_when_there_is_no_kube() {
+        let t = FakeTransport::default();
+        let got = dispatch_coordinator(
+            None,
+            Some(&t),
+            "ns",
+            "e-trino",
+            "GET",
+            "/v1/query",
+            &hdrs(),
+            Some(vec![1]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, (207, b"from-transport".to_vec()));
+        assert_eq!(
+            t.calls.lock().unwrap().as_slice(),
+            ["ns|e-trino|GET|/v1/query|[(\"X-Trino-User\", \"monitor\")]|Some([1])"]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_prefers_kube_over_the_transport() {
+        let kube = egret_provisioner::kube_client::FakeKube::default();
+        kube.set_coordinator_response(200, b"from-kube".to_vec());
+        let t = FakeTransport::default();
+        let got = dispatch_coordinator(
+            Some(&kube),
+            Some(&t),
+            "ns",
+            "e-trino",
+            "GET",
+            "/v1/query",
+            &hdrs(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, (200, b"from-kube".to_vec()));
+        assert!(t.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_neither_keeps_the_old_error() {
+        let err = dispatch_coordinator(None, None, "ns", "s", "GET", "/", &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CpError::BadRequest(m) if m == "kubernetes not configured"));
+    }
+
     #[test]
     fn map_query_list_item() {
         let v = json!({"queryId":"20260704_x","state":"RUNNING","query":"SELECT 1",
@@ -551,6 +662,7 @@ mod tests {
             pdp: std::sync::Arc::new(AllowAllPdp),
             engine_provisioner: None,
             kube: None,
+            coordinator_transport: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),

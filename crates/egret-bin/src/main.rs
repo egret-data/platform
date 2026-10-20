@@ -704,6 +704,36 @@ impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
     }
 }
 
+/// Which engine provisioner `[engines]` selects.
+#[derive(Debug, PartialEq, Eq)]
+enum Selection {
+    Kubernetes,
+    Docker,
+    Disabled,
+}
+
+/// Pure so the rules are testable: `auto` is Kubernetes when a client could be
+/// built and disabled otherwise (today's behaviour); `docker` is only ever
+/// chosen explicitly, whatever the cluster; an explicit `kubernetes` without a
+/// client is a startup error rather than a silent downgrade.
+fn select_provisioner(
+    cfg: &egret_config::EnginesConfig,
+    kube_available: bool,
+) -> Result<Selection, String> {
+    use egret_config::Provisioner;
+    match (cfg.provisioner, kube_available) {
+        (Provisioner::Auto, true) => Ok(Selection::Kubernetes),
+        (Provisioner::Auto, false) => Ok(Selection::Disabled),
+        (Provisioner::Kubernetes, true) => Ok(Selection::Kubernetes),
+        (Provisioner::Kubernetes, false) => Err(
+            "engines.provisioner = \"kubernetes\" but no kubernetes client could be built (neither in-cluster nor kubeconfig)"
+                .into(),
+        ),
+        (Provisioner::Docker, _) => Ok(Selection::Docker),
+        (Provisioner::None, _) => Ok(Selection::Disabled),
+    }
+}
+
 /// Provisions query engines (Phase 1: Trino, Phase 2: StarRocks) onto
 /// Kubernetes for the engine-mgmt seam. Adapts the kube-free
 /// `egret_engine_mgmt_api::EngineProvisioningPort` trait onto the
@@ -2100,7 +2130,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Port (provision/status/update/delete/restart) and the raw `KubeClient`
     // (exec/pod-logs/coordinator-request, served straight off `EngineMgmtState`)
     // are derived from the SAME kube client.
-    let kube: Option<std::sync::Arc<dyn egret_provisioner::KubeClient>> = {
+    //
+    // `[engines] provisioner` picks the backend (`select_provisioner`). `auto`
+    // is exactly the above; `docker` never builds a kube client.
+    let kube: Option<std::sync::Arc<dyn egret_provisioner::KubeClient>> = if !matches!(
+        config.engines.provisioner,
+        egret_config::Provisioner::Auto | egret_config::Provisioner::Kubernetes
+    ) {
+        None
+    } else {
         let kube = match egret_provisioner::LiveKube::in_cluster().await {
             Ok(k) => Some(k),
             Err(_) => egret_provisioner::LiveKube::from_kubeconfig().await.ok(),
@@ -2113,24 +2151,56 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         }
     };
+    let selection =
+        select_provisioner(&config.engines, kube.is_some()).map_err(|e| anyhow::anyhow!(e))?;
+    let mut coordinator_transport: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::CoordinatorTransport>,
+    > = None;
     let engine_provisioner: Option<
         std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
-    > = kube.clone().map(|kube| {
-        let trino = std::sync::Arc::new(egret_provisioner::TrinoProvisioner::new(kube.clone()));
-        let starrocks =
-            std::sync::Arc::new(egret_provisioner::StarRocksProvisioner::new(kube.clone()));
-        std::sync::Arc::new(EgretEngineProvisioningPort::new(trino, starrocks, kube))
-            as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
-    });
+    > = match selection {
+        Selection::Kubernetes => kube.clone().map(|kube| {
+            let trino = std::sync::Arc::new(egret_provisioner::TrinoProvisioner::new(kube.clone()));
+            let starrocks =
+                std::sync::Arc::new(egret_provisioner::StarRocksProvisioner::new(kube.clone()));
+            std::sync::Arc::new(EgretEngineProvisioningPort::new(trino, starrocks, kube))
+                as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
+        }),
+        Selection::Docker => {
+            let d = &config.engines.docker;
+            let api = egret_provisioner::docker::BollardDocker::connect(&d.host)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            api.ping()
+                .await
+                .map_err(|e| anyhow::anyhow!("docker daemon at {} is unreachable: {e}", d.host))?;
+            tracing::info!(host = %d.host, network = %d.network, "engine provisioning: docker");
+            coordinator_transport = Some(std::sync::Arc::new(
+                egret_provisioner::docker::HttpCoordinatorTransport::new(),
+            ));
+            Some(
+                std::sync::Arc::new(egret_provisioner::docker::DockerEngineProvisioner::new(
+                    std::sync::Arc::new(api),
+                    d.network.clone(),
+                    d.project.clone(),
+                    d.allowed_images.clone(),
+                ))
+                    as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+            )
+        }
+        Selection::Disabled => None,
+    };
 
     // In-cluster URL Trino pods use to reach egret's REST catalog + token
     // endpoint; shared by the engine-mgmt seam (provisioning) and control-plane
     // (policies' `trino_config` route renders the same base URL).
-    let engine_egret_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://egret:8080".to_string());
+    let engine_egret_url = match (&selection, &config.engines.docker.callback_url) {
+        (Selection::Docker, Some(url)) => url.clone(),
+        _ => config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://egret:8080".to_string()),
+    };
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
@@ -2263,6 +2333,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pdp: pdp.clone(),
         engine_provisioner,
         kube,
+        coordinator_transport,
         engine_egret_url,
         // Engines trust egret's OWN machine-IdP (the STS): the same issuer that
         // signs catalog + engine tokens, independent of whether external OIDC is
@@ -3131,5 +3202,32 @@ impl egret_controlplane::MaterializedViewLister for EngineMaterializedViewLister
                 })
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod provisioner_selection_tests {
+    use super::{select_provisioner, Selection};
+
+    fn engines_cfg(p: egret_config::Provisioner) -> egret_config::EnginesConfig {
+        egret_config::EnginesConfig {
+            provisioner: p,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn provisioner_selection_follows_the_config() {
+        use egret_config::Provisioner::*;
+        let sel = |p, kube| select_provisioner(&engines_cfg(p), kube);
+        assert_eq!(sel(Auto, true), Ok(Selection::Kubernetes));
+        assert_eq!(sel(Auto, false), Ok(Selection::Disabled));
+        assert_eq!(sel(Kubernetes, true), Ok(Selection::Kubernetes));
+        assert!(sel(Kubernetes, false).is_err());
+        // Docker is never auto-selected, but explicit wins whatever the cluster.
+        assert_eq!(sel(Docker, true), Ok(Selection::Docker));
+        assert_eq!(sel(Docker, false), Ok(Selection::Docker));
+        assert_eq!(sel(None, true), Ok(Selection::Disabled));
+        assert_eq!(sel(None, false), Ok(Selection::Disabled));
     }
 }

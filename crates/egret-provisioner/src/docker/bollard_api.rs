@@ -51,6 +51,16 @@ impl BollardDocker {
         Ok(Self { docker })
     }
 
+    /// Round-trips to the daemon; used once at startup so an unreachable
+    /// daemon fails the boot instead of the first "Add engine".
+    pub async fn ping(&self) -> Result<(), String> {
+        self.docker
+            .ping()
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("pinging the docker daemon: {e}"))
+    }
+
     async fn force_remove(&self, name: &str) {
         let opts = RemoveContainerOptionsBuilder::default().force(true).build();
         if let Err(e) = self.docker.remove_container(name, Some(opts)).await {
