@@ -2957,6 +2957,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http 1.5.0",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
