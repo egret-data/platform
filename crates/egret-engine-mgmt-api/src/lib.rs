@@ -667,6 +667,14 @@ impl std::fmt::Debug for StarRocksConfig {
     }
 }
 
+/// The longest StarRocks engine name egret accepts. The kube-starrocks
+/// operator (run with `--volume-name-with-hash=true`) names each FE pod volume
+/// it mounts from a Secret or ConfigMap `<object name>-<4 chars>`, untruncated,
+/// and a pod volume name is a DNS-1123 label (63 characters). The longest such
+/// objects egret mounts, `{name}-ranger-cm` and `{name}-rc-{6-char tag}`, are
+/// `name + 10` characters, so `name + 15 <= 63`.
+pub const MAX_STARROCKS_ENGINE_NAME_LEN: usize = 48;
+
 /// Desired state of a query engine (`kind` selects Trino vs StarRocks).
 #[derive(Clone, Debug)]
 pub struct EngineSpec {

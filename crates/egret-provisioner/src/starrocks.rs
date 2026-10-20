@@ -178,7 +178,7 @@ pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
 /// [`starrocks_cluster_cr`]) — never as a directory mount, which would
 /// shadow `fe.conf` and stop the FE booting.
 const FE_CONF_DIR: &str = "/opt/starrocks/fe/conf";
-/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-{credential id}`.
+/// Key (and file name) of the Ranger plugin security config in `{name}-rc-{tag}`.
 const RANGER_SECURITY_XML_KEY: &str = crate::ranger_config::STARROCKS_SECURITY_XML;
 /// Key (and file name) of the Ranger plugin audit config in `{name}-ranger-cm`.
 const RANGER_AUDIT_XML_KEY: &str = crate::ranger_config::STARROCKS_AUDIT_XML;
@@ -217,7 +217,7 @@ pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
-/// The `{name}-ranger-{credential id}` Secret ([`crate::rollout::ranger_secret_name`]):
+/// The `{name}-rc-{tag}` Secret ([`crate::rollout::ranger_secret_name`]):
 /// the Ranger plugin's security XML, which carries the engine's `/ranger`
 /// credential (spec 2026-10-20-ranger-surface-auth A9). One per credential, so
 /// an FE pod of a template that names a credential can only mount that one's
@@ -448,7 +448,7 @@ const RESTART_STAMP_KEY: &str = "egret.io/restarted-at";
 /// Pod-template annotation carrying a hash of every rendered config the FE
 /// **mounts**: `{name}-fe-cm` (`fe.conf`, via `configMapInfo`),
 /// `{name}-ranger-cm` (the Ranger audit XML, via `configMaps` + `subPath`) and
-/// `{name}-ranger-{credential id}` (the security XML and its credential, via `secrets` +
+/// `{name}-rc-{tag}` (the security XML and its credential, via `secrets` +
 /// `subPath`).
 ///
 /// **This is what makes a config change reach the FE.** Neither mount is
@@ -660,7 +660,7 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // operator had no reason to roll anything.
     //
     // The audit XML comes from `{name}-ranger-cm`; the security XML carries the
-    // plugin's credential, so it comes from the `{name}-ranger-{credential id}` Secret
+    // plugin's credential, so it comes from the `{name}-rc-{tag}` Secret
     // through the CR's `secrets` field (the same name+mountPath+subPath shape;
     // the operator names the pod volume itself, which no one here references).
     let mut extra_config_maps: Vec<Value> = Vec::new();
@@ -1098,7 +1098,7 @@ impl EngineProvisioner for StarRocksProvisioner {
         self.apply_all(spec).await?;
         // `apply_all` only applies the Ranger ConfigMap and Secret when bound, so
         // toggling a RangerBinding OFF would otherwise leave `{name}-ranger-cm` and
-        // `{name}-ranger-{credential id}` orphaned (the CR's mounts are dropped, but the
+        // `{name}-rc-{tag}` orphaned (the CR's mounts are dropped, but the
         // objects linger).
         // Best-effort delete it when Ranger is absent.
         if spec.ranger.is_none() {
@@ -1649,7 +1649,7 @@ mod tests {
         spec
     }
 
-    /// A9: the credential is in `{name}-ranger-{credential id}` and in no ConfigMap, CR
+    /// A9: the credential is in `{name}-rc-{tag}` and in no ConfigMap, CR
     /// or Debug output.
     #[test]
     fn the_credential_is_rendered_only_into_the_ranger_secret() {
@@ -1657,10 +1657,7 @@ mod tests {
         let secret = starrocks_ranger_secret(&spec).unwrap();
         assert_eq!(secret["kind"], "Secret");
         assert_eq!(secret["type"], "Opaque");
-        assert_eq!(
-            secret["metadata"]["name"],
-            format!("sr1-ranger-{TEST_CREDENTIAL_ID}")
-        );
+        assert_eq!(secret["metadata"]["name"], "sr1-rc-0b5ad7".to_string());
         assert_eq!(secret["metadata"]["labels"]["egret/engine"], "sr1");
         assert!(secret["stringData"]["ranger-starrocks-security.xml"]
             .as_str()
@@ -1717,7 +1714,7 @@ mod tests {
             .await
             .expect_err("the CR apply fails");
         let applied = kube.applied.lock().unwrap();
-        assert!(applied.contains_key(&format!("Secret/sr1-ranger-{TEST_CREDENTIAL_ID}")));
+        assert!(applied.contains_key("Secret/sr1-rc-0b5ad7"));
         assert!(!applied.contains_key("StarRocksCluster/sr1"));
     }
 
@@ -2785,7 +2782,7 @@ mod tests {
     /// CN pod still carries an OLD annotation, which must not matter.
     fn rolled_sr(kube: &crate::kube_client::FakeKube, cred: &str) {
         use crate::rollout::tests::{ready_pod, rolled_statefulset, secret};
-        kube.set_live(secret(&format!("sr1-ranger-{cred}"), cred));
+        kube.set_live(secret(&format!("sr1-rc-{cred}"), cred));
         kube.set_live(rolled_statefulset("sr1-fe", cred));
         *kube.live_pods.lock().unwrap() = vec![
             ready_pod("sr1-fe-0", fe_labels(), cred),
@@ -2852,7 +2849,7 @@ mod tests {
     async fn each_credential_has_its_own_secret_which_the_fe_mounts() {
         use crate::kube_client::FakeKube;
         let spec = bound_sr(Some(("engine-1", "pw")));
-        let name = format!("sr1-ranger-{TEST_CREDENTIAL_ID}");
+        let name = "sr1-rc-0b5ad7".to_string();
         assert_eq!(
             starrocks_ranger_secret(&spec).unwrap()["metadata"]["name"],
             name
@@ -2870,7 +2867,7 @@ mod tests {
         assert_eq!(
             *kube.deleted.lock().unwrap(),
             vec![
-                "Secret/sr1-ranger-c1".to_string(),
+                "Secret/sr1-rc-c1".to_string(),
                 "Secret/sr1-ranger-secret".to_string()
             ]
         );
@@ -2889,7 +2886,7 @@ mod tests {
         let deleted = kube.deleted.lock().unwrap();
         assert!(deleted.contains(&format!("Secret/{name}")), "{deleted:?}");
         assert!(deleted.contains(&"Secret/sr1-ranger-secret".to_string()));
-        assert!(!deleted.contains(&format!("Secret/sr1-x-ranger-{TEST_CREDENTIAL_ID}")));
+        assert!(!deleted.contains(&"Secret/sr1-x-rc-0b5ad7".to_string()));
     }
 
     /// The FE StatefulSet and its pod name c2, but only c1's Secret exists:
@@ -2901,13 +2898,54 @@ mod tests {
         let kube = Arc::new(FakeKube::default());
         let p = StarRocksProvisioner::new(kube.clone());
         rolled_sr(&kube, "c2");
-        kube.live.lock().unwrap().remove("Secret/sr1-ranger-c2");
-        kube.set_live(secret("sr1-ranger-c1", "c1"));
+        kube.live.lock().unwrap().remove("Secret/sr1-rc-c2");
+        kube.set_live(secret("sr1-rc-c1", "c1"));
         assert!(matches!(
             p.ranger_rollout("egret-engines", "sr1", "c2")
                 .await
                 .unwrap(),
             RangerRollout::Pending(_)
         ));
+    }
+
+    /// Review round 2 (Task 6b): the deployed operator runs with
+    /// `--volume-name-with-hash=true`, naming each `secrets`/`configMaps`
+    /// pod volume `<object name>-<4 chars>`, untruncated; a pod volume name is a
+    /// DNS-1123 label (63). For the LONGEST engine name egret accepts, every
+    /// such volume must fit.
+    #[test]
+    fn every_hashed_fe_volume_name_fits_a_dns_label_for_the_longest_engine_name() {
+        let longest = egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN;
+        let mut spec = sample_sr_spec_with_tls();
+        spec.name = "a".repeat(longest);
+        spec.ranger = Some(RangerBinding {
+            service_name: "sr1".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+            credential: Some(
+                crate::ranger_config::RenderableCredential::new(
+                    "ffffffff-ffff-4fff-bfff-ffffffffffff",
+                    "engine-1",
+                    "pw",
+                )
+                .unwrap(),
+            ),
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let mut seen = 0;
+        for role in ["starRocksFeSpec", "starRocksCnSpec"] {
+            for field in ["secrets", "configMaps"] {
+                for m in cr["spec"][role][field].as_array().into_iter().flatten() {
+                    let volume = format!("{}-abcd", m["name"].as_str().unwrap());
+                    assert!(
+                        volume.len() <= 63,
+                        "{role}.{field}: {volume} ({})",
+                        volume.len()
+                    );
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen >= 2, "the ranger Secret and ConfigMap were checked");
     }
 }

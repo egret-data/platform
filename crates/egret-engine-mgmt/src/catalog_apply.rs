@@ -198,7 +198,7 @@ async fn apply_trino(
     apply_built(st, prov.as_ref(), engine, &built, ApplyOp::Update)
         .await
         .map_err(|e| match e {
-            ApplyBuiltError::Conflict => ApplyError::Conflict,
+            ApplyBuiltError::Conflict | ApplyBuiltError::CredentialChanged => ApplyError::Conflict,
             ApplyBuiltError::Failed(m) => ApplyError::Rejected(m),
         })
 }

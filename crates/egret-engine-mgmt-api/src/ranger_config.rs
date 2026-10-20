@@ -37,6 +37,26 @@ pub const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
 /// The `fe.conf` line that switches StarRocks' access control to Ranger.
 pub const STARROCKS_ACCESS_CONTROL_LINE: &str = "access_control = ranger\n";
 
+/// How many characters of a credential's id name its Kubernetes Secret
+/// ([`ranger_secret_tag`]).
+pub const RANGER_SECRET_TAG_LEN: usize = 6;
+
+/// The short, NON-secret tag a credential's Kubernetes Secret is named by,
+/// `{engine}-rc-{tag}`: the first [`RANGER_SECRET_TAG_LEN`] alphanumerics of
+/// its id, lower-cased. Short because the StarRocks operator names the FE pod
+/// volume `<secret name>-<4 chars>` (DNS label, 63): with the 48-character
+/// engine-name bound ([`crate::MAX_STARROCKS_ENGINE_NAME_LEN`]) that is exactly
+/// 63. egret keeps the tags of one engine's current and previous credential
+/// distinct (it re-mints a credential whose tag collides).
+pub fn ranger_secret_tag(credential_id: &str) -> String {
+    credential_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(RANGER_SECRET_TAG_LEN)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 /// Shown in the files an operator installs by hand when the password is not repeated.
 pub const PASSWORD_PLACEHOLDER: &str = "REPLACE_WITH_THE_ENGINE_PASSWORD";
 
@@ -465,6 +485,20 @@ mod tests {
             ("c1", "engine-1", "a-b_c")
         );
         assert!(!format!("{ok:?}").contains("a-b_c"));
+    }
+
+    #[test]
+    fn the_secret_tag_is_a_short_lowercase_prefix_of_the_id() {
+        assert_eq!(
+            ranger_secret_tag("0B5AD7E2-0000-4000-8000-00000000c0de"),
+            "0b5ad7"
+        );
+        assert_eq!(ranger_secret_tag("c1"), "c1");
+        assert_eq!(ranger_secret_tag("ab-cd-ef-gh"), "abcdef");
+        assert_eq!(
+            ranger_secret_tag(&"f".repeat(36)).len(),
+            RANGER_SECRET_TAG_LEN
+        );
     }
 
     #[test]

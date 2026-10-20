@@ -5719,6 +5719,47 @@ async fn a_bound_trino_engine_is_applied_with_a_ranger_credential_that_verifies(
     assert_eq!(ranger_slots(&f, id).await, (current, None));
 }
 
+/// Task 6b review round 2: the operator names each FE pod volume
+/// `<object>-<4 chars>` (a 63-character DNS label), so a StarRocks engine name
+/// longer than `MAX_STARROCKS_ENGINE_NAME_LEN` is refused at create, before
+/// anything is minted or applied.
+#[tokio::test]
+async fn a_starrocks_engine_name_over_the_volume_budget_is_refused() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_name_budget_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let name = "s".repeat(egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN + 1);
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(j["error"].as_str().unwrap().contains("at most 48"), "{j}");
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing applied"
+    );
+}
+
 /// The StarRocks path builds its request separately; it must carry the
 /// credential too.
 #[tokio::test]

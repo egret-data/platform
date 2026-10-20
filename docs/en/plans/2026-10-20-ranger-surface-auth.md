@@ -536,7 +536,7 @@ pub struct DbVerifier { /* engine store + secrets */ }
 impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant time */ }
 ```
 
-**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left; each credential rendered into its own Secret `{name}-ranger-{id}`, deleted by exact name after its retire), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
+**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left; each credential rendered into its own Secret `{name}-rc-{tag}`, deleted by exact name after its retire), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
 
 - [ ] **Step 1: Migration**
 

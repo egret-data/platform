@@ -28,7 +28,8 @@
 //! columns (current = the id the rollout was observed for, previous = the id
 //! read). A rollout observed for an older credential therefore never retires
 //! the previous one of a newer rotation. Each credential is rendered into its own
-//! Kubernetes Secret, `{name}-ranger-{id}`, so a pod of a template that names a
+//! Kubernetes Secret, `{name}-rc-{tag}` (a short prefix of its id, distinct
+//! between the current and previous credential), so a pod of a template that names a
 //! credential can only mount that credential's content; the retired one's
 //! Secret is deleted by exact name after the retire. It runs on a periodic sweep
 //! ([`spawn_ranger_retire_sweeper`]) and on every read of the engine; anything
@@ -63,6 +64,19 @@ use egret_secrets::{SecretsError, WorkspaceSecretStore};
 use uuid::Uuid;
 
 use crate::{Engine, EngineHttpError as CpError, EngineMgmtState as CpState, EngineMgmtStore};
+
+/// How many draws [`RangerCredentialStore::mint_with_a_free_tag`] makes.
+const TAG_ATTEMPTS: usize = 8;
+
+/// Whether credential `new`'s Secret tag differs from every one of `others`.
+pub(crate) fn tag_is_free(new: Uuid, others: &[Option<Uuid>]) -> bool {
+    use egret_engine_mgmt_api::ranger_config::ranger_secret_tag;
+    let tag = ranger_secret_tag(&new.to_string());
+    others
+        .iter()
+        .flatten()
+        .all(|o| ranger_secret_tag(&o.to_string()) != tag)
+}
 
 /// How many times `ensure` re-reads the row after a lost compare-and-set.
 const ENSURE_ATTEMPTS: usize = 3;
@@ -341,7 +355,7 @@ impl RangerCredentialStore {
             Err(err) => tracing::warn!(engine = %engine.name, secret_id = %prev, error = %err,
                 "could not delete a retired ranger credential; the engine-delete sweep will"),
         }
-        // Its Kubernetes Secret (`{name}-ranger-{prev}`): no pod mounts it, the
+        // Its Kubernetes Secret (`{name}-rc-{tag of prev}`): no pod mounts it, the
         // rollout of the current one's having just been observed complete.
         let deleted = tokio::time::timeout(
             KUBE_CALL_TIMEOUT,
@@ -423,17 +437,7 @@ impl RangerCredentialStore {
         engine: &Engine,
         demote: bool,
     ) -> Result<Option<(Uuid, PluginCredential)>, CpError> {
-        let password = mint_password();
-        let new_id = self
-            .secrets
-            .create(
-                None,
-                &secret_name(engine.id),
-                Some("Ranger plugin credential"),
-                &password,
-            )
-            .await
-            .map_err(|e| CpError::BadRequest(format!("store ranger credential: {e}")))?;
+        let (password, new_id) = self.mint_with_a_free_tag(engine).await?;
         let previous = if demote {
             engine.ranger_secret_id
         } else {
@@ -468,6 +472,35 @@ impl RangerCredentialStore {
                 password,
             },
         )))
+    }
+
+    /// Mint and store a credential whose Kubernetes Secret tag
+    /// ([`egret_engine_mgmt_api::ranger_config::ranger_secret_tag`]) differs
+    /// from both credentials the row names: the current and previous
+    /// credential of one engine are rendered into DIFFERENT Secrets, so the
+    /// retire of one can never delete the other's. A colliding draw (about one
+    /// in 16 million) is discarded — never handed out — and re-drawn.
+    async fn mint_with_a_free_tag(&self, engine: &Engine) -> Result<(String, Uuid), CpError> {
+        for _ in 0..TAG_ATTEMPTS {
+            let password = mint_password();
+            let id = self
+                .secrets
+                .create(
+                    None,
+                    &secret_name(engine.id),
+                    Some("Ranger plugin credential"),
+                    &password,
+                )
+                .await
+                .map_err(|e| CpError::BadRequest(format!("store ranger credential: {e}")))?;
+            if tag_is_free(id, &[engine.ranger_secret_id, engine.ranger_secret_prev_id]) {
+                return Ok((password, id));
+            }
+            self.discard_unrecorded(engine.id, id).await;
+        }
+        tracing::error!(engine_id = %engine.id,
+            "could not mint a ranger credential with a Secret tag distinct from the engine's");
+        Err(CpError::Internal)
     }
 
     /// Mint a credential for an engine row that does not exist yet, WITHOUT
@@ -732,6 +765,24 @@ mod tests {
         assert!(!ct_eq(b"", b"a"));
         // A prefix padded with the zero byte the loop substitutes is not equal.
         assert!(!ct_eq(b"ab\0", b"ab"));
+    }
+
+    /// The current and previous credential of one engine never share a
+    /// Kubernetes Secret: a new credential whose tag equals either slot's is
+    /// refused (and re-drawn by `mint_with_a_free_tag`).
+    #[test]
+    fn a_tag_shared_with_either_slot_is_not_free() {
+        let id = |s: &str| Uuid::parse_str(s).unwrap();
+        let current = id("0b5ad7e2-0000-4000-8000-000000000001");
+        let previous = id("a1b2c3d4-0000-4000-8000-000000000002");
+        let same_as_current = id("0b5ad7ff-1111-4111-8111-111111111111");
+        let same_as_previous = id("a1b2c3ee-2222-4222-8222-222222222222");
+        let fresh = id("99999999-3333-4333-8333-333333333333");
+        let slots = [Some(current), Some(previous)];
+        assert!(!tag_is_free(same_as_current, &slots));
+        assert!(!tag_is_free(same_as_previous, &slots));
+        assert!(tag_is_free(fresh, &slots));
+        assert!(tag_is_free(same_as_current, &[None, Some(previous)]));
     }
 
     #[test]

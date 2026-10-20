@@ -850,6 +850,11 @@ pub(crate) enum ApplyBuiltError {
     /// it to check failed outright. Either way `apply_built` cannot confirm
     /// it is still safe to call the provisioner, so it never does.
     Conflict,
+    /// The Ranger credential this request renders is neither the row's
+    /// current nor its previous one any more (a rotation and retire landed
+    /// while it was built): applying it would put a retired credential on the
+    /// cluster. Nothing was applied.
+    CredentialChanged,
     Failed(String),
 }
 
@@ -881,7 +886,14 @@ pub(crate) async fn apply_built(
     op: ApplyOp,
 ) -> Result<(), ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
-        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {}
+        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {
+            if !renders_a_live_ranger_credential(&built.req, &current) {
+                if let Some(secrets) = &built.internal {
+                    discard_internal_secrets(st, secrets).await;
+                }
+                return Err(ApplyBuiltError::CredentialChanged);
+            }
+        }
         _ => {
             // N2 (round-2 review): nothing has been applied at this point —
             // this guard runs BEFORE the provisioner is ever touched — so a
@@ -983,6 +995,50 @@ async fn ranger_binding(
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         credential: Some(credential),
     }))
+}
+
+/// The 409 of an apply whose rendered Ranger credential is no longer the
+/// engine's current or previous one.
+pub(crate) const RANGER_CREDENTIAL_CHANGED: &str =
+    "the engine's ranger credential changed while the request was being built; retry";
+
+/// Whether the Ranger credential `req` renders (if any) is still one the row
+/// names, current or previous. A stale build that would render a RETIRED
+/// credential is refused right before the provisioner call. This narrows,
+/// but does not close, the race between concurrent applies (there is no
+/// per-engine lock): a rotation and retire can still land between this
+/// re-read and the apply.
+pub(crate) fn renders_a_live_ranger_credential(req: &EngineProvisionReq, row: &Engine) -> bool {
+    let Some(id) = req
+        .ranger
+        .as_ref()
+        .and_then(|r| r.credential.as_ref())
+        .map(|c| c.id())
+    else {
+        return true;
+    };
+    [row.ranger_secret_id, row.ranger_secret_prev_id]
+        .iter()
+        .flatten()
+        .any(|slot| slot.to_string() == id)
+}
+
+/// The SR paths call the provisioner directly: the same re-read and check.
+async fn refuse_a_stale_ranger_credential(
+    st: &CpState,
+    engine_id: Uuid,
+    req: &EngineProvisionReq,
+) -> Result<(), CpError> {
+    let row = st
+        .engine_mgmt
+        .get_engine(engine_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if renders_a_live_ranger_credential(req, &row) {
+        Ok(())
+    } else {
+        Err(CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into()))
+    }
 }
 
 /// `CpError::Conflict` with the wording every apply route uses when
@@ -3434,6 +3490,9 @@ async fn create_engine(
         compensate_failed_create(&st, undo).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => {
                 CpError::BadRequest(format!("engine provisioning failed: {msg}"))
             }
@@ -4268,6 +4327,15 @@ async fn create_starrocks_engine(
     // path — carry a secret, else a hard 400. The actual S3 coords + secret are
     // re-resolved from the warehouse inside `build_starrocks_provision_req` at
     // provision-req assembly time (below), so no bindings are threaded through.
+    // The operator names each FE pod volume `<object>-<4 chars>`, a DNS label:
+    // `{name}-ranger-cm` and `{name}-rc-{tag}` fit only up to this bound.
+    if b.name.len() > egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN {
+        return Err(CpError::BadRequest(format!(
+            "a StarRocks engine name must be at most {} characters (the operator derives \
+             63-character pod volume names from it)",
+            egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN
+        )));
+    }
     let sc = st
         .storage_registry
         .get_storage_conn(wh.storage_conn_id)
@@ -5834,6 +5902,9 @@ async fn update_trino_engine(
         restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         });
     }
@@ -5975,6 +6046,10 @@ async fn update_starrocks_engine(
             return Err(e);
         }
     };
+    if let Err(e) = refuse_a_stale_ranger_credential(&st, engine_id, &req).await {
+        restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+        return Err(e);
+    }
     if let Err(msg) = prov.update(&req).await {
         restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
         return Err(CpError::ClusterApplyFailed(msg));
@@ -6441,6 +6516,9 @@ async fn rotate_engine_secrets(
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         })?;
     Ok(StatusCode::NO_CONTENT)
@@ -6550,6 +6628,9 @@ async fn rotate_ranger_credential(
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         })?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -12402,6 +12483,72 @@ mod tests {
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "the provisioner must never be called once the row is deleting"
+        );
+    }
+
+    /// Task 6b review round 2: a request built with a Ranger credential the
+    /// row no longer names (a rotation AND its retire landed while it was
+    /// built) is refused right before the provisioner call, applying nothing.
+    /// The current or the previous credential is still applied.
+    #[tokio::test]
+    async fn apply_built_refuses_a_ranger_credential_the_row_no_longer_names() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let creds = crate::ranger_credential::RangerCredentialStore::from_state(&st);
+        let c1 = creds.ensure(&engine).await.expect("ensure").id;
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let c2 = creds.rotate(&row).await.expect("rotate").id;
+        let mut built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+        let render = |built: &mut BuiltReq, id: String| {
+            built.req.ranger = Some(egret_engine_mgmt_api::RangerBinding {
+                service_name: "p".into(),
+                egret_url: "http://egret:8080".into(),
+                poll_interval_ms: 30_000,
+                credential: Some(
+                    egret_engine_mgmt_api::ranger_config::RenderableCredential::new(
+                        id, "engine-x", "pw",
+                    )
+                    .unwrap(),
+                ),
+            });
+        };
+
+        render(&mut built, Uuid::new_v4().to_string());
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("a credential the row does not name is refused");
+        assert!(matches!(err, ApplyBuiltError::CredentialChanged));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing applied"
+        );
+
+        for live in [c1, c2] {
+            render(&mut built, live.to_string());
+            apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+                .await
+                .unwrap_or_else(|_| panic!("{live} is still named by the row"));
+        }
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
     }
 

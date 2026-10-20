@@ -11,7 +11,7 @@
 //! **Tied to one credential.** The provisioners stamp the credential's
 //! non-secret id ([`RANGER_CREDENTIAL_ANNOTATION`]) on the pod template of
 //! every workload that runs the plugin, and the password is rendered into a
-//! Secret of its own, `{name}-ranger-{id}` ([`ranger_secret_name`]), which
+//! Secret of its own, `{name}-rc-{tag}` ([`ranger_secret_name`]), which
 //! those pod templates mount: a pod can only hold the content of the
 //! credential its template names. A probe asks about ONE id, so a rollout that
 //! completed for an older apply (an older credential) never answers for a
@@ -59,7 +59,9 @@ pub fn legacy_ranger_secret_name(engine: &str) -> String {
 }
 
 /// The Secret the plugin's security XML is rendered into: one PER CREDENTIAL,
-/// `{engine}-ranger-{credential id}` (the id is not secret).
+/// `{engine}-rc-{tag}`, the tag being a short prefix of the (non-secret)
+/// credential id ([`crate::ranger_config::ranger_secret_tag`]; short so the
+/// StarRocks operator's hashed FE volume name stays a DNS label).
 ///
 /// Per credential because the XML is mounted by `subPath`, which keeps the
 /// content a pod saw at start: with one shared name, two interleaved applies
@@ -70,7 +72,10 @@ pub fn legacy_ranger_secret_name(engine: &str) -> String {
 /// X can only ever mount X's Secret, which is written once with X's content.
 pub fn ranger_secret_name(engine: &str, credential_id: Option<&str>) -> String {
     match credential_id {
-        Some(id) => format!("{engine}-ranger-{id}"),
+        Some(id) => format!(
+            "{engine}-rc-{}",
+            crate::ranger_config::ranger_secret_tag(id)
+        ),
         None => legacy_ranger_secret_name(engine),
     }
 }
@@ -322,7 +327,7 @@ pub(crate) enum Workload {
     StatefulSet(String),
 }
 
-/// Read the current credential's Secret (`{engine}-ranger-{expected}`), the
+/// Read the current credential's Secret (`{engine}-rc-{tag of expected}`), the
 /// workloads and the pods, and judge them all against `expected`. The first check that does not hold is the `Pending` reason.
 pub(crate) async fn observe(
     kube: &dyn KubeClient,
