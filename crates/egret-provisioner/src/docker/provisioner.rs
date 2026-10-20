@@ -214,10 +214,12 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
         // Restart cannot recreate containers (it has no spec). Saying "ok" here
         // left an engine whose containers were removed outside egret (for
         // example by the demo's `just demo-down`) at "provisioning" for good.
+        // An engine still being created has none yet either, so name both.
         if current.is_empty() {
             return Err(format!(
-                "engine {name} has no containers to restart (they were removed outside egret); \
-                 delete the engine and add it again"
+                "engine {name} has no containers to restart: either they are not created yet \
+                 (try again once it is running) or they were removed outside egret (delete \
+                 the engine and add it again)"
             ));
         }
         for c in current {
