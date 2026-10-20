@@ -840,3 +840,13 @@ Do not merge; the owner decides.
 | Master key (cause of the SMTP 500 seen in docs) | Global Constraints, 6 |
 
 Differences from the spec worth noting: the spec lists the frontend on 8080 only; the plan adds an **edge** container so Keycloak shares the origin (needed for one OIDC issuer string). The spec's "apps host second port" belongs to WP-B and is intentionally absent. The workflow container runner (`EGRET_WORKFLOW__CONTAINER_RUNNER`) is not configured in WP-A; container tasks are expected to fail in this package and are checked off in the acceptance run only for plain tasks.
+
+## Deviations recorded during execution
+
+Accepted by task and final reviews; the code is authoritative where it differs from the task text above.
+
+- Task 4: `egret` does OIDC discovery through the edge alias at boot, so the original order deadlocked. Final order: `egret` depends on `edge` (started); `edge` depends on `keycloak` (healthy) and resolves `frontend` lazily (`resolver 127.0.0.11`); `frontend` depends on `egret` (healthy). The issuer probe reads `/auth/realms/egret/.well-known/openid-configuration`.
+- Task 3: the login probe body is 54 bytes, so `content-length: 54`; use `exec -T` and `</dev/null`.
+- Task 6: `seed.sh` and `wait.sh` save the caller's `DEMO_PORT` (and `DEMO_URL`) before sourcing `demo.env` and restore them, so a shell override such as `DEMO_PORT=18080` wins. The seed charts carry `cartesian.xAxis` / `yMetrics` settings so the dashboard renders, and the seed repairs a partial earlier run.
+- Task 7: `wait.sh` probes only `/api/auth/config` (an endpoint egret alone answers) with a 5 s per-attempt timeout.
+- Final review: published ports bind to `127.0.0.1`; `egret` also waits for `trino-demo` healthy; `wait.sh` fails fast if `DEMO_URL` and `DEMO_PORT` disagree; unused `S3_*` keys were dropped from `demo.env`.
