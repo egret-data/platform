@@ -28,14 +28,16 @@ demo-up:
     ./deploy/demo/wait.sh
     ./deploy/demo/seed.sh
 
-# Stop the demo; removes engine containers egret provisioned (label egret.managed=true); keeps data volumes
+# Stop the demo; removes engine containers egret provisioned (labels egret.managed=true and egret.project=egret-demo); keeps data volumes
 demo-down:
-    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    -{{demo_compose}} stop egret
+    -EGRET_DEMO_PROJECT=egret-demo ./deploy/demo/remove-engines.sh
     {{demo_compose}} down
 
 # Stop the demo and DELETE its data volumes
 demo-reset:
-    -ids=$(docker ps -aq --filter label=egret.managed=true); [ -z "$ids" ] || docker rm -f $ids
+    -{{demo_compose}} stop egret
+    -EGRET_DEMO_PROJECT=egret-demo ./deploy/demo/remove-engines.sh
     {{demo_compose}} down -v
 
 # Re-run the idempotent seed
@@ -45,6 +47,29 @@ demo-seed:
 # Follow the demo's logs (optionally one service: just demo-logs egret)
 demo-logs service="":
     {{demo_compose}} logs -f {{service}}
+
+# Browser check of the Data Apps lifecycle (needs Node and Playwright; see deploy/demo/verify-apps.mjs)
+demo-verify-apps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # demo.env supplies the defaults; values the caller exported win (as in deploy/demo/wait.sh).
+    CALLER_PORT="${DEMO_PORT:-}"; CALLER_URL="${DEMO_URL:-}"; CALLER_APPS_URL="${DEMO_APPS_URL:-}"
+    set -a; . deploy/demo/demo.env; set +a
+    [ -z "$CALLER_PORT" ] || DEMO_PORT="$CALLER_PORT"
+    [ -z "$CALLER_URL" ] || DEMO_URL="$CALLER_URL"
+    [ -z "$CALLER_APPS_URL" ] || DEMO_APPS_URL="$CALLER_APPS_URL"
+    exec node deploy/demo/verify-apps.mjs
+
+# Browser check of Add engine: add a Trino engine, query it, delete it (needs Node, Playwright and docker; see deploy/demo/verify-engine.mjs)
+demo-verify-engine:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # demo.env supplies the defaults; values the caller exported win (as in deploy/demo/wait.sh).
+    CALLER_PORT="${DEMO_PORT:-}"; CALLER_URL="${DEMO_URL:-}"
+    set -a; . deploy/demo/demo.env; set +a
+    [ -z "$CALLER_PORT" ] || DEMO_PORT="$CALLER_PORT"
+    [ -z "$CALLER_URL" ] || DEMO_URL="$CALLER_URL"
+    exec node deploy/demo/verify-engine.mjs
 
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
 #

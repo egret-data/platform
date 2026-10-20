@@ -67,8 +67,8 @@ utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 tokio = { version = "1", features = ["full"] }
-# `libc::atexit` — used only by `egret-test-db`, to drop a test process's
-# private database as the process exits.
+# `libc::atexit` in `egret-test-db`, to drop a test process's private database as the process
+# exits; `libc::killpg` in `egret-apps`, to signal a pod's process group.
 libc = "0.2"
 tokio-util = "0.7"
 tokio-tungstenite = "0.30"
@@ -212,6 +212,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # `ColumnType` + `Value::Bytes` and never names those types.
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 testcontainers = "0.28"
+# Docker daemon client for the engine provisioner. No `ssl` feature: it would pull a rustls crypto provider; `tcp://` hosts are plain HTTP.
+bollard = { version = "0.21", default-features = false, features = ["http", "pipe"] }
+# Engine config files reach a Docker container as a tar archive (`PUT /containers/{id}/archive`).
+tar = "0.4"
 # kube 2 / k8s-openapi 0.26 — the versions lakekeeper's `limes` already pulls in,
 # so the tree holds one of each instead of two. (kube 4 is newer still, but limes
 # is git-pinned to 2, so following `latest` would put the duplicate straight back.)

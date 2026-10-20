@@ -63,11 +63,43 @@ services:
       timeout: 5s
       retries: 30
 
+  # Narrow door to the Docker API for egret's engine provisioner. Not published to the host. DEMO ONLY:
+  # CONTAINERS+POST still lets a caller start containers on the host (see the guide's Safety section).
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      NETWORKS: "1"
+      POST: "1"
+      INFO: "1"
+      PING: "1"
+      EXEC: "0"
+      VOLUMES: "0"
+      SERVICES: "0"
+      SWARM: "0"
+      SECRETS: "0"
+      CONFIGS: "0"
+      NODES: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      PLUGINS: "0"
+      SYSTEM: "0"
+      AUTH: "0"
+      SESSION: "0"
+      DISTRIBUTION: "0"
+      TASKS: "0"
+
   egret:
     image: egret-demo-backend:dev
+    # egret is PID 1; Docker's init reaps the kernel processes marimo leaves behind when a pod stops.
+    init: true
     build:
       context: ..
       dockerfile: deploy/docker/backend.Dockerfile
+      target: demo
     <<: *demo-env
     depends_on:
       postgres: { condition: service_healthy }
@@ -77,9 +109,11 @@ services:
       renderer: { condition: service_started }
       mailpit: { condition: service_started }
       trino-demo: { condition: service_healthy }
+      docker-proxy: { condition: service_started }
     entrypoint: ["/bin/sh", "/demo/egret-entrypoint.sh"]
     volumes:
       - ./demo/egret-entrypoint.sh:/demo/egret-entrypoint.sh:ro
+      - demo-appswork:/var/lib/egret-apps
     environment:
       EGRET_SERVER__HOST: 0.0.0.0
       EGRET_SERVER__PORT: "8080"
@@ -98,6 +132,11 @@ services:
       EGRET_RANGER__AUTH_TOKEN: ""
       EGRET_WORKFLOW__WORKER_ENABLED: "true"
       EGRET_WORKFLOW__SCHEDULER_ENABLED: "true"
+      # "Add engine" starts Trino containers through the socket proxy (egret never mounts the socket).
+      EGRET_ENGINES__PROVISIONER: docker
+      EGRET_ENGINES__DOCKER__HOST: tcp://docker-proxy:2375
+      EGRET_ENGINES__DOCKER__NETWORK: egret-demo_default
+      EGRET_ENGINES__DOCKER__PROJECT: egret-demo
       EGRET_LOG__FILTER: info,egret=debug
       EGRET_OIDC__ENABLED: "true"
       EGRET_OIDC__ISSUER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}/auth/realms/egret
@@ -112,6 +151,17 @@ services:
       EGRET_AUTOMATION__PUBLIC_URL: http://frontend
       # The links people open in mails.
       EGRET_AUTOMATION__BROWSER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}
+      # Data Apps (subprocess launcher, DEMO ONLY: no isolation between pods, see the guide).
+      EGRET_APPS__ORIGIN: ${DEMO_APPS_URL:-http://apps.localtest.me:8080}
+      EGRET_APPS__EGRET_ORIGIN: ${DEMO_URL:-http://egret.localtest.me:8080}
+      EGRET_APPS__LISTEN: 0.0.0.0:8081
+      EGRET_APPS__POD__LAUNCHER: subprocess
+      EGRET_APPS__POD__COMMAND: '["python","-I","-m","egret_marimo.launcher"]'
+      EGRET_APPS__POD__WORK_DIR: /var/lib/egret-apps
+      EGRET_APPS__POD__CONFIG_DIR: /opt/egret-apps/config
+      EGRET_APPS__POD__VENV_SHIM_DIR: /opt/egret-apps/venv-shim
+      # Pods run in this same container, so they call egret on loopback.
+      EGRET_APPS__POD__CALLBACK_URL: http://127.0.0.1:8080
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200'"]
       interval: 10s
@@ -143,6 +193,8 @@ services:
     image: egret-demo-frontend:dev
     build:
       context: ../frontend
+    environment:
+      APPS_ORIGIN: ${DEMO_APPS_URL:-http://apps.localtest.me:8080}
     depends_on:
       egret: { condition: service_healthy }
 
@@ -158,6 +210,8 @@ services:
       NGINX_ENVSUBST_FILTER: ^DEMO_
       # Interpolated, not env_file: a shell override such as DEMO_PORT=18080 must reach the container too.
       DEMO_PORT: ${DEMO_PORT:-8080}
+      DEMO_HOST: ${DEMO_HOST:-egret.localtest.me}
+      DEMO_APPS_HOST: ${DEMO_APPS_HOST:-apps.localtest.me}
     volumes:
       - ./demo/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
@@ -185,6 +239,11 @@ services:
       retries: 20
       start_period: 15s
 
+networks:
+  default:
+    name: egret-demo_default
+
 volumes:
   demo-pgdata:
   demo-rustfsdata:
+  demo-appswork:

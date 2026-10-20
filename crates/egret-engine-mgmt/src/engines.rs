@@ -7284,7 +7284,7 @@ async fn pod_logs(
     let kube = st
         .kube
         .as_ref()
-        .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
+        .ok_or_else(|| kube_only_error(st.coordinator_transport.is_some()))?;
     let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
     let logs = kube
         .pod_logs(
@@ -7373,7 +7373,7 @@ async fn pod_logs_follow(
         return Err(CpError::NotFound);
     }
     let Some(kube) = st.kube.clone() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
+        return Err(kube_only_error(st.coordinator_transport.is_some()));
     };
     let namespace = engine.namespace.clone();
     let engine_name = engine.name.clone();
@@ -7511,7 +7511,7 @@ async fn pod_exec(
         return Err(CpError::NotFound);
     }
     let Some(kube) = st.kube.clone() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
+        return Err(kube_only_error(st.coordinator_transport.is_some()));
     };
     let namespace = engine.namespace.clone();
     let engine_name = engine.name.clone();
@@ -7677,8 +7677,28 @@ async fn bridge_exec(
 )]
 pub struct EngineMgmtApi;
 
+/// The error for a kube-only operation (pod logs, follow, exec) when there is
+/// no kube client. With a coordinator transport set the engines run on Docker
+/// (there are no pods to read), which the message says instead of blaming a
+/// missing cluster.
+fn kube_only_error(has_coordinator_transport: bool) -> CpError {
+    if has_coordinator_transport {
+        CpError::BadRequest("not available with the Docker engine provisioner".into())
+    } else {
+        CpError::BadRequest("kubernetes not configured".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kube_only_routes_say_why_they_are_unavailable() {
+        assert!(matches!(kube_only_error(true),
+            CpError::BadRequest(m) if m == "not available with the Docker engine provisioner"));
+        assert!(matches!(kube_only_error(false),
+            CpError::BadRequest(m) if m == "kubernetes not configured"));
+    }
+
     #[test]
     fn the_profile_conflicts_name_the_profile_the_engines_and_a_remedy_that_exists() {
         let t = profile_type_conflict("eng-1", "starrocks");
@@ -8666,6 +8686,7 @@ mod tests {
             pdp: std::sync::Arc::new(AllowAllPdp),
             engine_provisioner: None,
             kube: None,
+            coordinator_transport: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),

@@ -24,6 +24,8 @@ tracing.workspace = true
 http.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 tokio.workspace = true
+# `killpg` in `subprocess_pod`: the launcher signals the pod's process group with a system call, not the `kill` binary.
+libc.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true

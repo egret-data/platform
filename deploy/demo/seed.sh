@@ -86,4 +86,18 @@ else echo "dashboard Sales overview exists"; fi
 #    server: without it this call answered 500 during the October 2026 docs run.
 call PUT "/api/ws/$WS/notifications/smtp" '{"host":"mailpit","port":1025,"from_address":"egret@demo.local","from_name":"Egret demo","tls_mode":"none"}' >/dev/null
 echo "smtp -> mailpit:1025"
+
+# 5. An Iceberg warehouse on the demo object store, for "Add engine" (its catalog is demo_warehouse).
+#    The endpoint is the service name: egret and the engine containers both reach it on the demo network.
+SC=$(find_id /api/control-plane/storage demo-rustfs)
+if [ -z "$SC" ]; then
+  SC=$(call POST /api/control-plane/storage "{\"name\":\"demo-rustfs\",\"provider\":\"s3\",\"endpoint\":\"http://rustfs:9000\",\"region\":\"us-east-1\",\"bucket\":\"$S3_BUCKET\",\"access_key\":\"egret\",\"new_secret\":{\"name\":\"demo-rustfs-secret\",\"value\":\"egretsecret\"},\"path_style\":true}" | id)
+  echo "storage demo-rustfs $SC"
+else echo "storage demo-rustfs exists"; fi
+if [ -z "$(find_id /api/control-plane/warehouses demo-warehouse)" ]; then
+  WS_ID=$(get /api/admin/workspaces | python3 -c 'import json,sys;print(next(w["id"] for w in json.load(sys.stdin) if w["slug"]==sys.argv[1]))' "$WS")
+  WH=$(call POST /api/control-plane/warehouses "{\"name\":\"demo-warehouse\",\"workspaceId\":\"$WS_ID\",\"storageConnectionId\":\"$SC\"}" | id)
+  echo "warehouse demo-warehouse $WH"
+else echo "warehouse demo-warehouse exists"; fi
+
 echo "seed done: $BASE (workspace $WS)"

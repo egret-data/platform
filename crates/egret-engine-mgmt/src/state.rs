@@ -62,6 +62,10 @@ pub struct EngineMgmtState {
     /// Serves exec/pod-logs/coordinator-request directly (kube-shaped, not on
     /// the Port); `None` in tests and when no cluster is configured.
     pub kube: Option<Arc<dyn egret_provisioner::KubeClient>>,
+    /// Reaches a coordinator over plain HTTP when there is no `kube` (the
+    /// Docker engine provisioner); `None` otherwise. Consulted only after
+    /// `kube`, so a Kubernetes deployment never uses it.
+    pub coordinator_transport: Option<Arc<dyn egret_engine_mgmt_api::CoordinatorTransport>>,
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
     pub engine_egret_url: String,
