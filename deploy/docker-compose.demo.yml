@@ -1,0 +1,55 @@
+# DEMO ONLY. Public development secrets. Never expose this stack to a network.
+# Everything runs on Docker, no Kubernetes. See docs/en/guides/demo-stack.md.
+name: egret-demo
+
+x-demo-env: &demo-env
+  env_file: [demo/demo.env]
+
+services:
+  postgres:
+    image: postgres:16
+    <<: *demo-env
+    volumes:
+      - demo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rustfs:
+    # STS AssumeRole is required: the embedded catalog vends credentials through it.
+    image: rustfs/rustfs:1.0.1
+    environment:
+      RUSTFS_ACCESS_KEY: egret
+      RUSTFS_SECRET_KEY: egretsecret
+    volumes:
+      - demo-rustfsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: creates the bucket the Helm chart's deps-rustfs-bucket-job creates (KI-137).
+  rustfs-init:
+    image: amazon/aws-cli:2.37.9
+    <<: *demo-env
+    depends_on:
+      rustfs: { condition: service_healthy }
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: egret
+      AWS_SECRET_ACCESS_KEY: egretsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://rustfs:9000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws s3api head-bucket --bucket "$${S3_BUCKET}" 2>/dev/null \
+          || aws s3api create-bucket --bucket "$${S3_BUCKET}"
+        echo "bucket $${S3_BUCKET} ready"
+
+volumes:
+  demo-pgdata:
+  demo-rustfsdata:
