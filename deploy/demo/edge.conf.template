@@ -1,0 +1,36 @@
+# DEMO ONLY. One origin for the app and Keycloak. Listens on the same port inside and outside
+# the container so the OIDC issuer URL is the same string for the browser and for egret.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen ${DEMO_PORT};
+    server_name _;
+    client_max_body_size 64m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host:$server_port;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_set_header X-Forwarded-Proto http;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+
+    location /auth/ {
+        proxy_pass http://keycloak:8080;
+    }
+
+    # Resolved per request, not at start-up: egret fetches OIDC discovery through this edge
+    # before it is healthy, and the frontend only starts after egret is healthy.
+    location / {
+        resolver 127.0.0.11 valid=5s;
+        set $frontend_upstream http://frontend:80;
+        proxy_pass $frontend_upstream;
+    }
+}

@@ -16,6 +16,8 @@ capabilities you would otherwise assemble from Metabase/Superset (BI & explorati
 (Iceberg REST catalog), Apache Ranger (access policy), DBApi (data API builder) and n8n (workflow
 automation) — into one governed platform with a shared design system.
 
+Try everything on Docker with one command: see [docs/en/guides/demo-stack.md](docs/en/guides/demo-stack.md).
+
 ---
 
 ## Why Egret

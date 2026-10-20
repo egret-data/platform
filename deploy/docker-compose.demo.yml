@@ -1,0 +1,190 @@
+# DEMO ONLY. Public development secrets. Never expose this stack to a network.
+# Everything runs on Docker, no Kubernetes. See docs/en/guides/demo-stack.md.
+name: egret-demo
+
+x-demo-env: &demo-env
+  env_file: [demo/demo.env]
+
+services:
+  postgres:
+    image: postgres:16
+    <<: *demo-env
+    volumes:
+      - demo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rustfs:
+    # STS AssumeRole is required: the embedded catalog vends credentials through it.
+    image: rustfs/rustfs:1.0.1
+    environment:
+      RUSTFS_ACCESS_KEY: egret
+      RUSTFS_SECRET_KEY: egretsecret
+    volumes:
+      - demo-rustfsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: creates the bucket the Helm chart's deps-rustfs-bucket-job creates (KI-137).
+  rustfs-init:
+    image: amazon/aws-cli:2.37.9
+    <<: *demo-env
+    depends_on:
+      rustfs: { condition: service_healthy }
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: egret
+      AWS_SECRET_ACCESS_KEY: egretsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://rustfs:9000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws s3api head-bucket --bucket "$${S3_BUCKET}" 2>/dev/null \
+          || aws s3api create-bucket --bucket "$${S3_BUCKET}"
+        echo "bucket $${S3_BUCKET} ready"
+
+  trino-demo:
+    image: trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx1g"
+    volumes:
+      - ./demo/trino/config.properties:/etc/trino/config.properties:ro
+      - ./demo/trino/catalog:/etc/trino/catalog:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  egret:
+    image: egret-demo-backend:dev
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    <<: *demo-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      rustfs-init: { condition: service_completed_successfully }
+      # OIDC discovery at start-up goes through the edge (same issuer URL as the browser).
+      edge: { condition: service_started }
+      renderer: { condition: service_started }
+      mailpit: { condition: service_started }
+      trino-demo: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/demo/egret-entrypoint.sh"]
+    volumes:
+      - ./demo/egret-entrypoint.sh:/demo/egret-entrypoint.sh:ro
+    environment:
+      EGRET_SERVER__HOST: 0.0.0.0
+      EGRET_SERVER__PORT: "8080"
+      EGRET_DATABASE__URL: postgres://egret:egret@postgres:5432/egret
+      EGRET_STORAGE__ENDPOINT: http://rustfs:9000
+      EGRET_STORAGE__BUCKET: warehouse
+      EGRET_STORAGE__REGION: us-east-1
+      EGRET_STORAGE__PATH_STYLE: "true"
+      EGRET_STORAGE__ACCESS_KEY: egret
+      EGRET_STORAGE__SECRET_KEY: egretsecret
+      EGRET_CATALOG__ENABLED: "true"
+      EGRET_CATALOG__WAREHOUSE: s3://warehouse
+      # Address other containers use to reach egret (engines, renderer): the service name.
+      EGRET_CATALOG__PUBLIC_URL: http://egret:8080
+      EGRET_RANGER__ENABLED: "true"
+      EGRET_RANGER__AUTH_TOKEN: ""
+      EGRET_WORKFLOW__WORKER_ENABLED: "true"
+      EGRET_WORKFLOW__SCHEDULER_ENABLED: "true"
+      EGRET_LOG__FILTER: info,egret=debug
+      EGRET_OIDC__ENABLED: "true"
+      EGRET_OIDC__ISSUER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}/auth/realms/egret
+      EGRET_OIDC__CLIENT_ID: egret
+      EGRET_OIDC__CLIENT_SECRET: egret-secret
+      EGRET_OIDC__REDIRECT_URL: ${DEMO_URL:-http://egret.localtest.me:8080}/api/auth/oidc/callback
+      EGRET_OIDC__GROUPS_CLAIM: groups
+      EGRET_IDP__ISSUER: ${DEMO_URL:-http://egret.localtest.me:8080}
+      EGRET_DATA_API__PUBLIC_URL: ${DEMO_URL:-http://egret.localtest.me:8080}
+      EGRET_AUTOMATION__RENDERER_URL: http://renderer:8080
+      # The renderer fetches /embed/print/... from egret's frontend by service name.
+      EGRET_AUTOMATION__PUBLIC_URL: http://frontend
+      # The links people open in mails.
+      EGRET_AUTOMATION__BROWSER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${DEMO_URL:-http://egret.localtest.me:8080}/auth
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /auth/realms/egret HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+  frontend:
+    image: egret-demo-frontend:dev
+    build:
+      context: ../frontend
+    depends_on:
+      egret: { condition: service_healthy }
+
+  edge:
+    image: nginx:1.27-alpine
+    # No dependency on frontend: egret needs this edge (OIDC discovery) before it becomes healthy,
+    # and frontend waits for a healthy egret. The edge resolves frontend lazily instead.
+    depends_on:
+      keycloak: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${DEMO_PORT:-8080}:${DEMO_PORT:-8080}"
+    environment:
+      NGINX_ENVSUBST_FILTER: ^DEMO_
+      # Interpolated, not env_file: a shell override such as DEMO_PORT=18080 must reach the container too.
+      DEMO_PORT: ${DEMO_PORT:-8080}
+    volumes:
+      - ./demo/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      default:
+        aliases:
+          - ${DEMO_HOST:-egret.localtest.me}
+
+  mailpit:
+    image: axllent/mailpit:v1.21@sha256:81370195cd4a0eab9604d17c2617a7525b0486f9365555253b6c5376c6350f1a
+    ports:
+      - "127.0.0.1:8025:8025"   # web UI: every mail the demo sends lands here
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+
+  renderer:
+    image: egret-demo-renderer:dev
+    build:
+      context: ../renderer
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+volumes:
+  demo-pgdata:
+  demo-rustfsdata:

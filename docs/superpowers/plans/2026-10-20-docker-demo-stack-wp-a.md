@@ -18,6 +18,7 @@ Spec: `docs/superpowers/specs/2026-10-20-docker-demo-stack-design.md` (WP-A). WP
 - Do not edit product source (`crates/`, `frontend/src`); only `deploy/`, `justfile`, `.env.example`, `docs/`, `README.md`.
 - Conventional Commits; commit messages end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`; `Closes #N` only in the PR description.
 - The repo rule: the PR updates the docs in `egret-data/docs` (Platform section) or says in the PR body which follow-up PR does; tick the Docs box in the PR template.
+- **Testing port.** This machine already runs another service on :8080, so while developing run compose with `DEMO_PORT=18080 DEMO_URL=http://egret.localtest.me:18080` exported in the shell (shell variables override `--env-file`). Never commit those values; `deploy/demo/demo.env` keeps 8080. Mailpit's UI port 8025 and no other host port are published. Do not stop or touch the running containers named `egret-dev-*`, `dgcl-*`, `egretdocs-*`.
 - Browser URL for everything is `http://egret.localtest.me:${DEMO_PORT:-8080}` (`*.localtest.me` resolves to 127.0.0.1 through public DNS; offline machines add `127.0.0.1 egret.localtest.me` to `/etc/hosts`).
 - Fixed values used throughout (public dev values):
   - `EGRET_SECRETS__MASTER_KEY=q1IaZ2X7N3i/um/U/aJ2lsmVrRE5pTZChAVG9ezDKPw=`
@@ -320,11 +321,11 @@ Expected: `egret` reaches `healthy`. If `egret migrate` fails with `the apps API
 Run:
 
 ```bash
-docker compose -f deploy/docker-compose.demo.yml exec egret bash -c \
-  'exec 3<>/dev/tcp/127.0.0.1/8080; printf "POST /api/auth/login HTTP/1.0\r\ncontent-type: application/json\r\ncontent-length: 56\r\n\r\n{\"email\":\"admin@egret.local\",\"password\":\"Admin12345!\"}" >&3; head -1 <&3'
+docker compose -f deploy/docker-compose.demo.yml exec -T egret bash -c \
+  'exec 3<>/dev/tcp/127.0.0.1/8080; printf "POST /api/auth/login HTTP/1.0\r\ncontent-type: application/json\r\ncontent-length: 54\r\n\r\n{\"email\":\"admin@egret.local\",\"password\":\"Admin12345!\"}" >&3; head -1 <&3'
 ```
 
-Expected: `HTTP/1.0 200 OK`. (`content-length` must equal the body's byte length, 56 for that body; recompute if the body changes.)
+Expected: `HTTP/1.0 200 OK`. (`content-length` must equal the body's byte length, 54 for that body; recompute if the body changes.)
 Also: `docker compose -f deploy/docker-compose.demo.yml logs egret | grep -i "password"` must not print the admin password a second time on restart (`init` no-ops when an admin exists). Restart `egret` and confirm.
 
 - [ ] **Step 5: Commit**
@@ -420,7 +421,6 @@ map $http_upgrade $connection_upgrade {
 
   edge:
     image: nginx:1.27-alpine
-    <<: *demo-env
     depends_on:
       frontend: { condition: service_started }
       keycloak: { condition: service_healthy }
@@ -428,6 +428,8 @@ map $http_upgrade $connection_upgrade {
       - "${DEMO_PORT:-8080}:${DEMO_PORT:-8080}"
     environment:
       NGINX_ENVSUBST_FILTER: ^DEMO_
+      # Interpolated, not env_file: a shell override such as DEMO_PORT=18080 must reach the container too.
+      DEMO_PORT: ${DEMO_PORT:-8080}
     volumes:
       - ./demo/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
@@ -838,3 +840,13 @@ Do not merge; the owner decides.
 | Master key (cause of the SMTP 500 seen in docs) | Global Constraints, 6 |
 
 Differences from the spec worth noting: the spec lists the frontend on 8080 only; the plan adds an **edge** container so Keycloak shares the origin (needed for one OIDC issuer string). The spec's "apps host second port" belongs to WP-B and is intentionally absent. The workflow container runner (`EGRET_WORKFLOW__CONTAINER_RUNNER`) is not configured in WP-A; container tasks are expected to fail in this package and are checked off in the acceptance run only for plain tasks.
+
+## Deviations recorded during execution
+
+Accepted by task and final reviews; the code is authoritative where it differs from the task text above.
+
+- Task 4: `egret` does OIDC discovery through the edge alias at boot, so the original order deadlocked. Final order: `egret` depends on `edge` (started); `edge` depends on `keycloak` (healthy) and resolves `frontend` lazily (`resolver 127.0.0.11`); `frontend` depends on `egret` (healthy). The issuer probe reads `/auth/realms/egret/.well-known/openid-configuration`.
+- Task 3: the login probe body is 54 bytes, so `content-length: 54`; use `exec -T` and `</dev/null`.
+- Task 6: `seed.sh` and `wait.sh` save the caller's `DEMO_PORT` (and `DEMO_URL`) before sourcing `demo.env` and restore them, so a shell override such as `DEMO_PORT=18080` wins. The seed charts carry `cartesian.xAxis` / `yMetrics` settings so the dashboard renders, and the seed repairs a partial earlier run.
+- Task 7: `wait.sh` probes only `/api/auth/config` (an endpoint egret alone answers) with a 5 s per-attempt timeout.
+- Final review: published ports bind to `127.0.0.1`; `egret` also waits for `trino-demo` healthy; `wait.sh` fails fast if `DEMO_URL` and `DEMO_PORT` disagree; unused `S3_*` keys were dropped from `demo.env`.

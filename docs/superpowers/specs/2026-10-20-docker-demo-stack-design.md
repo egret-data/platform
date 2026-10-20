@@ -151,3 +151,10 @@ reports and email, Notifications); close the matching known issues.
 | Docker socket exposure | socket proxy, off by default, allow-listed images |
 | Demo needs ~6 to 8 GB RAM | state it in the docs; Trino heap and resource limits are set small in the demo |
 | Pinned images disappear (MinIO precedent) | pin by digest where the dev compose does; no `latest` |
+
+## Notes from WP-A for WP-C
+
+- WP-A sets `EGRET_CATALOG__PUBLIC_URL=http://egret:8080` (the service name) because only containers use it today. WP-C must keep a browser-facing value where one is needed and add `engines.docker.callback_url`, as described above, rather than reuse this key for engine callbacks.
+- `just demo-down` and `demo-reset` remove containers by the label `egret.managed=true`, host-wide. WP-C should also label provisioned containers with the compose project (for example `egret.project=egret-demo`) and have the recipes filter on both.
+- Files differ from the names given above: `deploy/demo/wait.sh` (not `deploy/demo-wait.sh`) and a new `deploy/demo/seed.sh` (the older `deploy/seed-*.sh` scripts need a dev checkout and `psql`).
+- Ports bind to `127.0.0.1` only; WP-C must not publish engine ports.
