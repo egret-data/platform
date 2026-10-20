@@ -10,7 +10,7 @@ import {
   useControlPlaneCatalogRegistryListRegistryCatalogs,
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { useControlPlaneEnginesRegisterExternalEngine } from "@/api/generated/control-plane-engines/control-plane-engines";
-import type { RegisterExternalEngine } from "@/api/generated/model";
+import type { RangerCredentialDto, RegisterExternalEngine } from "@/api/generated/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -36,6 +36,7 @@ import {
   ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
+import { OneTimeCredentialDialog } from "./RangerCredential";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -47,6 +48,12 @@ const NO_PROFILE = "__none__";
  * not run. Nothing is provisioned and nothing is applied to the engine; the result
  * is a row, an optional profile binding and declared catalog attachments, then the
  * Ranger plugin configuration the operator installs.
+ *
+ * The 201 carries the engine's Ranger credential, shown ONCE (spec A10/A11):
+ * it is copied into this page's state, the mutation is reset (and kept by no
+ * cache, `gcTime: 0`), and a dialog that only closes once the operator says
+ * they saved it shows it. Then the page goes to the engine's Plugin config tab
+ * and the password is gone with it.
  */
 export default function EngineRegister() {
   const navigate = useNavigate();
@@ -62,6 +69,7 @@ export default function EngineRegister() {
   const [otherVersion, setOtherVersion] = useState("");
   const [profileId, setProfileId] = useState("");
   const [catalogIds, setCatalogIds] = useState<string[]>([]);
+  const [issued, setIssued] = useState<{ engineId: string; credential: RangerCredentialDto } | null>(null);
 
   const profilesQ = useQuery<Profile[], ApiError>({
     queryKey: profilesQueryKey,
@@ -76,11 +84,18 @@ export default function EngineRegister() {
 
   const register = useControlPlaneEnginesRegisterExternalEngine<ApiError>({
     mutation: {
-      // Navigating to the result, so no toast (FE-ACTION-2).
+      // Not kept once unobserved: the 201 body carries a password.
+      gcTime: 0,
+      // Navigating to the result after the credential dialog, so no toast (FE-ACTION-2).
       onSuccess: (res) => {
         void queryClient.invalidateQueries({ queryKey: enginesQueryKey });
         void queryClient.invalidateQueries({ queryKey: profilesQueryKey });
-        if (res.status === 201) navigate(`/control-plane/engines/${res.data.id}?tab=plugin-config`);
+        if (res.status === 201) {
+          const { username, password, credentialId } = res.data.rangerCredential;
+          setIssued({ engineId: res.data.id, credential: { username, password, credentialId } });
+        }
+        // Drop the response from the hook: from here on, `issued` is its only holder.
+        register.reset();
       },
     },
   });
@@ -101,7 +116,8 @@ export default function EngineRegister() {
       : `Enter ${missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} and ${missing[missing.length - 1]}`} (the version as x.y.z) to register.`;
 
   const dirty = !!(name || host || port || versionChoice || profileId || catalogIds.length);
-  useUnsavedChangesWarning(dirty && !register.isSuccess);
+  // While the credential is on screen, leaving the page would lose it too.
+  useUnsavedChangesWarning((dirty && !issued) || issued !== null);
 
   const profilesOfType = (profilesQ.data ?? []).filter((p) => p.type === type);
   const chosenProfile = profilesOfType.find((p) => String(p.id) === profileId);
@@ -357,7 +373,11 @@ export default function EngineRegister() {
           </section>
 
           <div className="flex flex-wrap items-center gap-3">
-            <Button type="submit" disabled={!!blockedReason || register.isPending} aria-describedby="er-submit-why">
+            <Button
+              type="submit"
+              disabled={!!blockedReason || register.isPending || issued !== null}
+              aria-describedby="er-submit-why"
+            >
               {register.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Register engine
             </Button>
@@ -370,6 +390,19 @@ export default function EngineRegister() {
           </div>
         </form>
       )}
+
+      <OneTimeCredentialDialog
+        credential={issued?.credential ?? null}
+        engineType={type}
+        title="Engine registered: save its Ranger credential"
+        intro="Copy it now: egret shows this password once. The engine's Ranger plugin presents it to egret to download policies; without it, the download is refused."
+        doneLabel="Open plugin configuration"
+        onDone={() => {
+          const id = issued?.engineId;
+          setIssued(null);
+          if (id) navigate(`/control-plane/engines/${id}?tab=plugin-config`);
+        }}
+      />
     </div>
   );
 }

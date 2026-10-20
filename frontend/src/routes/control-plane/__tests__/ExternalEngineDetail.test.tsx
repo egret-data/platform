@@ -101,9 +101,11 @@ describe("EngineDetail for an external engine", () => {
       "/governance/engines/profiles/trino-main",
     );
     // Lifecycle routes refuse an external engine with 409, so none is offered.
-    for (const name of [/restart/i, /rotate/i, /logs/i, /terminal/i]) {
+    for (const name of [/restart/i, /rotate secrets/i, /logs/i, /terminal/i]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+    // The one rotation that applies: its Ranger credential (egret's row only).
+    expect(screen.getByRole("button", { name: "Rotate credential" })).toBeInTheDocument();
     // A provisioned engine polls its cluster; an external one has nothing to poll.
     expect(screen.queryByText(/pods/i)).not.toBeInTheDocument();
   });

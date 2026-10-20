@@ -68,7 +68,8 @@ import {
   ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
-import { catalogKey, catalogsQueryKey } from "./queryKeys";
+import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
+import { RangerCredentialSection } from "./RangerCredential";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -77,8 +78,6 @@ const TABS = new Set(["overview", "catalogs", "plugin-config", "settings"]);
 /** The external engine row; `status` is the placeholder egret does not read, so it is left out. */
 type ExternalEngine = Omit<Engine, "status">;
 
-const engineKey = (id: string) => ["cp", "engine", id] as const;
-
 /**
  * The engine detail page for an `origin: external` engine.
  *
@@ -86,7 +85,8 @@ const engineKey = (id: string) => ["cp", "engine", id] as const;
  * cluster is offered here: no pods, logs, terminal, monitor, autoscaling, config
  * editors, restart or secret rotation (the server refuses all of them with 409).
  * What is left is the record (address, plugin version), the profile bound to it,
- * the catalogs declared attached, and the Ranger plugin configuration to install.
+ * the catalogs declared attached, the Ranger plugin configuration to install, and
+ * the Ranger credential the plugin presents (rotated and retired on Overview).
  */
 export default function ExternalEngineDetail({ engine }: { engine: ExternalEngine }) {
   const [sp, setSp] = useSearchParams();
@@ -144,6 +144,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
 
         <TabsContent value="overview" className="space-y-4">
           <Overview engine={engine} bound={bound} profilesQ={profilesQ} />
+          <RangerCredentialSection engine={engine} />
         </TabsContent>
         <TabsContent value="catalogs">
           <DeclaredCatalogs engine={engine} />
@@ -527,7 +528,7 @@ function SettingsForm({
   const save = useControlPlaneEnginesUpdateExternalEngine<ApiError>({
     mutation: {
       onSuccess: () => {
-        void queryClient.invalidateQueries({ queryKey: engineKey(engine.id) });
+        void queryClient.invalidateQueries({ queryKey: engineDetailKey(engine.id) });
         void queryClient.invalidateQueries({ queryKey: enginesQueryKey });
         void queryClient.invalidateQueries({ queryKey: profilesQueryKey });
         void queryClient.invalidateQueries({

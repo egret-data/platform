@@ -115,6 +115,26 @@ function mockGetEngine(spec: api.Engine["spec"]) {
   } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
 }
 
+/**
+ * The Overview tab renders the Ranger credential section (Task 7b), which
+ * takes two mutation hooks from the automocked engines module. An idle
+ * mutation for each, for every test; the section's own behaviour is covered
+ * against the real hooks in `RangerCredential.test.tsx`. `clearAllMocks` in
+ * the suites below clears calls, not this implementation.
+ */
+function idleMutation() {
+  return { mutate: vi.fn(), reset: vi.fn(), isPending: false, isError: false, error: null };
+}
+beforeEach(() => {
+  vi.mocked(engineApi.useControlPlaneEnginesRotateRangerCredential).mockImplementation(
+    () => idleMutation() as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesRotateRangerCredential>,
+  );
+  vi.mocked(engineApi.useControlPlaneEnginesRetirePreviousRangerCredential).mockImplementation(
+    () =>
+      idleMutation() as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesRetirePreviousRangerCredential>,
+  );
+});
+
 /** Keys passed to `invalidateQueries` by the render most recently started. */
 let invalidated: unknown[][];
 

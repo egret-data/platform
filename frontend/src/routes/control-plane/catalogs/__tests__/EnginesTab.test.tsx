@@ -107,6 +107,7 @@ function engine(over: Partial<EngineDto> = {}): EngineDto {
     namespace: "egret",
     status: "ready",
     origin: "provisioned",
+    rangerCredentialPending: false,
     spec: {},
     ...over,
   };

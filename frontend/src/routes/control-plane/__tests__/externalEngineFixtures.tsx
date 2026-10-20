@@ -66,13 +66,16 @@ export function LocationProbe() {
 export function Harness({
   me = ADMIN,
   entry,
+  client,
   children,
 }: {
   me?: Me | null;
   entry: string;
+  /** Pass one to inspect its caches after the run; a fresh one otherwise. */
+  client?: QueryClient;
   children: ReactNode;
 }) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const qc = client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return (
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>

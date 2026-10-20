@@ -1,5 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient } from "@tanstack/react-query";
 import { Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -18,7 +19,43 @@ import {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
+
+/** The one-time credential a 201 carries. Distinctive, so a leak is findable by text. */
+const CRED = {
+  username: "engine-x1",
+  password: "pw-SHOWN-ONCE-9f3c1d7e",
+  credentialId: "0b9a6c2e-3d4f-4a5b-8c6d-7e8f9a0b1c2d",
+};
+
+function registered(id: string) {
+  return { id, name: "legacy-trino", type: "trino", origin: "external", rangerCredential: { ...CRED, username: `engine-${id}` } };
+}
+
+/** Everything React Query holds: every query's and every mutation's state. */
+function cacheText(client: QueryClient): string {
+  return JSON.stringify([
+    client.getQueryCache().getAll().map((q) => q.state),
+    client.getMutationCache().getAll().map((m) => m.state),
+  ]);
+}
+
+function storageText(): string {
+  const dump = (st: Storage) => Array.from({ length: st.length }, (_, i) => `${st.key(i)}=${st.getItem(st.key(i) ?? "")}`);
+  return [...dump(window.localStorage), ...dump(window.sessionStorage), window.location.href].join("\n");
+}
+
+/** Every console line written while the test runs. */
+function spyOnConsole(): string[] {
+  const lines: string[] = [];
+  for (const level of ["log", "info", "warn", "error", "debug"] as const) {
+    vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a) ?? String(a))).join(" "));
+    });
+  }
+  return lines;
+}
 
 const READS = {
   "GET /api/control-plane/policies/services": { body: PROFILES },
@@ -70,10 +107,10 @@ describe("EngineRegister", () => {
     expect(screen.queryByRole("option", { name: /trino-main/ })).not.toBeInTheDocument();
   });
 
-  test("submit posts exactly the fields the API takes and lands on the Plugin config tab", async () => {
+  test("submit posts exactly the fields the API takes and shows the one-time credential before leaving", async () => {
     const calls = stubFetch({
       ...READS,
-      "POST /api/control-plane/engines/external": { status: 201, body: { id: "x1", name: "legacy-trino" } },
+      "POST /api/control-plane/engines/external": { status: 201, body: registered("x1") },
     });
     const user = userEvent.setup();
     renderRegister();
@@ -84,11 +121,25 @@ describe("EngineRegister", () => {
     await user.click(await screen.findByRole("checkbox", { name: "Declare lake attached" }));
     await user.click(screen.getByRole("button", { name: "Register engine" }));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("location")).toHaveTextContent(
-        "/control-plane/engines/x1?tab=plugin-config",
-      ),
-    );
+    const dialog = await screen.findByRole("alertdialog", { name: /save its Ranger credential/ });
+    expect(within(dialog).getByLabelText("Username")).toHaveValue("engine-x1");
+    const password = within(dialog).getByLabelText("Password");
+    expect(password).toHaveValue(CRED.password);
+    // Masked until asked, and selectable either way (a read-only input, not an image of text).
+    expect(password).toHaveAttribute("type", "password");
+    expect(password).toHaveAttribute("readonly");
+    await user.click(within(dialog).getByRole("button", { name: "Show password" }));
+    expect(password).toHaveAttribute("type", "text");
+    expect(within(dialog).getByLabelText("Credential id")).toHaveValue(CRED.credentialId);
+    expect(dialog).toHaveTextContent("ranger.plugin.trino.policy.rest.client.username");
+    expect(dialog).toHaveTextContent("ranger.plugin.trino.policy.rest.client.password");
+    expect(dialog).toHaveTextContent("ranger-trino-security.xml");
+    // Copy puts the exact password on the clipboard.
+    await user.click(within(dialog).getByRole("button", { name: "Copy password" }));
+    expect(await navigator.clipboard.readText()).toBe(CRED.password);
+    // Still on the register page: nothing navigated away from the only copy.
+    expect(screen.queryByTestId("location")).not.toBeInTheDocument();
+
     const post = calls.find((c) => c.method === "POST");
     expect(post?.body).toEqual({
       name: "legacy-trino",
@@ -99,6 +150,51 @@ describe("EngineRegister", () => {
       authzServiceId: 11,
       catalogs: ["c1"],
     });
+  });
+
+  test("the credential dialog cannot be closed until the operator confirms, and afterwards the password is nowhere", async () => {
+    stubFetch({
+      ...READS,
+      "POST /api/control-plane/engines/external": { status: 201, body: registered("x1") },
+    });
+    const logged = spyOnConsole();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <Harness entry="/control-plane/engines/register" client={client}>
+        <Routes>
+          <Route path="/control-plane/engines/register" element={<EngineRegister />} />
+          <Route path="/control-plane/engines/:id" element={<LocationProbe />} />
+        </Routes>
+      </Harness>,
+    );
+    await fillRequired(user);
+    await user.click(screen.getByRole("button", { name: "Register engine" }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    // While it is on screen, React Query no longer holds the response.
+    await waitFor(() => expect(cacheText(client)).not.toContain(CRED.password));
+
+    // Escape does not close it, and the way out is disabled, saying why.
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    const done = within(dialog).getByRole("button", { name: "Open plugin configuration" });
+    expect(done).toBeDisabled();
+    expect(done).toHaveAccessibleDescription(/does not show this password again/);
+
+    await user.click(within(dialog).getByRole("checkbox", { name: "I have saved the password and the credential id" }));
+    expect(done).toBeEnabled();
+    await user.click(done);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent("/control-plane/engines/x1?tab=plugin-config"),
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain(CRED.password);
+    expect(screen.getByTestId("location").textContent).not.toContain(CRED.password);
+    expect(cacheText(client)).not.toContain(CRED.password);
+    expect(storageText()).not.toContain(CRED.password);
+    expect(logged.some((line) => line.includes(CRED.password))).toBe(false);
   });
 
   test("a 400 shows the server's sentence beside the form and keeps every field", async () => {
@@ -184,7 +280,7 @@ describe("EngineRegister", () => {
   test("an 'Other' plugin version takes a typed x.y.z, and an unmodelled pair says migrations will be refused", async () => {
     const calls = stubFetch({
       ...READS,
-      "POST /api/control-plane/engines/external": { status: 201, body: { id: "x2" } },
+      "POST /api/control-plane/engines/external": { status: 201, body: registered("x2") },
     });
     const user = userEvent.setup();
     renderRegister();

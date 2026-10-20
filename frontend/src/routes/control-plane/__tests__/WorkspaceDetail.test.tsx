@@ -52,6 +52,7 @@ const ALL_ENGINES: EngineDto[] = [
     namespace: "engines",
     status: "running",
     origin: "provisioned",
+    rangerCredentialPending: false,
     spec: {
       coordinatorReplicas: 1,
       workerReplicas: 2,
@@ -68,6 +69,7 @@ const ALL_ENGINES: EngineDto[] = [
     namespace: "engines",
     status: "running",
     origin: "provisioned",
+    rangerCredentialPending: false,
     // JWT-enabled → assignable (the picker only offers these).
     spec: {
       coordinatorReplicas: 1,
