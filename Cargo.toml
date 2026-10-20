@@ -67,8 +67,8 @@ utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 tokio = { version = "1", features = ["full"] }
-# `libc::atexit` — used only by `egret-test-db`, to drop a test process's
-# private database as the process exits.
+# `libc::atexit` in `egret-test-db`, to drop a test process's private database as the process
+# exits; `libc::killpg` in `egret-apps`, to signal a pod's process group.
 libc = "0.2"
 tokio-util = "0.7"
 tokio-tungstenite = "0.30"
