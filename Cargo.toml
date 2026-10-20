@@ -212,6 +212,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # `ColumnType` + `Value::Bytes` and never names those types.
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 testcontainers = "0.28"
+# Engine config files reach a Docker container as a tar archive (`PUT /containers/{id}/archive`).
+tar = "0.4"
 # kube 2 / k8s-openapi 0.26 — the versions lakekeeper's `limes` already pulls in,
 # so the tree holds one of each instead of two. (kube 4 is newer still, but limes
 # is git-pinned to 2, so following `latest` would put the duplicate straight back.)

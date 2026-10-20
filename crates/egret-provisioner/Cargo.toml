@@ -23,6 +23,7 @@ chrono.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
 tokio-util = { workspace = true, features = ["io", "compat"] }
+tar.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
