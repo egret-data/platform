@@ -414,8 +414,10 @@ pub struct RangerBinding {
     pub poll_interval_ms: u32,
     /// The credential the plugin presents to egret's `/ranger` surface (spec
     /// 2026-10-20-ranger-surface-auth A9), checked renderable when it was made.
-    /// The provisioners render it into the `{name}-ranger-secret` Secret, never
-    /// a ConfigMap. `None` renders no credential.
+    /// The Kubernetes provisioners render it into that credential's own
+    /// `{name}-rc-{tag}` Secret, never a ConfigMap; the Docker provisioner
+    /// writes it into each container's security XML. `None` renders no
+    /// credential.
     pub credential: Option<ranger_config::RenderableCredential>,
 }
 

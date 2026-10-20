@@ -3,7 +3,7 @@
 -- `ranger_secret_prev_id` is the one it presented before the last rotation, kept
 -- valid until the rollout is observed complete (never delete a secret the
 -- cluster may still hold). Both name rows in the secret store
--- (`workspace_secrets`, global scope, named `engine-ranger-{engine_id}-{generation}`);
+-- (`workspace_secrets`, global scope, named `engine-ranger-{engine_id}-{random}`, a fresh UUID per credential);
 -- neither is a foreign key because the secret store is a separate seam.
 --
 -- `engines_external_shape` (0184) does not name these columns, so an external

@@ -510,7 +510,7 @@ e2e-kind: deploy-kind-oidc
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /ranger/service). For the governance enforcement e2e.
 # `/ranger` stays in its default `required` auth mode: every provisioned engine carries
-# its own Ranger credential in its `{name}-ranger-secret` Secret.
+# its own Ranger credential, one `{name}-rc-{tag}` Secret per credential.
 deploy-kind-governance: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \

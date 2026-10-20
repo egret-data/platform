@@ -110,7 +110,7 @@ với nó hay với tag service mà profile của nó nêu không (A5); `require
 Chế độ `anonymous` phục vụ caller không có credential hợp lệ, kèm một `warn!` lúc khởi động nêu rủi ro lộ dữ liệu.
 
 ### 4.3 Lưu trữ
-Secret nằm trong secret store hiện có, tên `engine-ranger-{engine_id}-{generation}`. Dòng engine tham chiếu chúng bằng hai cột
+Secret nằm trong secret store hiện có, tên `engine-ranger-{engine_id}-{random}` (`{random}`: một UUID v4 mới dạng simple cho mỗi credential, nên một lần rotate không bao giờ trùng tên với credential nó hạ xuống). Dòng engine tham chiếu chúng bằng hai cột
 mới (`ranger_secret_id`, `ranger_secret_prev_id`). Cặp `internal_secret_id`/`monitor_secret_id` hiện có **chỉ dành cho Trino**
 (`rotate_engine_secrets` từ chối StarRocks), nên không dùng lại được. Engine external có thể mang các cột này (CHECK của migration
 0184 không nêu chúng).
@@ -206,3 +206,10 @@ trong PR này hay không.
 - **Credential hiện tại hỏng + credential trước đó pending (chỉ database phát triển).** Dòng có credential hiện tại không render
   được (mint trước khi renderer có bước kiểm) và credential trước đó đang pending thì từ chối mọi lần apply và mọi lần rotate; gỡ
   bằng tay (module doc của `ranger_credential.rs`).
+- **Bỏ gắn profile xoá Ranger Secret ngay lập tức.** Một lần apply không có policy profile xoá mọi Ranger Secret của engine
+  (`{name}-rc-{tag}` và `{name}-ranger-secret` cũ) ngay, trong khi pod của template cũ (đã gắn profile) có thể vẫn chạy cho tới
+  khi rollout thay chúng. Chúng vẫn chạy, nhưng một `rollout undo` về template cũ sẽ không mount được Secret của nó (hãy gắn lại
+  profile). Giá trị credential trong secret store không bị xoá khi bỏ gắn.
+- **Docker provisioner.** Engine Docker (chỉ Trino) nhận XML mang credential dưới dạng file `0600` trong mỗi container, và mỗi
+  container mang id của credential ở label `egret/ranger-credential`. Rollout của nó hoàn tất khi mọi container của engine mang id
+  hiện tại, đang chạy và không unhealthy; nó không có object nào theo credential, nên lần retire không xoá gì ngoài secret store.

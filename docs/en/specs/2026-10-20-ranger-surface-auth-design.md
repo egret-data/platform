@@ -94,7 +94,7 @@ that an `Engine` caller is bound to it or to the tag service its profile names (
 the operator routes. `anonymous` mode serves callers without a valid credential, with a startup `warn!` naming the exposure.
 
 ### 4.3 Storage
-Secrets live in the existing secret store, named `engine-ranger-{engine_id}-{generation}`. The engine row references them with two new
+Secrets live in the existing secret store, named `engine-ranger-{engine_id}-{random}` (`{random}`: a fresh UUID v4 in simple form per credential, so a rotation never collides with the credential it demotes). The engine row references them with two new
 columns (`ranger_secret_id`, `ranger_secret_prev_id`). The existing `internal_secret_id`/`monitor_secret_id` pair is **Trino-only**
 (`rotate_engine_secrets` refuses StarRocks), so it cannot be reused. External engines may carry the columns (migration 0184's CHECK does not name them).
 Migrations: `0200_engine_ranger_credential.sql` (the two columns, plus a CHECK that a previous credential exists only next to a current one and differs from it) and `0201_ranger_auth_failures.sql` (A12).
@@ -168,3 +168,5 @@ Still open with the user: zero-replica rule (§8), a discard-pending route (§8)
 - **`engine_auth_failing` can be made to flap** by a credential-less caller who knows an engine id: a wrong password for that id raises it, and the engine's next real download clears it.
 - **Warm vs. cold plugin.** A plugin keeps enforcing cached policies across 401s, but a cold start without a cache denies all (§2); whether the cache directory survives a pod restart is for the live check.
 - **Bad current + pending previous (development databases only).** A row whose current credential cannot be rendered (minted before the renderer's check) and whose previous one is pending refuses every apply and every rotation; recovery is manual (`ranger_credential.rs` module doc).
+- **Unbinding deletes the Ranger Secrets at once.** An apply with no policy profile deletes every Ranger Secret of the engine (`{name}-rc-{tag}` and the legacy `{name}-ranger-secret`) immediately, while pods of the old, bound template may still be running until the rollout replaces them. They keep running, but a `rollout undo` to the old template fails to mount its Secret (re-bind instead). The credential's value in the secret store is not deleted by the unbind.
+- **Docker provisioner.** A Docker engine (Trino only) gets the credential-bearing XML as a `0600` file in each container, and each container carries the credential id as the label `egret/ranger-credential`. Its rollout is complete when every container of the engine carries the current id and is running and not unhealthy; it has no per-credential object, so the retire deletes nothing outside the secret store.

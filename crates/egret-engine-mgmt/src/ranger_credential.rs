@@ -4,7 +4,7 @@
 //! An engine's Ranger plugin authenticates to egret's `/ranger` surface with HTTP
 //! Basic `engine-<uuid>` ([`plugin_username`]) and a per-engine password. The
 //! password is a named secret in the GLOBAL scope of the secret store, named
-//! `engine-ranger-{engine_id}-{generation}`; the engine row names it in two
+//! `engine-ranger-{engine_id}-{random}`; the engine row names it in two
 //! columns:
 //!
 //! * `ranger_secret_id` — the credential the plugin is (or is about to be)
@@ -109,7 +109,7 @@ pub(crate) fn secret_name_prefix(engine_id: Uuid) -> String {
     format!("engine-ranger-{engine_id}-")
 }
 
-/// A per-generation suffix keeps a rotation from colliding with the name of the
+/// A random suffix (a fresh UUID per credential) keeps a rotation from colliding with the name of the
 /// credential it demotes (that one stays until it is retired).
 fn secret_name(engine_id: Uuid) -> String {
     format!(
