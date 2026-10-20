@@ -65,9 +65,10 @@ demo-verify-engine:
     #!/usr/bin/env bash
     set -euo pipefail
     # demo.env supplies the defaults; values the caller exported win (as in deploy/demo/wait.sh).
-    CALLER_PORT="${DEMO_PORT:-}"
+    CALLER_PORT="${DEMO_PORT:-}"; CALLER_URL="${DEMO_URL:-}"
     set -a; . deploy/demo/demo.env; set +a
     [ -z "$CALLER_PORT" ] || DEMO_PORT="$CALLER_PORT"
+    [ -z "$CALLER_URL" ] || DEMO_URL="$CALLER_URL"
     exec node deploy/demo/verify-engine.mjs
 
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.

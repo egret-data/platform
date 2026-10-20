@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // DEMO ONLY. Browser check of "Add engine" on the demo stack (Docker provisioner): as the seeded
 // admin, add a single-node Trino engine on the seeded warehouse, wait until it runs, assign it to
-// the workspace, run `SELECT 1` and a query on the warehouse catalog in SQL Lab through it, find
+// the workspace, run `SELECT 41 + 1` and queries on the warehouse catalog in SQL Lab through it, find
 // the query in the engine's monitor, delete the engine, and check that its containers are gone.
 // Prints "OK <step>" per step; exits 1 naming the failing step, with a screenshot.
 //   DEMO_PORT=18080 node deploy/demo/verify-engine.mjs
-// Env: BASE, DEMO_PORT, WS (default "default"), ENGINE (default "demo-e2e"), CATALOG (the seeded
+// Env: BASE (else DEMO_URL, else egret.localtest.me on DEMO_PORT), WS (default "default"), ENGINE (default "demo-e2e"), CATALOG (the seeded
 // warehouse's registry catalog, default "demo_warehouse"), DEMO_PROJECT (default "egret-demo"),
 // RUNNING_TIMEOUT_S (default 300: the first use pulls trinodb/trino), DELEGATION ("default" leaves
 // per-user delegation at Auto, which resolves to JWT here; "impersonate" picks Impersonate and turns
@@ -13,8 +13,10 @@
 // The monitor step: egret's query monitor does not list queries on these engines today (known
 // product issues, see the demo guide's Known behaviour: no egret-monitor user on a JWT-delegation
 // engine, `GET /v1/node` answers 404 on Trino 483, and the monitor user has no Ranger grant to see
-// other users' queries). The step passes when the query is listed; otherwise it requires the monitor's
-// "Engine not reachable" banner and prints KNOWN ISSUE, or fails when STRICT_MONITOR=1.
+// other users' queries). The step passes when the query is listed. Otherwise it prints what egret's
+// /cluster and /queries routes answered and accepts only those known answers (cluster 502 "engine not
+// reachable"; queries 502 the same with default delegation, 200 with a list with impersonation),
+// printing KNOWN ISSUE; STRICT_MONITOR=1 fails instead.
 // KEEP_ENGINE=1 stops after the monitor step and leaves the engine running (for manual checks).
 // STATE (session cookies) and SHOT_DIR default to the system temp dir, never the repo.
 import { execFileSync } from "node:child_process";
@@ -39,7 +41,7 @@ if (!chromium) {
   process.exit(2);
 }
 
-const BASE = process.env.BASE ?? `http://egret.localtest.me:${process.env.DEMO_PORT ?? "8080"}`;
+const BASE = process.env.BASE ?? process.env.DEMO_URL ?? `http://egret.localtest.me:${process.env.DEMO_PORT ?? "8080"}`;
 const STATE = process.env.STATE ?? path.join(os.tmpdir(), "egret-demo-verify-engine-state.json");
 const SHOT_DIR = process.env.SHOT_DIR ?? os.tmpdir();
 const EMAIL = process.env.EGRET_ADMIN_EMAIL ?? "admin@egret.local";
@@ -217,7 +219,13 @@ try {
   await step("running", async () => {
     const t0 = Date.now();
     await header().getByText("running", { exact: true }).waitFor({ timeout: RUNNING_MS });
-    console.log(`  status running after ${((Date.now() - t0) / 1000).toFixed(1)}s; containers: ${engineContainers().join(", ")}`);
+    // Positive control for the "containers removed" check: the same filter must see the engine now.
+    const names = engineContainers();
+    const coordinator = `egret-engine-egret-engines-${ENGINE}-coordinator`;
+    if (!names.includes(coordinator)) {
+      throw new Error(`docker ps with labels egret.engine=${ENGINE}, egret.project=${PROJECT} does not list ${coordinator} (got: ${names.join(", ") || "nothing"})`);
+    }
+    console.log(`  status running after ${((Date.now() - t0) / 1000).toFixed(1)}s; containers: ${names.join(", ")}`);
     await shot("running");
   });
 
@@ -238,7 +246,8 @@ try {
     await page.getByRole("button", { name: "New tab" }).click();
     await page.getByRole("combobox").filter({ hasText: /Select a database|\(/ }).first().click();
     await page.getByRole("option", { name: new RegExp(`^${ENGINE} \\(trino\\)`) }).click({ timeout: 30_000 });
-    await runSql(`SELECT 1 AS ${MARK}`, /^\s*1\s*$/);
+    // 42, not 1: the grid's row-number cell would match 1.
+    await runSql(`SELECT 41 + 1 AS ${MARK}`, /^\s*42\s*$/);
     await runSql(`SHOW SCHEMAS FROM ${CATALOG}`, "information_schema");
     // Write and read the warehouse: Iceberg REST catalog (egret) plus object storage (RustFS).
     const schema = `${CATALOG}.demo_e2e`;
@@ -251,6 +260,14 @@ try {
   });
 
   await step("monitor", async () => {
+    // Keep the last answer of egret's monitor routes, to tell the known issues from anything else.
+    const engineId = new URL(engineUrl).pathname.split("/").pop();
+    const seen = {};
+    const onResponse = async (r) => {
+      const m = new URL(r.url()).pathname.match(new RegExp(`^/api/control-plane/engines/${engineId}/(cluster|queries)$`));
+      if (m) seen[m[1]] = { status: r.status(), body: await r.text().catch(() => "") };
+    };
+    page.on("response", onResponse);
     await page.goto(`${engineUrl}?tab=monitor`);
     await page.getByRole("tab", { name: "Monitor" }).click();
     const listed = page.getByRole("cell", { name: new RegExp(MARK) }).first();
@@ -262,9 +279,23 @@ try {
       await listed.or(banner).first().waitFor({ timeout: 60_000 });
       await listed.waitFor({ timeout: 15_000 }).catch(() => {});
       if (!(await listed.isVisible())) {
+        for (let i = 0; i < 20 && !(seen.cluster && seen.queries); i++) await page.waitForTimeout(500);
+        const show = (k) => (seen[k] ? `${seen[k].status} ${seen[k].body.slice(0, 120)}` : "no response");
+        console.log(`  monitor routes: cluster -> ${show("cluster")}; queries -> ${show("queries")}`);
+        // The recorded causes (see the header): the cluster summary fails because Trino 483 answers
+        // 404 to /v1/node (egret maps it to 502 "engine not reachable"); a JWT-delegation engine has
+        // no monitor sign-in, so the query list fails the same way; with impersonation the monitor
+        // signs in and the list answers 200 but without the query. Anything else is a new failure.
+        const notReachable = (k) => seen[k]?.status === 502 && /engine not reachable/.test(seen[k].body);
+        const okList = seen.queries?.status === 200 && seen.queries.body.trim().startsWith("[");
+        const queriesExpected = DELEGATION === "impersonate" ? okList : notReachable("queries");
+        if (!notReachable("cluster") || !queriesExpected) {
+          throw new Error(`the monitor failed in a way that is not a recorded known issue (DELEGATION=${DELEGATION})`);
+        }
         console.log("  KNOWN ISSUE: the monitor does not list the query (see the header of this script); STRICT_MONITOR=1 makes this fail");
       }
     }
+    page.off("response", onResponse);
     await shot(`monitor-${DELEGATION}`);
   });
 
