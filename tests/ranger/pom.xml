@@ -47,6 +47,8 @@
                  `equalsIgnoreCase` can disagree, so the resolver's fold declines 25 code
                  points instead of every non-ASCII value. Measures the JDK, not the jar. -->
             <include>EgretCaseFoldAgreementTest.java</include>
+            <!-- Ranger surface auth: what a stock plugin sends (Basic, secure path) at >= 2.8.0. -->
+            <include>EgretPluginAuthTest.java</include>
             <!-- fix/tag-policies-service-def: measures that the `tagPolicies` block's OWN
                  service-def decides which tag policies run — with trino.json every tag
                  policy reaches every tagged column (the live fail-open), with tag.json

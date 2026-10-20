@@ -45,13 +45,19 @@ Optional — regenerate fixtures/service-policies.json from a running Egret:
 
 ```bash
 curl -s -H "Authorization: Bearer devtoken" \
-  "http://localhost:8080/service/plugins/policies/download/trino_prod" \
+  "http://localhost:8080/ranger/service/plugins/policies/download/trino_prod" \
   > tests/ranger/fixtures/service-policies.json
 ```
 
 The anchors assert: alice select allowed; bob denied; column email →
 MASK_HASH; row filter "country = 'US'". (Default `ranger-plugins-common`:
 **2.5.0**; the differential gate runs **both** 2.5.0 and 2.8.0 every time.)
+
+`EgretPluginAuthTest` pins what a stock plugin SENDS to its admin: from 2.8.0 on, with
+`policy.rest.client.username/password` set, it sends `Authorization: Basic ...` to
+`/service/plugins/secure/policies/download/<svc>`; 2.5.0 ignores those keys and sends no
+header. Run it per version: `mvn -q test -Dranger.version=2.8.0 -Dtest=EgretPluginAuthTest`.
+Egret's surface-auth design rests on it.
 
 ## Why 2.5.0 is the default
 
