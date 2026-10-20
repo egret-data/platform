@@ -36535,7 +36535,7 @@
         }
       }
     },
-    "/service/plugins/definitions": {
+    "/ranger/service/plugins/definitions": {
       "get": {
         "tags": [
           "ranger"
@@ -36568,7 +36568,7 @@
         }
       }
     },
-    "/service/plugins/definitions/name/{name}": {
+    "/ranger/service/plugins/definitions/name/{name}": {
       "get": {
         "tags": [
           "ranger"
@@ -36622,7 +36622,7 @@
         }
       }
     },
-    "/service/plugins/policies/download/{service}": {
+    "/ranger/service/plugins/policies/download/{service}": {
       "get": {
         "tags": [
           "ranger"
@@ -36691,7 +36691,7 @@
         }
       }
     },
-    "/service/plugins/policies/{id}": {
+    "/ranger/service/plugins/policies/{id}": {
       "get": {
         "tags": [
           "ranger"
@@ -36746,7 +36746,7 @@
         }
       }
     },
-    "/service/plugins/services": {
+    "/ranger/service/plugins/services": {
       "get": {
         "tags": [
           "ranger"
@@ -36782,7 +36782,7 @@
         }
       }
     },
-    "/service/tags/download/{service}": {
+    "/ranger/service/tags/download/{service}": {
       "get": {
         "tags": [
           "ranger"
@@ -49299,11 +49299,11 @@
           },
           "downloadUrl": {
             "type": "string",
-            "description": "`{public_url}/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
+            "description": "`{public_url}/ranger/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
           },
           "authMode": {
             "type": "string",
-            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/service`; the token is never shown here)."
+            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/ranger`; the token is never shown here)."
           },
           "rangerPluginVersion": {
             "type": [

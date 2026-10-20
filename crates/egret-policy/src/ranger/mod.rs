@@ -7,4 +7,4 @@ pub mod auth;
 pub mod dto;
 pub mod error;
 pub mod routes;
-pub use routes::{ranger_router, RangerState};
+pub use routes::{ranger_router, ranger_surface, RangerState};

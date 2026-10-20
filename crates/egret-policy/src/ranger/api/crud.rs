@@ -25,7 +25,7 @@ pub fn crud_routes() -> Router<RangerState> {
 
 #[utoipa::path(
     get,
-    path = "/service/plugins/definitions",
+    path = "/ranger/service/plugins/definitions",
     tag = "ranger",
     responses(
         (status = 200, description = "All stored Ranger service-definitions", body = RangerServiceDefs),
@@ -46,7 +46,7 @@ pub async fn list_defs(State(s): State<RangerState>) -> Result<Json<Value>, Rang
 
 #[utoipa::path(
     get,
-    path = "/service/plugins/definitions/name/{name}",
+    path = "/ranger/service/plugins/definitions/name/{name}",
     tag = "ranger",
     params(("name" = String, Path, description = "Service-definition name (e.g. `trino`)")),
     responses(
@@ -65,7 +65,7 @@ pub async fn get_def(
 
 #[utoipa::path(
     get,
-    path = "/service/plugins/services",
+    path = "/ranger/service/plugins/services",
     tag = "ranger",
     responses(
         (status = 200, description = "All policy profiles (Ranger services)", body = Vec<RangerServiceRef>),
@@ -95,7 +95,7 @@ pub async fn list_services(State(s): State<RangerState>) -> Result<Json<Value>, 
 
 #[utoipa::path(
     get,
-    path = "/service/plugins/policies/{id}",
+    path = "/ranger/service/plugins/policies/{id}",
     tag = "ranger",
     params(("id" = i64, Path, description = "Policy id")),
     responses(

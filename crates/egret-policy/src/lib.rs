@@ -31,7 +31,7 @@ pub use plugin_downloads::{
     plugins_hold_tag_version, wait_for_tag_version, DownloadKind, HoldState, WaitError,
     NO_PLUGIN_POLLED,
 };
-pub use ranger::{ranger_router, RangerState};
+pub use ranger::{ranger_router, ranger_surface, RangerState};
 pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,

@@ -45,7 +45,7 @@ const DECLARED_CATALOGS = CATALOGS.map((c) =>
 
 const PLUGIN_CONFIG = {
   serviceName: "trino-main",
-  downloadUrl: "https://egret.example.com/service/plugins/policies/download/trino-main",
+  downloadUrl: "https://egret.example.com/ranger/service/plugins/policies/download/trino-main",
   authMode: "bearer-configured",
   rangerPluginVersion: "2.5.0",
   rangerPluginVersionModelled: true,

@@ -609,12 +609,12 @@ pub struct RangerPluginFileDto {
 pub struct RangerPluginConfigDto {
     /// The bound policy profile: the Ranger service name the plugin asks for.
     pub service_name: String,
-    /// `{public_url}/service/plugins/policies/download/{serviceName}`: where the
+    /// `{public_url}/ranger/service/plugins/policies/download/{serviceName}`: where the
     /// plugin's download lands. The files below carry `public_url` itself (the
     /// plugin appends the path).
     pub download_url: String,
     /// `anonymous`, or `bearer-configured` (egret requires a bearer token on
-    /// `/service`; the token is never shown here).
+    /// `/ranger`; the token is never shown here).
     pub auth_mode: String,
     /// The plugin version the engine was DECLARED to run.
     pub ranger_plugin_version: Option<String>,
@@ -694,7 +694,7 @@ fn plugin_config_judgements(
     }
     let auth_mode = if f.bearer_configured {
         warnings.push(
-            "egret requires a bearer token on /service, and a stock Ranger plugin cannot send \
+            "egret requires a bearer token on /ranger, and a stock Ranger plugin cannot send \
              it: the download will be refused (401) unless something in front of egret adds the \
              token or exempts this engine."
                 .to_string(),
@@ -796,7 +796,7 @@ async fn ranger_plugin_config(
     Ok(Json(RangerPluginConfigDto {
         download_url: format!(
             "{}/service/plugins/policies/download/{service_name}",
-            st.engine_egret_url.trim_end_matches('/')
+            egret_engine_mgmt_api::ranger_config::plugin_base_url(&st.engine_egret_url)
         ),
         service_name,
         auth_mode: auth_mode.into(),

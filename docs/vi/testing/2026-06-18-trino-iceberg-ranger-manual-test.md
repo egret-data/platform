@@ -77,7 +77,7 @@ BIN=$(pwd)/../target/debug/egret
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
 curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
-curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/service/plugins/definitions
+curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
 ```
 Kỳ vọng: `healthz 200`, JSON `/v1/config` có `overrides` chứa `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (bỏ `?warehouse` thì chỉ trả về khóa signer, không có prefix), `anon /service: 200`.
 
@@ -123,7 +123,7 @@ cat > /tmp/ranger-trino-security.xml <<EOF
 <configuration>
   <property><name>ranger.plugin.trino.service.name</name><value>trino_prod</value></property>
   <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
-  <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://$HOST_IP:8080</value></property>
+  <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://$HOST_IP:8080/ranger</value></property>
   <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>5000</value></property>
   <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger-trino-cache</value></property>
   <property><name>ranger.plugin.trino.policy.rest.client.connection.timeoutMs</name><value>10000</value></property>
@@ -131,7 +131,7 @@ cat > /tmp/ranger-trino-security.xml <<EOF
 </configuration>
 EOF
 ```
-`RangerAdminRESTClient` tải từ `<policy.rest.url>/service/plugins/policies/download/<service.name>` — tức `/service` của Egret. Key config Trino 481: `ranger.service.name`, `ranger.plugin.config.resource`.
+`RangerAdminRESTClient` tải từ `<policy.rest.url>/service/plugins/policies/download/<service.name>` — tức `/ranger/service` của Egret. Key config Trino 481: `ranger.service.name`, `ranger.plugin.config.resource`.
 
 ### 3c. Khởi động Trino, đẩy config ranger, restart
 
@@ -160,8 +160,8 @@ Kỳ vọng: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, và `US 2 29.5 /
 Tên catalog trong Trino là `iceberg`, nên resource Ranger dùng `catalog=iceberg`. Default-deny nghĩa là user cần `execute` trên `queryid` và `impersonate` trên `trinouser` để chạy query, cộng `select` trên bảng.
 
 ```bash
-P() { curl -s -o /dev/null -w "  %{http_code}\n" -X POST "http://$HOST_IP:8080/service/plugins/policies" -H "Content-Type: application/json" -d "$1"; }
-curl -s -X POST "http://$HOST_IP:8080/service/plugins/services" -H "Content-Type: application/json" -d '{"name":"trino_prod","type":"trino","configs":{}}' >/dev/null
+P() { curl -s -o /dev/null -w "  %{http_code}\n" -X POST "http://$HOST_IP:8080/ranger/service/plugins/policies" -H "Content-Type: application/json" -d "$1"; }
+curl -s -X POST "http://$HOST_IP:8080/ranger/service/plugins/services" -H "Content-Type: application/json" -d '{"name":"trino_prod","type":"trino","configs":{}}' >/dev/null
 # toàn cục: ai cũng được chạy query + set session user của mình
 P '{"service":"trino_prod","name":"g-execquery","policyType":0,"isEnabled":true,"resources":{"queryid":{"values":["*"]}},"policyItems":[{"accesses":[{"type":"execute","isAllowed":true}],"groups":["public"]}]}'
 P '{"service":"trino_prod","name":"g-impersonate","policyType":0,"isEnabled":true,"resources":{"trinouser":{"values":["*"]}},"policyItems":[{"accesses":[{"type":"impersonate","isAllowed":true}],"groups":["public"]}]}'

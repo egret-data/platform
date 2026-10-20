@@ -82,7 +82,7 @@ a guessed path.
 ### Base URL reasoning
 
 `ranger.plugin.starrocks.policy.rest.url` is set to
-`http://host.docker.internal:8080`. The egret backend is **not containerized**
+`http://host.docker.internal:8080/ranger`. The egret backend is **not containerized**
 in this compose (see the `frontend` service comment above: the dev path is
 `cargo run -p egret-bin serve` on the host), so the StarRocks container must
 reach it via the host gateway, exactly like the existing
@@ -167,7 +167,7 @@ RangerAdminRESTClient.getServicePoliciesIfUpdated():... service not found / 200 
 ```
 
 and egret's own server logs show the inbound
-`GET /service/plugins/policies/download/sr1` request. A `404` here just means
+`GET /ranger/service/plugins/policies/download/sr1` request. A `404` here just means
 no `sr1` profile exists yet in egret (create one via the Policies UI); once it
 does, the request returns the real policy payload. A benign
 `getRolesIfUpdated ... 404 ... Ignoring` warning is expected and harmless —

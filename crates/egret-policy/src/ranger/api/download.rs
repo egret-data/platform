@@ -77,7 +77,7 @@ async fn record_poll(
 /// Returns 304 when the plugin's cached version matches; 200 + `ServicePolicies` otherwise.
 #[utoipa::path(
     get,
-    path = "/service/plugins/policies/download/{service}",
+    path = "/ranger/service/plugins/policies/download/{service}",
     tag = "ranger",
     params(
         ("service" = String, Path, description = "Policy profile (Ranger service) name"),
@@ -230,7 +230,7 @@ pub async fn download_policies(
 /// plugin's cached `tagVersion` matches the current one; 200 otherwise.
 #[utoipa::path(
     get,
-    path = "/service/tags/download/{service}",
+    path = "/ranger/service/tags/download/{service}",
     tag = "ranger",
     params(
         ("service" = String, Path, description = "Policy profile (Ranger service) name"),

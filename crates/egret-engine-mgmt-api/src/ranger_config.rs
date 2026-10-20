@@ -52,14 +52,25 @@ impl RangerPluginFiles {
     }
 }
 
+/// Where egret serves the Ranger plugin surface. The plugin appends
+/// `/service/plugins/...` to its configured URL, so the URL it is given is
+/// `<egret>` + this prefix. One spelling, used by the server and the renderer.
+pub const RANGER_SURFACE_PREFIX: &str = "/ranger";
+
+/// The URL an engine's plugin is configured with.
+pub fn plugin_base_url(egret_url: &str) -> String {
+    format!("{}{RANGER_SURFACE_PREFIX}", egret_url.trim_end_matches('/'))
+}
+
 /// The exact files egret mounts into its own engines, for `kind`.
 ///
 /// Trino: `access-control.properties`, `ranger-trino-security.xml`.
 /// StarRocks: `fe.conf (add this line)` (`access_control = ranger`),
 /// `ranger-starrocks-security.xml`, `ranger-starrocks-audit.xml`.
 ///
-/// `egret_url` is the base the plugin polls (the plugin appends
-/// `/service/plugins/policies/download/{service}` itself).
+/// `egret_url` is egret's own URL; the plugin is configured with
+/// [`plugin_base_url`] of it and appends
+/// `/service/plugins/policies/download/{service}` itself.
 pub fn ranger_plugin_files(
     kind: EngineKind,
     service_name: &str,
@@ -101,10 +112,11 @@ pub fn ranger_plugin_files(
 }
 
 fn security_xml(plugin: &str, svc: &str, url: &str, poll: u64) -> String {
+    let base = plugin_base_url(url);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
   <property><name>ranger.plugin.{plugin}.service.name</name><value>{svc}</value></property>\n\
-  <property><name>ranger.plugin.{plugin}.policy.rest.url</name><value>{url}</value></property>\n\
+  <property><name>ranger.plugin.{plugin}.policy.rest.url</name><value>{base}</value></property>\n\
   <property><name>ranger.plugin.{plugin}.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>\n\
   <property><name>ranger.plugin.{plugin}.policy.cache.dir</name><value>/tmp/ranger/{svc}/policycache</value></property>\n\
   <property><name>ranger.plugin.{plugin}.policy.pollIntervalMs</name><value>{poll}</value></property>\n\

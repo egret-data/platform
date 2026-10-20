@@ -6,7 +6,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_metastore::Db;
-use egret_policy::{ranger_router, RangerState};
+use egret_policy::{ranger_router, ranger_surface, RangerState};
 use egret_policy::{seed_trino, PolicyStore};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -487,4 +487,75 @@ async fn the_tag_block_carries_the_tag_def_even_for_a_trino_typed_tag_service() 
     // The resource half keeps its own def.
     assert_eq!(sp["serviceDef"]["name"], "trino", "{sp}");
     assert_eq!(block["policies"].as_array().map(Vec::len), Some(2), "{sp}");
+}
+
+/// The surface exactly as the server mounts it, anonymous, with one service.
+async fn anonymous_surface() -> Option<(axum::Router, String)> {
+    let url = egret_test_db::url().await?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
+    store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
+    let app = ranger_surface(RangerState {
+        store,
+        auth_token: Arc::from(""),
+    });
+    Some((app, svc))
+}
+
+#[tokio::test]
+async fn the_secure_path_serves_the_same_body_as_the_plain_path() {
+    let Some((app, svc)) = anonymous_surface().await else {
+        eprintln!("skip");
+        return;
+    };
+    let plain = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ranger/service/plugins/policies/download/{svc}"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    let secure = app
+        .oneshot(req(
+            "GET",
+            &format!("/ranger/service/plugins/secure/policies/download/{svc}"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert_eq!(secure.status(), StatusCode::OK);
+    let body = |r: axum::response::Response| async move {
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice::<Value>(&b).unwrap()
+    };
+    assert_eq!(body(plain).await, body(secure).await);
+}
+
+#[tokio::test]
+async fn the_old_root_service_prefix_is_gone() {
+    let Some((app, svc)) = anonymous_surface().await else {
+        eprintln!("skip");
+        return;
+    };
+    let r = app
+        .oneshot(req(
+            "GET",
+            &format!("/service/plugins/policies/download/{svc}"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }

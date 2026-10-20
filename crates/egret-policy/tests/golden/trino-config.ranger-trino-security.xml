@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
 <property><name>ranger.plugin.trino.service.name</name><value>SVC</value></property>
-<property><name>ranger.plugin.trino.policy.rest.url</name><value>http://egret:8080</value></property>
+<property><name>ranger.plugin.trino.policy.rest.url</name><value>http://egret:8080/ranger</value></property>
 <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
 <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger/SVC/policycache</value></property>
 <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>30000</value></property>

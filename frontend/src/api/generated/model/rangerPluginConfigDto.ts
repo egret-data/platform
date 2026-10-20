@@ -14,14 +14,14 @@ export interface RangerPluginConfigDto {
   /** The bound policy profile: the Ranger service name the plugin asks for. */
   serviceName: string;
   /**
-     * `{public_url}/service/plugins/policies/download/{serviceName}`: where the
+     * `{public_url}/ranger/service/plugins/policies/download/{serviceName}`: where the
      * plugin's download lands. The files below carry `public_url` itself (the
      * plugin appends the path).
      */
   downloadUrl: string;
   /**
      * `anonymous`, or `bearer-configured` (egret requires a bearer token on
-     * `/service`; the token is never shown here).
+     * `/ranger`; the token is never shown here).
      */
   authMode: string;
   /**

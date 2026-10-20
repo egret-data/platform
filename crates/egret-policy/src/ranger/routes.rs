@@ -19,6 +19,10 @@ pub fn ranger_router(state: RangerState) -> Router {
             get(api::download::download_policies),
         )
         .route(
+            "/plugins/secure/policies/download/{service}",
+            get(api::download::download_policies),
+        )
+        .route(
             "/tags/download/{service}",
             get(api::download::download_tags),
         )
@@ -28,6 +32,14 @@ pub fn ranger_router(state: RangerState) -> Router {
             super::auth::require_bearer,
         ))
         .with_state(state)
+}
+
+/// The whole Ranger surface as the server mounts it: `/ranger/service/...`.
+pub fn ranger_surface(state: RangerState) -> Router {
+    Router::new().nest(
+        egret_engine_mgmt_api::ranger_config::RANGER_SURFACE_PREFIX,
+        Router::new().nest("/service", ranger_router(state)),
+    )
 }
 
 // ---------- OpenAPI doc-only mirrors (E0·P4b-5) ----------
