@@ -16,4 +16,11 @@ export interface RangerCredentialDto {
   username: string;
   /** The password. egret does not show it again. */
   password: string;
+  /**
+     * Names THIS credential. Send it as `installed` to
+     * `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`
+     * once the engine runs with it; a confirmation naming any other
+     * credential retires nothing. An opaque id: it grants nothing.
+     */
+  credentialId: string;
 }

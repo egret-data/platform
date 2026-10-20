@@ -522,6 +522,28 @@ impl EngineMgmtStore {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Clear the previous Ranger credential only while the row's current one
+    /// is `expected_current` AND its previous one is `expected_previous` (the
+    /// operator-confirmed retire of an external engine). `false`: either
+    /// column moved, nothing was written.
+    pub async fn clear_ranger_prev_if_current(
+        &self,
+        engine_id: Uuid,
+        expected_current: Uuid,
+        expected_previous: Uuid,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET ranger_secret_prev_id = NULL \
+             WHERE id = $1 AND ranger_secret_id = $2 AND ranger_secret_prev_id = $3",
+        )
+        .bind(engine_id)
+        .bind(expected_current)
+        .bind(expected_previous)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
         sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
             .bind(id)

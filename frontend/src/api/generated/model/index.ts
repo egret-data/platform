@@ -513,6 +513,7 @@ export * from './resourceTagBody';
 export * from './resourceTagDto';
 export * from './resultsPage';
 export * from './resultsPageRowsItem';
+export * from './retirePreviousRangerCredential';
 export * from './roleAssigneeDto';
 export * from './roleDto';
 export * from './rolePrincipal';

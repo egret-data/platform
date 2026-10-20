@@ -486,7 +486,14 @@ async fn register_external_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
     Json(b): Json<RegisterExternalEngine>,
-) -> Result<(StatusCode, Json<RegisteredExternalEngineDto>), CpError> {
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<RegisteredExternalEngineDto>,
+    ),
+    CpError,
+> {
     egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
     validate_name(&b.name)?;
     if b.r#type != "trino" && b.r#type != "starrocks" {
@@ -531,6 +538,9 @@ async fn register_external_engine(
     let engine_id = Uuid::new_v4();
     let creds = crate::ranger_credential::RangerCredentialStore::from_state(&st);
     let (secret_id, credential) = creds.mint_unrecorded(engine_id).await?;
+    // A request cancelled between here and the discard below leaves this
+    // secret orphaned: harmless, since no row names it, so it verifies for
+    // nobody, and nobody was shown it.
     let registered = register_in_tx(&st, &b, engine_id, secret_id, &catalogs).await;
     let engine = match registered {
         Ok(engine) => engine,
@@ -548,11 +558,14 @@ async fn register_external_engine(
     );
     Ok((
         StatusCode::CREATED,
+        // The body carries a password: no browser or intermediary may keep it.
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(RegisteredExternalEngineDto {
             engine: engine.into(),
             ranger_credential: RangerCredentialDto {
                 username: credential.username.clone(),
                 password: credential.password.clone(),
+                credential_id: secret_id,
             },
         }),
     ))
@@ -666,6 +679,11 @@ pub struct RangerCredentialDto {
     pub username: String,
     /// The password. egret does not show it again.
     pub password: String,
+    /// Names THIS credential. Send it as `installed` to
+    /// `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`
+    /// once the engine runs with it; a confirmation naming any other
+    /// credential retires nothing. An opaque id: it grants nothing.
+    pub credential_id: Uuid,
 }
 
 impl std::fmt::Debug for RangerCredentialDto {
@@ -673,6 +691,7 @@ impl std::fmt::Debug for RangerCredentialDto {
         f.debug_struct("RangerCredentialDto")
             .field("username", &self.username)
             .field("password", &"<redacted>")
+            .field("credential_id", &self.credential_id)
             .finish()
     }
 }
@@ -727,6 +746,9 @@ struct PluginConfigFacts<'a> {
     engine_type: &'a str,
     public_url: &'a str,
     surface_mode: RangerSurfaceMode,
+    /// Whether the row names a current Ranger credential (an engine
+    /// registered before credentials existed names none).
+    has_credential: bool,
     ranger_enabled: bool,
     version: Option<&'a str>,
 }
@@ -788,6 +810,14 @@ fn plugin_config_judgements(
                  the security XML below, in place of the placeholder password."
                     .to_string(),
             );
+            if !f.has_credential {
+                must_supply.push(
+                    "This engine has no Ranger credential yet (it was registered before \
+                     credentials existed): obtain one with \
+                     POST /api/control-plane/engines/{id}/rotate-ranger-credential."
+                        .to_string(),
+                );
+            }
             "engine-credential"
         }
         RangerSurfaceMode::Anonymous => {
@@ -888,6 +918,7 @@ async fn ranger_plugin_config(
             engine_type: &engine.r#type,
             public_url: &st.engine_egret_url,
             surface_mode: st.ranger_surface_mode,
+            has_credential: engine.ranger_secret_id.is_some(),
             ranger_enabled: st.ranger_enabled,
             version: engine.ranger_plugin_version.as_deref(),
         });
@@ -930,6 +961,7 @@ mod plugin_config_tests {
             engine_type: "starrocks",
             public_url: url,
             surface_mode,
+            has_credential: true,
             ranger_enabled: enabled,
             version: v,
         }
@@ -1034,6 +1066,26 @@ mod plugin_config_tests {
         let all = format!("{w:?}{must:?}");
         assert!(!all.contains("bearer"), "{all}");
         assert!(!all.contains("anonymous"), "{all}");
+    }
+
+    #[test]
+    fn an_engine_without_a_credential_is_told_to_rotate_for_one() {
+        let mut f = facts("https://e.example.com", Required, true, Some("2.8.0"));
+        f.has_credential = false;
+        let (_, _, must, _) = plugin_config_judgements(&f);
+        assert!(
+            must.iter()
+                .any(|m| m.contains("no Ranger credential")
+                    && m.contains("rotate-ranger-credential")),
+            "{must:?}"
+        );
+        let (_, _, must, _) = plugin_config_judgements(&facts(
+            "https://e.example.com",
+            Required,
+            true,
+            Some("2.8.0"),
+        ));
+        assert!(!must.iter().any(|m| m.contains("no Ranger credential")));
     }
 
     #[test]

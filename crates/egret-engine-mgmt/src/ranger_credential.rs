@@ -40,9 +40,26 @@ use crate::{Engine, EngineHttpError as CpError, EngineMgmtState as CpState, Engi
 /// How many times `ensure` re-reads the row after a lost compare-and-set.
 const ENSURE_ATTEMPTS: usize = 3;
 
-/// The 409 a rotation gets while the previous credential is still pending.
+/// The 409 a provisioned engine's rotation gets while the previous credential
+/// is still pending.
 const ROTATION_PENDING: &str = "a ranger credential rotation is pending: the previous credential \
      has not been retired by a successful apply yet";
+
+/// The 409 an external engine's rotation gets while the previous credential is
+/// still pending: only the operator can say the new one is installed.
+const ROTATION_PENDING_EXTERNAL: &str = "a ranger credential rotation is pending: the previous \
+     credential is still valid until you confirm the current one is installed on the engine with \
+     POST /api/control-plane/engines/{id}/retire-previous-ranger-credential";
+
+/// The 409 an external engine's rotation gets when another rotation won.
+const ROTATION_RACED: &str = "a concurrent ranger credential rotation changed this engine: \
+     re-read the engine and retry";
+
+/// The 409 a confirmed retire gets when the operator's statement does not
+/// match the row.
+const RETIRE_MISMATCH: &str = "the credential named as installed is not this engine's current \
+     ranger credential (a later rotation, or a concurrent change): nothing was retired; install \
+     the current credential and confirm it";
 
 /// The prefix every credential secret of `engine_id` is named with. Engine
 /// delete sweeps it; nothing else may.
@@ -122,7 +139,7 @@ impl RangerCredentialStore {
                 return Ok(found);
             }
             match self.mint_and_commit(&row, false).await? {
-                Some(minted) => return Ok(minted),
+                Some((_, minted)) => return Ok(minted),
                 None => row = self.reload(engine.id).await?,
             }
         }
@@ -144,18 +161,8 @@ impl RangerCredentialStore {
     /// since `engine` was read) this returns the WINNER's current credential,
     /// not a new one; callers that need the row must re-read it.
     pub async fn rotate(&self, engine: &Engine) -> Result<PluginCredential, CpError> {
-        if let Some(prev) = engine.ranger_secret_prev_id {
-            match self.secrets.resolve_plaintext(None, prev).await {
-                Ok(_) => return Err(CpError::Conflict(ROTATION_PENDING.into())),
-                Err(SecretsError::NotFound) => {}
-                Err(e) => {
-                    return Err(CpError::BadRequest(format!(
-                        "resolve previous ranger credential: {e}"
-                    )))
-                }
-            }
-        }
-        if let Some(minted) = self.mint_and_commit(engine, true).await? {
+        self.refuse_if_pending(engine, ROTATION_PENDING).await?;
+        if let Some((_, minted)) = self.mint_and_commit(engine, true).await? {
             return Ok(minted);
         }
         let fresh = self.reload(engine.id).await?;
@@ -166,6 +173,38 @@ impl RangerCredentialStore {
                     "lost the race to rotate a ranger credential, and the winner's is unreadable");
                 Err(CpError::Internal)
             }
+        }
+    }
+
+    /// [`Self::rotate`] for an EXTERNAL engine: no apply follows, the
+    /// operator installs the returned credential. Returns the new current
+    /// credential's id (the `credentialId` the operator later names as
+    /// installed) with it. The pending refusal names the retire route, and a
+    /// lost compare-and-set is a 409 (re-read and retry) — never the winner's
+    /// credential handed out as if it were new.
+    pub async fn rotate_external(
+        &self,
+        engine: &Engine,
+    ) -> Result<(Uuid, PluginCredential), CpError> {
+        let pending = ROTATION_PENDING_EXTERNAL.replace("{id}", &engine.id.to_string());
+        self.refuse_if_pending(engine, &pending).await?;
+        self.mint_and_commit(engine, true)
+            .await?
+            .ok_or_else(|| CpError::Conflict(ROTATION_RACED.into()))
+    }
+
+    /// 409 `message` while the row names a previous credential whose secret
+    /// still exists. A dangling previous id does not block.
+    async fn refuse_if_pending(&self, engine: &Engine, message: &str) -> Result<(), CpError> {
+        let Some(prev) = engine.ranger_secret_prev_id else {
+            return Ok(());
+        };
+        match self.secrets.resolve_plaintext(None, prev).await {
+            Ok(_) => Err(CpError::Conflict(message.into())),
+            Err(SecretsError::NotFound) => Ok(()),
+            Err(e) => Err(CpError::BadRequest(format!(
+                "resolve previous ranger credential: {e}"
+            ))),
         }
     }
 
@@ -273,7 +312,7 @@ impl RangerCredentialStore {
         &self,
         engine: &Engine,
         demote: bool,
-    ) -> Result<Option<PluginCredential>, CpError> {
+    ) -> Result<Option<(Uuid, PluginCredential)>, CpError> {
         let password = mint_password();
         let new_id = self
             .secrets
@@ -311,10 +350,13 @@ impl RangerCredentialStore {
             self.discard_unrecorded(engine.id, new_id).await;
             return Ok(None);
         }
-        Ok(Some(PluginCredential {
-            username: plugin_username(engine.id),
-            password,
-        }))
+        Ok(Some((
+            new_id,
+            PluginCredential {
+                username: plugin_username(engine.id),
+                password,
+            },
+        )))
     }
 
     /// Mint a credential for an engine row that does not exist yet, WITHOUT
@@ -347,25 +389,38 @@ impl RangerCredentialStore {
     }
 
     /// The operator's confirmation that an EXTERNAL engine's plugin now runs
-    /// with the current credential: retire the previous one by its exact id
-    /// (read from the row, then compare-and-set, as [`Self::retire_previous_if`]).
-    /// `Ok(())` when nothing is pending (idempotent). A lost compare-and-set
-    /// means the slot changed under this call: `409`, nothing deleted.
+    /// with the credential `installed` (the `credentialId` registration or the
+    /// last rotation returned): retire the previous one by its exact id.
+    ///
+    /// It is a statement about WHAT is installed, checked on BOTH columns in
+    /// one compare-and-set (current = `installed` AND previous = the id read
+    /// from the row). A confirmation that names anything but the current
+    /// credential — a stale or duplicated request sent before a later rotation,
+    /// whose previous credential the engine may still hold — is a 409 and
+    /// deletes nothing. With the matching statement and nothing pending it is
+    /// `Ok(())` (idempotent). The secret is deleted only when the clear won.
     ///
     /// Unlike the after-apply retire, a failure to clear the column is
     /// returned: the operator asked for this and must know it did not happen.
     /// Once the column is cleared the credential no longer verifies; a failed
     /// delete of its secret only leaves an orphan for the engine-delete sweep.
-    pub async fn retire_previous_confirmed(&self, engine: &Engine) -> Result<(), CpError> {
+    pub async fn retire_previous_confirmed(
+        &self,
+        engine: &Engine,
+        installed: Uuid,
+    ) -> Result<(), CpError> {
+        if engine.ranger_secret_id != Some(installed) {
+            return Err(CpError::Conflict(RETIRE_MISMATCH.into()));
+        }
         let Some(prev) = engine.ranger_secret_prev_id else {
             return Ok(());
         };
-        if !self.store.clear_ranger_prev(engine.id, prev).await? {
-            return Err(CpError::Conflict(
-                "the engine's ranger credentials changed while the previous one was being \
-                 retired; re-read the engine and retry"
-                    .into(),
-            ));
+        if !self
+            .store
+            .clear_ranger_prev_if_current(engine.id, installed, prev)
+            .await?
+        {
+            return Err(CpError::Conflict(RETIRE_MISMATCH.into()));
         }
         match self.secrets.delete(None, prev).await {
             Ok(()) | Err(SecretsError::NotFound) => {}

@@ -45,6 +45,7 @@ import type {
   RangerPluginConfigDto,
   RegisterExternalEngine,
   RegisteredExternalEngineDto,
+  RetirePreviousRangerCredential,
   SetWorkspacesBody,
   UpdateExternalEngine,
   WorkspaceEngineDto
@@ -2795,6 +2796,11 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
   status: 204
 }
 
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneEnginesRetirePreviousRangerCredentialResponse401 = {
   data: ErrorBody
   status: 401
@@ -2823,7 +2829,7 @@ export type controlPlaneEnginesRetirePreviousRangerCredentialResponse500 = {
 export type controlPlaneEnginesRetirePreviousRangerCredentialResponseSuccess = (controlPlaneEnginesRetirePreviousRangerCredentialResponse204) & {
   headers: Headers;
 };
-export type controlPlaneEnginesRetirePreviousRangerCredentialResponseError = (controlPlaneEnginesRetirePreviousRangerCredentialResponse401 | controlPlaneEnginesRetirePreviousRangerCredentialResponse403 | controlPlaneEnginesRetirePreviousRangerCredentialResponse404 | controlPlaneEnginesRetirePreviousRangerCredentialResponse409 | controlPlaneEnginesRetirePreviousRangerCredentialResponse500) & {
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponseError = (controlPlaneEnginesRetirePreviousRangerCredentialResponse400 | controlPlaneEnginesRetirePreviousRangerCredentialResponse401 | controlPlaneEnginesRetirePreviousRangerCredentialResponse403 | controlPlaneEnginesRetirePreviousRangerCredentialResponse404 | controlPlaneEnginesRetirePreviousRangerCredentialResponse409 | controlPlaneEnginesRetirePreviousRangerCredentialResponse500) & {
   headers: Headers;
 };
 
@@ -2838,24 +2844,28 @@ export const getControlPlaneEnginesRetirePreviousRangerCredentialUrl = (id: stri
 }
 
 /**
- * Idempotent: with no previous credential pending it answers 204 and deletes
- * nothing. A provisioned engine retires automatically after an accepted apply,
- * so it is refused (409).
+ * The check is one compare-and-set on both columns (current = `installed`,
+ * previous = the id read from the row). Idempotent: with nothing pending and
+ * a matching `installed` it answers 204 and deletes nothing. A provisioned
+ * engine retires automatically after an accepted apply, so it is refused (409).
  * @summary `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
 confirmation that an EXTERNAL engine's plugin now runs with the credential
-the last rotation returned: the previous one is deleted by its exact id
-(compare-and-set on the row) and stops authenticating. Standing rule: egret
-never deletes a credential the cluster may still hold, and for an external
-engine only its operator can say it no longer does.
+named `installed` (the `credentialId` registration or the last rotation
+returned): the previous one is deleted by its exact id and stops
+authenticating. Standing rule: egret never deletes a credential the cluster
+may still hold, and for an external engine only its operator can say it no
+longer does — about a SPECIFIC credential, so a stale or duplicated
+confirmation sent before a later rotation retires nothing (409).
  */
-export const controlPlaneEnginesRetirePreviousRangerCredential = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRetirePreviousRangerCredentialResponse> => {
+export const controlPlaneEnginesRetirePreviousRangerCredential = async (id: string,
+    retirePreviousRangerCredential: RetirePreviousRangerCredential, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRetirePreviousRangerCredentialResponse> => {
 
   return customInstance<controlPlaneEnginesRetirePreviousRangerCredentialResponse>(getControlPlaneEnginesRetirePreviousRangerCredentialUrl(id),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(retirePreviousRangerCredential)
   }
 );}
 
@@ -2864,8 +2874,8 @@ export const controlPlaneEnginesRetirePreviousRangerCredential = async (id: stri
 
 
 export const getControlPlaneEnginesRetirePreviousRangerCredentialMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext> => {
 
 const mutationKey = ['controlPlaneEnginesRetirePreviousRangerCredential'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -2877,10 +2887,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, {id: string}> = (props) => {
-          const {id} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, {id: string;data: RetirePreviousRangerCredential}> = (props) => {
+          const {id,data} = props ?? {};
 
-          return  controlPlaneEnginesRetirePreviousRangerCredential(id,requestOptions)
+          return  controlPlaneEnginesRetirePreviousRangerCredential(id,data,requestOptions)
         }
 
 
@@ -2891,23 +2901,25 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>>
-
+    export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationBody = RetirePreviousRangerCredential
     export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationError = ErrorBody
 
     /**
  * @summary `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
 confirmation that an EXTERNAL engine's plugin now runs with the credential
-the last rotation returned: the previous one is deleted by its exact id
-(compare-and-set on the row) and stops authenticating. Standing rule: egret
-never deletes a credential the cluster may still hold, and for an external
-engine only its operator can say it no longer does.
+named `installed` (the `credentialId` registration or the last rotation
+returned): the previous one is deleted by its exact id and stops
+authenticating. Standing rule: egret never deletes a credential the cluster
+may still hold, and for an external engine only its operator can say it no
+longer does — about a SPECIFIC credential, so a stale or duplicated
+confirmation sent before a later rotation retires nothing (409).
  */
 export const useControlPlaneEnginesRetirePreviousRangerCredential = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>,
         TError,
-        {id: string},
+        {id: string;data: RetirePreviousRangerCredential},
         TContext
       > => {
       return useMutation(getControlPlaneEnginesRetirePreviousRangerCredentialMutationOptions(options), queryClient);

@@ -6474,13 +6474,13 @@ async fn rotate_engine_secrets(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "External engine: the new Ranger plugin credential, shown only here. The previous credential still authenticates until `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` retires it; until then a further rotation is refused", body = crate::external::RangerCredentialDto),
+        (status = 200, description = "External engine: the new Ranger plugin credential, shown only here (`Cache-Control: no-store`). The previous credential still authenticates until the operator, once the new one is installed, sends its `credentialId` as `installed` to `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`; until then a further rotation is refused", body = crate::external::RangerCredentialDto),
         (status = 204, description = "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"),
         (status = 400, description = "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: its credential has not been retired by an accepted apply yet, and any accepted apply retires it; external: retire it with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential` once the new one is installed); or the engine changed concurrently (e.g. a delete in progress)", body = ErrorBody),
+        (status = 409, description = "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: its credential has not been retired by an accepted apply yet, and any accepted apply retires it; external: confirm the current credential is installed with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`); or the engine changed concurrently (a delete in progress, or another rotation won: re-read the engine and retry)", body = ErrorBody),
         (status = 502, description = "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -6501,15 +6501,23 @@ async fn rotate_ranger_credential(
         // The row alone: an external engine's cluster is never touched. An
         // engine registered before credentials existed has no current one, so
         // this mints its first.
-        let credential = crate::ranger_credential::rotate(&st, &engine).await?;
+        let (credential_id, credential) =
+            crate::ranger_credential::RangerCredentialStore::from_state(&st)
+                .rotate_external(&engine)
+                .await?;
         tracing::info!(engine = %engine.name,
             "external engine's ranger credential rotated; the previous one stays valid until \
              the operator retires it");
-        return Ok(Json(crate::external::RangerCredentialDto {
-            username: credential.username.clone(),
-            password: credential.password.clone(),
-        })
-        .into_response());
+        return Ok((
+            // The body carries a password: no browser or intermediary may keep it.
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(crate::external::RangerCredentialDto {
+                username: credential.username.clone(),
+                password: credential.password.clone(),
+                credential_id,
+            }),
+        )
+            .into_response());
     }
     if engine.status == crate::engine_status::DELETING {
         return Err(apply_conflict());
@@ -6546,27 +6554,42 @@ async fn rotate_ranger_credential(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// `POST /engines/{id}/retire-previous-ranger-credential` body: the operator's
+/// statement of WHICH credential the engine now runs with.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RetirePreviousRangerCredential {
+    /// The `credentialId` that registration or the last rotation returned
+    /// with the credential now installed on the engine.
+    installed: Uuid,
+}
+
 /// `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
 /// confirmation that an EXTERNAL engine's plugin now runs with the credential
-/// the last rotation returned: the previous one is deleted by its exact id
-/// (compare-and-set on the row) and stops authenticating. Standing rule: egret
-/// never deletes a credential the cluster may still hold, and for an external
-/// engine only its operator can say it no longer does.
+/// named `installed` (the `credentialId` registration or the last rotation
+/// returned): the previous one is deleted by its exact id and stops
+/// authenticating. Standing rule: egret never deletes a credential the cluster
+/// may still hold, and for an external engine only its operator can say it no
+/// longer does — about a SPECIFIC credential, so a stale or duplicated
+/// confirmation sent before a later rotation retires nothing (409).
 ///
-/// Idempotent: with no previous credential pending it answers 204 and deletes
-/// nothing. A provisioned engine retires automatically after an accepted apply,
-/// so it is refused (409).
+/// The check is one compare-and-set on both columns (current = `installed`,
+/// previous = the id read from the row). Idempotent: with nothing pending and
+/// a matching `installed` it answers 204 and deletes nothing. A provisioned
+/// engine retires automatically after an accepted apply, so it is refused (409).
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/retire-previous-ranger-credential",
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = RetirePreviousRangerCredential,
     responses(
-        (status = 204, description = "The previous Ranger plugin credential is retired (it no longer authenticates), or none was pending; the current one is untouched. A further rotation is allowed again"),
+        (status = 204, description = "`installed` is the current credential: the previous Ranger plugin credential is retired (it no longer authenticates), or none was pending. The current one is untouched, and a further rotation is allowed again"),
+        (status = 400, description = "The body is missing or malformed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine is provisioned (egret retires its previous credential itself once Kubernetes accepts an apply), or its credentials changed concurrently (re-read and retry); nothing was retired", body = ErrorBody),
+        (status = 409, description = "Nothing was retired: the engine is provisioned (egret retires its previous credential itself once Kubernetes accepts an apply), or `installed` is not the engine's current credential (a confirmation sent before a later rotation, or a concurrent change): install the current credential and confirm it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6574,6 +6597,7 @@ async fn retire_previous_ranger_credential(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
+    Json(b): Json<RetirePreviousRangerCredential>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
     let engine = st
@@ -6589,7 +6613,7 @@ async fn retire_previous_ranger_credential(
         )));
     }
     crate::ranger_credential::RangerCredentialStore::from_state(&st)
-        .retire_previous_confirmed(&engine)
+        .retire_previous_confirmed(&engine, b.installed)
         .await?;
     tracing::info!(engine = %engine.name,
         "external engine's previous ranger credential retired on the operator's confirmation");
@@ -7500,6 +7524,7 @@ async fn bridge_exec(
     ),
     components(schemas(
         ModelledRangerPluginDto,
+        RetirePreviousRangerCredential,
         CreateEngineBody,
         NewEngineCatalog,
         EngineSpecDto,

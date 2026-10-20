@@ -456,3 +456,121 @@ async fn retiring_after_an_apply_of_a_superseded_credential_keeps_the_previous()
     assert_eq!(reload(&f, e.id).await.ranger_secret_prev_id, None);
     assert!(!ranger_secret_rows(&f, e.id).await.contains(&c1_id));
 }
+
+// ---- external engines (Task 7): rotate without an apply, retire on the
+// operator's statement of what is installed ----
+
+/// A lost compare-and-set on an external rotation is a 409, never the
+/// winner's credential handed out as if it were new.
+#[tokio::test]
+async fn an_external_rotation_with_a_stale_read_is_a_conflict() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    f.creds.ensure(&e).await.expect("ensure");
+    let stale = reload(&f, e.id).await;
+    let (id2, p2) = f.creds.rotate_external(&stale).await.expect("rotate");
+    let after_first = reload(&f, e.id).await;
+    assert_eq!(after_first.ranger_secret_id, Some(id2));
+    let rows = ranger_secret_rows(&f, e.id).await;
+
+    // `stale` names no previous, so it passes the pending check and loses
+    // the compare-and-set.
+    match f.creds.rotate_external(&stale).await {
+        Err(egret_engine_mgmt::EngineHttpError::Conflict(msg)) => {
+            assert!(msg.contains("concurrent"), "{msg}");
+            assert!(!msg.contains(&p2.password));
+        }
+        other => panic!("expected a 409 Conflict, got {other:?}"),
+    }
+    let after = reload(&f, e.id).await;
+    assert_eq!(after.ranger_secret_id, after_first.ranger_secret_id);
+    assert_eq!(
+        after.ranger_secret_prev_id,
+        after_first.ranger_secret_prev_id
+    );
+    assert_eq!(
+        ranger_secret_rows(&f, e.id).await,
+        rows,
+        "nothing minted is left"
+    );
+}
+
+#[tokio::test]
+async fn an_external_rotation_while_pending_names_the_retire_route() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    f.creds.ensure(&e).await.expect("ensure");
+    f.creds
+        .rotate_external(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    match f.creds.rotate_external(&reload(&f, e.id).await).await {
+        Err(egret_engine_mgmt::EngineHttpError::Conflict(msg)) => {
+            assert!(msg.contains("retire-previous-ranger-credential"), "{msg}");
+            assert!(!msg.contains("apply"), "{msg}");
+        }
+        other => panic!("expected a 409 Conflict, got {other:?}"),
+    }
+    // The provisioned wording stays about the apply.
+    match f.creds.rotate(&reload(&f, e.id).await).await {
+        Err(egret_engine_mgmt::EngineHttpError::Conflict(msg)) => {
+            assert!(msg.contains("apply"), "{msg}")
+        }
+        other => panic!("expected a 409 Conflict, got {other:?}"),
+    }
+}
+
+/// The retire is a compare-and-set on BOTH columns: the current one must be
+/// the credential the operator says is installed.
+#[tokio::test]
+async fn a_confirmed_retire_naming_a_credential_that_is_not_current_deletes_nothing() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let p1 = f.creds.ensure(&e).await.expect("ensure");
+    let c1 = reload(&f, e.id).await.ranger_secret_id.unwrap();
+    let (c2, p2) = f
+        .creds
+        .rotate_external(&reload(&f, e.id).await)
+        .await
+        .expect("rotate");
+    let row = reload(&f, e.id).await;
+    let rows = ranger_secret_rows(&f, e.id).await;
+
+    for wrong in [c1, Uuid::new_v4()] {
+        match f.creds.retire_previous_confirmed(&row, wrong).await {
+            Err(egret_engine_mgmt::EngineHttpError::Conflict(_)) => {}
+            other => panic!("expected a 409 Conflict, got {other:?}"),
+        }
+    }
+    assert_eq!(ranger_secret_rows(&f, e.id).await, rows);
+    assert!(verifies(&f, e.id, &p1.password).await);
+
+    // The row read before a concurrent change: the column compare-and-set
+    // still refuses (simulated: the current one moved under the read).
+    let mut stale = row.clone();
+    stale.ranger_secret_id = Some(Uuid::new_v4());
+    match f
+        .creds
+        .retire_previous_confirmed(&stale, stale.ranger_secret_id.unwrap())
+        .await
+    {
+        Err(egret_engine_mgmt::EngineHttpError::Conflict(_)) => {}
+        other => panic!("expected a 409 Conflict, got {other:?}"),
+    }
+    assert!(verifies(&f, e.id, &p1.password).await);
+
+    f.creds
+        .retire_previous_confirmed(&row, c2)
+        .await
+        .expect("matching retire");
+    assert!(!verifies(&f, e.id, &p1.password).await);
+    assert!(verifies(&f, e.id, &p2.password).await);
+    assert_eq!(ranger_secret_rows(&f, e.id).await, vec![c2]);
+    // Idempotent with the matching statement; a mismatch is still refused.
+    let row = reload(&f, e.id).await;
+    f.creds
+        .retire_previous_confirmed(&row, c2)
+        .await
+        .expect("idempotent");
+    assert!(f.creds.retire_previous_confirmed(&row, c1).await.is_err());
+}

@@ -14078,6 +14078,12 @@ async fn external_credential_returned_at_registration_authenticates_against_the_
     assert!(current.is_some() && prev.is_none());
 }
 
+/// The body of `retire-previous-ranger-credential`: the credential the
+/// operator says is installed.
+fn installed(credential_id: &serde_json::Value) -> Option<serde_json::Value> {
+    Some(serde_json::json!({ "installed": credential_id }))
+}
+
 #[tokio::test]
 async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_until_retired() {
     let port = FakeEnginePort::default();
@@ -14090,6 +14096,11 @@ async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_
     let (id, j) = external_credential_register(&f, &token, "trino", None).await;
     let (_, old) = credential_of(&j);
     let (old_id, _) = ranger_slots(&f, id).await;
+    assert_eq!(
+        j["rangerCredential"]["credentialId"],
+        old_id.unwrap().to_string(),
+        "{j}"
+    );
 
     let rotate = format!("/engines/{id}/rotate-ranger-credential");
     let retire = format!("/engines/{id}/retire-previous-ranger-credential");
@@ -14098,6 +14109,12 @@ async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_
     assert_eq!(r["username"], format!("engine-{id}"), "{r}");
     let new = r["password"].as_str().expect("password").to_string();
     assert_ne!(new, old);
+    let new_token = r["credentialId"].clone();
+    assert_eq!(
+        new_token,
+        ranger_slots(&f, id).await.0.unwrap().to_string(),
+        "{r}"
+    );
     assert!(ranger_verifies(&f, id, &new).await, "the new one verifies");
     assert!(
         ranger_verifies(&f, id, &old).await,
@@ -14110,16 +14127,37 @@ async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_
     );
 
     // A second rotation would push a credential the cluster may hold out of
-    // the window: refused, and nothing changes.
+    // the window: refused, naming the way out, and nothing changes.
     let slots = ranger_slots(&f, id).await;
     let (status, e) = call(&f, "POST", &rotate, &token, None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{e}");
-    assert!(e["error"].as_str().unwrap().contains("pending"), "{e}");
+    let msg = e["error"].as_str().unwrap();
+    assert!(msg.contains("pending"), "{e}");
+    assert!(msg.contains("retire-previous-ranger-credential"), "{e}");
+    assert!(!msg.contains("apply"), "external wording: {e}");
     assert!(!e.to_string().contains(&new), "{e}");
     assert_eq!(ranger_slots(&f, id).await, slots);
 
+    // Confirming the OLD credential as installed is not a confirmation of
+    // the new one: refused, nothing deleted.
+    let (status, e) = call(
+        &f,
+        "POST",
+        &retire,
+        &token,
+        installed(&serde_json::json!(old_id.unwrap())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{e}");
+    assert!(ranger_verifies(&f, id, &old).await);
+    assert_eq!(ranger_slots(&f, id).await, slots);
+    // No statement at all: refused before anything is read.
+    let (status, e) = call(&f, "POST", &retire, &token, None).await;
+    assert!(status.is_client_error(), "{status}: {e}");
+    assert_eq!(ranger_slots(&f, id).await, slots);
+
     // The operator confirms the new one is installed: the old one is retired.
-    let (status, b) = call(&f, "POST", &retire, &token, None).await;
+    let (status, b) = call(&f, "POST", &retire, &token, installed(&new_token)).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
     assert!(
         !ranger_verifies(&f, id, &old).await,
@@ -14131,8 +14169,8 @@ async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_
         "its secret is gone"
     );
     assert_eq!(ranger_slots(&f, id).await.1, None);
-    // Idempotent: nothing pending is a 204 that deletes nothing.
-    let (status, b) = call(&f, "POST", &retire, &token, None).await;
+    // Idempotent: nothing pending, same statement, is a 204 that deletes nothing.
+    let (status, b) = call(&f, "POST", &retire, &token, installed(&new_token)).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
     assert!(ranger_verifies(&f, id, &new).await);
 
@@ -14142,6 +14180,158 @@ async fn external_credential_rotation_returns_a_new_one_and_keeps_the_old_valid_
     assert_cluster_untouched(&port, &kube);
 }
 
+/// The stale-confirmation sequence: rotate (c2, prev c1), retire with c2,
+/// rotate (c3, prev c2), then a delayed or duplicated retire still naming c2.
+/// The cluster may still hold c2 (the operator has not installed c3 yet), so
+/// that retire must delete nothing.
+#[tokio::test]
+async fn external_credential_a_stale_retire_after_a_later_rotation_deletes_nothing() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_stale_admin", true).await;
+    let (id, _) = external_credential_register(&f, &token, "starrocks", None).await;
+    let rotate = format!("/engines/{id}/rotate-ranger-credential");
+    let retire = format!("/engines/{id}/retire-previous-ranger-credential");
+
+    let (status, r2) = call(&f, "POST", &rotate, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{r2}");
+    let (c2, t2) = (
+        r2["password"].as_str().unwrap().to_string(),
+        r2["credentialId"].clone(),
+    );
+    let (status, b) = call(&f, "POST", &retire, &token, installed(&t2)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+    let (status, r3) = call(&f, "POST", &rotate, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{r3}");
+    let (c3, t3) = (
+        r3["password"].as_str().unwrap().to_string(),
+        r3["credentialId"].clone(),
+    );
+    let slots = ranger_slots(&f, id).await;
+    assert_eq!(
+        slots.1.map(|u| u.to_string()),
+        t2.as_str().map(String::from)
+    );
+
+    // The stale retire: 409, and c2 — which the cluster may still hold — verifies.
+    let (status, e) = call(&f, "POST", &retire, &token, installed(&t2)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{e}");
+    assert!(ranger_verifies(&f, id, &c2).await, "c2 is not deleted");
+    assert!(secret_exists(&f, slots.1.unwrap()).await);
+    assert_eq!(ranger_slots(&f, id).await, slots);
+
+    // The matching statement retires c2.
+    let (status, b) = call(&f, "POST", &retire, &token, installed(&t3)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+    assert!(!ranger_verifies(&f, id, &c2).await);
+    assert!(ranger_verifies(&f, id, &c3).await);
+}
+
+/// The two responses that carry a password must not be stored by a browser
+/// or an intermediary.
+#[tokio::test]
+async fn external_credential_responses_carrying_a_password_are_no_store() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_nostore_admin", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines/external",
+            &token,
+            Some(register_body(
+                &external_name("ext-nostore"),
+                "trino",
+                "2.8.0",
+                None,
+                &[],
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
+    let (_, j) = into_json(resp).await;
+    let id = j["id"].as_str().unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{id}/rotate-ranger-credential"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
+}
+
+/// Every `engine-ranger-{uuid}-…` secret whose engine row does not exist.
+async fn orphan_ranger_secret_names(f: &Fixture) -> std::collections::BTreeSet<String> {
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT s.name, EXISTS (SELECT 1 FROM engine_mgmt.engines e \
+                                 WHERE 'engine-ranger-' || e.id::text || '-' = left(s.name, 51)) \
+           FROM workspace_secrets s \
+          WHERE s.workspace_id IS NULL AND left(s.name, 14) = 'engine-ranger-'",
+    )
+    .fetch_all(&f.db.pool)
+    .await
+    .unwrap();
+    rows.into_iter()
+        .filter(|(name, has_row)| !has_row && name.len() > 51 && name.as_bytes()[50] == b'-')
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// A registration that fails after the credential was minted (here: the
+/// name is taken) leaves no credential behind.
+#[tokio::test]
+async fn external_credential_a_failed_registration_leaves_no_credential() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cred_dup_admin", true).await;
+    let name = external_name("ext-dup");
+    let body = register_body(&name, "trino", "2.8.0", None, &[]);
+    let (status, j) = call(&f, "POST", "/engines/external", &token, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let before = orphan_ranger_secret_names(&f).await;
+    let (status, e) = call(&f, "POST", "/engines/external", &token, Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{e}");
+    // The shared database may hold another test's in-flight registration (its
+    // secret minted, its row not yet committed): give such a one time to
+    // commit, and judge only what is still an orphan then.
+    let mut new: Vec<String> = Vec::new();
+    for _ in 0..10 {
+        let now = orphan_ranger_secret_names(&f).await;
+        new = now.difference(&before).cloned().collect();
+        if new.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(new.is_empty(), "the failed registration left {new:?}");
+}
+
 #[tokio::test]
 async fn external_credential_rotation_mints_one_for_an_engine_registered_without() {
     let Some(f) = external_fixture(None, None).await else {
@@ -14149,8 +14339,9 @@ async fn external_credential_rotation_mints_one_for_an_engine_registered_without
         return;
     };
     let token = session_for(&f, "ext_cred_legacy_admin", true).await;
+    let profile = starrocks_profile(&f).await;
     // An engine registered before credentials existed: no slot at all.
-    let (id, _) = external_credential_register(&f, &token, "starrocks", None).await;
+    let (id, _) = external_credential_register(&f, &token, "starrocks", Some(profile)).await;
     let (cur, _) = ranger_slots(&f, id).await;
     sqlx::query("UPDATE engine_mgmt.engines SET ranger_secret_id = NULL WHERE id = $1")
         .bind(id)
@@ -14158,6 +14349,15 @@ async fn external_credential_rotation_mints_one_for_an_engine_registered_without
         .await
         .unwrap();
     secret_store(&f).delete(None, cur.unwrap()).await.unwrap();
+    let cfg_path = format!("/engines/{id}/ranger-plugin-config");
+    let (status, cfg) = call(&f, "GET", &cfg_path, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{cfg}");
+    assert!(
+        cfg["adminMustSupply"]
+            .to_string()
+            .contains("rotate-ranger-credential"),
+        "a legacy engine is told how to obtain a credential: {cfg}"
+    );
 
     let (status, r) = call(
         &f,
@@ -14171,6 +14371,13 @@ async fn external_credential_rotation_mints_one_for_an_engine_registered_without
     let password = r["password"].as_str().unwrap();
     assert!(ranger_verifies(&f, id, password).await);
     assert_eq!(ranger_slots(&f, id).await.1, None, "nothing to demote");
+    let (_, cfg) = call(&f, "GET", &cfg_path, &token, None).await;
+    assert!(
+        !cfg["adminMustSupply"]
+            .to_string()
+            .contains("rotate-ranger-credential"),
+        "{cfg}"
+    );
 }
 
 #[tokio::test]
@@ -14187,6 +14394,7 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
     let provisioned = seed_jwt_engine(&f).await;
     let (id, j) = external_credential_register(&f, &admin, "trino", None).await;
     let (_, old) = credential_of(&j);
+    let any = installed(&serde_json::json!(Uuid::new_v4()));
 
     let path = |id: Uuid, what: &str| format!("/engines/{id}/{what}");
     // Provisioned engines retire automatically after an accepted apply.
@@ -14195,7 +14403,7 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
         "POST",
         &path(provisioned, "retire-previous-ranger-credential"),
         &admin,
-        None,
+        any.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{e}");
@@ -14204,17 +14412,28 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
         "POST",
         &path(Uuid::new_v4(), "retire-previous-ranger-credential"),
         &admin,
-        None,
+        any.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{e}");
-    for what in [
-        "rotate-ranger-credential",
-        "retire-previous-ranger-credential",
-    ] {
-        let (status, e) = call(&f, "POST", &path(id, what), &reader, None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{what}: {e}");
-    }
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(id, "rotate-ranger-credential"),
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{e}");
+    let (status, e) = call(
+        &f,
+        "POST",
+        &path(id, "retire-previous-ranger-credential"),
+        &reader,
+        any.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{e}");
     assert_eq!(
         ranger_slots(&f, id).await.1,
         None,
@@ -14234,7 +14453,7 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
         "POST",
         &path(id, "retire-previous-ranger-credential"),
         &reader,
-        None,
+        installed(&r["credentialId"]),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{e}");
@@ -14247,7 +14466,7 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
         "POST",
         &path(id, "retire-previous-ranger-credential"),
         &updater,
-        None,
+        installed(&r["credentialId"]),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{e}");
@@ -14409,6 +14628,7 @@ fn external_credential_debug_of_the_dtos_redacts_the_password() {
     let dto = egret_engine_mgmt::external::RangerCredentialDto {
         username: "engine-1".into(),
         password: "s3cr3t-value".into(),
+        credential_id: Uuid::nil(),
     };
     let shown = format!("{dto:?}");
     assert!(!shown.contains("s3cr3t-value"), "{shown}");
