@@ -7,7 +7,7 @@ map $http_upgrade $connection_upgrade {
 
 server {
     listen ${DEMO_PORT};
-    server_name _;
+    server_name ${DEMO_HOST} _;
     client_max_body_size 64m;
 
     proxy_http_version 1.1;
@@ -32,5 +32,31 @@ server {
         resolver 127.0.0.11 valid=5s;
         set $frontend_upstream http://frontend:80;
         proxy_pass $frontend_upstream;
+    }
+}
+
+# The Data Apps host: a sibling hostname of the app, served by egret's separate apps listener.
+server {
+    listen ${DEMO_PORT};
+    server_name ${DEMO_APPS_HOST};
+    client_max_body_size 64m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host:$server_port;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_set_header X-Forwarded-Proto http;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+
+    # Resolved per request: egret is not up yet when the edge starts.
+    location / {
+        resolver 127.0.0.11 valid=5s;
+        set $apps_upstream http://egret:8081;
+        proxy_pass $apps_upstream;
     }
 }

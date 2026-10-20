@@ -46,6 +46,18 @@ demo-seed:
 demo-logs service="":
     {{demo_compose}} logs -f {{service}}
 
+# Browser check of the Data Apps lifecycle (needs Node and Playwright; see deploy/demo/verify-apps.mjs)
+demo-verify-apps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # demo.env supplies the defaults; values the caller exported win (as in deploy/demo/wait.sh).
+    CALLER_PORT="${DEMO_PORT:-}"; CALLER_URL="${DEMO_URL:-}"; CALLER_APPS_URL="${DEMO_APPS_URL:-}"
+    set -a; . deploy/demo/demo.env; set +a
+    [ -z "$CALLER_PORT" ] || DEMO_PORT="$CALLER_PORT"
+    [ -z "$CALLER_URL" ] || DEMO_URL="$CALLER_URL"
+    [ -z "$CALLER_APPS_URL" ] || DEMO_APPS_URL="$CALLER_APPS_URL"
+    exec node deploy/demo/verify-apps.mjs
+
 # Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
 #
 # `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
