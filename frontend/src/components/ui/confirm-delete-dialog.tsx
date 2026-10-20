@@ -28,19 +28,36 @@ interface ConfirmDeleteDialogProps {
    * about.
    */
   confirmDisabled?: boolean;
+  /**
+   * Match `confirmText` exactly, case included. Defaults to `false` (every
+   * existing call site types a word whose case does not matter). A
+   * classification's key and name can differ only in case (`pii` / `PII`),
+   * and typing the name must not confirm the delete of the key.
+   */
+  caseSensitive?: boolean;
+  /**
+   * Passed to the dialog's content: a dialog opened from state rather than a
+   * Radix trigger has no element to return focus to, so its caller can focus
+   * the opener here (as `EnginePermissionsPanel` does). Optional; omitted,
+   * nothing changes.
+   */
+  onCloseAutoFocus?: (event: Event) => void;
   onConfirm: () => void;
   children?: React.ReactNode;
 }
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
   open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete',
-  confirmDisabled = false, onConfirm, children,
+  confirmDisabled = false, caseSensitive = false, onCloseAutoFocus, onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
+  const matches = caseSensitive
+    ? inputValue === confirmText
+    : inputValue.toLowerCase() === confirmText.toLowerCase();
 
   const handleConfirm = () => {
     if (confirmDisabled) return;
-    if (inputValue.toLowerCase() === confirmText.toLowerCase()) {
+    if (matches) {
       onConfirm();
       setInputValue('');
       onOpenChange(false);
@@ -49,7 +66,7 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
 
   return (
     <AlertDialog open={open} onOpenChange={(o) => { if (!o) setInputValue(''); onOpenChange(o); }}>
-      <AlertDialogContent>
+      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
@@ -70,7 +87,7 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
           <Button
             variant="destructive"
             onClick={handleConfirm}
-            disabled={confirmDisabled || inputValue.toLowerCase() !== confirmText.toLowerCase()}
+            disabled={confirmDisabled || !matches}
           >
             {confirmLabel}
           </Button>

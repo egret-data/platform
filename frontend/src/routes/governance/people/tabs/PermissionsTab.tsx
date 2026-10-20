@@ -22,8 +22,9 @@ import { AssignmentBadge } from "@/routes/governance/GrantDialog";
 import { grantDeleteDescription, grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { GrantSentenceText } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
-import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError, STACKED_TABLE } from "@/routes/governance/tabParts";
-import { principalTitle, workspaceNamesOf, type Principal } from "@/routes/governance/people/principalData";
+import { ACTIONS_CELL, HandWrittenPointer, Section, TabError, STACKED_TABLE } from "@/routes/governance/tabParts";
+import { principalSubject, principalTitle, workspaceNamesOf, type Principal } from "@/routes/governance/people/principalData";
+import { PrincipalHandWrittenSection } from "@/routes/governance/handwritten/PrincipalHandWrittenSection";
 import {
   REACH_GROUPS,
   reachesAtAll,
@@ -123,6 +124,8 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
   return (
     <div className="space-y-6">
       <DataGrants principal={principal} onEdit={onEdit} />
+      {/* #4b (spec §6): the hand-written access policies naming the principal. */}
+      {isPublic ? null : <PrincipalHandWrittenSection subject={principalSubject(principal)} show="access" />}
       {isPublic ? null : <EngineGrantsSection principal={principal} />}
     </div>
   );
@@ -171,14 +174,13 @@ function DataGrants({ principal, onEdit }: { principal: Principal; onEdit: (gran
   }
   // Relative: this page, on its Check access tab.
   // `public` has no Check access tab (spec §2), so its note names none.
-  const note = (
-    <div className="space-y-1">
-      <EgretGrantsOnlyNote
-        explainLabel={isPublic ? null : "Check access"}
-        explainTo={isPublic ? undefined : "?tab=check"}
-      />
-      {noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null}
-    </div>
+  const note = noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null;
+  const pointer = (
+    <HandWrittenPointer
+      lead="To see the engines' answer, use"
+      explainLabel={isPublic ? null : "Check access"}
+      explainTo={isPublic ? undefined : "?tab=check"}
+    />
   );
 
   if (reaching.length === 0) {
@@ -186,6 +188,7 @@ function DataGrants({ principal, onEdit }: { principal: Principal; onEdit: (gran
       <div className="space-y-2">
         {note}
         <EmptyState icon={KeyRound} title={`No egret grant reaches ${name}`} />
+        {pointer}
       </div>
     );
   }
@@ -263,6 +266,7 @@ function DataGrants({ principal, onEdit }: { principal: Principal; onEdit: (gran
           </Section>
         ))
       )}
+      {pointer}
       <ConfirmDeleteDialog
         open={deleting !== null}
         onOpenChange={(open) => {

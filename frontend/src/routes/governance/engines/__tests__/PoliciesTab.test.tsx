@@ -228,7 +228,7 @@ describe("controls follow the row's source", () => {
     );
     expect(within(rowOf(`perm-clearance-${TAG}`)).getByRole("link", { name: /Open source/ })).toHaveAttribute(
       "href",
-      `/governance/classifications/${TAG}`,
+      `/governance/classifications/${TAG}?tab=clearance`,
     );
     expect(within(rowOf(`perm-engine-${EG}`)).getByRole("link", { name: /Open source/ })).toHaveAttribute(
       "href",

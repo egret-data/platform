@@ -32,6 +32,13 @@ function serve(principal: Record<string, Answer>, rules: Answer | Answer[], cata
         return reply(list[Math.min(asked.rules++, list.length - 1)]);
       }
       if (url.pathname === "/api/control-plane/governance/catalogs") return reply(catalogs);
+      // #4b route B: pending unless a test answers it (`HW`), so egret's own sections are what these tests read.
+      const hw = /^\/api\/control-plane\/governance\/principals\/(user|group|role)\/([^/]+)\/handwritten$/.exec(url.pathname);
+      if (hw) {
+        hwAsked.push(`${hw[1]}/${decodeURIComponent(hw[2])}`);
+        const a = HW[`${hw[1]}/${decodeURIComponent(hw[2])}`];
+        return a ? Promise.resolve(json(a.status, a.body)) : new Promise<Response>(() => {});
+      }
       return Promise.resolve(json(404, { error: "not found" }));
     }),
   );
@@ -59,6 +66,16 @@ function open(url: string, as: Me = READER) {
 }
 
 afterEach(() => vi.unstubAllGlobals());
+/** Route B's answers by `kind/id` (#4b); an unanswered one stays pending. Reset after each test. */
+let HW: Record<string, { status: number; body: unknown }> = {};
+const hwAsked: string[] = [];
+afterEach(() => {
+  HW = {};
+  hwAsked.length = 0;
+});
+/** egret's own sections: the hand-written one (#4b) is tested on its own. */
+const notHandWritten = (t: string | null) => !t?.startsWith("Hand-written") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
+
 
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
 const WS2 = "6f1c2a90-0000-4000-8000-00000000000b";
@@ -134,7 +151,11 @@ const RULES: RuleView[] = [
 ];
 
 const tab = () => screen.getByRole("tabpanel");
-const sections = () => within(tab()).getAllByRole("region").map((r) => within(r).getByRole("heading").textContent);
+const sections = () =>
+  within(tab())
+    .getAllByRole("region")
+    .map((r) => within(r).getAllByRole("heading")[0].textContent)
+    .filter(notHandWritten);
 const rowsOf = (name: string) =>
   within(within(tab()).getByRole("table", { name }))
     .getAllByRole("row")
@@ -216,7 +237,7 @@ describe("a principal's Masks & filters tab", () => {
     open("/governance/people/users/u-ana?tab=masks");
 
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByText(/^Lists egret rules\./)).toBeInTheDocument();
+    expect(await within(panel).findByText(/^egret rules are above; hand-written policies below\./)).toBeInTheDocument();
     expect(within(panel).getByRole("link", { name: "Check access" })).toHaveAttribute(
       "href",
       "/governance/people/users/u-ana?tab=check",
@@ -293,5 +314,39 @@ describe("a principal's Masks & filters tab", () => {
     expect(
       within(panel).getByText("7 other rules apply to everyone they do not exempt; each object's Masks & filters tab lists them."),
     ).toBeInTheDocument();
+  });
+});
+
+/** #4b spec §6: the hand-written masking and row-filter policies naming the principal (route B). */
+describe("hand-written policies on a People page's Masks & filters tab", () => {
+  it("lists the masking and row-filter rows, not the access ones", async () => {
+    const row = (id: number, name: string, policyType: string, bucket: string) => ({
+      id,
+      name,
+      service: "lake-tr",
+      inTagService: false,
+      policyType,
+      resourceSummary: "catalog=ice",
+      enabled: true,
+      denyAllElse: false,
+      unmodelled: [],
+      naming: [{ bucket, how: "direct", via: null, onEngines: true }],
+      engines: [],
+    });
+    HW = {
+      "user/u-ana": ok({
+        principal: { kind: "user", id: "u-ana", label: "Ana", username: "ana" },
+        state: "listed",
+        policies: [row(1, "hw-access", "access", "allow"), row(2, "hw-mask", "masking", "mask"), row(3, "hw-filter", "rowfilter", "row_filter")],
+        everyone: { count: 0, policies: [] },
+        unreadable: [],
+      }) as { status: number; body: unknown },
+    };
+    serve({ "users/u-ana": ok(ANA) }, ok([]));
+    open("/governance/people/users/u-ana?tab=masks");
+    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies (2)" });
+    expect(within(section).getByText("hw-mask")).toBeInTheDocument();
+    expect(within(section).getByText("hw-filter")).toBeInTheDocument();
+    expect(within(section).queryByText("hw-access")).not.toBeInTheDocument();
   });
 });

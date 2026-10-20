@@ -26,13 +26,18 @@ import type {
   ChangesPage,
   ControlPlaneGovernanceBrowseParams,
   ControlPlaneGovernanceChangesParams,
+  ControlPlaneGovernanceObjectHandwrittenParams,
   ControlPlaneGovernanceObjectLineageParams,
   ControlPlaneGovernanceObjectTagsParams,
   EnginePluginResponse,
   ErrorBody,
   GovernanceCatalog,
+  ObjectHandWritten,
   ObjectLineage,
-  ObjectTags
+  ObjectTags,
+  PrincipalHandWritten,
+  TagHandWritten,
+  TagUsage
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -56,6 +61,276 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type controlPlaneGovernanceTagHandwrittenResponse200 = {
+  data: TagHandWritten
+  status: 200
+}
+
+export type controlPlaneGovernanceTagHandwrittenResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceTagHandwrittenResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceTagHandwrittenResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernanceTagHandwrittenResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceTagHandwrittenResponseSuccess = (controlPlaneGovernanceTagHandwrittenResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceTagHandwrittenResponseError = (controlPlaneGovernanceTagHandwrittenResponse401 | controlPlaneGovernanceTagHandwrittenResponse403 | controlPlaneGovernanceTagHandwrittenResponse404 | controlPlaneGovernanceTagHandwrittenResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceTagHandwrittenResponse = (controlPlaneGovernanceTagHandwrittenResponseSuccess | controlPlaneGovernanceTagHandwrittenResponseError)
+
+export const getControlPlaneGovernanceTagHandwrittenUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/classifications/${encodeURIComponent(id)}/handwritten`
+}
+
+/**
+ * Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it; `sameName` lists other tags with this name, which those policies reach too. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.
+ * @summary Hand-written tag policies of a classification.
+ */
+export const controlPlaneGovernanceTagHandwritten = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceTagHandwrittenResponse> => {
+
+  return customInstance<controlPlaneGovernanceTagHandwrittenResponse>(getControlPlaneGovernanceTagHandwrittenUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceTagHandwrittenQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/classifications/${encodeURIComponent(id)}/handwritten`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceTagHandwrittenQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceTagHandwrittenQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>> = ({ signal }) => controlPlaneGovernanceTagHandwritten(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceTagHandwrittenQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>>
+export type ControlPlaneGovernanceTagHandwrittenQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceTagHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceTagHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceTagHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Hand-written tag policies of a classification.
+ */
+
+export function useControlPlaneGovernanceTagHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceTagHandwrittenQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceTagUsageResponse200 = {
+  data: TagUsage
+  status: 200
+}
+
+export type controlPlaneGovernanceTagUsageResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceTagUsageResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceTagUsageResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernanceTagUsageResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceTagUsageResponseSuccess = (controlPlaneGovernanceTagUsageResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceTagUsageResponseError = (controlPlaneGovernanceTagUsageResponse401 | controlPlaneGovernanceTagUsageResponse403 | controlPlaneGovernanceTagUsageResponse404 | controlPlaneGovernanceTagUsageResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceTagUsageResponse = (controlPlaneGovernanceTagUsageResponseSuccess | controlPlaneGovernanceTagUsageResponseError)
+
+export const getControlPlaneGovernanceTagUsageUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/classifications/${encodeURIComponent(id)}/usage`
+}
+
+/**
+ * The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Requires tag:read or policy:read.
+ * @summary Where a classification is used.
+ */
+export const controlPlaneGovernanceTagUsage = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceTagUsageResponse> => {
+
+  return customInstance<controlPlaneGovernanceTagUsageResponse>(getControlPlaneGovernanceTagUsageUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceTagUsageQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/classifications/${encodeURIComponent(id)}/usage`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceTagUsageQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceTagUsageQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>> = ({ signal }) => controlPlaneGovernanceTagUsage(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceTagUsageQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>>
+export type ControlPlaneGovernanceTagUsageQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceTagUsage<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceTagUsage<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceTagUsage<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Where a classification is used.
+ */
+
+export function useControlPlaneGovernanceTagUsage<TData = Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceTagUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceTagUsageQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type controlPlaneGovernanceAttentionResponse200 = {
   data: AttentionResponse
@@ -894,6 +1169,309 @@ export function useControlPlaneGovernanceObjectLineage<TData = Awaited<ReturnTyp
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getControlPlaneGovernanceObjectLineageQueryOptions(catalogId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceObjectHandwrittenResponse200 = {
+  data: ObjectHandWritten
+  status: 200
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceObjectHandwrittenResponseSuccess = (controlPlaneGovernanceObjectHandwrittenResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceObjectHandwrittenResponseError = (controlPlaneGovernanceObjectHandwrittenResponse400 | controlPlaneGovernanceObjectHandwrittenResponse401 | controlPlaneGovernanceObjectHandwrittenResponse403 | controlPlaneGovernanceObjectHandwrittenResponse404 | controlPlaneGovernanceObjectHandwrittenResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceObjectHandwrittenResponse = (controlPlaneGovernanceObjectHandwrittenResponseSuccess | controlPlaneGovernanceObjectHandwrittenResponseError)
+
+export const getControlPlaneGovernanceObjectHandwrittenUrl = (catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/governance/objects/${encodeURIComponent(catalogId)}/handwritten?${stringifiedParams}` : `/api/control-plane/governance/objects/${encodeURIComponent(catalogId)}/handwritten`
+}
+
+/**
+ * Every hand-written (operator) Ranger policy of the profiles whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.
+ * @summary Hand-written policies that reach a Data object.
+ */
+export const controlPlaneGovernanceObjectHandwritten = async (catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceObjectHandwrittenResponse> => {
+
+  return customInstance<controlPlaneGovernanceObjectHandwrittenResponse>(getControlPlaneGovernanceObjectHandwrittenUrl(catalogId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceObjectHandwrittenQueryKey = (catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams,) => {
+    return [
+    `/api/control-plane/governance/objects/${encodeURIComponent(catalogId)}/handwritten`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceObjectHandwrittenQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError = ErrorBody>(catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceObjectHandwrittenQueryKey(catalogId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>> = ({ signal }) => controlPlaneGovernanceObjectHandwritten(catalogId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: catalogId !== null && catalogId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceObjectHandwrittenQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>>
+export type ControlPlaneGovernanceObjectHandwrittenQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceObjectHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError = ErrorBody>(
+ catalogId: string,
+    params: undefined |  ControlPlaneGovernanceObjectHandwrittenParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceObjectHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError = ErrorBody>(
+ catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceObjectHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError = ErrorBody>(
+ catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Hand-written policies that reach a Data object.
+ */
+
+export function useControlPlaneGovernanceObjectHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError = ErrorBody>(
+ catalogId: string,
+    params?: ControlPlaneGovernanceObjectHandwrittenParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceObjectHandwrittenQueryOptions(catalogId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse200 = {
+  data: PrincipalHandWritten
+  status: 200
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernancePrincipalHandwrittenResponseSuccess = (controlPlaneGovernancePrincipalHandwrittenResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernancePrincipalHandwrittenResponseError = (controlPlaneGovernancePrincipalHandwrittenResponse400 | controlPlaneGovernancePrincipalHandwrittenResponse401 | controlPlaneGovernancePrincipalHandwrittenResponse403 | controlPlaneGovernancePrincipalHandwrittenResponse404 | controlPlaneGovernancePrincipalHandwrittenResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernancePrincipalHandwrittenResponse = (controlPlaneGovernancePrincipalHandwrittenResponseSuccess | controlPlaneGovernancePrincipalHandwrittenResponseError)
+
+export const getControlPlaneGovernancePrincipalHandwrittenUrl = (kind: string,
+    id: string,) => {
+
+
+
+
+  return `/api/control-plane/governance/principals/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/handwritten`
+}
+
+/**
+ * Every hand-written (operator) Ranger policy, in every profile and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.
+ * @summary Hand-written policies that name a principal.
+ */
+export const controlPlaneGovernancePrincipalHandwritten = async (kind: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernancePrincipalHandwrittenResponse> => {
+
+  return customInstance<controlPlaneGovernancePrincipalHandwrittenResponse>(getControlPlaneGovernancePrincipalHandwrittenUrl(kind,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernancePrincipalHandwrittenQueryKey = (kind: string,
+    id: string,) => {
+    return [
+    `/api/control-plane/governance/principals/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/handwritten`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernancePrincipalHandwrittenQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError = ErrorBody>(kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernancePrincipalHandwrittenQueryKey(kind,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>> = ({ signal }) => controlPlaneGovernancePrincipalHandwritten(kind,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: kind !== null && kind !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernancePrincipalHandwrittenQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>>
+export type ControlPlaneGovernancePrincipalHandwrittenQueryError = ErrorBody
+
+
+export function useControlPlaneGovernancePrincipalHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError = ErrorBody>(
+ kind: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernancePrincipalHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError = ErrorBody>(
+ kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernancePrincipalHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError = ErrorBody>(
+ kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Hand-written policies that name a principal.
+ */
+
+export function useControlPlaneGovernancePrincipalHandwritten<TData = Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError = ErrorBody>(
+ kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernancePrincipalHandwritten>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernancePrincipalHandwrittenQueryOptions(kind,id,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

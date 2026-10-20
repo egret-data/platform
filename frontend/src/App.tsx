@@ -85,6 +85,15 @@ const RulePage = lazy(() => import("@/routes/governance/people/RulePage"));
  */
 const EnginesRoutes = lazy(() => import("@/routes/governance/engines/EnginesRoutes"));
 
+/**
+ * The Governance Classification area (DG redesign #4b): the tag catalogue and
+ * one page per classification, code-split like Engine & policy (FE-ROUTE-2).
+ * Nothing under `routes/governance/classifications/` may be imported statically
+ * from the entry graph, except `tagUrl.ts`, which pages outside the area link
+ * through; `npm run test:bundle:governance-classification` checks it.
+ */
+const ClassificationsRoutes = lazy(() => import("@/routes/governance/classifications/ClassificationsRoutes"));
+
 /** What the People area shows while its chunk loads: a list skeleton in the page frame. */
 function PeopleFallback() {
   return (
@@ -108,6 +117,15 @@ function EnginesFallback() {
   return (
     <div className="p-4" data-testid="governance-engines-loading">
       <ListSkeleton cols={4} />
+    </div>
+  );
+}
+
+/** What the Classification area shows while its chunk loads: a list skeleton in the page frame. */
+function ClassificationsFallback() {
+  return (
+    <div className="p-4" data-testid="governance-classifications-loading">
+      <ListSkeleton cols={5} />
     </div>
   );
 }
@@ -196,8 +214,6 @@ import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
-import Classifications from "@/routes/governance/Classifications";
-import TagDetail from "@/routes/governance/TagDetail";
 import { LegacyGovernanceRedirect, RetiredPermPageRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 import PolicyRedirect from "@/routes/governance/engines/PolicyRedirect";
 
@@ -649,8 +665,18 @@ function GovernanceRoutes() {
           <Route path="policies/:service/migrate" element={<RequirePermission perm="policy:read"><PolicyRedirect to="migrate" /></RequirePermission>} />
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyRedirect to="editor" /></RequirePermission>} />
           <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyRedirect to="editor" /></RequirePermission>} />
-          <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
-          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
+          {/* DG redesign #4b (spec §2): Classification, gated `tag:read`; the
+              tabs that read policies check `policy:read` themselves. */}
+          <Route
+            path="classifications/*"
+            element={
+              <RequirePermission perm="tag:read">
+                <LazyRouteArea area="Classification" fallback={<ClassificationsFallback />}>
+                  <ClassificationsRoutes />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
           {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}
           <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="*" element={<Navigate to="/governance" replace />} />

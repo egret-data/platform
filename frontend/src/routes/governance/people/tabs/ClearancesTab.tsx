@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import type { Principal } from "@/routes/governance/people/principalData";
+import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 
 /** The verbatim sentence for a gate that names only groups (spec §2): the compiler emits nothing for it. */
 export const GROUPS_ONLY_GATE = "Engines do not enforce this gate (it names only groups)";
@@ -114,7 +115,7 @@ export function ClearancesTab({ principal }: { principal: Principal }) {
             <TableCell className="whitespace-normal">
               {canReadTags ? (
                 <Link
-                  to={`/governance/classifications/${encodeURIComponent(f.tagId)}`}
+                  to={tagUrl(f.tagId, "clearance")}
                   className="text-sm font-medium text-primary hover:underline"
                 >
                   {f.tagName}

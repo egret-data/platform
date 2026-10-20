@@ -152,7 +152,7 @@ describe("a principal's Clearances tab", () => {
     serve({ "users/u-ana": ok(ANA) });
     const { unmount } = open("/governance/people/users/u-ana?tab=clearances", TAG_READER);
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t-pii");
+    expect(await within(panel).findByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t-pii?tab=clearance");
     unmount();
 
     open("/governance/people/users/u-ana?tab=clearances", READER);

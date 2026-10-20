@@ -26,6 +26,7 @@ import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policy
 import { TabError } from "@/routes/governance/tabParts";
 import { compiledSource, compiledSourceLabel, type CompiledSource } from "@/routes/governance/engines/compiledSource";
 import { editorUrl, engineUrl, type EditorSubject } from "@/routes/governance/engines/engineUrl";
+import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 import type { PolicySource } from "@/routes/governance/engines/profilePolicies";
 
@@ -61,7 +62,7 @@ function sourceHref(src: CompiledSource | null, subject: EditorSubject, tagRead:
     case "rule":
       return `/governance/rules/${encodeURIComponent(src.id)}`;
     case "clearance":
-      return tagRead ? `/governance/classifications/${encodeURIComponent(src.id)}` : null;
+      return tagRead ? tagUrl(src.id, "clearance") : null;
     case "engine_grant":
       return "engineId" in subject ? engineUrl(subject.engineId, "engine-permissions", { grant: src.id }) : null;
     default:
