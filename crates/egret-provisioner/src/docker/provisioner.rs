@@ -177,7 +177,12 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
             )
         });
         if let Some(c) = failed {
-            let message = self.api.log_tail(&c.name, LOG_LINES).await?;
+            // A failed engine stays "failed" even when its log cannot be read.
+            let message = self
+                .api
+                .log_tail(&c.name, LOG_LINES)
+                .await
+                .unwrap_or_else(|e| format!("log unavailable: {e}"));
             return Ok(EngineStatus {
                 phase: "failed".into(),
                 message: Some(message),
@@ -198,8 +203,22 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
         let plans = self.plan(spec)?;
         self.ensure_images(&plans).await?;
         let current = self.engine_containers(&spec.namespace, &spec.name).await?;
+        let had = current.len();
         self.remove_all(current.into_iter().map(|c| c.name)).await?;
-        self.start_all(&plans).await
+        // There is no old plan to roll back to: once the old containers are
+        // gone, a failed start leaves the engine with none. Say so.
+        self.start_all(&plans).await.map_err(|e| {
+            if had > 0 {
+                format!(
+                    "the previous containers of engine {} were removed and the new ones did not \
+                     start, so the engine now has none (save its settings again, or delete and \
+                     add it): {e}",
+                    spec.name
+                )
+            } else {
+                e
+            }
+        })
     }
 
     async fn delete(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
@@ -455,6 +474,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_of_a_failed_engine_whose_log_cannot_be_read_is_still_failed() {
+        let (fake, p) = setup();
+        p.provision(&spec_with("e1", 0)).await.unwrap();
+        fake.set_state(&coord("e1"), ContainerState::Dead);
+        fake.fail_next("log_tail");
+        let s = p.status("trino", NS, "e1").await.unwrap();
+        assert_eq!(s.phase, "failed");
+        assert_eq!(
+            s.message.as_deref(),
+            Some("log unavailable: fake log_tail failure")
+        );
+    }
+
+    #[tokio::test]
     async fn status_one_unhealthy_container_keeps_the_engine_provisioning() {
         let s = status_with(
             &[
@@ -511,6 +544,28 @@ mod tests {
             fake.plan_of(&coord("e1")).unwrap().image,
             "trinodb/trino:484"
         );
+    }
+
+    #[tokio::test]
+    async fn update_whose_start_fails_says_the_old_containers_are_gone() {
+        let (fake, p) = setup();
+        p.provision(&spec_with("e1", 0)).await.unwrap();
+        fake.fail_next("create_and_start");
+        let e = p.update(&spec_with("e1", 0)).await.unwrap_err();
+        assert!(
+            e.contains("previous containers of engine e1 were removed"),
+            "{e}"
+        );
+        assert!(e.contains("fake create_and_start failure"), "{e}");
+        assert!(fake.names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_from_nothing_whose_start_fails_keeps_the_plain_error() {
+        let (fake, p) = setup();
+        fake.fail_next("create_and_start");
+        let e = p.update(&spec_with("e1", 0)).await.unwrap_err();
+        assert_eq!(e, "fake create_and_start failure");
     }
 
     #[tokio::test]
