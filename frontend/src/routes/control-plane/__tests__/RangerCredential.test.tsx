@@ -48,6 +48,19 @@ function externalServer(start: { current: string | null; pending: boolean }) {
     "GET /api/control-plane/policies/services": { body: PROFILES },
     "GET /api/control-plane/catalogs": { body: [] },
     "GET /api/control-plane/engines/modelled-ranger-plugins": { body: MODELLED_PLUGINS },
+    "GET /api/control-plane/engines/x1/ranger-plugin-config": {
+      body: {
+        serviceName: "trino-main",
+        downloadUrl: "https://egret.example.com/ranger",
+        authMode: "engine-credential",
+        rangerPluginVersion: "2.5.0",
+        rangerPluginVersionModelled: true,
+        warnings: [],
+        assumptions: [],
+        adminMustSupply: [],
+        files: [{ name: "ranger-trino-security.xml", content: "<configuration/>\n" }],
+      },
+    },
     [ROTATE]: () => {
       if (row.pending)
         return { status: 409, body: { error: "a previous ranger credential is still pending: retire it first" } };
@@ -165,6 +178,66 @@ describe("Ranger credential — external engine", () => {
     await waitFor(() => expect(calls.find((c) => `${c.method} ${c.path}` === RETIRE)?.body).toEqual({ installed: C2 }));
     expect(await screen.findByTestId("ranger-credential-error")).toHaveTextContent("not the engine's current one");
     expect(row.pending).toBe(true);
+  });
+
+  test("the rotation's id survives a visit to the Plugin config tab, where the operator installs it", async () => {
+    const { calls } = externalServer({ current: C1, pending: false });
+    const user = userEvent.setup();
+    renderExternal();
+
+    await user.click(await screen.findByRole("button", { name: "Rotate credential" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Rotate credential" }),
+    );
+    const shown = await screen.findByRole("alertdialog", { name: "New Ranger credential" });
+    await user.click(within(shown).getByRole("checkbox", { name: /I have saved/ }));
+    await user.click(within(shown).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+
+    // Install it from the Plugin config tab (the Overview panel unmounts), then come back.
+    await user.click(screen.getByRole("tab", { name: "Plugin config" }));
+    expect(await screen.findByText("ranger-trino-security.xml")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Ranger credential" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Overview" }));
+
+    await user.click(await within(section()).findByRole("button", { name: "Retire previous credential" }));
+    const retire = await screen.findByRole("alertdialog", { name: "Retire the previous credential?" });
+    // Not the typed fallback: the token this page's rotation returned.
+    expect(within(retire).queryByLabelText("Credential id of the installed credential")).not.toBeInTheDocument();
+    expect(retire).toHaveTextContent(C2);
+    await user.click(within(retire).getByRole("button", { name: "Retire previous credential" }));
+    await waitFor(() => expect(calls.find((c) => `${c.method} ${c.path}` === RETIRE)?.body).toEqual({ installed: C2 }));
+  });
+
+  test("in the typed fallback the current id is hidden and the hint warns against copying it", async () => {
+    externalServer({ current: C2, pending: true });
+    const user = userEvent.setup();
+    renderExternal();
+    expect(await screen.findByTestId("ranger-credential-id")).toHaveTextContent(C2);
+    await user.click(await screen.findByRole("button", { name: "Retire previous credential" }));
+    const retire = await screen.findByRole("alertdialog", { name: "Retire the previous credential?" });
+    expect(screen.queryByTestId("ranger-credential-id")).not.toBeInTheDocument();
+    expect(within(retire).getByLabelText("Credential id of the installed credential")).toHaveAccessibleDescription(
+      /Do not copy the engine's current credential id from this page unless that is the credential the engine runs/,
+    );
+  });
+
+  test("copying announces the result to assistive technology", async () => {
+    externalServer({ current: C1, pending: false });
+    const user = userEvent.setup();
+    renderExternal();
+    await user.click(await screen.findByRole("button", { name: "Rotate credential" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Rotate credential" }),
+    );
+    const shown = await screen.findByRole("alertdialog", { name: "New Ranger credential" });
+    await user.click(within(shown).getByRole("button", { name: "Copy password" }));
+    await waitFor(() =>
+      expect(within(shown).getAllByRole("status").map((e) => e.textContent)).toContain("Copied the password"),
+    );
+    // Only the field that was copied says so.
+    expect(within(shown).getAllByRole("status").filter((e) => e.textContent)).toHaveLength(1);
+    expect(await navigator.clipboard.readText()).toBe(NEW_PASSWORD);
   });
 
   test("after a reload the rotation's id is gone: Retire asks for it and sends what the operator entered", async () => {

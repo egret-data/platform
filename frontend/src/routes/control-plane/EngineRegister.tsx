@@ -117,7 +117,7 @@ export default function EngineRegister() {
 
   const dirty = !!(name || host || port || versionChoice || profileId || catalogIds.length);
   // While the credential is on screen, leaving the page would lose it too.
-  useUnsavedChangesWarning((dirty && !issued) || issued !== null);
+  useUnsavedChangesWarning(dirty || issued !== null);
 
   const profilesOfType = (profilesQ.data ?? []).filter((p) => p.type === type);
   const chosenProfile = profilesOfType.find((p) => String(p.id) === profileId);

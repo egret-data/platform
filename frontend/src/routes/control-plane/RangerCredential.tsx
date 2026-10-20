@@ -12,7 +12,7 @@
  * storage, a query cache entry, a toast or a log line, and the dialog that
  * shows it drops it when it closes. A reload cannot bring it back, by design.
  */
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -52,20 +52,30 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function CopyButton({ value, what }: { value: string; what: string }) {
   const [copied, setCopied] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  // A pending reset must not fire into an unmounted button (the dialog closes on Done).
+  useEffect(() => () => window.clearTimeout(timer.current), []);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error(`Could not copy the ${what} to the clipboard. Select the text and copy it.`);
     }
   };
   return (
-    <Button type="button" size="sm" variant="outline" onClick={() => void copy()} aria-label={`Copy ${what}`}>
-      {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-      {copied ? "Copied" : "Copy"}
-    </Button>
+    <>
+      <Button type="button" size="sm" variant="outline" onClick={() => void copy()} aria-label={`Copy ${what}`}>
+        {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
+        {copied ? "Copied" : "Copy"}
+      </Button>
+      {/* The button's name stays "Copy …", so the result is announced here. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied ? `Copied the ${what}` : ""}
+      </span>
+    </>
   );
 }
 
@@ -220,6 +230,25 @@ export function OneTimeCredentialDialog({
   );
 }
 
+/** The `installed` token: the credential id the last rotation returned. Never the password. */
+export interface RotationToken {
+  value: string | null;
+  set: (id: string | null) => void;
+}
+
+/**
+ * Hold the rotation token for one engine, in React state only (not the URL or
+ * storage: a reload loses it, and the retire dialog then asks for the id).
+ * Keyed by engine id, so moving to another engine's page drops it.
+ */
+export function useRotationToken(engineId: string): RotationToken {
+  const [held, setHeld] = useState<{ engineId: string; id: string } | null>(null);
+  return {
+    value: held && held.engineId === engineId ? held.id : null,
+    set: (id) => setHeld(id === null ? null : { engineId, id }),
+  };
+}
+
 /**
  * The "Ranger credential" section of an engine's Overview: its state, Rotate,
  * and — for an external engine with a rotation pending — Retire previous.
@@ -235,8 +264,16 @@ export function OneTimeCredentialDialog({
  */
 export function RangerCredentialSection({
   engine,
+  rotation,
 }: {
   engine: Pick<Engine, "id" | "type" | "origin" | "rangerCredentialPending" | "rangerCredentialId">;
+  /**
+   * Where the `installed` token lives. A page whose tabs unmount this section
+   * (the operator installs the credential on the Plugin config tab) passes a
+   * holder that outlives the tab panel: {@link useRotationToken}. Without one,
+   * the token lives in this section's own state.
+   */
+  rotation?: RotationToken;
 }) {
   const queryClient = useQueryClient();
   const external = isExternal(engine);
@@ -248,7 +285,8 @@ export function RangerCredentialSection({
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [shown, setShown] = useState<RangerCredentialDto | null>(null);
   // The id the last rotation in THIS mount returned: the `installed` token.
-  const [rotatedId, setRotatedId] = useState<string | null>(null);
+  const ownToken = useRotationToken(engine.id);
+  const { value: rotatedId, set: setRotatedId } = rotation ?? ownToken;
   const [retireOpen, setRetireOpen] = useState(false);
   const [typedId, setTypedId] = useState("");
   const [failure, setFailure] = useState<unknown>(null);
@@ -348,7 +386,9 @@ export function RangerCredentialSection({
           <Badge variant={state.variant}>{state.badge}</Badge>
           <p className="text-muted-foreground">{state.text}</p>
         </dd>
-        {currentId && (
+        {/* Hidden while the retire dialog asks for the installed id: it must come
+            from what the operator saved, not be copied from here. */}
+        {currentId && !(retireOpen && !rotatedId) && (
           <>
             <dt className="text-muted-foreground">Current credential id</dt>
             <dd className="break-all font-mono text-xs" data-testid="ranger-credential-id">
@@ -438,9 +478,12 @@ export function RangerCredentialSection({
                 aria-describedby={`${base}-installed-hint`}
               />
               <p id={`${base}-installed-hint`} className="text-xs text-muted-foreground">
-                Enter the id shown with the password at rotation. egret retires the previous credential only if this
-                is the engine&apos;s current one. If you lost the new password before installing it, retiring breaks
-                the engine&apos;s policy download until you rotate again and install that one.
+                Enter the id shown with the password at rotation, from your own record of the credential you
+                installed. Do not copy the engine&apos;s current credential id from this page unless that is the
+                credential the engine runs: egret retires the previous credential only if this is the current one,
+                and an engine still using the previous one then can no longer download policies. If you lost the new
+                password before installing it, retiring breaks the engine&apos;s policy download until you rotate
+                again and install that one.
               </p>
             </div>
           )}

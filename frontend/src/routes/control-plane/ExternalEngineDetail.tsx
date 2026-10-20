@@ -69,7 +69,7 @@ import {
   useModelledPlugins,
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
-import { RangerCredentialSection } from "./RangerCredential";
+import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -108,6 +108,9 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
     retry: false,
   });
   const bound = profilesQ.data?.find((p) => p.engines.some((e) => e.id === engine.id));
+  // Held here, above the tabs: the Overview panel unmounts while the operator
+  // installs the new credential from the Plugin config tab.
+  const rotation = useRotationToken(engine.id);
 
   return (
     <div className="space-y-5">
@@ -144,7 +147,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
 
         <TabsContent value="overview" className="space-y-4">
           <Overview engine={engine} bound={bound} profilesQ={profilesQ} />
-          <RangerCredentialSection engine={engine} />
+          <RangerCredentialSection engine={engine} rotation={rotation} />
         </TabsContent>
         <TabsContent value="catalogs">
           <DeclaredCatalogs engine={engine} />
