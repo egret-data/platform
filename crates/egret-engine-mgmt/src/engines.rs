@@ -7296,6 +7296,9 @@ async fn pod_logs(
         )
         .await
         .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
+    // `engine:read` is enough to get here: a credential an engine prints (the
+    // Trino Ranger plugin's `…rest.client.password=` line) is masked.
+    let logs = crate::log_redaction::redact_log_text(&logs);
     Ok(Json(PodLogsDto { logs }))
 }
 
@@ -7397,7 +7400,8 @@ async fn bridge_log_follow(
     mut socket: WebSocket,
 ) {
     let mut stream = match kube.pod_logs_stream(namespace, pod, tail_lines).await {
-        Ok(s) => s,
+        // Masked line by line, as `pod_logs` masks the whole text.
+        Ok(s) => crate::log_redaction::redact_log_stream(s),
         Err(e) => {
             let _ = socket
                 .send(Message::Text(format!("log stream failed: {e}").into()))

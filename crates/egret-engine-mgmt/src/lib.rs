@@ -10,6 +10,7 @@ pub mod engines;
 pub mod error;
 pub mod external;
 pub mod http_error;
+pub mod log_redaction;
 pub mod monitor;
 pub mod probe;
 pub mod profile_compiler;
