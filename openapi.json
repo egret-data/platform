@@ -42971,7 +42971,8 @@
           "namespace",
           "status",
           "spec",
-          "origin"
+          "origin",
+          "rangerCredentialPending"
         ],
         "properties": {
           "id": {
@@ -43040,6 +43041,18 @@
               "null"
             ],
             "description": "Why the engine is not modelled, and how to fix it (for a provisioned\nengine: pin its image). Absent when modelled."
+          },
+          "rangerCredentialPending": {
+            "type": "boolean",
+            "description": "Whether a PREVIOUS Ranger plugin credential is still valid beside the\ncurrent one (spec 2026-10-20-ranger-surface-auth A10/A11): a rotation\nis pending. Provisioned: until the rollout of the current credential\nis observed complete, when egret retires the previous one itself.\nExternal: until the operator confirms the current one is installed\n(`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`).\nWhile it is `true` a further rotation is refused (409)."
+          },
+          "rangerCredentialId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id of the engine's CURRENT Ranger plugin credential: the\n`credentialId` registration or the last rotation returned with it.\nAn opaque id that grants nothing (never the password); an external\nengine's operator sends it as `installed` to confirm which credential\nthe engine runs with. Absent when the engine has no credential yet."
           }
         }
       },

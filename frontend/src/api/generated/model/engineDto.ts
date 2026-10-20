@@ -64,4 +64,23 @@ export interface EngineDto {
      * @nullable
      */
   rangerPluginVersionNote?: string | null;
+  /**
+     * Whether a PREVIOUS Ranger plugin credential is still valid beside the
+     * current one (spec 2026-10-20-ranger-surface-auth A10/A11): a rotation
+     * is pending. Provisioned: until the rollout of the current credential
+     * is observed complete, when egret retires the previous one itself.
+     * External: until the operator confirms the current one is installed
+     * (`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`).
+     * While it is `true` a further rotation is refused (409).
+     */
+  rangerCredentialPending: boolean;
+  /**
+     * The id of the engine's CURRENT Ranger plugin credential: the
+     * `credentialId` registration or the last rotation returned with it.
+     * An opaque id that grants nothing (never the password); an external
+     * engine's operator sends it as `installed` to confirm which credential
+     * the engine runs with. Absent when the engine has no credential yet.
+     * @nullable
+     */
+  rangerCredentialId?: string | null;
 }

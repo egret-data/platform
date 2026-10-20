@@ -337,6 +337,21 @@ pub(crate) struct EngineDto {
     /// engine: pin its image). Absent when modelled.
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_plugin_version_note: Option<String>,
+    /// Whether a PREVIOUS Ranger plugin credential is still valid beside the
+    /// current one (spec 2026-10-20-ranger-surface-auth A10/A11): a rotation
+    /// is pending. Provisioned: until the rollout of the current credential
+    /// is observed complete, when egret retires the previous one itself.
+    /// External: until the operator confirms the current one is installed
+    /// (`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`).
+    /// While it is `true` a further rotation is refused (409).
+    ranger_credential_pending: bool,
+    /// The id of the engine's CURRENT Ranger plugin credential: the
+    /// `credentialId` registration or the last rotation returned with it.
+    /// An opaque id that grants nothing (never the password); an external
+    /// engine's operator sends it as `installed` to confirm which credential
+    /// the engine runs with. Absent when the engine has no credential yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_credential_id: Option<Uuid>,
 }
 
 impl From<Engine> for EngineDto {
@@ -372,6 +387,8 @@ impl From<Engine> for EngineDto {
             ranger_plugin_version: version,
             ranger_plugin_version_modelled: Some(modelled),
             ranger_plugin_version_note: note,
+            ranger_credential_pending: e.ranger_secret_prev_id.is_some(),
+            ranger_credential_id: e.ranger_secret_id,
         }
     }
 }
@@ -7689,11 +7706,20 @@ mod tests {
         declared: Option<&str>,
     ) -> EngineDto {
         Engine {
+            spec,
+            ranger_plugin_version: declared.map(str::to_string),
+            ..dto_engine(kind, origin)
+        }
+        .into()
+    }
+
+    fn dto_engine(kind: &str, origin: &str) -> Engine {
+        Engine {
             id: Uuid::new_v4(),
             name: "e".into(),
             r#type: kind.into(),
             namespace: "ns".into(),
-            spec,
+            spec: serde_json::json!({}),
             status: "running".into(),
             authz_service_id: None,
             delegator_secret_id: None,
@@ -7709,9 +7735,33 @@ mod tests {
             origin: origin.into(),
             external_host: None,
             external_port: None,
-            ranger_plugin_version: declared.map(str::to_string),
+            ranger_plugin_version: None,
         }
-        .into()
+    }
+
+    #[test]
+    fn the_dto_names_the_current_ranger_credential_and_whether_a_previous_one_is_pending() {
+        let (current, prev) = (Uuid::new_v4(), Uuid::new_v4());
+        // Through `From<Engine>`, the only constructor: the slots drive both fields.
+        let mut e = Engine {
+            ranger_secret_id: Some(current),
+            ranger_secret_prev_id: Some(prev),
+            ..dto_engine("trino", "external")
+        };
+        let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
+        assert_eq!(j["rangerCredentialPending"], true, "{j}");
+        assert_eq!(j["rangerCredentialId"], current.to_string(), "{j}");
+        assert!(
+            !j.to_string().contains(&prev.to_string()),
+            "the previous credential's id is not shown: {j}"
+        );
+        e.ranger_secret_prev_id = None;
+        let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
+        assert_eq!(j["rangerCredentialPending"], false, "{j}");
+        e.ranger_secret_id = None;
+        let j = serde_json::to_value(EngineDto::from(e)).unwrap();
+        assert!(j.get("rangerCredentialId").is_none(), "{j}");
+        assert_eq!(j["rangerCredentialPending"], false, "{j}");
     }
 
     #[test]
