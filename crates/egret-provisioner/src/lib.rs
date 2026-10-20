@@ -6,6 +6,7 @@
 pub mod ingress;
 pub mod kube_client;
 pub mod provisioner;
+pub mod rollout;
 pub mod spec;
 pub mod starrocks;
 pub mod trino;

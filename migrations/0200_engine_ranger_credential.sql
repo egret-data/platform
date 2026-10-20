@@ -1,8 +1,8 @@
 -- Per-engine Ranger plugin credential (spec 2026-10-20-ranger-surface-auth, §4.3, A10).
 -- `ranger_secret_id` is the password the engine's plugin presents now;
 -- `ranger_secret_prev_id` is the one it presented before the last rotation, kept
--- valid until a successful apply proves the pods rolled (never delete a secret
--- the cluster may still hold). Both name rows in the secret store
+-- valid until the rollout is observed complete (never delete a secret the
+-- cluster may still hold). Both name rows in the secret store
 -- (`workspace_secrets`, global scope, named `engine-ranger-{engine_id}-{generation}`);
 -- neither is a foreign key because the secret store is a separate seam.
 --

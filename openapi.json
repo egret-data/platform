@@ -5809,7 +5809,7 @@
           "control-plane-engines"
         ],
         "summary": "`POST /engines/{id}/retire-previous-ranger-credential` — the operator's\nconfirmation that an EXTERNAL engine's plugin now runs with the credential\nnamed `installed` (the `credentialId` registration or the last rotation\nreturned): the previous one is deleted by its exact id and stops\nauthenticating. Standing rule: egret never deletes a credential the cluster\nmay still hold, and for an external engine only its operator can say it no\nlonger does — about a SPECIFIC credential, so a stale or duplicated\nconfirmation sent before a later rotation retires nothing (409).",
-        "description": "The check is one compare-and-set on both columns (current = `installed`,\nprevious = the id read from the row). Idempotent: with nothing pending and\na matching `installed` it answers 204 and deletes nothing. A provisioned\nengine retires automatically after an accepted apply, so it is refused (409).",
+        "description": "The check is one compare-and-set on both columns (current = `installed`,\nprevious = the id read from the row). Idempotent: with nothing pending and\na matching `installed` it answers 204 and deletes nothing. A provisioned\nengine's previous credential is retired by egret once the rollout of the\ncurrent one is observed complete, so it is refused (409).",
         "operationId": "retire_previous_ranger_credential",
         "parameters": [
           {
@@ -5878,7 +5878,7 @@
             }
           },
           "409": {
-            "description": "Nothing was retired: the engine is provisioned (egret retires its previous credential itself once Kubernetes accepts an apply), or `installed` is not the engine's current credential (a confirmation sent before a later rotation, or a concurrent change): install the current credential and confirm it",
+            "description": "Nothing was retired: the engine is provisioned (egret retires its previous credential itself once the rollout of the current one is observed complete), or `installed` is not the engine's current credential (a confirmation sent before a later rotation, or a concurrent change): install the current credential and confirm it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5906,7 +5906,7 @@
           "control-plane-engines"
         ],
         "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential\nis committed and the old one demoted to previous; both authenticate until\nthe previous one is retired. A rotation is refused (409) while a previous\none is still pending, so a rotation never deletes a credential.",
-        "description": "**Provisioned engine** (Trino or StarRocks): the new credential is applied\n(the pods roll) and the old one is deleted by its exact id as soon as\nKubernetes ACCEPTS the apply — which can be before the pods have finished\nrolling, so a pod still running with the old password can be refused by\n`/ranger` until it is replaced. A failed apply deletes nothing, and any\nlater accepted apply retires the previous one. Answers 204.\n\n**External engine**: nothing is applied (egret never touches its cluster).\nThe answer is 200 with the new credential — **shown once** — for the\noperator to install. No apply can prove they did, so the previous one stays\nvalid until the operator confirms with\n`POST /engines/{id}/retire-previous-ranger-credential`.",
+        "description": "**Provisioned engine** (Trino or StarRocks): the new credential is applied\nand the route answers 204 once Kubernetes ACCEPTS the apply; the pods then\nroll. The previous credential stays valid until that rollout is OBSERVED\ncomplete — every pod that runs the plugin (Trino: coordinator and workers;\nStarRocks: the FE) runs the new credential and none of an older template is\nleft — and is then deleted by its exact id, by a periodic sweep or the next\nread of the engine\n([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).\nA stalled rollout keeps it valid for as long as it stalls. A failed apply\ndeletes nothing; the previous one is retired once a later apply has rolled\nout the current one.\n\n**External engine**: nothing is applied (egret never touches its cluster).\nThe answer is 200 with the new credential — **shown once** — for the\noperator to install. No apply can prove they did, so the previous one stays\nvalid until the operator confirms with\n`POST /engines/{id}/retire-previous-ranger-credential`.",
         "operationId": "rotate_ranger_credential",
         "parameters": [
           {
@@ -5932,7 +5932,7 @@
             }
           },
           "204": {
-            "description": "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential is retired as soon as the apply is accepted, which can be before the pods have finished rolling: a pod still running with the old password can be refused by the Ranger surface until it is replaced"
+            "description": "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential remains valid until the rollout is observed complete (every pod that runs the Ranger plugin runs the new credential and none of an older template is left); egret then retires it. Until then a further rotation is refused"
           },
           "400": {
             "description": "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
@@ -5975,7 +5975,7 @@
             }
           },
           "409": {
-            "description": "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: its credential has not been retired by an accepted apply yet, and any accepted apply retires it; external: confirm the current credential is installed with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`); or the engine changed concurrently (a delete in progress, or another rotation won: re-read the engine and retry)",
+            "description": "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: the rollout of the current credential has not been observed complete yet, so the previous one is still valid; retry once the rollout has completed; external: confirm the current credential is installed with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`); or the engine changed concurrently (a delete in progress, or another rotation won: re-read the engine and retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5995,7 +5995,7 @@
             }
           },
           "502": {
-            "description": "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later accepted apply retires it",
+            "description": "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later apply of the new one has been observed to roll out",
             "content": {
               "application/json": {
                 "schema": {

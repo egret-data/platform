@@ -61,7 +61,9 @@ pub struct Engine {
     /// [`crate::ranger_credential`].
     pub ranger_secret_id: Option<Uuid>,
     /// The credential the plugin presented before the last rotation, still
-    /// accepted until a successful apply retires it (A10).
+    /// accepted until it is retired (A10): for a provisioned engine once the
+    /// rollout of the current one is observed complete, for an external one on
+    /// its operator's confirmation.
     pub ranger_secret_prev_id: Option<Uuid>,
 }
 

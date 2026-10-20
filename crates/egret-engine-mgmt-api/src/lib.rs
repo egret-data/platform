@@ -424,7 +424,7 @@ impl RangerBinding {
     pub fn credential_ref(&self) -> Option<ranger_config::PluginCredentialRef<'_>> {
         self.credential
             .as_ref()
-            .map(ranger_config::RenderableCredential::as_ref)
+            .map(ranger_config::RenderableCredential::borrowed)
     }
 }
 
@@ -698,6 +698,20 @@ pub struct EngineStatus {
     pub pods: Vec<PodStatus>,
 }
 
+/// What a rollout probe saw of an engine's Ranger credential (spec
+/// 2026-10-20-ranger-surface-auth A10): whether every pod that runs the Ranger
+/// plugin now runs with ONE credential, named by its non-secret id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RangerRollout {
+    /// The rollout of that credential is observed complete: the workloads that
+    /// run the plugin have rolled their pod template to it, and no pod of an
+    /// older template is still running.
+    Complete,
+    /// Not (or not yet) complete, with a reason for the log. Every absent,
+    /// unknown or partial observation lands here.
+    Pending(String),
+}
+
 use async_trait::async_trait;
 
 /// Provisions/updates/deletes a query engine on Kubernetes. Kube-free by
@@ -711,6 +725,21 @@ pub trait EngineProvisioningPort: Send + Sync {
     async fn update(&self, req: &EngineSpec) -> Result<(), String>;
     async fn delete(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
+    /// Whether the engine's pods have rolled out with the Ranger credential
+    /// whose id is `credential_id` ([`RangerRollout`]). The previous credential
+    /// is retired only on `Ok(Complete)`.
+    ///
+    /// The default cannot observe anything, so it never says complete: a
+    /// provisioner that does not implement it keeps every previous credential.
+    async fn ranger_rollout(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        _credential_id: &str,
+    ) -> Result<RangerRollout, String> {
+        Err("this provisioner cannot observe a rollout".into())
+    }
 }
 
 #[cfg(test)]

@@ -715,9 +715,22 @@ struct FakeEnginePort {
     /// How many times `status` was asked, for any engine. An external engine has
     /// no cluster of egret's to ask about, so a read of one must leave this at 0.
     status_calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// The Ranger credential id the fake cluster's pods have FULLY rolled out
+    /// with (`None`: nothing observed). `ranger_rollout` is `Complete` only
+    /// when asked about exactly this id — as the real probe, which reads the
+    /// id the apply stamped on the pod templates.
+    rolled_out: Arc<std::sync::Mutex<Option<String>>>,
+    /// When `Some`, `ranger_rollout` fails with it.
+    rollout_error: Arc<std::sync::Mutex<Option<String>>>,
+    /// `(engine name, credential id)` per `ranger_rollout` call.
+    rollout_calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl FakeEnginePort {
+    /// The fake cluster's pods now all run the credential `id`.
+    fn roll_out(&self, id: Option<Uuid>) {
+        *self.rolled_out.lock().unwrap() = id.map(|i| i.to_string());
+    }
     fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
         *self.status_response.lock().unwrap() = Some(status);
     }
@@ -813,6 +826,27 @@ impl EngineProvisioningPort for FakeEnginePort {
             .unwrap()
             .push((ns.to_string(), name.to_string()));
         Ok(())
+    }
+    async fn ranger_rollout(
+        &self,
+        _kind: &str,
+        _ns: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<egret_engine_mgmt_api::RangerRollout, String> {
+        self.rollout_calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), credential_id.to_string()));
+        if let Some(e) = self.rollout_error.lock().unwrap().clone() {
+            return Err(e);
+        }
+        Ok(match self.rolled_out.lock().unwrap().as_deref() {
+            Some(id) if id == credential_id => egret_engine_mgmt_api::RangerRollout::Complete,
+            other => egret_engine_mgmt_api::RangerRollout::Pending(format!(
+                "the fake pods run {other:?}"
+            )),
+        })
     }
 }
 
@@ -5533,6 +5567,16 @@ fn rendered_ranger_credential(spec: &egret_engine_mgmt_api::EngineSpec) -> (Stri
     (c.username().to_string(), c.password().to_string())
 }
 
+/// The id an apply named its Ranger credential by (stamped on the pods).
+fn rendered_ranger_credential_id(spec: &egret_engine_mgmt_api::EngineSpec) -> String {
+    spec.ranger
+        .as_ref()
+        .and_then(|r| r.credential.as_ref())
+        .expect("a bound engine is applied with its ranger credential")
+        .id()
+        .to_string()
+}
+
 /// Whether `/ranger` would accept `password` for `engine_id` (A10: current OR
 /// previous credential).
 async fn ranger_verifies(f: &Fixture, engine_id: Uuid, password: &str) -> bool {
@@ -5564,6 +5608,24 @@ fn rotate_ranger_req(id: impl std::fmt::Display, token: &str) -> HttpRequest<Bod
         token,
         None,
     )
+}
+
+/// One pass of the background sweep that retires a previous Ranger
+/// credential once the rollout is observed complete (Task 6b), over the state
+/// `f.app` runs on.
+async fn sweep_ranger_retire(f: &Fixture) -> usize {
+    let st = engine_state(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        None,
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
+    );
+    egret_engine_mgmt::ranger_credential::retire_rolled_out_previous_credentials(&st).await
 }
 
 /// A9: a bound Trino engine is provisioned with `engine-<uuid>` and a password
@@ -5655,8 +5717,8 @@ async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verif
     assert_eq!(user, egret_engine_mgmt_api::credential::plugin_username(id));
     assert!(ranger_verifies(&f, id, &pw).await);
 
-    // Rotation works for StarRocks too, and the old one is retired by the
-    // successful apply.
+    // Rotation works for StarRocks too. The old one stays valid while the FE
+    // rolls, and is retired once that rollout is observed complete.
     let resp = f
         .app
         .clone()
@@ -5667,16 +5729,29 @@ async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verif
     let (_, pw2) = rendered_ranger_credential(&port.last_updated());
     assert_ne!(pw2, pw);
     assert!(ranger_verifies(&f, id, &pw2).await);
+    assert!(ranger_verifies(&f, id, &pw).await, "kept until rolled out");
+    let (current, prev) = ranger_slots(&f, id).await;
+    assert!(prev.is_some());
+    assert_eq!(
+        rendered_ranger_credential_id(&port.last_updated()),
+        current.unwrap().to_string(),
+        "the apply names the current credential for the rollout probe"
+    );
+    port.roll_out(current);
+    sweep_ranger_retire(&f).await;
     assert!(!ranger_verifies(&f, id, &pw).await);
     assert_eq!(ranger_slots(&f, id).await.1, None);
 }
 
-/// A10 through the route: rotate mints a new current, the apply renders it, and
-/// only the SUCCESSFUL apply retires the old one. While a failed rotation's
-/// previous credential is pending, a second rotation is a 409 that applies
-/// nothing; a later successful apply retires it and rotation is allowed again.
+/// A10 through the route (Task 6b): rotate mints a new current and the apply
+/// renders it, but the previous one stays valid until the rollout of the new
+/// one is OBSERVED complete — never merely because Kubernetes accepted the
+/// apply. A stalled rollout keeps it through every sweep and read, and a
+/// rotation stays refused (409, naming the rollout); a completed rollout
+/// retires it once, by its exact id. A failed apply keeps both, and a rollout
+/// that completed for the OLDER credential never retires them.
 #[tokio::test]
-async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_apply() {
+async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observed_complete() {
     let port = FakeEnginePort::default();
     let Some(f) = setup_with_ranger(
         Some(Arc::new(port.clone())),
@@ -5696,8 +5771,9 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
     let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
     let (_, p1) = rendered_ranger_credential(&port.last_provisioned());
     let (c1, _) = ranger_slots(&f, id).await;
+    port.roll_out(c1);
 
-    // 1. A successful rotation: new password applied, old one retired.
+    // 1. A rotation the cluster accepted: both credentials still verify.
     let resp = f
         .app
         .clone()
@@ -5707,20 +5783,59 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let (_, p2) = rendered_ranger_credential(&port.last_updated());
     assert_ne!(p2, p1);
-    assert!(ranger_verifies(&f, id, &p2).await);
-    assert!(
-        !ranger_verifies(&f, id, &p1).await,
-        "retired after the apply"
-    );
     let (c2, prev) = ranger_slots(&f, id).await;
     assert_ne!(c2, c1);
-    assert_eq!(prev, None);
+    assert_eq!(prev, c1, "accepted is not rolled out: the previous is kept");
+    assert!(ranger_verifies(&f, id, &p1).await);
+    assert!(ranger_verifies(&f, id, &p2).await);
+
+    // 2. The rollout stalls (the pods still run c1): sweeps and reads keep c1.
+    for _ in 0..3 {
+        sweep_ranger_retire(&f).await;
+        let (status, _) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(ranger_slots(&f, id).await, (c2, c1));
+    assert!(ranger_verifies(&f, id, &p1).await);
+    assert!(port
+        .rollout_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, _)| *n == name)
+        .all(|(_, asked)| Some(asked.as_str()) == c2.map(|c| c.to_string()).as_deref()));
+
+    // 3. Meanwhile a rotation is refused BEFORE any apply, naming the rollout.
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(rotate_ranger_req(id, &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert!(j["error"].as_str().unwrap().contains("rolled out"), "{j}");
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before);
+    assert_eq!(ranger_slots(&f, id).await, (c2, c1));
+
+    // 4. The rollout completes: the next sweep retires c1 by its id, once.
+    port.roll_out(c2);
+    sweep_ranger_retire(&f).await;
+    assert!(!ranger_verifies(&f, id, &p1).await);
+    assert!(ranger_verifies(&f, id, &p2).await);
+    assert_eq!(ranger_slots(&f, id).await, (c2, None));
     assert!(matches!(
         secret_store(&f).resolve_plaintext(None, c1.unwrap()).await,
         Err(egret_secrets::SecretsError::NotFound)
     ));
+    sweep_ranger_retire(&f).await;
+    assert_eq!(ranger_slots(&f, id).await, (c2, None));
+    assert!(ranger_verifies(&f, id, &p2).await, "c2 untouched");
 
-    // 2. A rotation whose apply fails keeps BOTH (the cluster may hold either).
+    // 5. A rotation whose apply fails keeps both, and the pods — which still
+    //    run c2, fully rolled out — never retire them.
     port.set_fail_update(true);
     let (status, j) = into_json(
         f.app
@@ -5732,43 +5847,16 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
     let (_, p3) = rendered_ranger_credential(&port.last_updated());
-    assert!(
-        ranger_verifies(&f, id, &p2).await,
-        "the previous one is kept"
-    );
-    assert!(ranger_verifies(&f, id, &p3).await);
     let (c3, prev) = ranger_slots(&f, id).await;
-    assert_ne!(c3, c2);
-    assert_eq!(
-        prev, c2,
-        "the failed rotation's previous credential stays pending"
-    );
-
-    // 3. While that previous one is pending, a rotation is refused BEFORE any
-    // apply and changes nothing.
-    port.set_fail_update(false);
-    let updates_before = port.updated.lock().unwrap().len();
-    let slots_before = ranger_slots(&f, id).await;
-    let (status, j) = into_json(
-        f.app
-            .clone()
-            .oneshot(rotate_ranger_req(id, &token))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
-    assert_eq!(
-        port.updated.lock().unwrap().len(),
-        updates_before,
-        "nothing applied"
-    );
-    assert_eq!(ranger_slots(&f, id).await, slots_before);
+    assert_eq!(prev, c2);
+    sweep_ranger_retire(&f).await;
+    assert_eq!(ranger_slots(&f, id).await, (c3, c2));
     assert!(ranger_verifies(&f, id, &p2).await);
     assert!(ranger_verifies(&f, id, &p3).await);
 
-    // 4. Any later successful apply renders the current one and retires the
-    // previous; a rotation is allowed again.
+    // 6. A later apply renders c3; once it has rolled out, a READ of the
+    //    engine retires c2 (no sweep needed), and rotation is allowed again.
+    port.set_fail_update(false);
     let resp = f
         .app
         .clone()
@@ -5782,8 +5870,16 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(rendered_ranger_credential(&port.last_updated()).1, p3);
+    assert_eq!(
+        ranger_slots(&f, id).await,
+        (c3, c2),
+        "accepted, not rolled out"
+    );
+    port.roll_out(c3);
+    let (status, _) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ranger_slots(&f, id).await, (c3, None));
     assert!(!ranger_verifies(&f, id, &p2).await);
-    assert_eq!(ranger_slots(&f, id).await.1, None);
     let resp = f
         .app
         .clone()
@@ -5791,6 +5887,50 @@ async fn rotate_ranger_credential_retires_the_old_one_only_after_a_successful_ap
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// A probe that fails (the cluster cannot be read) keeps the previous one.
+#[tokio::test]
+async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_ranger_probe_err_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (_, p1) = rendered_ranger_credential(&port.last_provisioned());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(rotate_ranger_req(id, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (c2, c1) = ranger_slots(&f, id).await;
+    port.roll_out(c2);
+    *port.rollout_error.lock().unwrap() = Some("connection refused".into());
+
+    sweep_ranger_retire(&f).await;
+    let (status, _) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a failed probe does not fail the read"
+    );
+
+    assert_eq!(ranger_slots(&f, id).await, (c2, c1));
+    assert!(ranger_verifies(&f, id, &p1).await);
 }
 
 /// A credential minted before Task 6 could contain `--`, which the renderer
@@ -5868,6 +6008,12 @@ async fn an_unrenderable_stored_credential_fails_the_apply_until_rotated() {
     let (_, pw) = rendered_ranger_credential(&port.last_updated());
     assert!(!pw.contains("--"));
     assert!(ranger_verifies(&f, id, &pw).await);
+    assert!(
+        ranger_verifies(&f, id, "pre-task-6--value").await,
+        "kept until the rollout is observed complete"
+    );
+    port.roll_out(ranger_slots(&f, id).await.0);
+    sweep_ranger_retire(&f).await;
     assert!(
         !ranger_verifies(&f, id, "pre-task-6--value").await,
         "retired"
@@ -14397,7 +14543,7 @@ async fn external_credential_retire_refuses_provisioned_unknown_and_unauthorised
     let any = installed(&serde_json::json!(Uuid::new_v4()));
 
     let path = |id: Uuid, what: &str| format!("/engines/{id}/{what}");
-    // Provisioned engines retire automatically after an accepted apply.
+    // Provisioned engines retire by themselves once a rollout is observed complete.
     let (status, e) = call(
         &f,
         "POST",

@@ -2847,7 +2847,8 @@ export const getControlPlaneEnginesRetirePreviousRangerCredentialUrl = (id: stri
  * The check is one compare-and-set on both columns (current = `installed`,
  * previous = the id read from the row). Idempotent: with nothing pending and
  * a matching `installed` it answers 204 and deletes nothing. A provisioned
- * engine retires automatically after an accepted apply, so it is refused (409).
+ * engine's previous credential is retired by egret once the rollout of the
+ * current one is observed complete, so it is refused (409).
  * @summary `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
 confirmation that an EXTERNAL engine's plugin now runs with the credential
 named `installed` (the `credentialId` registration or the last rotation
@@ -2988,11 +2989,16 @@ export const getControlPlaneEnginesRotateRangerCredentialUrl = (id: string,) => 
 
 /**
  * **Provisioned engine** (Trino or StarRocks): the new credential is applied
- * (the pods roll) and the old one is deleted by its exact id as soon as
- * Kubernetes ACCEPTS the apply — which can be before the pods have finished
- * rolling, so a pod still running with the old password can be refused by
- * `/ranger` until it is replaced. A failed apply deletes nothing, and any
- * later accepted apply retires the previous one. Answers 204.
+ * and the route answers 204 once Kubernetes ACCEPTS the apply; the pods then
+ * roll. The previous credential stays valid until that rollout is OBSERVED
+ * complete — every pod that runs the plugin (Trino: coordinator and workers;
+ * StarRocks: the FE) runs the new credential and none of an older template is
+ * left — and is then deleted by its exact id, by a periodic sweep or the next
+ * read of the engine
+ * ([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).
+ * A stalled rollout keeps it valid for as long as it stalls. A failed apply
+ * deletes nothing; the previous one is retired once a later apply has rolled
+ * out the current one.
  *
  * **External engine**: nothing is applied (egret never touches its cluster).
  * The answer is 200 with the new credential — **shown once** — for the

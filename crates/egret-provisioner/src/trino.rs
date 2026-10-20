@@ -5,8 +5,8 @@
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
 use crate::spec::{
-    EngineSpec, EngineStatus, KedaTrigger, PodStatus, ResourceGroup, ResourceGroups, RoleConfig,
-    SessionRule,
+    EngineSpec, EngineStatus, KedaTrigger, PodStatus, RangerRollout, ResourceGroup, ResourceGroups,
+    RoleConfig, SessionRule,
 };
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -459,12 +459,19 @@ pub fn trino_ranger_secret(spec: &EngineSpec) -> Option<Value> {
     let xml = rendered
         .get(TRINO_RANGER_SECURITY_XML)
         .expect("the renderer emits it");
-    Some(json!({
+    let mut secret = json!({
         "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
         "metadata": { "name": format!("{}-ranger-secret", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "stringData": { TRINO_RANGER_SECURITY_XML: xml }
-    }))
+    });
+    // Which credential this Secret now holds (its non-secret id), so a rollout
+    // probe can tell a later write of an OLDER credential (`crate::rollout`).
+    if let Some(id) = crate::rollout::ranger_credential_id(spec) {
+        secret["metadata"]["annotations"] =
+            json!({ crate::rollout::RANGER_CREDENTIAL_ANNOTATION: id });
+    }
+    Some(secret)
 }
 
 /// Project the resolved dockerconfigjson value (populated at provision from a
@@ -967,6 +974,14 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
     });
 
+    // Both roles run the Ranger plugin: name the credential their pods are
+    // rendered with (its non-secret id), so the rollout of THAT credential can
+    // be observed before the previous one is retired (`crate::rollout`).
+    if let Some(id) = crate::rollout::ranger_credential_id(spec) {
+        deployment["spec"]["template"]["metadata"]["annotations"]
+            [crate::rollout::RANGER_CREDENTIAL_ANNOTATION] = json!(id);
+    }
+
     // Cluster-wide Deployment-level fields (from spec.config).
     if let Some(strat) = &spec.config.deployment_strategy {
         let mut s = json!({ "type": strat.kind });
@@ -1263,6 +1278,26 @@ impl EngineProvisioner for TrinoProvisioner {
             pods: pod_status,
         })
     }
+    async fn ranger_rollout(
+        &self,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<RangerRollout> {
+        use crate::rollout::Workload;
+        crate::rollout::observe(
+            &*self.kube,
+            namespace,
+            &format!("{name}-ranger-secret"),
+            &[
+                Workload::Deployment(format!("{name}-coordinator")),
+                Workload::Deployment(format!("{name}-worker")),
+            ],
+            &format!("app.kubernetes.io/instance={name}"),
+            credential_id,
+        )
+        .await
+    }
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         // Re-apply everything; the recomputed checksum annotation rolls the pods
         // so Trino reloads the (static) config + catalogs.
@@ -1423,13 +1458,16 @@ mod tests {
         }
     }
 
+    const TEST_CREDENTIAL_ID: &str = "0b5ad7e2-0000-4000-8000-00000000c0de";
+
     fn bound(credential: Option<(&str, &str)>) -> RangerBinding {
         RangerBinding {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             credential: credential.map(|(u, p)| {
-                crate::ranger_config::RenderableCredential::new(u, p).expect("renderable")
+                crate::ranger_config::RenderableCredential::new(TEST_CREDENTIAL_ID, u, p)
+                    .expect("renderable")
             }),
         }
     }
@@ -2866,5 +2904,120 @@ mod tests {
             12,
             "the other 12 objects are deleted"
         );
+    }
+
+    // ── Task 6b: the rollout of ONE Ranger credential is observable ─────────
+
+    /// Every workload and the Secret name the credential they were rendered
+    /// with (its id, never its password); nothing does when unbound.
+    #[test]
+    fn both_roles_and_the_secret_name_the_rendered_credential() {
+        use crate::rollout::RANGER_CREDENTIAL_ANNOTATION as ANN;
+        let mut spec = sample_spec();
+        spec.ranger = Some(bound(Some(("engine-1", "Pw_secret"))));
+        for role in [Role::Coordinator, Role::Worker] {
+            let d = trino_deployment(&spec, role);
+            assert_eq!(
+                d["spec"]["template"]["metadata"]["annotations"][ANN],
+                TEST_CREDENTIAL_ID
+            );
+            assert!(!d.to_string().contains("Pw_secret"));
+        }
+        let secret = trino_ranger_secret(&spec).unwrap();
+        assert_eq!(secret["metadata"]["annotations"][ANN], TEST_CREDENTIAL_ID);
+
+        // Bound without a credential, or unbound: no annotation anywhere.
+        for ranger in [Some(bound(None)), None] {
+            let mut spec = sample_spec();
+            spec.ranger = ranger;
+            let d = trino_deployment(&spec, Role::Worker);
+            assert!(d["spec"]["template"]["metadata"]["annotations"]
+                .get(ANN)
+                .is_none());
+        }
+    }
+
+    /// The live cluster of a fully rolled Trino engine `demo` on `cred`.
+    fn rolled_trino(kube: &crate::kube_client::FakeKube, cred: &str) {
+        use crate::rollout::tests::{ready_pod, rolled_deployment, secret};
+        kube.set_live(secret("demo-ranger-secret", cred));
+        kube.set_live(rolled_deployment("demo-coordinator", cred));
+        kube.set_live(rolled_deployment("demo-worker", cred));
+        let labels = json!({ "app.kubernetes.io/instance": "demo" });
+        *kube.live_pods.lock().unwrap() = vec![
+            ready_pod("demo-coordinator-a", labels.clone(), cred),
+            ready_pod("demo-worker-a", labels.clone(), cred),
+            ready_pod("demo-worker-b", labels, cred),
+        ];
+    }
+
+    #[tokio::test]
+    async fn a_trino_rollout_is_complete_only_for_the_credential_it_rolled_out() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        rolled_trino(&kube, "c2");
+        assert_eq!(
+            p.ranger_rollout("egret-engines", "demo", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Complete
+        );
+        // An older rollout never answers for a newer credential.
+        rolled_trino(&kube, "c1");
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "demo", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_trino_worker_rollout_is_pending() {
+        use crate::kube_client::FakeKube;
+        use crate::rollout::tests::{ready_pod, rolled_deployment};
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        rolled_trino(&kube, "c2");
+        // The worker's new ReplicaSet has one of two pods; an old one still runs.
+        let mut worker = rolled_deployment("demo-worker", "c2");
+        worker["status"]["updatedReplicas"] = json!(1);
+        worker["status"]["replicas"] = json!(3);
+        kube.set_live(worker);
+        kube.live_pods.lock().unwrap().push(ready_pod(
+            "demo-worker-old",
+            json!({ "app.kubernetes.io/instance": "demo" }),
+            "c1",
+        ));
+        let RangerRollout::Pending(reason) = p
+            .ranger_rollout("egret-engines", "demo", "c2")
+            .await
+            .unwrap()
+        else {
+            panic!("a stalled rollout is not complete");
+        };
+        assert!(reason.contains("demo-worker"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_trino_rollout_with_a_workload_missing_or_a_failed_read_is_not_complete() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        rolled_trino(&kube, "c2");
+        kube.live.lock().unwrap().remove("Deployment/demo-worker");
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "demo", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
+        rolled_trino(&kube, "c2");
+        *kube.fail_reads.lock().unwrap() = Some("connection refused".into());
+        assert!(p
+            .ranger_rollout("egret-engines", "demo", "c2")
+            .await
+            .is_err());
     }
 }

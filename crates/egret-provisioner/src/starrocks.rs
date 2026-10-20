@@ -8,7 +8,8 @@
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
 use crate::spec::{
-    EngineSpec, EngineStatus, PodStatus, RoleResources, StarRocksPod, DEFAULT_FE_META_STORAGE_SIZE,
+    EngineSpec, EngineStatus, PodStatus, RangerRollout, RoleResources, StarRocksPod,
+    DEFAULT_FE_META_STORAGE_SIZE,
 };
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -225,12 +226,19 @@ pub fn starrocks_ranger_secret(spec: &EngineSpec) -> Option<Value> {
     let security_xml = rendered
         .get(RANGER_SECURITY_XML_KEY)
         .expect("the renderer emits it");
-    Some(json!({
+    let mut secret = json!({
         "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
         "metadata": { "name": format!("{}-ranger-secret", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "stringData": { RANGER_SECURITY_XML_KEY: security_xml }
-    }))
+    });
+    // Which credential this Secret now holds (its non-secret id), so a rollout
+    // probe can tell a later write of an OLDER credential (`crate::rollout`).
+    if let Some(id) = crate::rollout::ranger_credential_id(spec) {
+        secret["metadata"]["annotations"] =
+            json!({ crate::rollout::RANGER_CREDENTIAL_ANNOTATION: id });
+    }
+    Some(secret)
 }
 
 /// The FE TLS cert ConfigMap (`{name}-ssl-cm`). `None` unless the engine's
@@ -915,6 +923,12 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
         .as_object_mut()
         .expect("annotations is a JSON object")
         .insert(CONFIG_CHECKSUM_KEY.to_string(), json!(checksum));
+    // Only the FE runs the Ranger plugin: name the credential its pods are
+    // rendered with (its non-secret id), so the rollout of THAT credential can
+    // be observed before the previous one is retired (`crate::rollout`).
+    if let Some(id) = crate::rollout::ranger_credential_id(spec) {
+        fe_spec["annotations"][crate::rollout::RANGER_CREDENTIAL_ANNOTATION] = json!(id);
+    }
 
     json!({
         "apiVersion": "starrocks.com/v1", "kind": "StarRocksCluster",
@@ -1146,6 +1160,26 @@ impl EngineProvisioner for StarRocksProvisioner {
                 .await;
         }
         Ok(())
+    }
+    async fn ranger_rollout(
+        &self,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<RangerRollout> {
+        // The operator names the FE StatefulSet `{cluster}-fe` and labels its
+        // pods `app.starrocks.ownerreference/name={cluster}-fe` (see `status`).
+        // The CN runs no Ranger plugin, so it is not observed.
+        use crate::rollout::Workload;
+        crate::rollout::observe(
+            &*self.kube,
+            namespace,
+            &format!("{name}-ranger-secret"),
+            &[Workload::StatefulSet(format!("{name}-fe"))],
+            &format!("app.starrocks.ownerreference/name={name}-fe"),
+            credential_id,
+        )
+        .await
     }
     async fn status(&self, namespace: &str, name: &str) -> anyhow::Result<EngineStatus> {
         // The kube-starrocks operator owns the FE/CN pods and stamps
@@ -1590,6 +1624,8 @@ mod tests {
         assert!(cr["spec"]["starRocksFeSpec"].get("secrets").is_none());
     }
 
+    const TEST_CREDENTIAL_ID: &str = "0b5ad7e2-0000-4000-8000-00000000c0de";
+
     fn bound_sr(credential: Option<(&str, &str)>) -> EngineSpec {
         let mut spec = sample_sr_spec();
         spec.ranger = Some(RangerBinding {
@@ -1597,7 +1633,8 @@ mod tests {
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             credential: credential.map(|(u, p)| {
-                crate::ranger_config::RenderableCredential::new(u, p).expect("renderable")
+                crate::ranger_config::RenderableCredential::new(TEST_CREDENTIAL_ID, u, p)
+                    .expect("renderable")
             }),
         });
         spec
@@ -2702,5 +2739,97 @@ mod tests {
             deleted.is_empty(),
             "a failed update must not delete anything at all; deleted: {deleted:?}"
         );
+    }
+
+    // ── Task 6b: the rollout of ONE Ranger credential is observable ─────────
+
+    /// The FE (which runs the plugin) and the Secret name the credential they
+    /// were rendered with; the CN does not.
+    #[test]
+    fn the_fe_and_the_secret_name_the_rendered_credential() {
+        use crate::rollout::RANGER_CREDENTIAL_ANNOTATION as ANN;
+        let spec = bound_sr(Some(("engine-1", "Pw_secret")));
+        let cr = starrocks_cluster_cr(&spec);
+        assert_eq!(
+            cr["spec"]["starRocksFeSpec"]["annotations"][ANN],
+            TEST_CREDENTIAL_ID
+        );
+        assert!(cr["spec"]["starRocksCnSpec"]["annotations"]
+            .get(ANN)
+            .is_none());
+        let secret = starrocks_ranger_secret(&spec).unwrap();
+        assert_eq!(secret["metadata"]["annotations"][ANN], TEST_CREDENTIAL_ID);
+        let unbound = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(unbound["spec"]["starRocksFeSpec"]["annotations"]
+            .get(ANN)
+            .is_none());
+    }
+
+    fn fe_labels() -> Value {
+        json!({ "app.starrocks.ownerreference/name": "sr1-fe" })
+    }
+
+    /// The live cluster of a fully rolled StarRocks engine `sr1` on `cred`; its
+    /// CN pod still carries an OLD annotation, which must not matter.
+    fn rolled_sr(kube: &crate::kube_client::FakeKube, cred: &str) {
+        use crate::rollout::tests::{ready_pod, rolled_statefulset, secret};
+        kube.set_live(secret("sr1-ranger-secret", cred));
+        kube.set_live(rolled_statefulset("sr1-fe", cred));
+        *kube.live_pods.lock().unwrap() = vec![
+            ready_pod("sr1-fe-0", fe_labels(), cred),
+            ready_pod(
+                "sr1-cn-0",
+                json!({ "app.starrocks.ownerreference/name": "sr1-cn" }),
+                "an-old-one",
+            ),
+        ];
+    }
+
+    #[tokio::test]
+    async fn a_starrocks_rollout_is_observed_on_the_fe_only() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        rolled_sr(&kube, "c2");
+        assert_eq!(
+            p.ranger_rollout("egret-engines", "sr1", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Complete
+        );
+        // An older rollout never answers for a newer credential.
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "sr1", "c3")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_fe_rollout_is_pending_and_a_failed_read_is_an_error() {
+        use crate::kube_client::FakeKube;
+        use crate::rollout::tests::ready_pod;
+        let kube = Arc::new(FakeKube::default());
+        let p = StarRocksProvisioner::new(kube.clone());
+        rolled_sr(&kube, "c2");
+        // The operator has updated the StatefulSet, but the old FE pod is
+        // still the one running: two revisions.
+        let mut sts = crate::rollout::tests::rolled_statefulset("sr1-fe", "c2");
+        sts["status"]["currentRevision"] = json!("fe-old");
+        sts["status"]["updatedReplicas"] = json!(0);
+        kube.set_live(sts);
+        *kube.live_pods.lock().unwrap() = vec![ready_pod("sr1-fe-0", fe_labels(), "c1")];
+        assert!(matches!(
+            p.ranger_rollout("egret-engines", "sr1", "c2")
+                .await
+                .unwrap(),
+            RangerRollout::Pending(_)
+        ));
+        *kube.fail_reads.lock().unwrap() = Some("forbidden".into());
+        assert!(p
+            .ranger_rollout("egret-engines", "sr1", "c2")
+            .await
+            .is_err());
     }
 }

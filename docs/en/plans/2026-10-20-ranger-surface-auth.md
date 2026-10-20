@@ -534,7 +534,7 @@ pub struct DbVerifier { /* engine store + secrets */ }
 impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant time */ }
 ```
 
-**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate until the apply is accepted; the previous one is deleted (by exact id) once Kubernetes accepts the apply, which can be before the pods have finished rolling — never a prefix sweep (standing rule).
+**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
 
 - [ ] **Step 1: Migration**
 
@@ -542,7 +542,7 @@ impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant
 -- Per-engine Ranger plugin credential (spec 2026-10-20-ranger-surface-auth).
 -- `ranger_secret_id` is the password the engine's plugin presents now;
 -- `ranger_secret_prev_id` is the one it presented before the last rotation, kept
--- valid until a successful apply proves the pods rolled (never delete a secret
+-- valid until the rollout is observed complete (never delete a secret
 -- the cluster may still hold). Both name rows in the secret store; neither is
 -- a foreign key because the secret store is a separate seam.
 ALTER TABLE engine_mgmt.engines
@@ -725,7 +725,7 @@ add a pod volume `{ "name": "ranger-secret", "secret": { "secretName": "{name}-r
 
 Pods must roll when the Secret changes: add the Secret's content hash to the pod template annotation the way the ConfigMap's hash is added (find it with `grep -n "checksum\|config-hash" crates/egret-provisioner/src/*.rs`; if the ConfigMap has no such annotation, add `egret/ranger-secret-hash: <sha256 hex of the XML>` to both pod templates — without it a rotation would not restart the pods).
 
-Engine build/apply (`engines.rs`): in `build_provision_req_with`, for an engine bound to a profile, `let cred = ranger_credential::ensure(st, engine).await?` (or `rotate` when `BuildOpts.rotate_ranger_credential`), and put it in the spec. After a **successful** `apply_built`, call `ranger_credential::retire_previous(st, engine.id).await`. Add `rotate_ranger_credential: bool` to `BuildOpts` (default false).
+Engine build/apply (`engines.rs`): in `build_provision_req_with`, for an engine bound to a profile, `let cred = ranger_credential::ensure(st, engine).await?` (or `rotate` when `BuildOpts.rotate_ranger_credential`), and put it in the spec. ~~After a **successful** `apply_built`, call `ranger_credential::retire_previous(st, engine.id).await`.~~ Superseded by Task 6b (user decision 2026-10-20): nothing is retired after the apply; `ranger_credential::retire_previous_if_rolled_out` retires the previous credential once the provisioner observes the rollout of the current one complete (periodic sweep + engine reads). Add `rotate_ranger_credential: bool` to `BuildOpts` (default false).
 
 Rotation route (all provisioned engines, both types): `POST /engines/{id}/rotate-ranger-credential`, `engine:update`, 409 for external (Task 7 adds the external variant), 204 on success; mirrors `rotate_engine_secrets` (including the `deleting` guard and the `apply_conflict()` mapping). Register it in the router and the OpenAPI `paths(...)` list; then `npm run gen:api`.
 

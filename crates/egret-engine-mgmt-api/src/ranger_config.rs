@@ -77,20 +77,37 @@ fn check_renderable(username: &str, password: &str) -> Result<(), UnrenderableCr
 /// checked renderable ([`UnrenderableCredential`]) in every build: the only way
 /// to make one is [`RenderableCredential::new`], so the renderer can never be
 /// handed a value it would have to escape. Its `Debug` redacts the password.
+///
+/// It also carries the credential's `id`: an opaque, NON-secret name of this
+/// credential generation (egret uses the id of the secret that holds the
+/// password). The provisioners stamp it on the pod template and on the Secret
+/// they render the password into, so a rollout of THIS credential can be
+/// observed (spec 2026-10-20-ranger-surface-auth A10) — never the password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RenderableCredential {
+    id: String,
     username: String,
     password: String,
 }
 
 impl RenderableCredential {
     pub fn new(
+        id: impl Into<String>,
         username: impl Into<String>,
         password: impl Into<String>,
     ) -> Result<Self, UnrenderableCredential> {
-        let (username, password) = (username.into(), password.into());
+        let (id, username, password) = (id.into(), username.into(), password.into());
         check_renderable(&username, &password)?;
-        Ok(Self { username, password })
+        Ok(Self {
+            id,
+            username,
+            password,
+        })
+    }
+
+    /// The non-secret name of this credential generation.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn username(&self) -> &str {
@@ -102,7 +119,7 @@ impl RenderableCredential {
     }
 
     /// The borrowed form [`ranger_plugin_files`] takes.
-    pub fn as_ref(&self) -> PluginCredentialRef<'_> {
+    pub fn borrowed(&self) -> PluginCredentialRef<'_> {
         PluginCredentialRef {
             username: &self.username,
             password: &self.password,
@@ -113,6 +130,7 @@ impl RenderableCredential {
 impl std::fmt::Debug for RenderableCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderableCredential")
+            .field("id", &self.id)
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .finish()
@@ -120,7 +138,7 @@ impl std::fmt::Debug for RenderableCredential {
 }
 
 /// A borrowed, already-checked credential for [`ranger_plugin_files`]. Built by
-/// [`PluginCredentialRef::new`] (checked) or [`RenderableCredential::as_ref`].
+/// [`PluginCredentialRef::new`] (checked) or [`RenderableCredential::borrowed`].
 #[derive(Clone, Copy)]
 pub struct PluginCredentialRef<'a> {
     username: &'a str,
@@ -427,7 +445,7 @@ mod tests {
             ("engine--1", "pw", "username"),
         ] {
             assert_eq!(
-                RenderableCredential::new(u, p).unwrap_err(),
+                RenderableCredential::new("c1", u, p).unwrap_err(),
                 UnrenderableCredential { field },
                 "{u} / {p}"
             );
@@ -436,13 +454,16 @@ mod tests {
                 UnrenderableCredential { field }
             );
         }
-        let err = RenderableCredential::new("engine-1", "s3cr3t--x").unwrap_err();
+        let err = RenderableCredential::new("c1", "engine-1", "s3cr3t--x").unwrap_err();
         assert!(
             !err.to_string().contains("s3cr3t"),
             "no value in the message"
         );
-        let ok = RenderableCredential::new("engine-1", "a-b_c").unwrap();
-        assert_eq!((ok.username(), ok.password()), ("engine-1", "a-b_c"));
+        let ok = RenderableCredential::new("c1", "engine-1", "a-b_c").unwrap();
+        assert_eq!(
+            (ok.id(), ok.username(), ok.password()),
+            ("c1", "engine-1", "a-b_c")
+        );
         assert!(!format!("{ok:?}").contains("a-b_c"));
     }
 

@@ -9,9 +9,10 @@
 //! The database is shared with concurrently running tests, so every query here
 //! is scoped to the test's own engine id.
 
-use egret_engine_mgmt::ranger_credential::{DbVerifier, RangerCredentialStore};
+use egret_engine_mgmt::ranger_credential::{DbVerifier, RangerCredentialStore, RolloutRetire};
 use egret_engine_mgmt::{Engine, EngineMgmtStore};
 use egret_engine_mgmt_api::credential::{plugin_username, EngineCredentialVerifier};
+use egret_engine_mgmt_api::{EngineProvisioningPort, RangerRollout};
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -412,6 +413,7 @@ async fn concurrent_ensure_converges_on_one_credential() {
 #[test]
 fn the_debug_output_never_carries_the_password() {
     let c = egret_engine_mgmt::ranger_credential::PluginCredential {
+        id: Uuid::nil(),
         username: "engine-x".into(),
         password: "s3cr3t-value".into(),
     };
@@ -420,41 +422,281 @@ fn the_debug_output_never_carries_the_password() {
     assert!(!dbg.contains("s3cr3t-value"));
 }
 
-/// `retire_previous_rendered`'s KEEP branch: an apply that rendered a credential
-/// which is no longer current (a rotation committed a newer one after the apply
-/// was built) must not retire the previous slot — that slot may hold exactly
-/// what this apply just put on the cluster.
-#[tokio::test]
-async fn retiring_after_an_apply_of_a_superseded_credential_keeps_the_previous() {
-    let f = harness_or_skip!();
-    let e = seed_engine(&f).await;
-    let c1 = f.creds.ensure(&e).await.expect("ensure");
-    let c1_id = reload(&f, e.id).await.ranger_secret_id.unwrap();
+// ---- Task 6b: a provisioned engine's previous credential is retired only
+// once the rollout of the current one is OBSERVED complete ----
+
+/// A fake cluster for the rollout probe: the credential id every pod has
+/// fully rolled out with (`None`: nothing observed), or a probe failure.
+#[derive(Default)]
+struct FakeRollout {
+    rolled_out: std::sync::Mutex<Option<Uuid>>,
+    error: std::sync::Mutex<Option<String>>,
+    /// The credential id of every probe, in order.
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeRollout {
+    fn rolled_out(&self, id: Uuid) {
+        *self.rolled_out.lock().unwrap() = Some(id);
+    }
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EngineProvisioningPort for FakeRollout {
+    async fn provision(&self, _: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        Err("not in this test".into())
+    }
+    async fn status(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+        Err("not in this test".into())
+    }
+    async fn update(&self, _: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        Err("not in this test".into())
+    }
+    async fn delete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        Err("not in this test".into())
+    }
+    async fn restart(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        Err("not in this test".into())
+    }
+    async fn ranger_rollout(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        credential_id: &str,
+    ) -> Result<RangerRollout, String> {
+        self.asked.lock().unwrap().push(credential_id.to_string());
+        if let Some(e) = self.error.lock().unwrap().clone() {
+            return Err(e);
+        }
+        Ok(match *self.rolled_out.lock().unwrap() {
+            Some(id) if id.to_string() == credential_id => RangerRollout::Complete,
+            other => RangerRollout::Pending(format!("the pods run {other:?}")),
+        })
+    }
+}
+
+/// `ensure` c1 then `rotate` to c2: returns (c1 id, c1 password, c2 id).
+async fn rotated_once(f: &Fixture, e: &Engine) -> (Uuid, String, Uuid) {
+    let c1 = f.creds.ensure(e).await.expect("ensure");
     let c2 = f
         .creds
-        .rotate(&reload(&f, e.id).await)
+        .rotate(&reload(f, e.id).await)
         .await
         .expect("rotate");
-    assert_ne!(c1.password, c2.password);
-    let row = reload(&f, e.id).await;
-    assert_eq!(row.ranger_secret_prev_id, Some(c1_id));
+    let row = reload(f, e.id).await;
+    assert_eq!(row.ranger_secret_prev_id, Some(c1.id));
+    assert_eq!(row.ranger_secret_id, Some(c2.id));
+    (c1.id, c1.password, c2.id)
+}
 
-    // The apply that lands rendered c1, the now-previous credential.
-    f.creds.retire_previous_rendered(e.id, &c1.password).await;
+/// The previous credential is still there and still authenticates.
+async fn assert_kept(f: &Fixture, e: &Engine, prev: Uuid, prev_password: &str) {
+    assert_eq!(
+        reload(f, e.id).await.ranger_secret_prev_id,
+        Some(prev),
+        "previous kept"
+    );
+    assert!(ranger_secret_rows(f, e.id).await.contains(&prev));
+    assert!(verifies(f, e.id, prev_password).await);
+}
+
+/// A stalled rollout (the pods still run the old credential) keeps the
+/// previous one through any number of sweeps.
+#[tokio::test]
+async fn a_stalled_rollout_keeps_the_previous_through_every_sweep() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let (c1, p1, c2) = rotated_once(&f, &e).await;
+    let cluster = FakeRollout::default();
+    cluster.rolled_out(c1);
+
+    for _ in 0..3 {
+        let outcome = f
+            .creds
+            .retire_previous_if_rolled_out(&reload(&f, e.id).await, &cluster)
+            .await;
+        assert!(matches!(outcome, RolloutRetire::Kept(_)), "{outcome:?}");
+    }
+
+    assert_kept(&f, &e, c1, &p1).await;
+    assert_eq!(cluster.asked(), vec![c2.to_string(); 3], "asked about c2");
+}
+
+/// The completed rollout of the CURRENT credential retires the previous one,
+/// by its exact id, once.
+#[tokio::test]
+async fn a_completed_rollout_retires_the_previous_by_exact_id_once() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let (c1, p1, c2) = rotated_once(&f, &e).await;
+    let snapshot = reload(&f, e.id).await;
+    let cluster = FakeRollout::default();
+    cluster.rolled_out(c2);
+
+    let outcome = f
+        .creds
+        .retire_previous_if_rolled_out(&snapshot, &cluster)
+        .await;
+
+    assert_eq!(outcome, RolloutRetire::Retired(c1));
+    let row = reload(&f, e.id).await;
+    assert_eq!(row.ranger_secret_prev_id, None);
+    assert_eq!(row.ranger_secret_id, Some(c2));
+    assert_eq!(ranger_secret_rows(&f, e.id).await, vec![c2]);
+    assert!(!verifies(&f, e.id, &p1).await);
+
+    // Again, from the fresh row and from the stale snapshot: nothing more.
+    assert_eq!(
+        f.creds.retire_previous_if_rolled_out(&row, &cluster).await,
+        RolloutRetire::NothingPending
+    );
+    assert!(matches!(
+        f.creds
+            .retire_previous_if_rolled_out(&snapshot, &cluster)
+            .await,
+        RolloutRetire::Kept(_)
+    ));
+    assert_eq!(ranger_secret_rows(&f, e.id).await, vec![c2], "c2 untouched");
+}
+
+/// A rollout that completed for an OLDER credential never retires the
+/// previous credential of a newer rotation: c1 -> c2 (rolled out, c1 retired)
+/// -> c3 while the pods still run c2. Both the fresh row (the probe asks
+/// about c3) and a snapshot read before the rotation (the probe asks about c2,
+/// which IS rolled out, but the compare-and-set names the old pair) keep c2.
+#[tokio::test]
+async fn a_rollout_of_an_older_credential_never_retires_a_newer_rotations_previous() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let (_c1, _p1, c2) = rotated_once(&f, &e).await;
+    let cluster = FakeRollout::default();
+    cluster.rolled_out(c2);
+    let before_rotation = reload(&f, e.id).await;
+    // A first sweep retires c1; then c3 is rotated in.
+    assert!(matches!(
+        f.creds
+            .retire_previous_if_rolled_out(&before_rotation, &cluster)
+            .await,
+        RolloutRetire::Retired(_)
+    ));
+    f.creds
+        .rotate(&reload(&f, e.id).await)
+        .await
+        .expect("rotate to c3");
+    let row = reload(&f, e.id).await;
+    assert_eq!(row.ranger_secret_prev_id, Some(c2));
+    let c3 = row.ranger_secret_id.unwrap();
+
+    let fresh = f.creds.retire_previous_if_rolled_out(&row, &cluster).await;
+    assert!(matches!(fresh, RolloutRetire::Kept(_)), "{fresh:?}");
+    assert_eq!(cluster.asked().last(), Some(&c3.to_string()));
+
+    // The snapshot read before the rotation names c2 as current: the probe
+    // says c2 is rolled out, and still nothing may be retired.
+    let outcome = f
+        .creds
+        .retire_previous_if_rolled_out(&before_rotation, &cluster)
+        .await;
+    assert!(matches!(outcome, RolloutRetire::Kept(_)), "{outcome:?}");
 
     let after = reload(&f, e.id).await;
-    assert_eq!(after.ranger_secret_prev_id, Some(c1_id), "previous kept");
-    assert_eq!(after.ranger_secret_id, row.ranger_secret_id);
-    assert!(
-        ranger_secret_rows(&f, e.id).await.contains(&c1_id),
-        "the previous credential's secret still exists"
+    assert_eq!(
+        (after.ranger_secret_id, after.ranger_secret_prev_id),
+        (Some(c3), Some(c2))
     );
-    assert!(verifies(&f, e.id, &c1.password).await);
+    assert!(ranger_secret_rows(&f, e.id).await.contains(&c2));
+}
 
-    // Control: the apply that rendered the current one does retire it.
-    f.creds.retire_previous_rendered(e.id, &c2.password).await;
-    assert_eq!(reload(&f, e.id).await.ranger_secret_prev_id, None);
-    assert!(!ranger_secret_rows(&f, e.id).await.contains(&c1_id));
+/// A probe that fails keeps the previous credential.
+#[tokio::test]
+async fn a_failed_probe_keeps_the_previous() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let (c1, p1, c2) = rotated_once(&f, &e).await;
+    let cluster = FakeRollout::default();
+    cluster.rolled_out(c2);
+    *cluster.error.lock().unwrap() = Some("connection refused".into());
+
+    let outcome = f
+        .creds
+        .retire_previous_if_rolled_out(&reload(&f, e.id).await, &cluster)
+        .await;
+
+    assert!(matches!(outcome, RolloutRetire::Kept(_)), "{outcome:?}");
+    assert_kept(&f, &e, c1, &p1).await;
+}
+
+/// An engine row deleted between the read and the retire: no panic, and no
+/// delete beyond the engine-delete rules (the previous secret is not touched
+/// here; the engine delete's own sweep owns it).
+#[tokio::test]
+async fn an_engine_deleted_midway_retires_nothing() {
+    let f = harness_or_skip!();
+    let e = seed_engine(&f).await;
+    let (c1, _p1, c2) = rotated_once(&f, &e).await;
+    let snapshot = reload(&f, e.id).await;
+    f.store.delete_engine(e.id).await.expect("delete the row");
+    let cluster = FakeRollout::default();
+    cluster.rolled_out(c2);
+
+    let outcome = f
+        .creds
+        .retire_previous_if_rolled_out(&snapshot, &cluster)
+        .await;
+
+    assert!(matches!(outcome, RolloutRetire::Kept(_)), "{outcome:?}");
+    let rows = ranger_secret_rows(&f, e.id).await;
+    assert!(rows.contains(&c1) && rows.contains(&c2), "{rows:?}");
+}
+
+/// An external engine retires only on its operator's confirmation, and an
+/// engine being deleted is left to the delete: neither is even probed.
+#[tokio::test]
+async fn external_and_deleting_engines_are_never_probed() {
+    let f = harness_or_skip!();
+    for (column, sql) in [
+        (
+            "origin",
+            "UPDATE engine_mgmt.engines SET origin = 'external', external_host = 'sr.example', \
+             external_port = 9030, ranger_plugin_version = '2.8.0', namespace = '' \
+             WHERE id = $1",
+        ),
+        (
+            "status",
+            "UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1",
+        ),
+    ] {
+        let e = seed_engine(&f).await;
+        let (c1, p1, c2) = rotated_once(&f, &e).await;
+        sqlx::query(sql)
+            .bind(e.id)
+            .execute(&f.db.pool)
+            .await
+            .expect("mark the engine");
+        let cluster = FakeRollout::default();
+        cluster.rolled_out(c2);
+
+        let outcome = f
+            .creds
+            .retire_previous_if_rolled_out(&reload(&f, e.id).await, &cluster)
+            .await;
+
+        assert!(
+            matches!(outcome, RolloutRetire::Kept(_)),
+            "{column}: {outcome:?}"
+        );
+        assert!(cluster.asked().is_empty(), "{column}: never probed");
+        assert_kept(&f, &e, c1, &p1).await;
+    }
 }
 
 // ---- external engines (Task 7): rotate without an apply, retire on the
@@ -511,10 +753,11 @@ async fn an_external_rotation_while_pending_names_the_retire_route() {
         }
         other => panic!("expected a 409 Conflict, got {other:?}"),
     }
-    // The provisioned wording stays about the apply.
+    // The provisioned wording is about the rollout (Task 6b), not the apply.
     match f.creds.rotate(&reload(&f, e.id).await).await {
         Err(egret_engine_mgmt::EngineHttpError::Conflict(msg)) => {
-            assert!(msg.contains("apply"), "{msg}")
+            assert!(msg.contains("rolled out"), "{msg}");
+            assert!(!msg.contains("apply"), "{msg}");
         }
         other => panic!("expected a 409 Conflict, got {other:?}"),
     }

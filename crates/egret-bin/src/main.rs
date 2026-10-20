@@ -782,6 +782,19 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
             .map_err(|e| e.to_string())
     }
 
+    async fn ranger_rollout(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<egret_engine_mgmt_api::RangerRollout, String> {
+        self.for_kind(kind)
+            .ranger_rollout(namespace, name, credential_id)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
         if kind == "starrocks" {
             // StarRocks pods are owned by the kube-starrocks operator (not plain
@@ -2356,6 +2369,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let (seeded, failed) =
             egret_engine_mgmt::seed_user_baselines_for_existing_engines(st).await;
         tracing::info!(seeded, failed, "per-user Ranger baseline pass");
+    }
+
+    // Spec 2026-10-20-ranger-surface-auth A10 (Task 6b): a provisioned engine's
+    // previous Ranger credential is retired only once the rollout of the
+    // current one is OBSERVED complete. This sweep is what observes it (a read
+    // of the engine does too). On every replica: the retire is a
+    // compare-and-set, so two replicas retire a credential once. Stops with
+    // the other background loops.
+    {
+        let st = engine_mgmt
+            .as_ref()
+            .expect("engine-mgmt state is built just above")
+            .clone();
+        egret_engine_mgmt::ranger_credential::spawn_ranger_retire_sweeper(
+            st,
+            egret_engine_mgmt::ranger_credential::RANGER_RETIRE_SWEEP_INTERVAL,
+            reaper_cancel.clone().cancelled_owned(),
+        );
     }
 
     // Control plane: global platform-admin Storage + Secrets + Access console.

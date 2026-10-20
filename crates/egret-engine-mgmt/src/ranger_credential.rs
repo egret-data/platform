@@ -13,18 +13,41 @@
 //!   rotation.
 //!
 //! **Both verify.** A rotation commits the new current and demotes the old one
-//! to previous BEFORE the apply that renders it, so both authenticate until that
-//! apply is accepted. The previous one is deleted by its exact id once
-//! Kubernetes ACCEPTS an apply that rendered the current one
-//! ([`RangerCredentialStore::retire_previous_rendered`]) — which can be before
-//! the pods have finished rolling, so a pod still running with the old password
-//! can be refused until it is replaced. Never by
-//! a prefix sweep (that happens only at engine delete, when no apply can still
-//! be in flight). A rotation is REFUSED while the previous credential is still
-//! pending retirement, so nothing ever pushes a credential the cluster may hold
-//! out of the two-slot window.
-//! This is the standing rule: never delete a secret value the cluster may still
-//! hold.
+//! to previous BEFORE the apply that renders it, so both authenticate while the
+//! engine's pods roll.
+//!
+//! **The previous one is retired only once the rollout is OBSERVED complete**,
+//! never when Kubernetes merely accepts the apply: until then a pod of the old
+//! template still holds the old password in its mounted copy of the Secret, and
+//! deleting it would stop that pod's policy downloads (revocations and masks
+//! would silently stop applying). Every apply stamps the current credential's
+//! id on the pod templates and on the Secret (`egret_provisioner::rollout`);
+//! [`RangerCredentialStore::retire_previous_if_rolled_out`] asks the
+//! provisioner whether the pods have rolled out with THAT id, and only then
+//! retires the previous one, by its exact id, in one compare-and-set on both
+//! columns (current = the id the rollout was observed for, previous = the id
+//! read). A rollout observed for an older credential therefore never retires
+//! the previous one of a newer rotation. It runs on a periodic sweep
+//! ([`spawn_ranger_retire_sweeper`]) and on every read of the engine; anything
+//! absent, unknown, partial or failing keeps the previous credential.
+//!
+//! Never by a prefix sweep (that happens only at engine delete). A rotation is
+//! REFUSED while the previous credential is still pending retirement, so
+//! nothing ever pushes a credential the cluster may hold out of the two-slot
+//! window. This is the standing rule: never delete a secret value the cluster
+//! may still hold.
+//!
+//! **A known dead end, left to an operator.** A row whose CURRENT credential
+//! cannot be rendered (only one minted before the renderer's check existed can
+//! be: `mint_password` re-draws a `--`) AND whose previous one is pending is
+//! stuck: every apply is refused (409, unrenderable), so the rollout of the
+//! current one never completes, and a rotation is refused (409, pending). egret
+//! does not break it by overwriting the previous slot: whether the cluster
+//! still holds that credential depends on the engine's history, which the row
+//! does not record, so it cannot be proved safe. Such rows exist only in
+//! development databases. To recover, an operator who has checked that no pod
+//! still runs the previous credential clears `ranger_secret_prev_id` and
+//! deletes that secret by hand (or deletes the engine).
 //!
 //! Unlike the Trino-only internal/monitor pair (`rotate_engine_secrets`), this
 //! credential exists for every engine kind, StarRocks included.
@@ -32,6 +55,7 @@
 use egret_engine_mgmt_api::credential::{
     plugin_username, EngineCredentialVerifier, EngineIdentity,
 };
+use egret_engine_mgmt_api::{EngineProvisioningPort, RangerRollout};
 use egret_secrets::{SecretsError, WorkspaceSecretStore};
 use uuid::Uuid;
 
@@ -43,7 +67,8 @@ const ENSURE_ATTEMPTS: usize = 3;
 /// The 409 a provisioned engine's rotation gets while the previous credential
 /// is still pending.
 const ROTATION_PENDING: &str = "a ranger credential rotation is pending: the previous credential \
-     has not been retired by a successful apply yet";
+     stays valid until the engine's pods are observed to have rolled out with the current one; \
+     retry once that rollout has completed";
 
 /// The 409 an external engine's rotation gets while the previous credential is
 /// still pending: only the operator can say the new one is installed.
@@ -96,6 +121,9 @@ pub(crate) fn mint_password() -> String {
 /// The credential to render into an engine's plugin config.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PluginCredential {
+    /// The id of the secret that holds the password: the non-secret name of
+    /// this credential generation, stamped on the pods it is rendered into.
+    pub id: Uuid,
     pub username: String,
     pub password: String,
 }
@@ -103,6 +131,7 @@ pub struct PluginCredential {
 impl std::fmt::Debug for PluginCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PluginCredential")
+            .field("id", &self.id)
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .finish()
@@ -152,8 +181,9 @@ impl RangerCredentialStore {
     /// return the new one.
     ///
     /// **Refused (409) while a rotation is pending**, i.e. while the row names a
-    /// previous credential whose secret still exists: a successful apply has not
-    /// retired it yet, so the cluster may still hold it, and a second rotation
+    /// previous credential whose secret still exists: the rollout of the
+    /// current one has not been observed complete yet, so the cluster may
+    /// still hold the previous one, and a second rotation
     /// would have to drop it from the two-slot window. A previous id whose
     /// secret is already gone (dangling) is simply overwritten.
     ///
@@ -208,10 +238,11 @@ impl RangerCredentialStore {
         }
     }
 
-    /// After a successful apply: delete the previous credential's secret and
-    /// clear its column. Failures are logged, never returned — the apply has
-    /// already succeeded, and an unretired previous credential only stays valid
-    /// a little longer.
+    /// Delete the previous credential's secret and clear its column,
+    /// UNCONDITIONALLY — whatever the cluster holds. No route or sweep calls
+    /// it: a provisioned engine retires through
+    /// [`Self::retire_previous_if_rolled_out`], an external one through
+    /// [`Self::retire_previous_confirmed`]. Failures are logged, never returned.
     pub async fn retire_previous(&self, engine_id: Uuid) {
         let prev = match self.store.get_engine(engine_id).await {
             Ok(Some(e)) => e.ranger_secret_prev_id,
@@ -227,36 +258,84 @@ impl RangerCredentialStore {
         }
     }
 
-    /// After a successful apply that rendered `rendered` (a password): retire
-    /// the previous credential, but ONLY while the row's current credential is
-    /// still the one that apply rendered. If a rotation committed a newer
-    /// current after this apply was built, this apply put an older credential
-    /// on the cluster — the one now in the previous slot, possibly — so
-    /// nothing is retired; the apply that renders the newer one will.
-    /// Failures are logged, never returned (see [`Self::retire_previous`]).
-    pub async fn retire_previous_rendered(&self, engine_id: Uuid, rendered: &str) {
-        let row = match self.store.get_engine(engine_id).await {
-            Ok(Some(e)) => e,
-            Ok(None) => return,
-            Err(err) => {
-                tracing::warn!(%engine_id, error = %err,
-                    "could not read the engine to retire its previous ranger credential");
-                return;
-            }
+    /// Retire a PROVISIONED engine's previous credential once the rollout of
+    /// its current one is observed complete (module doc; spec A10).
+    ///
+    /// `engine` is the row as last read. The provisioner is asked whether the
+    /// pods run the credential the row names as current — by its id, which the
+    /// apply stamped on the pod templates — and only on
+    /// [`RangerRollout::Complete`] is the previous one retired: by its exact
+    /// id, in one compare-and-set on BOTH columns, so a row that changed since
+    /// it was read (a later rotation, an engine delete) retires nothing. The
+    /// secret is deleted only when that clear won.
+    ///
+    /// Fails closed: an external engine (only its operator's confirmation
+    /// retires), an engine being deleted (the engine delete owns its
+    /// credentials), a row with no current credential, a pending rollout and a
+    /// failed probe all keep the previous credential. Never returns an error
+    /// and never panics: a background sweep and a read call it.
+    pub async fn retire_previous_if_rolled_out(
+        &self,
+        engine: &Engine,
+        port: &dyn EngineProvisioningPort,
+    ) -> RolloutRetire {
+        let Some(prev) = engine.ranger_secret_prev_id else {
+            return RolloutRetire::NothingPending;
         };
-        let Some(prev) = row.ranger_secret_prev_id else {
-            return;
-        };
-        match self.resolve_current(&row).await {
-            Ok(Some(current)) if current.password == rendered => {
-                self.retire_previous_if(engine_id, prev).await;
-            }
-            Ok(_) => tracing::info!(%engine_id,
-                "the apply rendered a ranger credential that is no longer current; \
-                 the previous one is kept for the apply that renders the current one"),
-            Err(err) => tracing::warn!(%engine_id, error = %err,
-                "could not read the current ranger credential; the previous one is kept"),
+        if crate::external::is_external(engine) {
+            return RolloutRetire::Kept(
+                "external engine: only its operator's confirmation retires the previous \
+                 credential"
+                    .into(),
+            );
         }
+        if engine.status == crate::engine_status::DELETING {
+            return RolloutRetire::Kept("the engine is being deleted".into());
+        }
+        let Some(current) = engine.ranger_secret_id else {
+            return RolloutRetire::Kept("the engine names no current credential".into());
+        };
+        match port
+            .ranger_rollout(
+                &engine.r#type,
+                &engine.namespace,
+                &engine.name,
+                &current.to_string(),
+            )
+            .await
+        {
+            Ok(RangerRollout::Complete) => {}
+            Ok(RangerRollout::Pending(reason)) => return RolloutRetire::Kept(reason),
+            Err(err) => {
+                tracing::warn!(engine = %engine.name, error = %err,
+                    "could not observe the ranger credential rollout; the previous credential \
+                     is kept");
+                return RolloutRetire::Kept(format!("rollout probe failed: {err}"));
+            }
+        }
+        match self
+            .store
+            .clear_ranger_prev_if_current(engine.id, current, prev)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return RolloutRetire::Kept("the engine's credentials changed concurrently".into())
+            }
+            Err(err) => {
+                tracing::warn!(engine = %engine.name, error = %err,
+                    "could not clear the previous ranger credential");
+                return RolloutRetire::Kept(format!("could not clear it: {err}"));
+            }
+        }
+        match self.secrets.delete(None, prev).await {
+            Ok(()) | Err(SecretsError::NotFound) => {}
+            Err(err) => tracing::warn!(engine = %engine.name, secret_id = %prev, error = %err,
+                "could not delete a retired ranger credential; the engine-delete sweep will"),
+        }
+        tracing::info!(engine = %engine.name, secret_id = %prev,
+            "the rollout of the current ranger credential is complete; the previous one is retired");
+        RolloutRetire::Retired(prev)
     }
 
     /// The compare-and-set half of [`Self::retire_previous`]: clear the column
@@ -284,6 +363,7 @@ impl RangerCredentialStore {
         };
         match self.secrets.resolve_plaintext(None, id).await {
             Ok(password) => Ok(Some(PluginCredential {
+                id,
                 username: plugin_username(engine.id),
                 password,
             })),
@@ -353,6 +433,7 @@ impl RangerCredentialStore {
         Ok(Some((
             new_id,
             PluginCredential {
+                id: new_id,
                 username: plugin_username(engine.id),
                 password,
             },
@@ -382,6 +463,7 @@ impl RangerCredentialStore {
         Ok((
             id,
             PluginCredential {
+                id,
                 username: plugin_username(engine_id),
                 password,
             },
@@ -449,18 +531,73 @@ pub async fn rotate(st: &CpState, engine: &Engine) -> Result<PluginCredential, C
     RangerCredentialStore::from_state(st).rotate(engine).await
 }
 
-/// [`RangerCredentialStore::retire_previous`] on the seam's state.
-pub async fn retire_previous(st: &CpState, engine_id: Uuid) {
-    RangerCredentialStore::from_state(st)
-        .retire_previous(engine_id)
-        .await
+/// What [`RangerCredentialStore::retire_previous_if_rolled_out`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RolloutRetire {
+    /// The engine has no previous credential.
+    NothingPending,
+    /// The previous credential, this id, was retired.
+    Retired(Uuid),
+    /// The previous credential is kept, for this reason.
+    Kept(String),
 }
 
-/// [`RangerCredentialStore::retire_previous_rendered`] on the seam's state.
-pub async fn retire_previous_rendered(st: &CpState, engine_id: Uuid, rendered: &str) {
-    RangerCredentialStore::from_state(st)
-        .retire_previous_rendered(engine_id, rendered)
-        .await
+/// How often [`spawn_ranger_retire_sweeper`] looks at the engines whose
+/// previous credential is pending.
+pub const RANGER_RETIRE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One pass of the sweep: every provisioned engine whose previous credential is
+/// pending gets [`RangerCredentialStore::retire_previous_if_rolled_out`].
+/// Returns how many were retired. Every replica may run it: the retire is a
+/// compare-and-set, so two passes over one engine retire it once.
+pub async fn retire_rolled_out_previous_credentials(st: &CpState) -> usize {
+    let Some(port) = st.engine_provisioner.as_ref() else {
+        return 0;
+    };
+    let engines = match st.engine_mgmt.list_engines().await {
+        Ok(engines) => engines,
+        Err(err) => {
+            tracing::warn!(error = %err,
+                "could not list the engines to retire previous ranger credentials");
+            return 0;
+        }
+    };
+    let creds = RangerCredentialStore::from_state(st);
+    let mut retired = 0;
+    for engine in engines.iter().filter(|e| e.ranger_secret_prev_id.is_some()) {
+        match creds
+            .retire_previous_if_rolled_out(engine, port.as_ref())
+            .await
+        {
+            RolloutRetire::Retired(_) => retired += 1,
+            RolloutRetire::Kept(reason) => tracing::debug!(engine = %engine.name, %reason,
+                "the previous ranger credential is kept: rollout not observed complete"),
+            RolloutRetire::NothingPending => {}
+        }
+    }
+    retired
+}
+
+/// Run [`retire_rolled_out_previous_credentials`] every `period` until
+/// `shutdown` resolves. A pass longer than the period does not cause a burst.
+pub fn spawn_ranger_retire_sweeper(
+    st: CpState,
+    period: std::time::Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::pin!(shutdown);
+        let mut tick = tokio::time::interval(period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = tick.tick() => {
+                    retire_rolled_out_previous_credentials(&st).await;
+                }
+            }
+        }
+    })
 }
 
 /// The verifier the `/ranger` surface consults: accepts the current OR the
