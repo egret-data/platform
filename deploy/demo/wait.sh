@@ -9,7 +9,8 @@ set -a; . deploy/demo/demo.env; set +a
 URL="http://${DEMO_HOST}:${DEMO_PORT}"
 echo -n "waiting for $URL "
 for _ in $(seq 1 180); do
-  if curl -fsS -o /dev/null "$URL/api/auth/config" 2>/dev/null || curl -fsS -o /dev/null "$URL/" 2>/dev/null; then
+  # /api/auth/config is answered by egret itself (through edge and frontend); / alone is served by nginx.
+  if curl -fsS -m 5 -o /dev/null "$URL/api/auth/config" 2>/dev/null; then
     echo " ready"
     cat <<EOT
 
