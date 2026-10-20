@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { Compass, Feather, LogOut, Moon, Settings, ShieldCheck, Sun } from "lucide-react";
+import { Compass, LogOut, Moon, Settings, ShieldCheck, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -77,9 +77,7 @@ export function Header() {
       }`}
     >
       <Link to="/" className="flex shrink-0 items-center gap-2">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-          <Feather className="h-4 w-4" />
-        </span>
+        <img src="/favicon.svg" alt={narrow ? "Egret" : ""} className="h-8 w-8 rounded-lg shadow-sm" />
         {/* The mark alone still identifies the app; the wordmark is the cheapest 55px to give
             back, and it is the only element here with no function of its own. */}
         {!narrow && <span className="text-base font-semibold tracking-tight">Egret</span>}
