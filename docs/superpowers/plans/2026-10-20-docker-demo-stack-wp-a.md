@@ -18,6 +18,7 @@ Spec: `docs/superpowers/specs/2026-10-20-docker-demo-stack-design.md` (WP-A). WP
 - Do not edit product source (`crates/`, `frontend/src`); only `deploy/`, `justfile`, `.env.example`, `docs/`, `README.md`.
 - Conventional Commits; commit messages end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`; `Closes #N` only in the PR description.
 - The repo rule: the PR updates the docs in `egret-data/docs` (Platform section) or says in the PR body which follow-up PR does; tick the Docs box in the PR template.
+- **Testing port.** This machine already runs another service on :8080, so while developing run compose with `DEMO_PORT=18080 DEMO_URL=http://egret.localtest.me:18080` exported in the shell (shell variables override `--env-file`). Never commit those values; `deploy/demo/demo.env` keeps 8080. Mailpit's UI port 8025 and no other host port are published. Do not stop or touch the running containers named `egret-dev-*`, `dgcl-*`, `egretdocs-*`.
 - Browser URL for everything is `http://egret.localtest.me:${DEMO_PORT:-8080}` (`*.localtest.me` resolves to 127.0.0.1 through public DNS; offline machines add `127.0.0.1 egret.localtest.me` to `/etc/hosts`).
 - Fixed values used throughout (public dev values):
   - `EGRET_SECRETS__MASTER_KEY=q1IaZ2X7N3i/um/U/aJ2lsmVrRE5pTZChAVG9ezDKPw=`
@@ -420,7 +421,6 @@ map $http_upgrade $connection_upgrade {
 
   edge:
     image: nginx:1.27-alpine
-    <<: *demo-env
     depends_on:
       frontend: { condition: service_started }
       keycloak: { condition: service_healthy }
@@ -428,6 +428,8 @@ map $http_upgrade $connection_upgrade {
       - "${DEMO_PORT:-8080}:${DEMO_PORT:-8080}"
     environment:
       NGINX_ENVSUBST_FILTER: ^DEMO_
+      # Interpolated, not env_file: a shell override such as DEMO_PORT=18080 must reach the container too.
+      DEMO_PORT: ${DEMO_PORT:-8080}
     volumes:
       - ./demo/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
