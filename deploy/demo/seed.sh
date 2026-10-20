@@ -46,15 +46,16 @@ else echo "dataset orders exists"; fi
 
 # 3. Charts and dashboard
 spec() { echo "{\"metrics\":$1,\"dimensions\":$2,\"columns\":[],\"filters\":[],\"orderby\":$3,\"row_limit\":1000,\"rollup_groups\":[]$4}"; }
-chart() { # chart <name> <viz> <spec-json>
-  local c; c=$(find_id "/api/ws/$WS/charts" "$1")
+chart() { # chart <name> <viz> <spec-json> [settings-json]  (cartesian kinds need cartesian.xAxis/yMetrics in settings)
+  local c st='{}'; [ -z "${4:-}" ] || st=$4
+  c=$(find_id "/api/ws/$WS/charts" "$1")
   if [ -z "$c" ]; then
-    c=$(call POST "/api/ws/$WS/charts" "{\"dataset_id\":\"$DS\",\"name\":\"$1\",\"viz_type\":\"$2\",\"params\":{\"version\":2,\"settings\":{},\"spec\":$3}}" | id)
+    c=$(call POST "/api/ws/$WS/charts" "{\"dataset_id\":\"$DS\",\"name\":\"$1\",\"viz_type\":\"$2\",\"params\":{\"version\":2,\"settings\":$st,\"spec\":$3}}" | id)
   fi
   echo "$c"
 }
-BAR=$(chart "Revenue by order status" bar "$(spec '["revenue"]' '["orderstatus"]' '[]' '')")
-LINE=$(chart "Revenue by month" line "$(spec '["revenue"]' '["orderdate"]' '[{"field":"orderdate","desc":false}]' ',"temporal_units":{"orderdate":"month"}')")
+BAR=$(chart "Revenue by order status" bar "$(spec '["revenue"]' '["orderstatus"]' '[]' '')" '{"cartesian.xAxis":"orderstatus","cartesian.yMetrics":["revenue"]}')
+LINE=$(chart "Revenue by month" line "$(spec '["revenue"]' '["orderdate"]' '[{"field":"orderdate","desc":false}]' ',"temporal_units":{"orderdate":"month"}')" '{"cartesian.xAxis":"orderdate","cartesian.yMetrics":["revenue"]}')
 TBL=$(chart "Orders by priority" table "$(spec '["order_count"]' '["orderpriority"]' '[]' '')")
 
 DASH=$(find_id "/api/ws/$WS/dashboards" "Sales overview")

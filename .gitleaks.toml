@@ -18,4 +18,6 @@ paths = [
   '''plugin-host/src/test/''',
   '''crates/egret-engine-mgmt/src/engines\.rs''',
   '''crates/egret-config/src/lib\.rs''',
+  # Docker demo stack: fixed, documented, PUBLIC development values (see docs/en/guides/demo-stack.md).
+  '''deploy/demo/demo\.env$''',
 ]
