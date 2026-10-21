@@ -7,7 +7,8 @@ const downloadCsv = vi.fn();
 const downloadJson = vi.fn();
 const downloadPng = vi.fn((..._a: unknown[]) => Promise.resolve());
 const downloadXlsx = vi.fn((..._a: unknown[]) => Promise.resolve());
-vi.mock("../export-chart", () => ({
+vi.mock("../export-chart", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../export-chart")>()),
   downloadCsv: (...a: unknown[]) => downloadCsv(...a),
   downloadJson: (...a: unknown[]) => downloadJson(...a),
   downloadPng: (...a: unknown[]) => downloadPng(...a),
@@ -15,16 +16,23 @@ vi.mock("../export-chart", () => ({
 vi.mock("../export-xlsx", () => ({ downloadXlsx: (...a: unknown[]) => downloadXlsx(...a) }));
 
 import { ChartExportMenu } from "../ChartExportMenu";
+import { MAX_CHART_ROWS } from "@/api/charts";
+
+/** The note's text, derived from the one constant the chart query is capped by (KI-049, KI-072). */
+const LIMIT_NOTE = `The maximum download size is ${MAX_CHART_ROWS.toLocaleString()} rows.`;
 
 const columns = [{ name: "a", type: "x" }];
 const rows = [["1"]];
 
-function Harness({ withSvg, disabled, columnSettings }: { withSvg: boolean; disabled?: boolean; columnSettings?: Record<string, { column_title?: string }> }) {
+function Harness({ withSvg, withIcon, disabled, columnSettings }: { withSvg: boolean; withIcon?: boolean; disabled?: boolean; columnSettings?: Record<string, { column_title?: string }> }) {
   const ref = useRef<HTMLDivElement>(null);
   return (
     <div>
       <div ref={ref} data-testid="container">
-        {withSvg ? <svg data-testid="thesvg" /> : <span>table</span>}
+        {/* An icon <svg> first, as the Object detail's pager arrows are: it must never be what
+            `.png` finds. */}
+        {withIcon && <svg data-testid="icon" className="lucide" />}
+        {withSvg ? <div data-chart-image=""><svg data-testid="thesvg" /></div> : <span>table</span>}
       </div>
       <ChartExportMenu title="My Chart" columns={columns} rows={rows} containerRef={ref} disabled={disabled} columnSettings={columnSettings} />
     </div>
@@ -57,10 +65,22 @@ describe("ChartExportMenu", () => {
     expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual([".csv", ".xlsx", ".json", ".png"]);
   });
 
-  it("carries Metabase's formatting checkbox, default on, and its row-limit note", async () => {
+  // KI-043: Object detail renders no chart, only pager-arrow icons, and `.png` used to export one.
+  it("does not offer .png when the only <svg> in the card is an icon", async () => {
+    const user = userEvent.setup();
+    render(<Harness withSvg={false} withIcon />);
+    await user.click(screen.getByRole("button", { name: /export chart/i }));
+    await screen.findByText("Download data");
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual([".csv", ".xlsx", ".json"]);
+  });
+
+  it("carries Metabase's formatting checkbox, default on, and the chart's real row limit", async () => {
+    // KI-049/KI-072: the file is built from the rows the card loaded, which a chart query caps at
+    // MAX_CHART_ROWS — the popover used to promise Metabase's 1 million.
     await open(false);
     expect(screen.getByLabelText("keep the data formatted")).toBeChecked();
-    expect(screen.getByText("The maximum download size is 1 million rows.")).toBeInTheDocument();
+    expect(screen.getByText(LIMIT_NOTE)).toBeInTheDocument();
+    expect(LIMIT_NOTE).toBe("The maximum download size is 10,000 rows.");
   });
 
   it("hides the formatting checkbox and the row-limit note for .png", async () => {
@@ -68,7 +88,7 @@ describe("ChartExportMenu", () => {
     const user = await open(true);
     await user.click(screen.getByRole("radio", { name: ".png" }));
     expect(screen.queryByLabelText("keep the data formatted")).toBeNull();
-    expect(screen.queryByText("The maximum download size is 1 million rows.")).toBeNull();
+    expect(screen.queryByText(LIMIT_NOTE)).toBeNull();
   });
 
   it("downloads CSV with the formatting flag on by default", async () => {
@@ -99,8 +119,11 @@ describe("ChartExportMenu", () => {
     expect(downloadJson).toHaveBeenCalledWith("My Chart", columns, rows, undefined, true);
   });
 
-  it("downloads PNG from the container's svg, not from the whole tile", async () => {
-    const user = await open(true);
+  it("downloads PNG from the chart image, not from an icon before it", async () => {
+    const user = userEvent.setup();
+    render(<Harness withSvg withIcon />);
+    await user.click(screen.getByRole("button", { name: /export chart/i }));
+    await screen.findByText("Download data");
     await user.click(screen.getByRole("radio", { name: ".png" }));
     await user.click(screen.getByRole("button", { name: "Download" }));
     expect(downloadPng).toHaveBeenCalledWith("My Chart", screen.getByTestId("thesvg"));

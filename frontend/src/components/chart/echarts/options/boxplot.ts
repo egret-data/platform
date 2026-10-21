@@ -9,8 +9,9 @@ import {
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
 import { sortCategories } from "./cartesian";
 import {
-  CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor, fadeColor, scaleLightness,
+  CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor, resolveFontFamily, fadeColor, scaleLightness,
 } from "../palette";
+import { measureText } from "../../measure-text";
 
 export interface ResultColumn { name: string; type: string }
 
@@ -107,6 +108,26 @@ const MEAN_DARKEN = 0.3;            // MEAN_COLOR_DARKEN_FACTOR
 const NON_OUTLIER_ALPHA = 0.6;      // NON_OUTLIER_OPACITY, for "All points"
 const MIN_BOX_WIDTH = 3;            // BOXPLOT_MIN_BOX_WIDTH
 const MAX_BOX_WIDTH = 60;           // BOXPLOT_MAX_BOX_WIDTH
+/** How far a value label sits from its box's centre line — see the labels' own note below. */
+const LABEL_DISTANCE = MAX_BOX_WIDTH / 2 + 4;
+
+/**
+ * The extra right inset the last box's value labels need, in px — 0 when they already fit inside
+ * the plot's half band plus the grid's own right margin.
+ *
+ * The last box is centred half a band (`plotWidth / categories / 2`) from the plot's right edge, and
+ * its label ends `distance + labelWidth` right of that centre. Whatever runs past the band and the
+ * margin is clipped. Reserving `extra` also narrows the plot by `extra`, which moves the centre left
+ * by `extra / (2 * categories)`, so the inset is solved for rather than taken from the first guess:
+ * `distance + labelWidth - (plotWidth - extra) / 2n <= gridRight + extra`.
+ */
+export function labelOverhangRight({ labelWidth, distance, plotWidth, categories, gridRight }: {
+  labelWidth: number; distance: number; plotWidth: number; categories: number; gridRight: number;
+}): number {
+  if (categories <= 0 || labelWidth <= 0 || plotWidth <= 0) return 0;
+  const over = distance + labelWidth - plotWidth / (2 * categories) - gridRight;
+  return over > 0 ? Math.ceil(over / (1 - 1 / (2 * categories))) : 0;
+}
 const MEAN_SYMBOL_SIZE = CHART_THEME.symbolSize + 2; // MEAN_SYMBOL_SIZE_OFFSET
 
 /** Linear-interpolation quantile over a pre-sorted array — Metabase's `getQuantile`. */
@@ -384,11 +405,40 @@ export function buildBoxplotOption(
   const categoryBand = categoryGutter != null && fit?.kind !== "hide"
     ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
     : 0;
+  /**
+   * ROOM FOR THE LAST BOX'S VALUE LABELS (KI-165). They are drawn to the RIGHT of each box, at
+   * `LABEL_DISTANCE` from its centre line, and `containLabel` reserves room for axis labels only —
+   * so on the last box a label wider than the space between that box and the card edge was clipped
+   * ("31.6" for "31.6K"). Measured, like the x-label fit: the strings this builder will draw there,
+   * in the bold label font, against the plot width the fit above estimates. No measurement (jsdom,
+   * an unlaid-out card) reserves nothing, the old behaviour.
+   */
+  const lastStats = stats[stats.length - 1];
+  const lastLabels = cfg.showLabels && lastStats
+    ? ((cfg.labelMode ?? "median") === "all" ? lastStats.box : [lastStats.box[2]])
+      .map((v) => fmt(v, true, cfg.compactValues ?? true))
+    : [];
+  const labelFont = { size: CHART_THEME.labelFontSize, family: resolveFontFamily(), weight: CHART_THEME.labelWeight };
+  const lastLabelWidth = measurable && lastLabels.length > 0
+    ? widestLabelWidth(lastLabels, (t) => measureText(t, labelFont))
+    : 0;
+  const labelRoom = size && lastLabelWidth > 0
+    ? labelOverhangRight({
+        // + 4: Metabase's label padding, so the text clears the card edge rather than touching it
+        // (measured live at 1024px: without it the label ended 1px past the <svg>).
+        labelWidth: lastLabelWidth + 4,
+        distance: LABEL_DISTANCE,
+        plotWidth: estimatePlotWidth(size, axisWidest, (v) => fmt(v, true), Boolean(yTitle)),
+        categories: stats.length,
+        gridRight: CHART_THEME.grid.right as number,
+      })
+    : 0;
   // The insets this builder is about to emit, hoisted so the fit subtracts the grid it really uses.
   const grid = {
     ...CHART_THEME.grid,
     bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
     left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
+    right: (CHART_THEME.grid.right as number) + labelRoom,
   };
   /**
    * How far the value axis runs. Every value the axis has to hold — the five box numbers, the
@@ -605,7 +655,7 @@ export function buildBoxplotOption(
           // `MAX_BOX_WIDTH` plus Metabase's own 4px label padding always clears it. A narrower box
           // leaves the label further out than strictly needed; overlapping the border is the worse
           // of the two, and ECharts gives an option builder no way to know the drawn width.
-          show: true, position: "right", distance: MAX_BOX_WIDTH / 2 + 4,
+          show: true, position: "right", distance: LABEL_DISTANCE,
           fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight, color: axisLabelColor,
           // Metabase's `graph.label_value_formatting` defaults to COMPACT for a box plot, and the
           // reason shows immediately: a median of 87.957 sits beside a box 47px tall. The axis

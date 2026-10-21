@@ -130,9 +130,9 @@ function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, au
   return (
     <div className="group relative flex h-full flex-col">
       {/* THE PENCIL IS A SECOND <svg> IN THE TILE, which is exactly why this cluster sits OUTSIDE
-          `chartRef`. The PNG export does `containerRef.current.querySelector("svg")`; if it pointed
-          at the tile it would find the Download icon or this pencil and export a 16px square. That
-          has happened in this repo. `DashboardCardView.export.test.tsx` is the regression net. */}
+          `chartRef`. The PNG export now asks for the chart image (`chartImageSvg`) rather than the first
+          <svg>, but it used to do `querySelector("svg")`, and pointed at the tile that found the
+          Download icon or this pencil and exported a 16px square. That has happened in this repo. `DashboardCardView.export.test.tsx` is the regression net. */}
       {(canExport || href) && (
         <div className="dash-nodrag absolute right-1 top-1 z-10 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           {href && (

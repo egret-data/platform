@@ -1627,6 +1627,8 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
      */
     xAxis: {
       type: "value", name: xTitle, nameLocation: "middle", nameGap: 28,
+      // The family's title ink (`baseOption`'s axes do the same); ECharts' default reads far paler.
+      nameTextStyle: { color: axisLabelColor },
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(xMetric, widestOfMetric(0)) },
       axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.xAxisTicks !== false },
@@ -1671,6 +1673,7 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
       type: cfg.logScale ? ("log" as const) : ("value" as const),
       scale: unpinFromZeroOn(cfg),
       name: yTitle,
+      nameTextStyle: { color: axisLabelColor },
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(yMetric, widestOfMetric(1)) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
@@ -3160,7 +3163,12 @@ function baseOption(
     }));
   } else if (horizontal) {
     xAxis = mkValueAxis(leftSeries);
-    yAxis = categoryAxis;
+    // TOP TO BOTTOM IN ROW ORDER, as Metabase's row chart reads. ECharts lays a vertical category
+    // axis out from the bottom, so the first row the query returned — the largest, under the row
+    // chart's default sort — was drawn LAST, at the foot of the card, and a "top 10" read upside
+    // down (KI-045). `inverse` flips the drawing only; the data, the drills and the tooltips are
+    // indexed as before.
+    yAxis = { ...categoryAxis, inverse: true };
   } else if (dual) {
     xAxis = xCategory;
     yAxis = [mkValueAxis(leftSeries, "left"), mkValueAxis(rightSeries, "right")];

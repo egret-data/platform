@@ -102,6 +102,23 @@ export function downloadCsv(title: string | undefined, columns: ResultColumn[], 
   downloadBlob(exportFilename(title, "csv"), new Blob([rowsToCsv(columns, rows, columnSettings, formatted)], { type: "text/csv;charset=utf-8" }));
 }
 
+/**
+ * THE MARK AN IMAGE-EXPORTABLE CHART SURFACE CARRIES, and the reason `.png` asks for it rather than
+ * for "the first <svg> in the card". Every icon in this app is an inline <svg> too: the object
+ * detail's pager arrows, a trend's arrow, a menu chevron. Asked for any <svg>, the exporter handed
+ * the Object detail's 32x32 pager arrow to the rasteriser and downloaded a 286-byte picture of it.
+ * `EChartsRenderer` is the one surface that draws a whole chart into ONE <svg>, so it is the one
+ * that carries this; a card without it (a table, an object detail, a progress bar, a trapezoid
+ * funnel drawn as one <svg> per band) has no single image to export and is not offered `.png` —
+ * Metabase's `canSavePng` likewise leaves out table, pivot and object.
+ */
+export const CHART_IMAGE_ATTR = "data-chart-image";
+
+/** The chart image inside `container`, or null when the card did not draw one. */
+export function chartImageSvg(container: ParentNode | null | undefined): SVGElement | null {
+  return container?.querySelector<SVGElement>(`[${CHART_IMAGE_ATTR}] svg`) ?? null;
+}
+
 /** Rasterise an <svg> element to a PNG Blob via Image → canvas. ECharts SVG has no foreignObject, so no taint. */
 export function svgToPngBlob(svg: SVGElement, scale = 2): Promise<Blob> {
   return new Promise((resolve, reject) => {

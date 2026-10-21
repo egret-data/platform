@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { ResultColumn } from "@/components/chart/ChartTable";
 import type { ColumnFormat } from "@/components/chart/format-types";
-import { downloadCsv, downloadJson, downloadPng } from "./export-chart";
+import { MAX_CHART_ROWS } from "@/api/charts";
+import { chartImageSvg, downloadCsv, downloadJson, downloadPng } from "./export-chart";
 import { downloadXlsx } from "./export-xlsx";
 
 /** Metabase's three table formats in its own order (`common/types/export.ts:4-9`); `.png` is
- *  appended only when the card actually rendered an <svg>, matching its `canSavePng`. */
+ *  appended only when the card actually rendered a chart image (`chartImageSvg`), matching its
+ *  `canSavePng`. */
 const TABLE_FORMATS = ["csv", "xlsx", "json"] as const;
 type ExportFormat = (typeof TABLE_FORMATS)[number] | "png";
 
@@ -54,7 +56,7 @@ export function ChartExportMenu({ title, columns, rows, containerRef, disabled, 
     setBusy(true);
     try {
       if (effFormat === "png") {
-        const svg = containerRef.current?.querySelector("svg");
+        const svg = chartImageSvg(containerRef.current);
         if (svg) await downloadPng(title, svg);
       } else if (effFormat === "xlsx") {
         await downloadXlsx(title, columns, rows, columnSettings, formatted);
@@ -72,7 +74,7 @@ export function ChartExportMenu({ title, columns, rows, containerRef, disabled, 
   }
 
   return (
-    <Popover onOpenChange={(open) => { if (open) setHasSvg(!!containerRef.current?.querySelector("svg")); }}>
+    <Popover onOpenChange={(open) => { if (open) setHasSvg(!!chartImageSvg(containerRef.current)); }}>
       <PopoverTrigger asChild>
         <Button size="sm" variant="ghost" aria-label="Export chart" disabled={disabled}>
           <Download className="h-4 w-4" />
@@ -113,7 +115,10 @@ export function ChartExportMenu({ title, columns, rows, containerRef, disabled, 
             <Checkbox id={formattedId} aria-label="keep the data formatted" checked={formatted} onCheckedChange={(v) => setFormatted(v === true)} />
           </label>
         )}
-        {isTable && <p className="text-xs text-muted-foreground">The maximum download size is 1 million rows.</p>}
+        {/* The file is written in the browser from the rows the card loaded, and a chart query never
+            returns more than `MAX_CHART_ROWS` — so that is the limit, not Metabase's server-side
+            million, which no egret export goes through. */}
+        {isTable && <p className="text-xs text-muted-foreground">{`The maximum download size is ${MAX_CHART_ROWS.toLocaleString()} rows.`}</p>}
         <Button size="sm" className="ml-auto" disabled={busy} onClick={run}>Download</Button>
       </PopoverContent>
     </Popover>

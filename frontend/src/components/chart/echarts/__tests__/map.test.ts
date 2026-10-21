@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildMapOption, pinCoverage, pinProblem, pinNote } from "../options/map";
+import { buildMapOption, pinCoverage, pinProblem, pinNote, regionCoverage, regionNote } from "../options/map";
 import { MAPS, indexRegionNames, indexRegionExtent, regionExtent, resolveRegion } from "../maps/registry";
 import { SERIES_PALETTE, choroplethScale, setLightness, saturateColor, scaleLightness } from "../palette";
 
@@ -8,6 +8,14 @@ const rows = [["California", 100], ["Texas", 40], ["Nevada", 250]];
 const base = { echartsName: "us_states", region: "state", metric: "rev", normalize: (v: unknown) => String(v) };
 
 describe("buildMapOption", () => {
+  // KI-046: a row naming no region was ignored by ECharts but still stretched the legend's range.
+  it("leaves rows that match no region out of the data and out of the legend's range", () => {
+    const regions = new Set(["California", "Texas"]);
+    const opt = buildMapOption(cols, rows, { ...base, regions }) as any;
+    expect(opt.series[0].data.map((d: { name: string }) => d.name)).toEqual(["California", "Texas"]);
+    expect([opt.visualMap.min, opt.visualMap.max]).toEqual([40, 100]);
+  });
+
   it("maps rows to normalised region keys, dropping what does not resolve", () => {
     const opt = buildMapOption(cols, [...rows, ["", 5], ["Ohio", NaN]], base) as any;
     expect(opt.series[0].data).toEqual([
@@ -659,5 +667,23 @@ describe("buildMapOption — pin map tooltip columns", () => {
 
   it("is unchanged when no extra column is asked for", () => {
     expect(tip({ tooltipColumns: undefined })).toBe("San Francisco<br/>37.7749, -122.4194");
+  });
+});
+
+describe("regionCoverage and regionNote (KI-046)", () => {
+  const regions = new Set(["California", "Texas"]);
+  it("counts the rows that land and names the ones that do not", () => {
+    const cov = regionCoverage(cols, rows, { ...base, regions });
+    expect(cov).toEqual({ total: 3, matched: 2, unmatched: ["Nevada"] });
+    expect(regionNote(cov, "US states")).toBe('Showing 2 of 3 rows: 1 matches no region on the US states map ("Nevada").');
+  });
+  it("names three values and says there are more", () => {
+    const many = [["A", 1], ["B", 2], ["C", 3], ["D", 4], ["Texas", 5]];
+    const note = regionNote(regionCoverage(cols, many, { ...base, regions }), "US states");
+    expect(note).toBe('Showing 1 of 5 rows: 4 match no region on the US states map ("A", "B", "C", …).');
+  });
+  it("is silent when every row lands, and when the map is not indexed yet", () => {
+    expect(regionNote(regionCoverage(cols, [["Texas", 1]], { ...base, regions }), "US states")).toBeUndefined();
+    expect(regionNote(regionCoverage(cols, rows, base), "US states")).toBeUndefined();
   });
 });

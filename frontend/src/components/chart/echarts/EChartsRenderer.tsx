@@ -297,5 +297,7 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     };
   }, [highlightDataIndex]);
 
-  return <div ref={elRef} className={className ?? "h-full w-full"} />;
+  // `data-chart-image` (`CHART_IMAGE_ATTR` in export-chart.ts): this <div> holds the chart's one
+  // <svg>, which is the image `.png` exports.
+  return <div ref={elRef} className={className ?? "h-full w-full"} data-chart-image="" />;
 }
