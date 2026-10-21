@@ -30,7 +30,7 @@ import {
 } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { Section, TabError } from "@/routes/governance/tabParts";
+import { Section, STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 import { TERM } from "@/routes/governance/glossary";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
@@ -322,7 +322,10 @@ function Columns({
       {canReadRules && rulesQ.isError ? (
         <TabError what="rules" onRetry={() => void rulesQ.refetch()} />
       ) : null}
-      <Table aria-label="Columns">
+      {/* Below sm the rows stack into cards, each fact labelled by its cell's
+          data-label, so a column's classifications and rules are on screen at
+          390 px without the page scrolling sideways (C13.2). */}
+      <Table aria-label="Columns" className={STACKED_TABLE}>
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
@@ -343,9 +346,9 @@ function Columns({
                   {col.name}
                 </Link>
               </TableCell>
-              <TableCell className="font-mono text-xs">{col.type}</TableCell>
+              <TableCell data-label="Type" className="font-mono text-xs">{col.type}</TableCell>
               {showTags ? (
-                <TableCell>
+                <TableCell data-label={TERM.classifications}>
                   {assignments === undefined ? (
                     tags.isError ? (
                       <span className="text-muted-foreground">—</span>
@@ -364,7 +367,7 @@ function Columns({
                 </TableCell>
               ) : null}
               {canReadRules ? (
-                <TableCell className="whitespace-normal">
+                <TableCell data-label={TERM.rules} className="whitespace-normal">
                   {rulesQ.isError ? (
                     <span className="text-muted-foreground">—</span>
                   ) : masks === undefined || reach.status === "loading" ? (

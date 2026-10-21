@@ -101,6 +101,21 @@ describe("the Classification index", () => {
     expect(within(rowOf("Finance")).getAllByRole("cell")[5]).toHaveTextContent("2 groups");
   });
 
+  it("drops Key, Description and BI objects below md, keeping Name, Data and Clearance", async () => {
+    serve({ "/tags": ok(TAGS) });
+    openArea(INDEX, STEWARD);
+    await screen.findByRole("link", { name: "PII" }, T);
+    const table = screen.getByRole("table");
+    for (const name of ["Key", "Description", "BI objects"]) {
+      expect(within(table).getByRole("columnheader", { name: new RegExp(name) })).toHaveClass("hidden", "md:table-cell");
+    }
+    // The cells follow their header, so a hidden column leaves no orphan cell.
+    expect(within(rowOf("PII")).getByText("pii").closest("td")).toHaveClass("hidden", "md:table-cell");
+    for (const name of ["Name", "Data", "Clearance"]) {
+      expect(within(table).getByRole("columnheader", { name: new RegExp(name) })).not.toHaveClass("hidden");
+    }
+  });
+
   it("marks a clearance with a lock icon beside the words, never colour alone", async () => {
     serve({ "/tags": ok(TAGS) });
     openArea(INDEX, TAG_READER);

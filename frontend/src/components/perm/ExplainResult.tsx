@@ -1229,7 +1229,10 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
            three routes in, and in the second — a profile egret's compiler
            does not target, a tag service say — a plugin IS downloading.
            What is true of all three is that no profile egret compiles for
-           covers this catalog, so that is what the copy claims. */
+           covers this catalog, so that is what the copy claims.
+
+           Classification UX C12: the visible sentence is the short one; the
+           long one, unchanged, is under "How this answer was worked out". */
         <Alert data-testid="no-profile-state">
           <AlertDescription className="space-y-1">
             <Badge variant="outline" className="gap-1">
@@ -1237,10 +1240,7 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
               Nothing is enforcing
             </Badge>
             <p className="text-sm">
-              No policy profile serves this catalog, so no policy set egret compiles
-              covers it. This is not a denial — nothing is enforcing here, which is a
-              different fact from a policy refusing the access. Attach the catalog to a
-              profile if it is meant to be governed.
+              No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.
             </p>
           </AlertDescription>
         </Alert>
@@ -1274,101 +1274,123 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
           teaches a reader to discount the ones that still do. */}
       <Alert data-testid="honest-limits">
         <AlertDescription className="space-y-1 text-xs">
-          {/* ⚠ **Rewritten by Task 8's browser gate (F4).** This said the tag
-              list "decides nothing here" and is "not the set the engine would
-              resolve", which was true of the exact-match query it used to
-              render and is false of what the server sends now: that list IS the
-              evaluator's input, rolled up the hierarchy, and every verdict above
-              was computed from it. The limit that survives is the one that still
-              holds — a target naming no table can carry none. */}
-          {/* ⚠ **Gated on there BEING a profile — found in the browser, and it is
-              the same class one notch further down.** These two paragraphs talk
-              about "each profile's tag list" and "those sets"; under
-              `no_profile_serves_the_catalog` there are no profiles and no lists,
-              so they described nothing on screen. Prose about an absent thing is
-              how a reader learns to discount the limits that do hold — the
-              argument this whole block is introduced with. */}
-          {result.profiles.length > 0 && (
-            <>
-          {/* ⚠ Narrowed with the block itself (review H1/H2/H3). This said
-                  "the set every verdict HERE was computed from" under a single
-                  list below every profile — which asserted per verdict what was
-                  true per request, and said it even when there were no verdicts.
-                  Each profile now carries its own set, so this says what is true
-                  of all of them and claims nothing about any one. */}
-              <p>
-                Each profile’s tag list is the set egret resolved for this target, rolled up
-                the resource hierarchy the way the engine’s own enricher rolls it: a tag
-                marked <span className="italic">on the table</span> reaches this column
-                because the assignment names the table. A profile whose download carries no
-                tag policies shows none, because nothing there could consult them. Tags
-                populate only when the target names both a schema and a table — a
-                catalog-only target carries none, because assignments attach to tables and
-                columns.
-              </p>
-              {/* ⚠ The asymmetry a steward auditing a table would otherwise learn
-                  the hard way, and it is MEASURED rather than reasoned: asking
-                  about `sp4d1.t2` with no column answers an empty list while
-                  `sp4d1.t2.item` answers `pii`, because the enricher admits SELF and
-                  ANCESTOR attachments and not DESCENDANT ones. The engine behaves
-                  the same way — the live gate measured a tag-addressed row filter
-                  NOT firing at table granularity for a column-level tag — so this
-                  is the engine's rule showing through, not egret's gap. Said here
-                  because the list cannot say it: it is a true statement about what
-                  is ABSENT. */}
-              <p>
-                Those sets are for the resource you asked about, and that cuts downwards:
-                a tag attached to a column does <span className="font-medium">not</span>{" "}
-                appear when you ask about its table, because the engine’s enricher reaches
-                up the hierarchy and never down. Auditing a table is therefore not the same
-                as auditing its columns — ask about the column to see a tag stored on it.
-              </p>
-            </>
-          )}
+          {/* Classification UX C12: the verdict above is read first, so ONE
+              limit stays visible here — the one that changes what "Allowed"
+              means. Every other paragraph of this block folds under a closed
+              disclosure, text unchanged and one click away. */}
           <p>
-            A policy that grants through a role, or through any group except{" "}
-            <span className="font-mono">public</span>, matches nobody on these engines:
-            egret serves no roles download and runs no usersync, so explain sends
-            neither. That is why egret’s own compiler names a role’s holders and a
-            group’s members instead, by username — so only a manual policy can
-            still name one.{" "}
-            <span className="font-mono">public</span> is the exception and it does
-            decide — Ranger matches it by name whatever the request carries, and egret’s
-            own compiler grants and denies through it, so a verdict here can come from a{" "}
-            <span className="font-mono">public</span> policy. Otherwise any verdict is
-            what the engine reaches for this username alone.
+            Masks on Trino and row filters are not shown here, so{" "}
+            <span className="italic">Allowed</span> can still return masked values or
+            filtered rows.
           </p>
-          <p>
-            There is no field here to assert a role, a group or a workspace the subject
-            does not hold, so this answers why the subject is allowed or refused as they
-            are — not what would happen if they held something else.
-          </p>
-          {/* ⚠ **Task 8's browser gate, F3.** This paragraph used to end "mask
-              and row-filter verdicts arrive with SP4d-2b" — rendered, on the
-              SP4d-2b branch, where they do not arrive: `explain` calls neither
-              `evaluate_data_mask` nor `evaluate_row_filter`, though the
-              evaluator implements both and Task 8's live gate was built out of
-              them. A promise dated to the version the reader is holding is the
-              limit-that-no-longer-holds failure in its worst form, and the
-              comment above this block already argued against it.
+          <details>
+            <summary className="cursor-pointer text-xs font-medium">How this answer was worked out</summary>
+            <div className="mt-1 space-y-1">
+              {result.outcome === "no_profile_serves_the_catalog" && (
+                <p>
+                  No policy profile serves this catalog, so no policy set egret compiles
+                  covers it. This is not a denial — nothing is enforcing here, which is a
+                  different fact from a policy refusing the access. Attach the catalog to a
+                  profile if it is meant to be governed.
+                </p>
+              )}
+              {/* ⚠ **Rewritten by Task 8's browser gate (F4).** This said the tag
+                  list "decides nothing here" and is "not the set the engine would
+                  resolve", which was true of the exact-match query it used to
+                  render and is false of what the server sends now: that list IS the
+                  evaluator's input, rolled up the hierarchy, and every verdict above
+                  was computed from it. The limit that survives is the one that still
+                  holds — a target naming no table can carry none. */}
+              {/* ⚠ **Gated on there BEING a profile — found in the browser, and it is
+                  the same class one notch further down.** These two paragraphs talk
+                  about "each profile's tag list" and "those sets"; under
+                  `no_profile_serves_the_catalog` there are no profiles and no lists,
+                  so they described nothing on screen. Prose about an absent thing is
+                  how a reader learns to discount the limits that do hold — the
+                  argument this whole block is introduced with. */}
+              {result.profiles.length > 0 && (
+                <>
+              {/* ⚠ Narrowed with the block itself (review H1/H2/H3). This said
+                      "the set every verdict HERE was computed from" under a single
+                      list below every profile — which asserted per verdict what was
+                      true per request, and said it even when there were no verdicts.
+                      Each profile now carries its own set, so this says what is true
+                      of all of them and claims nothing about any one. */}
+                  <p>
+                    Each profile’s tag list is the set egret resolved for this target, rolled up
+                    the resource hierarchy the way the engine’s own enricher rolls it: a tag
+                    marked <span className="italic">on the table</span> reaches this column
+                    because the assignment names the table. A profile whose download carries no
+                    tag policies shows none, because nothing there could consult them. Tags
+                    populate only when the target names both a schema and a table — a
+                    catalog-only target carries none, because assignments attach to tables and
+                    columns.
+                  </p>
+                  {/* ⚠ The asymmetry a steward auditing a table would otherwise learn
+                      the hard way, and it is MEASURED rather than reasoned: asking
+                      about `sp4d1.t2` with no column answers an empty list while
+                      `sp4d1.t2.item` answers `pii`, because the enricher admits SELF and
+                      ANCESTOR attachments and not DESCENDANT ones. The engine behaves
+                      the same way — the live gate measured a tag-addressed row filter
+                      NOT firing at table granularity for a column-level tag — so this
+                      is the engine's rule showing through, not egret's gap. Said here
+                      because the list cannot say it: it is a true statement about what
+                      is ABSENT. */}
+                  <p>
+                    Those sets are for the resource you asked about, and that cuts downwards:
+                    a tag attached to a column does <span className="font-medium">not</span>{" "}
+                    appear when you ask about its table, because the engine’s enricher reaches
+                    up the hierarchy and never down. Auditing a table is therefore not the same
+                    as auditing its columns — ask about the column to see a tag stored on it.
+                  </p>
+                </>
+              )}
+              <p>
+                A policy that grants through a role, or through any group except{" "}
+                <span className="font-mono">public</span>, matches nobody on these engines:
+                egret serves no roles download and runs no usersync, so explain sends
+                neither. That is why egret’s own compiler names a role’s holders and a
+                group’s members instead, by username — so only a manual policy can
+                still name one.{" "}
+                <span className="font-mono">public</span> is the exception and it does
+                decide — Ranger matches it by name whatever the request carries, and egret’s
+                own compiler grants and denies through it, so a verdict here can come from a{" "}
+                <span className="font-mono">public</span> policy. Otherwise any verdict is
+                what the engine reaches for this username alone.
+              </p>
+              <p>
+                There is no field here to assert a role, a group or a workspace the subject
+                does not hold, so this answers why the subject is allowed or refused as they
+                are — not what would happen if they held something else.
+              </p>
+              {/* ⚠ **Task 8's browser gate, F3.** This paragraph used to end "mask
+                  and row-filter verdicts arrive with SP4d-2b" — rendered, on the
+                  SP4d-2b branch, where they do not arrive: `explain` calls neither
+                  `evaluate_data_mask` nor `evaluate_row_filter`, though the
+                  evaluator implements both and Task 8's live gate was built out of
+                  them. A promise dated to the version the reader is holding is the
+                  limit-that-no-longer-holds failure in its worst form, and the
+                  comment above this block already argued against it.
 
-              So this states the limit and dates nothing. Replacing it with a
-              new promise would reintroduce exactly the same defect the first
-              time a package slipped. */}
-          {/* Task 12, M-5: this used to say "ACCESS only" under a StarRocks
-              mask line, which contradicted it. It now names what is shown. */}
-          <p>
-            On a StarRocks profile, a read of a column also shows the mask the engine
-            applies to it. Apart from that this answers about access only: row filters,
-            and masks on Trino, are not reported, so a target this page calls{" "}
-            <span className="font-medium">Allowed</span> can still return masked values,
-            filtered rows, or an error from a mask the engine cannot apply. Asking which
-            takes the engine.
-          </p>
-          <p>
-            Each plugin polls for its policy set on an interval, so an engine can still
-            be enforcing a slightly older download than the artifact evaluated here.
-          </p>
+                  So this states the limit and dates nothing. Replacing it with a
+                  new promise would reintroduce exactly the same defect the first
+                  time a package slipped. */}
+              {/* Task 12, M-5: this used to say "ACCESS only" under a StarRocks
+                  mask line, which contradicted it. It now names what is shown. */}
+              <p>
+                On a StarRocks profile, a read of a column also shows the mask the engine
+                applies to it. Apart from that this answers about access only: row filters,
+                and masks on Trino, are not reported, so a target this page calls{" "}
+                <span className="font-medium">Allowed</span> can still return masked values,
+                filtered rows, or an error from a mask the engine cannot apply. Asking which
+                takes the engine.
+              </p>
+              <p>
+                Each plugin polls for its policy set on an interval, so an engine can still
+                be enforcing a slightly older download than the artifact evaluated here.
+              </p>
+            </div>
+          </details>
         </AlertDescription>
       </Alert>
     </div>

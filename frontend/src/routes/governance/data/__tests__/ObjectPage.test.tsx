@@ -427,6 +427,19 @@ describe("ObjectTabs", () => {
 });
 
 describe("OverviewTab", () => {
+  it("stacks the columns table into labelled cards on a narrow screen", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    expect(columns.className).toContain("max-sm:block");
+    const email = within(columns).getByRole("link", { name: "email" }).closest("tr") as HTMLElement;
+    expect([...email.querySelectorAll("td[data-label]")].map((td) => td.getAttribute("data-label"))).toEqual([
+      "Type",
+      "Classifications",
+      "Rules",
+    ]);
+  });
+
   it("shows a catalog's schemas, attached engines and workspaces", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice");

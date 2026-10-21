@@ -205,7 +205,7 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
         </TableCell>
         <TableCell className="whitespace-normal">
           {r.outcome === "no_profile_serves_the_catalog" ? (
-            <p className="text-sm">Nothing is enforcing: no policy profile serves this catalog.</p>
+            <p className="text-sm">Nothing is enforced: no engine with a policy profile serves this catalog.</p>
           ) : (
             <ul role="list" className="space-y-0.5 text-sm">
               {r.profiles.map((p) => (

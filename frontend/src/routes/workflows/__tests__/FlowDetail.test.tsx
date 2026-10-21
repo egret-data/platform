@@ -638,7 +638,9 @@ describe("FlowDetail: routing and states", () => {
     server = new FakeWorkflowServer();
     server.getFlowReply = { status: 403, body: { error: "forbidden" } };
     renderAt();
-    expect(await screen.findByRole("heading", { level: 1, name: "403 — Forbidden" })).toBeInTheDocument();
+    // The 403 card's heading is the sentence now; the status code stays as its eyebrow.
+    expect(await screen.findByRole("heading", { level: 1, name: "You don't have access to this page." })).toBeInTheDocument();
+    expect(screen.getByText("403 — Forbidden")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.queryByText("Flow not found")).not.toBeInTheDocument();
   });

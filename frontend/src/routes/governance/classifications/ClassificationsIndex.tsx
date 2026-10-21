@@ -51,6 +51,8 @@ export const NO_CLASSIFICATION_YET = "No classification yet.";
 const isUnused = (t: Tag) => !(t.catalog_tables ?? 0) && !(t.catalog_columns ?? 0) && t.assignment_count === 0;
 
 /** The words a row searches by (the shared table's own search is off: this page owns `?q=`). */
+/** A column that drops below `md`; FilterableTable puts it on the header and every cell. */
+const HIDDEN_BELOW_MD = "hidden md:table-cell";
 const haystack = (t: Tag) => `${t.name} ${t.key} ${t.description}`.toLowerCase();
 
 /**
@@ -119,6 +121,8 @@ export default function ClassificationsIndex() {
     ) : null;
   const newButton = newButtonAt();
 
+  // Below md the low-priority columns drop so the list fits 390 px (C13.1):
+  // the key stays on the classification's page and the search still matches it.
   const columns: Column<Tag>[] = [
     {
       key: "name",
@@ -138,12 +142,14 @@ export default function ClassificationsIndex() {
       key: "key",
       label: "Key",
       sortable: true,
+      className: HIDDEN_BELOW_MD,
       value: (t) => t.key,
       cell: (t) => <span className="font-mono text-xs">{t.key}</span>,
     },
     {
       key: "description",
       label: "Description",
+      className: HIDDEN_BELOW_MD,
       cell: (t) => <span className="text-muted-foreground">{t.description || "—"}</span>,
     },
     {
@@ -162,7 +168,7 @@ export default function ClassificationsIndex() {
       key: "bi",
       label: "BI objects",
       sortable: true,
-      className: "tabular-nums",
+      className: `${HIDDEN_BELOW_MD} tabular-nums`,
       value: (t) => t.assignment_count,
       cell: (t) => t.assignment_count,
     },

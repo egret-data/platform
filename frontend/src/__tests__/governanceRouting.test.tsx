@@ -169,6 +169,22 @@ describe("Governance routing in App", () => {
     expect(currentUrl()).toBe("/governance/policies");
   }, 15_000);
 
+  it("a refused Governance page says why and offers a way back", async () => {
+    openApp("/governance/classifications", me([]));
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "You don't have access to this page." }, TIMEOUT),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Governance needs a governance permission such as tag:read or policy:read.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Go to the home page" })).toHaveAttribute("href", "/");
+  }, 15_000);
+
+  it("a page refused by its own permission names that permission", async () => {
+    // TAG_ONLY enters Governance but People needs policy:read.
+    openApp("/governance/people", TAG_ONLY);
+    expect(await screen.findByText("This page needs the policy:read permission.", {}, TIMEOUT)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Go to the home page" })).toHaveAttribute("href", "/");
+  }, 15_000);
+
   it("still lands an infra-only user on their first Control Plane section", async () => {
     openApp("/control-plane", INFRA_ONLY);
     await waitFor(() => expect(currentUrl()).toBe("/control-plane/engines"), TIMEOUT);
