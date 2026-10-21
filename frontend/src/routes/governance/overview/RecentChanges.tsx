@@ -13,7 +13,9 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
+import { TERM } from "@/routes/governance/glossary";
 import { LINK } from "@/routes/governance/overview/AttentionRow";
+import { changeSentence } from "@/routes/governance/overview/changeSentence";
 import { refUrl } from "@/routes/governance/overview/refUrl";
 
 const PAGE = 25;
@@ -130,7 +132,7 @@ export function RecentChanges() {
                 <span>{who(e)}</span>
                 <When at={e.at} />
               </div>
-              <p className="break-words">{e.sentence}</p>
+              <p className="break-words">{changeSentence(e, who(e))}</p>
               <Target e={e} />
             </li>
           ))}
@@ -154,7 +156,7 @@ export function RecentChanges() {
                   <When at={e.at} />
                 </TableCell>
                 <TableCell>{who(e)}</TableCell>
-                <TableCell className="whitespace-normal">{e.sentence}</TableCell>
+                <TableCell className="whitespace-normal">{changeSentence(e, who(e))}</TableCell>
                 <TableCell>
                   <Target e={e} />
                 </TableCell>
@@ -183,8 +185,7 @@ export function RecentChanges() {
             : `Changes older than ${page.retentionDays} days are pruned.`}
         </p>
         <p>
-          Role assignments and catalog tags are recorded after they commit and can be missing if the audit
-          writer was overloaded.
+          {`Role assignments and ${TERM.classifications.toLowerCase()} attached to data are recorded after they commit and can be missing if the audit writer was overloaded.`}
         </p>
       </div>
     </div>

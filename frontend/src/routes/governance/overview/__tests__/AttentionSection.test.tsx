@@ -29,7 +29,8 @@ describe("the counts strip", () => {
     openOverview();
     const strip = await screen.findByTestId("overview-counts");
     expect(strip).toHaveTextContent("3catalogs");
-    expect(strip).toHaveTextContent("1egret grant");
+    expect(strip).toHaveTextContent("1grant");
+    expect(strip).not.toHaveTextContent("egret grant");
     expect(strip).toHaveTextContent("2rules");
     expect(strip).toHaveTextContent("1classification");
     expect(strip).not.toHaveTextContent("classifications");
@@ -40,7 +41,8 @@ describe("the counts strip", () => {
     openOverview();
     const strip = await screen.findByTestId("overview-counts");
     expect(strip).toHaveTextContent("0catalogs");
-    expect(strip).toHaveTextContent("4egret grants");
+    expect(strip).toHaveTextContent("4grants");
+    expect(strip).not.toHaveTextContent("egret grant");
     expect(strip).not.toHaveTextContent("classification");
   });
 });

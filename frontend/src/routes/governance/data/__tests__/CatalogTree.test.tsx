@@ -380,6 +380,10 @@ describe("DataPage", () => {
     renderData();
     expect(screen.getByRole("heading", { level: 1, name: "Data" })).toBeInTheDocument();
     expect(screen.getByText(/Pick a catalog/)).toBeInTheDocument();
+    // The glossary's word (N18): a classification, never a tag. "Go to path" names the tree's control (FE-COPY-3).
+    expect(screen.getByText(/who can read it, its classifications and its rules\./)).toBeInTheDocument();
+    expect(screen.queryByText(/its tags/)).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /go to path/i })).toBeInTheDocument();
   });
 
   it("collapses the tree under a toggle on a narrow screen", async () => {
