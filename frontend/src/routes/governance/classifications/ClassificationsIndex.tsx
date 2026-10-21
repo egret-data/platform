@@ -38,6 +38,7 @@ import {
   TagSwatch,
   useCanManageTags,
 } from "@/routes/governance/classifications/tagParts";
+import { TERM } from "@/routes/governance/glossary";
 
 export const NO_CLASSIFICATION_YET = "No classification yet.";
 
@@ -145,7 +146,7 @@ export default function ClassificationsIndex() {
     },
     {
       key: "clearance",
-      label: "Clearance",
+      label: TERM.clearance,
       sortable: true,
       value: (t) => t.required_roles.length + t.required_groups.length,
       cell: (t) => <ClearanceCell tag={t} />,
@@ -219,8 +220,8 @@ export default function ClassificationsIndex() {
 
   return (
     <ListPageShell
-      title="Classifications"
-      description="Tags that classify data and BI objects, and the clearance each one requires."
+      title={TERM.classifications}
+      description={`${TERM.classifications} label data and BI objects, and set the ${TERM.clearance.toLowerCase()} each one requires.`}
       action={newButton}
     >
       <div className="space-y-4">

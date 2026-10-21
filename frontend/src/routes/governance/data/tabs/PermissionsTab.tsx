@@ -23,6 +23,7 @@ import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -143,7 +144,7 @@ function Grants({
   inherited.sort((a, b) => order.indexOf(a.from) - order.indexOf(b.from) || bySentence(a.grant, b.grant));
 
   // The tab renders the grants only with policy:read, which is also what Who can read? needs.
-  const note = <HandWrittenPointer explainLabel={canRead ? "Who can read?" : null} />;
+  const note = <HandWrittenPointer explainLabel={canRead ? TERM.whoCanRead : null} />;
   if (here.length + inherited.length + inside.length + byPattern.length === 0) {
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     return (

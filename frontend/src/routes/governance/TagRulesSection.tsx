@@ -51,8 +51,8 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
           <TableHeader>
             <TableRow>
               <TableHead>{TERM.rule}</TableHead>
-              <TableHead>Kind</TableHead>
-              <TableHead>Applies through</TableHead>
+              <TableHead>{TERM.kind}</TableHead>
+              <TableHead>{TERM.appliesThrough}</TableHead>
               <TableHead>{TERM.exempt}</TableHead>
             </TableRow>
           </TableHeader>

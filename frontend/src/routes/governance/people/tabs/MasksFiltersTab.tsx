@@ -81,7 +81,7 @@ function EgretRules({ principal }: { principal: Principal }) {
   const header = noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null;
   const pointer = (
     <HandWrittenPointer
-      subject="Rules"
+      subject={TERM.rules}
       lead="To see the engines' answer, use"
       explainLabel={isPublic ? null : "Check access"}
       explainTo={isPublic ? undefined : "?tab=check"}

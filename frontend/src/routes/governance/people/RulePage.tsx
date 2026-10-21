@@ -111,7 +111,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
     <div className="space-y-6 p-4">
       <RuleHeader title={r.name} actions={actions} />
       <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
-        <Detail term="Kind">
+        <Detail term={TERM.kind}>
           <span className="break-words font-mono">{formatRuleKind(r)}</span>
         </Detail>
         <Detail term={TERM.appliesTo}>

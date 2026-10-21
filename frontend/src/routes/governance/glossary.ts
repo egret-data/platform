@@ -26,6 +26,10 @@ export const TERM = {
   rules: "Rules",
   mask: "Mask",
   rowFilter: "Row filter",
+  /** A rule's kind (Mask or Row filter), as a column or field name. */
+  kind: "Kind",
+  /** How a listed rule reaches a classification: written on it, or on one with the same name. */
+  appliesThrough: "Applies through",
   /** Who a rule does not apply to. */
   exempt: "Exempt",
   /** What a rule is written on: a classification or a path. */
@@ -49,23 +53,18 @@ export const TERM = {
   addRule: "Add rule",
 } as const;
 
-/** A rule's kind as a word: `Mask` or `Row filter`. */
-export function ruleKindWord(kind: "mask" | "row_filter"): string {
-  return kind === "mask" ? TERM.mask : TERM.rowFilter;
-}
-
 /**
  * Ranger's mask types (`crates/egret-policy/src/service-defs/trino.json`,
- * `maskTypes`) with the labels the rule dialog offers, in the dialog's order.
+ * `maskTypes`) with the spec §4 glossary's labels, in the rule dialog's order.
  */
 export const MASK_TYPES: { value: string; label: string }[] = [
   { value: "MASK", label: "Redact" },
-  { value: "MASK_SHOW_LAST_4", label: "Partial mask: show last 4" },
-  { value: "MASK_SHOW_FIRST_4", label: "Partial mask: show first 4" },
+  { value: "MASK_SHOW_LAST_4", label: "Partial (last 4)" },
+  { value: "MASK_SHOW_FIRST_4", label: "Partial (first 4)" },
   { value: "MASK_HASH", label: "Hash" },
   { value: "MASK_NULL", label: "Nullify" },
-  { value: "MASK_NONE", label: "Unmasked (retain original value)" },
-  { value: "MASK_DATE_SHOW_YEAR", label: "Date: show only year" },
+  { value: "MASK_NONE", label: "Unmasked" },
+  { value: "MASK_DATE_SHOW_YEAR", label: "Year only" },
   { value: "CUSTOM", label: "Custom" },
 ];
 

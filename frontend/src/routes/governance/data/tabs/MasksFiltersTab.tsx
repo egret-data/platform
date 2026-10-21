@@ -339,10 +339,10 @@ function RuleTable({
     <Table aria-label={label}>
       <TableHeader>
         <TableRow>
-          <TableHead>Rule</TableHead>
-          <TableHead>Kind</TableHead>
+          <TableHead>{TERM.rule}</TableHead>
+          <TableHead>{TERM.kind}</TableHead>
           {extra ? <TableHead>{extra.head}</TableHead> : null}
-          <TableHead>Exempt</TableHead>
+          <TableHead>{TERM.exempt}</TableHead>
           {canWrite ? (
             <TableHead className={ACTIONS_CELL}>
               <span className="sr-only">Actions</span>

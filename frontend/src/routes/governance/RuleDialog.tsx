@@ -346,7 +346,7 @@ function RuleForm({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="rule-kind">Kind</Label>
+            <Label htmlFor="rule-kind">{TERM.kind}</Label>
             <Select value={kindType} onValueChange={(v) => changeKind(v as KindType)}>
               <SelectTrigger id="rule-kind">
                 <SelectValue />
@@ -429,7 +429,7 @@ function RuleForm({
           )}
 
           <div className="space-y-1.5">
-            <Label>Exempt</Label>
+            <Label>{TERM.exempt}</Label>
             <PrincipalPicker value={exempt} onChange={setExempt} exempt />
           </div>
 

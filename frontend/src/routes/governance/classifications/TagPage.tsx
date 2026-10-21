@@ -89,13 +89,13 @@ export default function TagPage() {
   let content: ReactNode;
   if (tagsQ.isError) {
     content = (
-      <section aria-label="Classification">
+      <section aria-label={TERM.classification}>
         <TabError what="classification" onRetry={() => void tagsQ.refetch()} />
       </section>
     );
   } else if (!tagsQ.data) {
     content = (
-      <section aria-label="Classification">
+      <section aria-label={TERM.classification}>
         <ListSkeleton rows={4} cols={3} />
       </section>
     );
@@ -103,7 +103,7 @@ export default function TagPage() {
     const tag = tagsQ.data.find((t) => t.id === id);
     if (!tag) {
       content = (
-        <section aria-label="Classification">
+        <section aria-label={TERM.classification}>
           <Alert>
             <AlertDescription>{NO_CLASSIFICATION_WITH_ID}</AlertDescription>
           </Alert>

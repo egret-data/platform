@@ -56,6 +56,10 @@ describe("the Classification index", () => {
     openArea(INDEX, TAG_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "Classifications" }, T)).toBeInTheDocument();
     await screen.findByRole("link", { name: "PII" }, T);
+    expect(
+      screen.getByText("Classifications label data and BI objects, and set the clearance each one requires."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Tags that classify/)).not.toBeInTheDocument();
     const names = screen.getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent);
     expect(names).toEqual(["Columns only", "Finance", "Internal", "PII"]);
   });

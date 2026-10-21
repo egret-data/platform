@@ -21,7 +21,11 @@ describe("the glossary's mask types", () => {
     expect(formatRuleKind(rule({ type: "row_filter", filter_expr: "region = 'us'" }))).toBe("Row filter · region = 'us'");
     // An unknown type the API may still hold is shown as stored, never dropped.
     expect(formatRuleKind(rule({ type: "mask", mask_type: "MASK_FUTURE" }))).toBe("Mask · MASK_FUTURE");
+    expect(MASK_TYPES.map((m) => m.label)).toEqual([
+      "Redact", "Partial (last 4)", "Partial (first 4)", "Hash", "Nullify", "Unmasked", "Year only", "Custom",
+    ]);
     expect(MASK_TYPE_LABEL.MASK).toBe("Redact");
+    expect(formatRuleKind(rule({ type: "mask", mask_type: "MASK_DATE_SHOW_YEAR" }))).toBe("Mask · Year only");
   });
 });
 

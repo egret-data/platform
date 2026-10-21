@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { DEFAULT_COLOR, TagSwatch, useCanManageTags } from "@/routes/governance/classifications/tagParts";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
  * A classification's header (spec §5): swatch, name (the page's `h1`), key,
@@ -31,7 +32,7 @@ export function TagHeader({ tag, actions }: { tag: Tag; actions?: ReactNode }) {
   const gated = tag.required_roles.length + tag.required_groups.length > 0;
 
   return (
-    <section aria-label="Classification" className="space-y-3">
+    <section aria-label={TERM.classification} className="space-y-3">
       {editing ? (
         <EditForm tag={tag} onDone={closeForm} />
       ) : (
