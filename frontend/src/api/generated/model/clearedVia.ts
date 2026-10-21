@@ -5,13 +5,28 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ClearedScope } from './clearedScope';
 import type { ClearedViaKind } from './clearedViaKind';
 
 /**
- * One required role or group a person is cleared through.
+ * One required role or group a person is listed through.
  */
 export interface ClearedVia {
   kind: ClearedViaKind;
   /** The role's or group's name. */
   name: string;
+  scope?: null | ClearedScope;
+  /**
+     * The workspace or object id of a `workspace` or `object` scope; null
+     * otherwise.
+     * @nullable
+     */
+  scopeId?: string | null;
+  /**
+     * A role held by this group the person is a direct member of, not by
+     * the person: egret clears them, engines refuse them. Null for a role
+     * held directly and for a group membership.
+     * @nullable
+     */
+  throughGroup?: string | null;
 }

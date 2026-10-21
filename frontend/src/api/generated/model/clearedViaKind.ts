@@ -7,7 +7,7 @@
  */
 
 /**
- * How a person comes to be cleared.
+ * How a person comes to be listed.
  */
 export type ClearedViaKind = typeof ClearedViaKind[keyof typeof ClearedViaKind];
 

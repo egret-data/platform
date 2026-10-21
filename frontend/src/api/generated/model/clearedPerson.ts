@@ -8,7 +8,7 @@
 import type { ClearedVia } from './clearedVia';
 
 /**
- * One person a clearance admits.
+ * One person listed for a clearance.
  */
 export interface ClearedPerson {
   userId: string;
@@ -20,16 +20,22 @@ export interface ClearedPerson {
      */
   username?: string | null;
   /**
-     * Every required role, then every required group, that clears them,
-     * each sorted by name.
+     * The account's status (`active` or `disabled`). A disabled account is
+     * listed: its grants still stand.
+     */
+  status: string;
+  /** A Data API service account (migration `0119`). */
+  serviceAccount: boolean;
+  /**
+     * Every way they are listed: role grants (direct, then through a group)
+     * before group memberships, each sorted by name, scope, scope id.
      */
   via: ClearedVia[];
   /**
      * Whether the compiled engine deny excepts them: they hold a required
-     * role directly, unexpired, and have a username. A required group never
-     * does (a group-only gate compiles to nothing on engines, and a gate with
-     * roles excepts only role holders), and a holder with no username is
-     * named once a compile mints one.
+     * role DIRECTLY (any scope), unexpired, and have a username. Never
+     * through a group or a group membership. A direct holder with no
+     * username is named once a compile mints one.
      */
   onEngines: boolean;
 }

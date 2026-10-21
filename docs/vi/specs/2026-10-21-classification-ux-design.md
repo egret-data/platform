@@ -410,20 +410,43 @@ Playwright (Task 12) kiểm footer vẫn trong tầm nhìn sau một lỗi, ở 
 
    ```text
    ClearedPeople {
-     count: number,
-     people: [ { userId, label, username: string | null,
-                 via: [ { kind: "role" | "group", name } ],
-                 onEngines: boolean } ],      // true khi một required role nêu tên họ, tức engine thực thi cho họ
-     truncated: boolean                         // people tối đa 200, count luôn chính xác
+     count: number,               // mọi người được liệt kê theo các quy tắc dưới (không phải mọi người egret cấp: platform admin không được liệt kê)
+     people: [ {                  // 200 người đầu, sắp theo label
+       userId, label, username: string | null,
+       status: string,            // "active" | "disabled"; tài khoản bị khoá vẫn được liệt kê
+       serviceAccount: boolean,
+       via: [ { kind: "role" | "group", name,
+                scope: "platform" | "workspace" | "object" | null,   // chỉ với grant role
+                scopeId: uuid | null,                                 // id workspace hoặc object
+                throughGroup: string | null } ],                      // role do nhóm này giữ, không phải người đó
+       onEngines: boolean         // giữ một required role TRỰC TIẾP và có username: lệnh deny trên engine chừa họ ra
+     } ],
+     truncated: boolean,          // hơn 200 người; count luôn chính xác
+     enginesEnforce: boolean,     // clearance nêu ít nhất một required role
+     onEnginesCount: number       // số người có onEngines, không phụ thuộc giới hạn 200
    }
    ```
 
-   - Người giữ role là người dùng có grant `allow` còn hiệu lực của một required role (`role_holders_via`).
-   - Thành viên nhóm là `user_groups` của các id nhóm bắt buộc.
-   - Kết quả bỏ trùng theo id người dùng và sắp theo label.
-   - Một tag không có clearance trả `{count: 0, people: [], truncated: false}`. Tag không tồn tại trả 404.
+   Ai được liệt kê, và mỗi nhóm người nghĩa là gì:
 
-   Tab hiện "**N people are cleared**" với một danh sách mở rộng được (`Collapsible`/`<details>`): tên, username, qua đâu, và dấu "engines" khi `onEngines`. Không có `policy:read` thì hiện số role và số nhóm, kèm câu "Seeing who is cleared needs the policy:read permission."
+   | Nhóm người | Liệt kê dưới dạng | Egret (mở object) | Engine (SQL) |
+   |---|---|---|---|
+   | Giữ required role trực tiếp (`allow` còn hiệu lực; `role_holders_via`) | `via.kind = role`, `throughGroup` null | được cấp | được cấp khi có username (`onEngines`) |
+   | Giữ required role qua một nhóm họ là thành viên trực tiếp (grant nhóm `allow` còn hiệu lực) | `via.kind = role`, `throughGroup` = nhóm | được cấp | bị từ chối |
+   | Thành viên required group, clearance **không** nêu role nào | `via.kind = group`; `enginesEnforce` false | được cấp | không giữ lại dữ liệu với ai (clearance chỉ có nhóm không biên dịch ra gì) |
+   | Thành viên required group, clearance **cũng** nêu role | `via.kind = group` | được cấp | bị từ chối |
+   | Grant role giới hạn ở một workspace hoặc object | `via.scope`, `via.scopeId` | chỉ được cấp trong phạm vi đó | được cấp ở mọi nơi (lệnh đọc cột không có phạm vi) |
+   | Platform admin | không liệt kê | luôn được cấp | không có ngoại lệ |
+
+   - Kết quả bỏ trùng theo id người dùng và sắp theo label.
+   - Một tag không có clearance trả `{count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0}`. Tag không tồn tại trả 404.
+
+   **Câu chữ trên UI (có giới hạn rõ; không bao giờ nói "can open it" cho con số).** Tab hiện một danh sách mở rộng được (`Collapsible`/`<details>`) với tiêu đề "**N people hold a required role or belong to a required group**" ("1 person holds a required role or belongs to a required group"). Mỗi mục hiện tên, username, các cách được liệt kê, dấu "service account" hoặc "disabled", và dấu "engines" khi `onEngines`. Role có phạm vi đọc là "in workspace X only" / "on one object only". Các dòng cố định:
+   - Luôn hiện: "Platform admins can always open it in egret."
+   - Khi `!enginesEnforce`: "Engines do not enforce this clearance: anyone with SQL access can read the data."
+   - Ở dòng chỉ được liệt kê qua role do nhóm giữ: "Cleared in egret, refused on engines".
+
+   Không có `policy:read` thì hiện số role và số nhóm, kèm câu "Seeing who is cleared needs the policy:read permission."
 3. **Độ tương phản (N21).** Các cảnh báo thôi dùng `Badge variant="warning"`. Badge là component dùng chung nên không bị sửa (FE-TEST-3); palette thô của nó là nợ đã ghi trong rulebook. Một `Callout` cục bộ dùng `bg-highlight/15 text-foreground border-highlight`, với `AlertTriangle` màu `text-foreground`. `--highlight` và `--foreground` là token (`FE/index.css`), nên không có màu thô nào (FE-VISUAL-1). Chữ thân trên nền pha 15% `--highlight` trên `--background` giữ độ tương phản của foreground (trên 7:1 ở cả sáng và tối). Bước Playwright đo nó bằng `getComputedStyle` (FE-TEST-2).
 4. "Not gated — …" thành "None: anyone who can read the data can open it." (theo bảng thuật ngữ).
 
@@ -581,7 +604,7 @@ Sau B3, B4 và B5: sinh lại `openapi.json` (`cargo run -q -p egret-bin --bin e
 | Kiểu | File | Ghi chú |
 |---|---|---|
 | `RuleEffect`, `EffectCatalog`, `EffectEngine`, `ExistingMask`, `PreviewResponse.effect` | sinh ra (`FE/api/generated/model/`) | sau `npm run gen:api` |
-| `ClearedPeople`, `ClearedPerson`, `ClearedVia`; hook `usePermClearedPeople(tagId)` | sinh ra | orval đặt tên hook từ tag `perm` + hàm `cleared_people`, như `list_overlaps` thành `usePermListOverlaps` |
+| `ClearedPeople`, `ClearedPerson`, `ClearedVia`, `ClearedViaKind`, `ClearedScope`; hook `usePermClearedPeople(tagId)` | sinh ra | orval đặt tên hook từ tag `perm` + hàm `cleared_people`, như `list_overlaps` thành `usePermListOverlaps` |
 | `TableUsage.warehouseId` | sinh ra | |
 | `ApiErrorCode` = `"tag_key_invalid" \| "tag_key_taken" \| "tag_name_taken" \| "tag_in_use" \| "table_tag_mask_conflict" \| "rule_overlap"` và các hàm thu hẹp `tableTagMaskConflict(e)`, `ruleOverlap(e)`, `tagInUse(e)`, `tagNameTaken(e)`, `tagKeyTaken(e)`, `tagKeyInvalid(e)` | `FE/routes/governance/apiErrors.ts` (tạo mới) | đọc `ApiError.code` và `ApiError.body` (`FE/api/client.ts:4-27`) |
 | `RuleEntry` = `{kind: "classification", tagKey, tagName}` \| `{kind: "table", catalogId, schema, table}` \| `{kind: "column", catalogId, schema, table, column, classifications}` \| `{kind: "edit", rule}`; `seedRule(entry)`, `ruleDraftKey(userId, entry)` | `FE/routes/governance/ruleDraft.ts` | điều khiển mặc định của C8 và khoá bản nháp |

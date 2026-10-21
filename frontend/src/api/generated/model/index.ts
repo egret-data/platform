@@ -108,6 +108,7 @@ export * from './classifiedPolicy';
 export * from './clearanceFact';
 export * from './clearedPeople';
 export * from './clearedPerson';
+export * from './clearedScope';
 export * from './clearedVia';
 export * from './clearedViaKind';
 export * from './clientDto';

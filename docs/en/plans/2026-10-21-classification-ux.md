@@ -1092,8 +1092,9 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Produces:
-  - `GET /api/control-plane/perm/clearances/{tag_id}/people` (`policy:read`) → `ClearedPeople { count: u32, people: Vec<ClearedPerson>, truncated: bool }`;
-  - `ClearedPerson { user_id: Uuid, label: String, username: Option<String>, via: Vec<ClearedVia>, on_engines: bool }`;
+  - `GET /api/control-plane/perm/clearances/{tag_id}/people` (`policy:read`) → `ClearedPeople { count: u32, people: Vec<ClearedPerson>, truncated: bool, engines_enforce: bool, on_engines_count: u32 }`;
+  - `ClearedPerson { user_id: Uuid, label: String, username: Option<String>, status: String, service_account: bool, via: Vec<ClearedVia>, on_engines: bool }`;
+  - (fix round 1) `ClearedVia { kind: ClearedViaKind /* role|group */, name: String, scope: Option<ClearedScope /* platform|workspace|object */>, scope_id: Option<Uuid>, through_group: Option<String> }`; role holders through a group are listed too. The spec C9 table is authoritative for what each population means.
   - `ClearedVia { kind: String /* role|group */, name: String }`. All camelCase.
   - `TableUsage.warehouse_id: Uuid` (wire `warehouseId`).
   - Generated hook `usePermClearedPeople(tagId)`.
@@ -2208,7 +2209,7 @@ In `classifications/__tests__/ClearanceTab.test.tsx`:
       "/tags": ok([PII]),
       "/access/roles": ok([]),
       "/access/groups": ok([]),
-      "/perm/clearances/t-pii/people": ok({ count: 0, people: [], truncated: false }),
+      "/perm/clearances/t-pii/people": ok({ count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0 }),
     });
     openArea("/governance/classifications/t-pii?tab=clearance", ADMIN);
     const scope = await screen.findByText(/Clearance decides who may open data with this classification/, undefined, T);
@@ -2219,26 +2220,46 @@ In `classifications/__tests__/ClearanceTab.test.tsx`:
     expect(screen.queryByText(/Not gated/)).not.toBeInTheDocument();
   });
 
-  it("lists the people a clearance admits, each once, marking who engines enforce it for", async () => {
+  it("lists the people a clearance lists, each once, with qualified copy", async () => {
+    const via = (kind: "role" | "group", name: string, extra = {}) =>
+      ({ kind, name, scope: kind === "role" ? "platform" : null, scopeId: null, throughGroup: null, ...extra });
     serve({
       "/tags": ok([{ ...PII, required_roles: ["cleared"] }]),
       "/access/roles": ok([]),
       "/access/groups": ok([]),
       "/perm/clearances/t-pii/people": ok({
-        count: 2, truncated: false,
+        count: 3, truncated: false, enginesEnforce: true, onEnginesCount: 1,
         people: [
-          { userId: "u1", label: "Ann", username: "ann", via: [{ kind: "role", name: "cleared" }], onEngines: true },
-          { userId: "u2", label: "Bo", username: null, via: [{ kind: "group", name: "data-team" }], onEngines: false },
+          { userId: "u1", label: "Ann", username: "ann", status: "active", serviceAccount: false,
+            via: [via("role", "cleared")], onEngines: true },
+          { userId: "u2", label: "Bo", username: null, status: "active", serviceAccount: false,
+            via: [via("group", "data-team")], onEngines: false },
+          { userId: "u3", label: "Cy", username: "cy", status: "active", serviceAccount: false,
+            via: [via("role", "cleared", { throughGroup: "ops" })], onEngines: false },
         ],
       }),
     });
     openArea("/governance/classifications/t-pii?tab=clearance", ADMIN);
-    await userEvent.click(await screen.findByText("2 people are cleared", undefined, T));
+    await userEvent.click(await screen.findByText("3 people hold a required role or belong to a required group", undefined, T));
+    expect(screen.getByText("Platform admins can always open it in egret.")).toBeInTheDocument();
+    expect(screen.queryByText(/Engines do not enforce this clearance/)).not.toBeInTheDocument();
     const list = screen.getByRole("list", { name: "Cleared people" });
     expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
       "Ann · ann · role cleared · engines",
       "Bo · group data-team",
+      "Cy · cy · role cleared through group ops · Cleared in egret, refused on engines",
     ]);
+  });
+
+  it("says when engines do not enforce a group-only clearance", async () => {
+    serve({
+      "/tags": ok([{ ...PII, required_groups: ["g-1"] }]),
+      "/access/roles": ok([]),
+      "/access/groups": ok([]),
+      "/perm/clearances/t-pii/people": ok({ count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0 }),
+    });
+    openArea("/governance/classifications/t-pii?tab=clearance", ADMIN);
+    expect(await screen.findByText("Engines do not enforce this clearance: anyone with SQL access can read the data.", undefined, T)).toBeInTheDocument();
   });
 
   it("without policy:read, says what reading the cleared people needs", async () => {
@@ -2296,7 +2317,9 @@ cd frontend && npx vitest run src/routes/governance/classifications 2>&1 | tail 
    - (b) The four measured warnings move into `<details><summary>Engine details</summary>…</details>`, as `Callout`s. Remove `Badge variant="warning"` from this file.
    - (c) "Not gated — …" becomes "None: anyone who can read the data can open it.".
    - (d) Cleared people:
-     - With `policy:read`, `usePermClearedPeople(tag.id)` renders `<details><summary>{count} {count === 1 ? "person is" : "people are"} cleared</summary><ul aria-label="Cleared people">…</ul></details>`. Each item is `label · username? · via (kind name, joined ", ") · "engines" when onEngines`. "and N more" when `truncated`.
+     - With `policy:read`, `usePermClearedPeople(tag.id)` renders `<details><summary>{count} {count === 1 ? "person holds a required role or belongs to a required group" : "people hold a required role or belong to a required group"}</summary><ul aria-label="Cleared people">…</ul></details>`. Never say "can open it" for this count (spec C9 table: it is neither egret's nor the engines' cleared set).
+     - Each item is `label · username? · via · markers`. A via is `kind name`, plus ` in workspace <name or id> only` / ` on one object only` for a scoped role, plus ` through group <g>` when `throughGroup`; vias are joined ", ". Markers: "service account", "disabled", "engines" when `onEngines`, and "Cleared in egret, refused on engines" when every via is through a group. "and N more" when `truncated`.
+     - Fixed lines: always "Platform admins can always open it in egret."; when `!enginesEnforce`, "Engines do not enforce this clearance: anyone with SQL access can read the data."
      - Without `policy:read`, it shows `CLEARED_NEEDS_POLICY_READ`.
      - Invalidate `getPermClearedPeopleQueryKey(tag.id)` in `persist`'s success.
 6. **`ClassificationsIndex.tsx:194`**: the `EmptyState` gains a description with `<ol aria-label="How classification works">` holding the three steps, the middle one linking "Data". Keep the New button for `tag:manage`; without it, show "Creating needs the tag:manage permission."

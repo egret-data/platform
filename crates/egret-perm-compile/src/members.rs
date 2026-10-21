@@ -458,6 +458,11 @@ pub(crate) struct RoleHolderRow {
     pub(crate) role_name: String,
     pub(crate) user_id: Uuid,
     pub(crate) username: Option<String>,
+    /// The grant's scope (`platform`, `workspace`, `object`) and scope id.
+    /// The compiler ignores both (a role is scope-free on engines,
+    /// [`role_usernames`]); People and the clearance read report them.
+    pub(crate) scope_type: String,
+    pub(crate) scope_id: Option<Uuid>,
 }
 
 /// One workspace-membership row as read for expansion: who, and the username
@@ -502,7 +507,7 @@ pub(crate) async fn role_holders_via(
     }
     sqlx::query_as(
         "SELECT r.name AS role_name, ag.principal_id AS user_id, \
-            u.username::text AS username \
+            u.username::text AS username, ag.scope_type, ag.scope_id \
            FROM access_grants ag \
            JOIN roles r ON r.id = ag.role_id \
            JOIN users u ON u.id = ag.principal_id \

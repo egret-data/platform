@@ -7785,7 +7785,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The people the classification's clearance admits, each once with every required role and group that clears them: live, direct, allow holders of a required role (any scope) and direct members of a required group, as the compiler reads them (service accounts included). Not listed: people holding a required role only through a group, and platform admins (egret exempts them; engines do not). `onEngines` is true only for a required-role holder with a username, whom the compiled engine deny excepts. `count` counts everyone; `people` is the first 200 sorted by label, and `truncated` says more exist. A tag with no clearance answers no one",
+            "description": "The people listed for the classification's clearance, each once with every way they are listed: direct holders of a required role (live, allow, any scope; the compiler's read), holders of a required role through a group they are a direct member of (`throughGroup`; egret clears them, engines refuse them) and direct members of a required group. Role grants carry their scope: egret clears only within a workspace or object scope, engines everywhere. `onEngines` is true only for a direct required-role holder with a username, whom the compiled engine deny excepts; `onEnginesCount` counts them all. `enginesEnforce` is false when the clearance names no required role: engines then withhold the data from nobody. Platform admins are always cleared by egret and are not listed. `count` counts everyone listed; `people` is the first 200 sorted by label, and `truncated` says more exist. A tag with no clearance lists no one",
             "content": {
               "application/json": {
                 "schema": {
@@ -39733,17 +39733,19 @@
       },
       "ClearedPeople": {
         "type": "object",
-        "description": "The people a classification's clearance admits, as egret's membership\nreads see them: the live, direct, `allow` holders of any of its\n`required_roles` (at any scope; [`crate::members::role_holders_via`]) and\nthe direct members of any of its `required_groups`\n([`crate::members::group_members_via`]), each person once. Not listed:\npeople holding a required role only through a group (egret clears them,\nengines do not), and platform admins, whom egret exempts from every gate\nbut engines do not.",
+        "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`); engines\n  refuse them (the compiler expands only user holders).\n- **Group member, gate names no role** (`enginesEnforce` false): egret\n  clears them; engines withhold the data from NOBODY, since a group-only\n  gate compiles to nothing on engines.\n- **Group member, gate also names a role**: egret clears them; engines\n  refuse them (a Ranger group matches nobody; only role holders are\n  excepted).\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.",
         "required": [
           "count",
           "people",
-          "truncated"
+          "truncated",
+          "enginesEnforce",
+          "onEnginesCount"
         ],
         "properties": {
           "count": {
             "type": "integer",
             "format": "int32",
-            "description": "Every person admitted.",
+            "description": "Every person listed by the rules above (not only the first 200). It\nis not everyone egret clears: platform admins are cleared and not\nlisted (see the type doc).",
             "minimum": 0
           },
           "people": {
@@ -39755,16 +39757,28 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "More people are admitted than are listed."
+            "description": "More people are listed than `people` carries."
+          },
+          "enginesEnforce": {
+            "type": "boolean",
+            "description": "Whether engines enforce the clearance at all: true when it names at\nleast one required role. False means anyone with SQL access reads the\ndata on engines."
+          },
+          "onEnginesCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many of `count` are `onEngines`, independent of the 200 cap.",
+            "minimum": 0
           }
         }
       },
       "ClearedPerson": {
         "type": "object",
-        "description": "One person a clearance admits.",
+        "description": "One person listed for a clearance.",
         "required": [
           "userId",
           "label",
+          "status",
+          "serviceAccount",
           "via",
           "onEngines"
         ],
@@ -39784,22 +39798,39 @@
             ],
             "description": "The stored engine username; null when none is allocated yet."
           },
+          "status": {
+            "type": "string",
+            "description": "The account's status (`active` or `disabled`). A disabled account is\nlisted: its grants still stand."
+          },
+          "serviceAccount": {
+            "type": "boolean",
+            "description": "A Data API service account (migration `0119`)."
+          },
           "via": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ClearedVia"
             },
-            "description": "Every required role, then every required group, that clears them,\neach sorted by name."
+            "description": "Every way they are listed: role grants (direct, then through a group)\nbefore group memberships, each sorted by name, scope, scope id."
           },
           "onEngines": {
             "type": "boolean",
-            "description": "Whether the compiled engine deny excepts them: they hold a required\nrole directly, unexpired, and have a username. A required group never\ndoes (a group-only gate compiles to nothing on engines, and a gate with\nroles excepts only role holders), and a holder with no username is\nnamed once a compile mints one."
+            "description": "Whether the compiled engine deny excepts them: they hold a required\nrole DIRECTLY (any scope), unexpired, and have a username. Never\nthrough a group or a group membership. A direct holder with no\nusername is named once a compile mints one."
           }
         }
       },
+      "ClearedScope": {
+        "type": "string",
+        "description": "The scope of a role grant.",
+        "enum": [
+          "platform",
+          "workspace",
+          "object"
+        ]
+      },
       "ClearedVia": {
         "type": "object",
-        "description": "One required role or group a person is cleared through.",
+        "description": "One required role or group a person is listed through.",
         "required": [
           "kind",
           "name"
@@ -39811,12 +39842,38 @@
           "name": {
             "type": "string",
             "description": "The role's or group's name."
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClearedScope",
+                "description": "A role grant's scope; null for a group membership. Engines ignore it\n(a column read carries no workspace), egret clears only within it."
+              }
+            ]
+          },
+          "scopeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace or object id of a `workspace` or `object` scope; null\notherwise."
+          },
+          "throughGroup": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A role held by this group the person is a direct member of, not by\nthe person: egret clears them, engines refuse them. Null for a role\nheld directly and for a group membership."
           }
         }
       },
       "ClearedViaKind": {
         "type": "string",
-        "description": "How a person comes to be cleared.",
+        "description": "How a person comes to be listed.",
         "enum": [
           "role",
           "group"

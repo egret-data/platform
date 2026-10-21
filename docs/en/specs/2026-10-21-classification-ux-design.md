@@ -408,20 +408,43 @@ Playwright (Task 12) checks that the footer stays in view after an error at 1440
 
    ```text
    ClearedPeople {
-     count: number,
-     people: [ { userId, label, username: string | null,
-                 via: [ { kind: "role" | "group", name } ],
-                 onEngines: boolean } ],      // true when a required role names them, i.e. engines enforce it for them
-     truncated: boolean                         // people capped at 200, count is exact
+     count: number,               // everyone listed by the rules below (not everyone egret clears: platform admins are not listed)
+     people: [ {                  // the first 200, sorted by label
+       userId, label, username: string | null,
+       status: string,            // "active" | "disabled"; a disabled account is listed
+       serviceAccount: boolean,
+       via: [ { kind: "role" | "group", name,
+                scope: "platform" | "workspace" | "object" | null,   // role grants only
+                scopeId: uuid | null,                                 // workspace or object id
+                throughGroup: string | null } ],                      // a role held by this group, not by the person
+       onEngines: boolean         // holds a required role DIRECTLY and has a username: the engine deny excepts them
+     } ],
+     truncated: boolean,          // more than 200 listed; count is exact
+     enginesEnforce: boolean,     // the clearance names at least one required role
+     onEnginesCount: number       // people with onEngines, independent of the cap
    }
    ```
 
-   - Role holders are users with a live `allow` grant of a required role (`role_holders_via`).
-   - Group members are `user_groups` of the required group ids.
-   - The results are deduplicated by user id and sorted by label.
-   - A tag without clearance answers `{count: 0, people: [], truncated: false}`. An unknown tag is 404.
+   Who is listed, and what each population means:
 
-   The tab shows "**N people are cleared**" with an expandable list (a `Collapsible`/`<details>`): name, username, via, and an "engines" mark where `onEngines`. Without `policy:read` it shows the counts of roles and groups and the sentence "Seeing who is cleared needs the policy:read permission."
+   | Population | Listed as | Egret (object access) | Engines (SQL) |
+   |---|---|---|---|
+   | Holds a required role directly (live `allow`; `role_holders_via`) | `via.kind = role`, `throughGroup` null | cleared | cleared when they have a username (`onEngines`) |
+   | Holds a required role through a group they are a direct member of (live `allow` group grant) | `via.kind = role`, `throughGroup` = group | cleared | refused |
+   | Member of a required group, the clearance names **no** role | `via.kind = group`; `enginesEnforce` false | cleared | nothing is withheld from anyone (a group-only clearance compiles to nothing) |
+   | Member of a required group, the clearance **also** names a role | `via.kind = group` | cleared | refused |
+   | Role grant scoped to a workspace or object | `via.scope`, `via.scopeId` | cleared within that scope only | cleared everywhere (a column read has no scope) |
+   | Platform admin | not listed | always cleared | no bypass |
+
+   - The results are deduplicated by user id and sorted by label.
+   - A tag without clearance answers `{count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0}`. An unknown tag is 404.
+
+   **UI copy (qualified; never "can open it" for the count).** The tab shows an expandable list (a `Collapsible`/`<details>`) whose summary is "**N people hold a required role or belong to a required group**" ("1 person holds a required role or belongs to a required group"). Each item shows name, username, the ways it is listed, a "service account" or "disabled" marker, and an "engines" mark where `onEngines`. A scoped role reads "in workspace X only" / "on one object only". Fixed lines:
+   - Always: "Platform admins can always open it in egret."
+   - When `!enginesEnforce`: "Engines do not enforce this clearance: anyone with SQL access can read the data."
+   - On a row listed only through a group-held role: "Cleared in egret, refused on engines".
+
+   Without `policy:read` it shows the counts of roles and groups and the sentence "Seeing who is cleared needs the policy:read permission."
 3. **Contrast (N21).** The warnings stop using `Badge variant="warning"`. The badge is a shared component, so it is not changed (FE-TEST-3); its raw palette is debt listed in the rulebook. A local `Callout` uses `bg-highlight/15 text-foreground border-highlight` with an `AlertTriangle` in `text-foreground`. `--highlight` and `--foreground` are tokens (`FE/index.css`), so no raw colour is involved (FE-VISUAL-1). Body text on a 15% tint of `--highlight` over `--background` keeps the foreground's contrast (above 7:1 in light and dark). The Playwright step measures it with `getComputedStyle` (FE-TEST-2).
 4. "Not gated — …" becomes "None: anyone who can read the data can open it." (glossary).
 
@@ -579,7 +602,7 @@ After B3, B4 and B5: regenerate `openapi.json` (`cargo run -q -p egret-bin --bin
 | Type | File | Notes |
 |---|---|---|
 | `RuleEffect`, `EffectCatalog`, `EffectEngine`, `ExistingMask`, `PreviewResponse.effect` | generated (`FE/api/generated/model/`) | after `npm run gen:api` |
-| `ClearedPeople`, `ClearedPerson`, `ClearedVia`; hook `usePermClearedPeople(tagId)` | generated | orval names the hook from tag `perm` + fn `cleared_people`, as `list_overlaps` became `usePermListOverlaps` |
+| `ClearedPeople`, `ClearedPerson`, `ClearedVia`, `ClearedViaKind`, `ClearedScope`; hook `usePermClearedPeople(tagId)` | generated | orval names the hook from tag `perm` + fn `cleared_people`, as `list_overlaps` became `usePermListOverlaps` |
 | `TableUsage.warehouseId` | generated | |
 | `ApiErrorCode` = `"tag_key_invalid" \| "tag_key_taken" \| "tag_name_taken" \| "tag_in_use" \| "table_tag_mask_conflict" \| "rule_overlap"` and narrowers `tableTagMaskConflict(e)`, `ruleOverlap(e)`, `tagInUse(e)`, `tagNameTaken(e)`, `tagKeyTaken(e)`, `tagKeyInvalid(e)` | `FE/routes/governance/apiErrors.ts` (Create) | read `ApiError.code` and `ApiError.body` (`FE/api/client.ts:4-27`) |
 | `RuleEntry` = `{kind: "classification", tagKey, tagName}` \| `{kind: "table", catalogId, schema, table}` \| `{kind: "column", catalogId, schema, table, column, classifications}` \| `{kind: "edit", rule}`; `seedRule(entry)`, `ruleDraftKey(userId, entry)` | `FE/routes/governance/ruleDraft.ts` | drives C8's defaults and the draft key |

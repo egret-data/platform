@@ -8,23 +8,51 @@
 import type { ClearedPerson } from './clearedPerson';
 
 /**
- * The people a classification's clearance admits, as egret's membership
- * reads see them: the live, direct, `allow` holders of any of its
- * `required_roles` (at any scope; [`crate::members::role_holders_via`]) and
- * the direct members of any of its `required_groups`
- * ([`crate::members::group_members_via`]), each person once. Not listed:
- * people holding a required role only through a group (egret clears them,
- * engines do not), and platform admins, whom egret exempts from every gate
- * but engines do not.
+ * The people listed for a classification's clearance, and what each
+ * population means. A person is listed once whatever the number of ways.
+ *
+ * - **Role held directly** (`via.kind = role`, `throughGroup` null): a live,
+ *   `allow` grant of a required role to the user
+ *   ([`crate::members::role_holders_via`], the compiler's read). Cleared in
+ *   egret and, with a username, on engines (`onEngines`).
+ * - **Role held through a group** (`throughGroup` set): a live `allow` grant
+ *   of a required role to a group the user is a direct member of. Egret's
+ *   object check clears them (`egret_auth::grants`, `user_groups`); engines
+ *   refuse them (the compiler expands only user holders).
+ * - **Group member, gate names no role** (`enginesEnforce` false): egret
+ *   clears them; engines withhold the data from NOBODY, since a group-only
+ *   gate compiles to nothing on engines.
+ * - **Group member, gate also names a role**: egret clears them; engines
+ *   refuse them (a Ranger group matches nobody; only role holders are
+ *   excepted).
+ * - **Scoped grant** (`via.scope` workspace or object): egret clears them
+ *   only within that workspace or object; engines everywhere (a column read
+ *   carries no scope).
+ * - **Platform admins** are always cleared by egret (a scope-correct
+ *   exemption) and are NOT listed unless they are also listed by a rule
+ *   above; engines give them no bypass.
  */
 export interface ClearedPeople {
   /**
-     * Every person admitted.
+     * Every person listed by the rules above (not only the first 200). It
+     * is not everyone egret clears: platform admins are cleared and not
+     * listed (see the type doc).
      * @minimum 0
      */
   count: number;
   /** The first [`CLEARED_PEOPLE_LIMIT`] (200) of them, sorted by label. */
   people: ClearedPerson[];
-  /** More people are admitted than are listed. */
+  /** More people are listed than `people` carries. */
   truncated: boolean;
+  /**
+     * Whether engines enforce the clearance at all: true when it names at
+     * least one required role. False means anyone with SQL access reads the
+     * data on engines.
+     */
+  enginesEnforce: boolean;
+  /**
+     * How many of `count` are `onEngines`, independent of the 200 cap.
+     * @minimum 0
+     */
+  onEnginesCount: number;
 }

@@ -281,6 +281,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::people::ClearedPerson,
         crate::people::ClearedVia,
         crate::people::ClearedViaKind,
+        crate::people::ClearedScope,
         people::ExplainPrincipalRequest,
         people::ExplainPrincipalRef,
         people::ExplainPrincipalResponse,
