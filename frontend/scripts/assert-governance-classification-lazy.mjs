@@ -38,6 +38,8 @@ const MARKERS = [
   ["src/routes/governance/classifications/DeleteTagDialog.tsx", "Rules: needs policy:read to count."],
   // Where used's Data empty sentence (spec §5.1).
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
+  // The Effect strip's missing-permission line for clearance (spec C2).
+  ["src/routes/governance/classifications/EffectStrip.tsx", "Setting clearance needs the tag:manage permission."],
   // The Clearance tab's compile line (spec §5.2).
   ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
   // The Rules tab without policy:read (spec §5.3).
