@@ -82,6 +82,11 @@ if [ "$CARDS" = 0 ]; then
   [ "$NEW" = 1 ] || echo "dashboard Sales overview cards repaired"
 else echo "dashboard Sales overview exists"; fi
 
+# 3b. A fuller dashboard, "E-commerce Insights (egret clone)": 4 datasets, 22 charts, 3 tabs, on the TPC-H data.
+BASE_URL="$BASE" EGRET_WS="$WS" EGRET_DB=trino-demo EGRET_CSRF="$CSRF" \
+  EGRET_COOKIES="$(awk '$6 ~ /^egret_/ {printf "%s=%s; ", $6, $7}' "$JAR")" \
+  python3 scripts/seed_ecommerce_clone.py
+
 # 4. Workspace SMTP -> Mailpit (a PUT replaces; safe to repeat). Needs EGRET_SECRETS__MASTER_KEY on the
 #    server: without it this call answered 500 during the October 2026 docs run.
 call PUT "/api/ws/$WS/notifications/smtp" '{"host":"mailpit","port":1025,"from_address":"egret@demo.local","from_name":"Egret demo","tls_mode":"none"}' >/dev/null
