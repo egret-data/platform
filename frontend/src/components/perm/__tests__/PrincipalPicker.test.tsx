@@ -156,6 +156,23 @@ describe("PrincipalPicker", () => {
     expect(screen.queryByRole("option", { name: "role" })).not.toBeInTheDocument();
   });
 
+  // N26 (spec C8.5): in a rule's exemptions the group suggestions used to float over the
+  // "current members" line, hiding the very sentence that explains the choice.
+  test("exempt mode lists group suggestions after the group help line, not over it", async () => {
+    const user = userEvent.setup();
+    mockPrincipals([{ kind: "group", name: "analysts", label: "analysts", username: null }]);
+    renderPicker({ exempt: true });
+
+    await user.click(screen.getByRole("combobox", { name: "Include kind" }));
+    await user.click(await screen.findByRole("option", { name: "group" }));
+    await user.click(screen.getByRole("combobox", { name: "Include group search" }));
+    const listbox = await screen.findByRole("listbox", { name: "Include group suggestions" });
+    const help = screen.getByText(/current members/);
+
+    expect(help.compareDocumentPosition(listbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(listbox).getByRole("option", { name: "analysts" })).toBeInTheDocument();
+  });
+
   test("selecting a user suggestion stores the server-allocated username, not the email, and shows which value is stored", async () => {
     const user = userEvent.setup();
     const { onChange } = renderPicker();

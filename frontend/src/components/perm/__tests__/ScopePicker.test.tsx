@@ -73,6 +73,18 @@ describe("ScopePicker", () => {
     ).not.toBeInTheDocument();
   });
 
+  test("catalogRequired marks the Catalog field required, in its label and to assistive technology", () => {
+    renderPicker({ catalogRequired: true });
+    expect(screen.getByText("Catalog").closest("label")).toHaveTextContent("Catalog (required)");
+    expect(screen.getByRole("combobox", { name: /^Catalog/ })).toHaveAttribute("aria-required", "true");
+  });
+
+  test("without catalogRequired the Catalog field reads as before", () => {
+    renderPicker();
+    expect(screen.getByText("Catalog").closest("label")).toHaveTextContent(/^Catalog$/);
+    expect(screen.getByRole("combobox", { name: /^Catalog/ })).not.toHaveAttribute("aria-required");
+  });
+
   test("row-filter mode renders no Column field at all", () => {
     renderPicker({ rowFilterMode: true });
     expect(screen.queryByLabelText("Column")).not.toBeInTheDocument();

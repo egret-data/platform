@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Tag as TagIcon, UserSearch } from "lucide-react";
+import { Plus, Tag as TagIcon, UserSearch } from "lucide-react";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -21,6 +21,7 @@ import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabPa
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
+import { RuleDialog } from "@/routes/governance/RuleDialog";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants and rules.
@@ -57,6 +58,10 @@ type ColumnPath = ObjectPath & { schema: string; object: string; column: string 
  *
  * F10: these are lists of what selects the column, never who sees what. Who
  * can read it is explain's answer, from "Who can read this column?".
+ *
+ * Add rule (`policy:update`, spec C8.3) opens `RuleDialog` on a mask of this
+ * column, offering each classification the column carries as "Or apply it to
+ * <classification>".
  */
 export function ColumnPanel({
   path,
@@ -170,10 +175,12 @@ function checkColumn(browse: BrowseResult, asked: string): ColumnCheck {
 function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const can = usePolicyPermissions();
   const canRead = can("policy:read");
+  const canWriteRule = can("policy:update");
   const canTag = can("catalog_registry:update");
   const egret = catalog.warehouseId != null;
   const assignments = egret ? assignmentsOf(tags) : null;
   const [whoCanRead, setWhoCanRead] = useState(false);
+  const [addRule, setAddRule] = useState(false);
   const [addTag, setAddTag] = useState<TagTarget | null>(null);
   const canRemoveTag = useCanEditCatalogTags();
   // After a remove, focus lands on the panel's Add classification (removing needs the same permission, so it is there).
@@ -182,6 +189,10 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
 
   const own = (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, path.column));
   const fromTable = (assignments ?? []).filter((a) => a.column === "");
+  // What a rule on a classification would reach this column through: its own and its table's, once each.
+  const carried = [...own, ...fromTable]
+    .map((a) => ({ key: a.tag.key, name: a.tag.name }))
+    .filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i);
 
   return (
     <div className="space-y-6">
@@ -190,6 +201,12 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
           <Button variant="outline" size="sm" onClick={() => setWhoCanRead(true)}>
             <UserSearch aria-hidden />
             Who can read this column?
+          </Button>
+        ) : null}
+        {canWriteRule ? (
+          <Button variant="outline" size="sm" onClick={() => setAddRule(true)}>
+            <Plus aria-hidden />
+            {TERM.addRule}
           </Button>
         ) : null}
         {canTag ? (
@@ -285,6 +302,18 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
       )}
 
       <WhoCanReadDialog open={whoCanRead} onOpenChange={setWhoCanRead} path={path} catalogId={catalog.id} />
+      <RuleDialog
+        open={addRule}
+        onOpenChange={setAddRule}
+        entry={{
+          kind: "column",
+          catalogId: catalog.id,
+          schema: path.schema,
+          table: path.object,
+          column: path.column,
+          classifications: carried,
+        }}
+      />
       {removal.dialog}
       <AddTagDialog
         target={addTag}

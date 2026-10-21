@@ -72,7 +72,7 @@ export default function RulePage() {
   return (
     <>
       <RuleBody rule={found} onEdit={() => setEditing(true)} onDelete={() => setDeleting(true)} />
-      <RuleDialog open={editing} onOpenChange={setEditing} existing={found} />
+      <RuleDialog open={editing} onOpenChange={setEditing} entry={{ kind: "edit", rule: found }} />
       <ConfirmDeleteDialog
         open={deleting}
         onOpenChange={setDeleting}

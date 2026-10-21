@@ -1,0 +1,73 @@
+import { describe, expect, it } from "vitest";
+import { clearRuleDraft, loadRuleDraft, ruleDraftKey, saveRuleDraft, seedRule } from "@/routes/governance/ruleDraft";
+import type { Rule } from "@/api/generated/model";
+
+describe("seedRule: defaults per entry point (spec C8)", () => {
+  it("from a classification: a Redact mask on that classification, named after it", () => {
+    expect(seedRule({ kind: "classification", tagKey: "pii", tagName: "PII" })).toEqual({
+      name: "Mask PII",
+      kind: { type: "mask", mask_type: "MASK" },
+      selector: { type: "tag", key: "pii" },
+      exempt: { include: [], exclude: [] },
+    });
+  });
+  it("from a table: a mask on the table's path, column left empty", () => {
+    expect(seedRule({ kind: "table", catalogId: "c", schema: "s", table: "t" })).toEqual({
+      name: "",
+      kind: { type: "mask", mask_type: "MASK" },
+      selector: { type: "path", catalog_id: "c", schema: "s", table: "t" },
+      exempt: { include: [], exclude: [] },
+    });
+  });
+  it("from a column: a mask on that column", () => {
+    const r = seedRule({ kind: "column", catalogId: "c", schema: "s", table: "t", column: "email", classifications: [] });
+    expect(r.selector).toEqual({ type: "path", catalog_id: "c", schema: "s", table: "t", column: "email" });
+    expect(r.kind).toEqual({ type: "mask", mask_type: "MASK" });
+  });
+  it("from a catalog or schema page: a mask on that scope, no level invented", () => {
+    expect(seedRule({ kind: "scope", catalogId: "c", schema: "s" }).selector).toEqual({ type: "path", catalog_id: "c", schema: "s" });
+    expect(seedRule({ kind: "scope", catalogId: "c" }).selector).toEqual({ type: "path", catalog_id: "c" });
+  });
+  it("from an existing rule: the rule's own fields, not a default", () => {
+    const rule: Rule = {
+      id: "r1",
+      name: "filter-us",
+      kind: { type: "row_filter", filter_expr: "region = 'us'" },
+      selector: { type: "path", catalog_id: "c", schema: "s", table: "t" },
+      exempt: { include: [{ kind: "user", ref: "alice" }], exclude: [] },
+    };
+    expect(seedRule({ kind: "edit", rule })).toEqual({
+      name: "filter-us",
+      kind: rule.kind,
+      selector: rule.selector,
+      exempt: rule.exempt,
+    });
+  });
+});
+
+describe("the draft store", () => {
+  it("keys drafts by user and entry, and clears one without touching another", () => {
+    const a = ruleDraftKey("u1", { kind: "classification", tagKey: "pii", tagName: "PII" });
+    const b = ruleDraftKey("u2", { kind: "classification", tagKey: "pii", tagName: "PII" });
+    expect(a).not.toBe(b);
+    const draft = seedRule({ kind: "classification", tagKey: "pii", tagName: "PII" });
+    saveRuleDraft(a, { ...draft, name: "kept" });
+    expect(loadRuleDraft(a)?.name).toBe("kept");
+    expect(loadRuleDraft(b)).toBeUndefined();
+    clearRuleDraft(a);
+    expect(loadRuleDraft(a)).toBeUndefined();
+  });
+
+  it("tells entry points apart: a table, one of its columns and a rule each keep their own draft", () => {
+    const keys = [
+      ruleDraftKey("u1", { kind: "table", catalogId: "c", schema: "s", table: "t" }),
+      ruleDraftKey("u1", { kind: "column", catalogId: "c", schema: "s", table: "t", column: "email", classifications: [] }),
+      ruleDraftKey("u1", { kind: "scope", catalogId: "c", schema: "s" }),
+      ruleDraftKey("u1", {
+        kind: "edit",
+        rule: { id: "r1", name: "x", kind: { type: "mask", mask_type: "MASK" }, selector: { type: "tag", key: "pii" }, exempt: { include: [], exclude: [] } },
+      }),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+});

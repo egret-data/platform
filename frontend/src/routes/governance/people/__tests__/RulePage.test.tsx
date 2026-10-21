@@ -21,8 +21,8 @@ vi.mock("@/routes/governance/RuleDialog", async () => {
   const actual = await vi.importActual<typeof import("@/routes/governance/RuleDialog")>("@/routes/governance/RuleDialog");
   return {
     ...actual,
-    RuleDialog: ({ open, existing }: { open: boolean; existing: { name: string } | null }) =>
-      open ? <div>{`editing ${existing?.name ?? "nothing"}`}</div> : null,
+    RuleDialog: ({ open, entry }: { open: boolean; entry: { kind: string; rule?: { name: string } } }) =>
+      open ? <div>{`editing ${entry.kind === "edit" ? (entry.rule?.name ?? "nothing") : "nothing"}`}</div> : null,
   };
 });
 

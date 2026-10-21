@@ -1209,19 +1209,21 @@ describe("MasksFiltersTab", () => {
     expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("opens Add rule in RuleDialog with a path selector for this object", async () => {
+  it("opens Add rule in RuleDialog as a mask on this table's path, every column (spec C8.3)", async () => {
     serveData(fixture({ rules: ok([]) }));
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "New rule" })).toBeInTheDocument();
-    // A table's path completes a row filter; a mask would need a column.
-    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Filter rows");
+    // The area is about masking: a table opens on a mask, its Column left empty, which masks every column.
+    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
     expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
-    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: /^Catalog/ })).toHaveTextContent("ice"));
     expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
     expect(within(dialog).getByLabelText(/^Table/)).toHaveValue("orders");
+    expect(within(dialog).getByLabelText("Column")).toHaveValue("");
+    expect(within(dialog).getByText("Leave Column empty to mask every column of the table.")).toBeInTheDocument();
     expect(within(dialog).getByText("Applies to ice.sales.orders")).toBeInTheDocument();
   });
 
@@ -1243,7 +1245,7 @@ describe("MasksFiltersTab", () => {
     await user.click(await within(panel()).findByRole("button", { name: "Edit us_only" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "Edit rule" })).toBeInTheDocument();
-    expect(within(dialog).getByLabelText("Name")).toHaveValue("us_only");
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("us_only");
   });
 
   it("deletes a rule after confirmation, then refetches the tab and confirms", async () => {

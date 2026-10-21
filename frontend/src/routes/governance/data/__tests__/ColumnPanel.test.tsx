@@ -677,6 +677,38 @@ describe("Add classification", () => {
 });
 
 /** #4b spec §6 (F12): every hand-written policy that reaches the column, from route A with `column`. */
+describe("Add rule from the column panel (spec C8.3)", () => {
+  const RULE_WRITER: Me = { ...STEWARD, permissions: ["policy:read", "policy:update", "tag:read"] };
+
+  it("opens the rule dialog on a mask of this column, offering each classification it carries", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?column=email", RULE_WRITER);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await user.click(await within(panel).findByRole("button", { name: "Add rule" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New rule" });
+    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: /^Catalog/ })).toHaveTextContent("ice"));
+    expect(within(dialog).getByLabelText("Column")).toHaveValue("email");
+    // Its own classification and its table's, each one click from a rule on the classification.
+    expect(within(dialog).getByRole("button", { name: "Or apply it to PII" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Or apply it to CONFIDENTIAL" })).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Or apply it to PII" }));
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+  });
+
+  it("is not offered without policy:update", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders?column=email", STEWARD);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await within(panel).findByRole("button", { name: "Who can read this column?" });
+    expect(within(panel).queryByRole("button", { name: "Add rule" })).not.toBeInTheDocument();
+  });
+});
+
 describe("the column panel's manual policies", () => {
   it("lists every row for the column, asking route A with the column", async () => {
     const calls = serveData(fixture({ handwritten: { "c-ice|sales|orders|email": handwrittenAnswer("c-ice") } }));

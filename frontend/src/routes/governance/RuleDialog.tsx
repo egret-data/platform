@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -8,20 +8,29 @@ import {
   usePermPatchRule,
   usePermPreview,
 } from "@/api/generated/perm/perm";
-import type { NewRule, PreviewResponse, PrincipalSet, Rule, RuleKind, Scope, Selector } from "@/api/generated/model";
+import type { NewRule, PreviewResponse, PrincipalSet, RuleKind, Scope, Selector } from "@/api/generated/model";
 import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { ApiError } from "@/api/client";
 import { type Tag, useTags } from "@/api/tags";
+import { useAuth } from "@/auth/useAuth";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
 import { ScopePicker } from "@/components/perm/ScopePicker";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -29,8 +38,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { formatScope } from "./permFormat";
 import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
+import {
+  clearRuleDraft,
+  loadRuleDraft,
+  ruleDraftKey,
+  saveRuleDraft,
+  seedRule,
+  type RuleEntry,
+} from "@/routes/governance/ruleDraft";
 
 /*
  * D7: `mask_type` is a fixed list in the UI even though the API takes a free
@@ -39,10 +57,19 @@ import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
  */
 
 const EMPTY_SCOPE: Scope = { catalog_id: "" };
-const EMPTY_EXEMPT: PrincipalSet = { include: [], exclude: [] };
+
+/** Create's reason when only the preview is missing or out of date (spec C8.2). */
+export const PREVIEW_TO_ENABLE_CREATE = "Preview the rule to enable Create.";
+/** The path-mask help (spec C8.1): an absent column is legal and means every column. */
+export const EMPTY_COLUMN_MASKS_EVERY_COLUMN = "Leave Column empty to mask every column of the table.";
 
 type KindType = RuleKind["type"];
 type SelectorType = Selector["type"];
+
+/** "(required)" after a label's text (spec C8.1); the field itself carries `aria-required`. */
+function RequiredMark() {
+  return <span className="font-normal text-muted-foreground"> (required)</span>;
+}
 
 /**
  * A tag selector for a rule. **The model selects by `key`, while
@@ -69,7 +96,10 @@ function TagKeySelector({
 
   return (
     <div className="space-y-1.5">
-      <Label htmlFor="rule-tag-search">{TERM.classification}</Label>
+      <Label htmlFor="rule-tag-search">
+        {TERM.classification}
+        <RequiredMark />
+      </Label>
       {selected ? (
         <div className="flex items-center gap-2">
           <Badge variant="secondary">{selected.name}</Badge>
@@ -85,6 +115,7 @@ function TagKeySelector({
           <div className="relative">
             <Input
               id="rule-tag-search"
+              aria-required="true"
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onFocus={() => setOpen(true)}
@@ -123,20 +154,51 @@ function TagKeySelector({
   );
 }
 
-function kindOf(kindType: KindType, maskType: string, valueExpr: string, filterExpr: string): RuleKind {
-  if (kindType === "mask") {
-    return {
-      type: "mask",
-      mask_type: maskType,
-      value_expr: maskType === "CUSTOM" ? valueExpr : undefined,
-    };
+/** The form's fields, one per control. A `NewRule` is derived from them ({@link bodyOf}). */
+type FormState = {
+  name: string;
+  kindType: KindType;
+  maskType: string;
+  valueExpr: string;
+  filterExpr: string;
+  selectorType: SelectorType;
+  tagKey: string;
+  scope: Scope;
+  exempt: PrincipalSet;
+};
+
+function stateOf(rule: NewRule): FormState {
+  const { kind, selector } = rule;
+  let scope = EMPTY_SCOPE;
+  if (selector.type === "path") {
+    const { catalog_id, schema, table, column } = selector;
+    scope = { catalog_id, schema, table, column };
   }
-  return { type: "row_filter", filter_expr: filterExpr };
+  return {
+    name: rule.name,
+    kindType: kind.type,
+    maskType: kind.type === "mask" ? kind.mask_type : "MASK",
+    valueExpr: kind.type === "mask" ? (kind.value_expr ?? "") : "",
+    filterExpr: kind.type === "row_filter" ? kind.filter_expr : "",
+    selectorType: selector.type,
+    tagKey: selector.type === "tag" ? selector.key : "",
+    scope,
+    exempt: rule.exempt ?? { include: [], exclude: [] },
+  };
 }
 
-function selectorOf(selectorType: SelectorType, tagKey: string, scope: Scope): Selector {
-  if (selectorType === "tag") return { type: "tag", key: tagKey };
-  return { ...scope, type: "path" };
+function bodyOf(s: FormState): NewRule {
+  const kind: RuleKind =
+    s.kindType === "mask"
+      ? { type: "mask", mask_type: s.maskType, value_expr: s.maskType === "CUSTOM" ? s.valueExpr : undefined }
+      : { type: "row_filter", filter_expr: s.filterExpr };
+  const selector: Selector = s.selectorType === "tag" ? { type: "tag", key: s.tagKey } : { ...s.scope, type: "path" };
+  return { name: s.name, kind, selector, exempt: s.exempt };
+}
+
+/** A rule's content as a comparable string: the same derivation for the seed and the form. */
+function snapshotOf(rule: NewRule): string {
+  return JSON.stringify(bodyOf(stateOf(rule)));
 }
 
 /**
@@ -149,27 +211,50 @@ function selectorOf(selectorType: SelectorType, tagKey: string, scope: Scope): S
  * `row_filter` uses `ScopePicker`'s `rowFilterMode` (no column field at all,
  * catalog+schema+table jointly required).
  *
- * `initialSelector` and `initialKind` seed a NEW rule's selector and kind (the
- * Data object page's Add rule passes a `path` selector naming its object, and
- * on a table a row filter, which that selector completes); `existing` wins.
+ * **The entry contract (spec C8.3).** `entry` says where the dialog was opened
+ * from, and that alone decides its defaults (`seedRule`) and its draft
+ * (`ruleDraftKey`): a classification's page passes `classification`, a
+ * table's Rules tab `table` (a catalog's or schema's, `scope`), the column
+ * panel `column`, and a rule's page or an Edit action `edit`.
+ *
+ * **The draft (spec C8.4).** The form saves itself to the in-memory draft
+ * store on every change, so closing the dialog by navigating away keeps it,
+ * and reopening from the same entry point restores it. Cancel, Escape, the
+ * close button and an outside click on a changed form ask "Discard this
+ * rule?" first; Discard and a successful save forget the draft.
  */
 export function RuleDialog({
   open,
   onOpenChange,
-  existing,
-  initialSelector,
-  initialKind,
+  entry,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  existing?: Rule | null;
-  initialSelector?: Selector;
-  initialKind?: KindType;
+  entry: RuleEntry;
 }) {
+  // The form decides whether a close needs asking (it knows whether it is dirty).
+  const closeRequestRef = useRef<(() => void) | null>(null);
+  // Start over remounts the form, so every field reseeds from the entry point.
+  const [round, setRound] = useState(0);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && <RuleForm existing={existing} initialSelector={initialSelector} initialKind={initialKind} onOpenChange={onOpenChange} />}
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) onOpenChange(true);
+        else if (closeRequestRef.current) closeRequestRef.current();
+        else onOpenChange(false);
+      }}
+    >
+      <DialogContent className="max-h-[85vh] max-w-2xl">
+        {open && (
+          <RuleForm
+            key={round}
+            entry={entry}
+            onOpenChange={onOpenChange}
+            closeRequestRef={closeRequestRef}
+            onStartOver={() => setRound((r) => r + 1)}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -177,54 +262,45 @@ export function RuleDialog({
 
 /**
  * The form itself — mounted only while the dialog is `open` (see
- * `RuleDialog` above), so every field below is freshly seeded from
- * `existing` via a lazy initializer rather than an effect that would have to
- * "reset" state a remount never let accumulate in the first place.
+ * `RuleDialog` above), so every field is seeded once, from the draft of this
+ * entry point when there is one, else from the entry point's defaults.
  */
 function RuleForm({
-  existing,
-  initialSelector,
-  initialKind,
+  entry,
   onOpenChange,
+  closeRequestRef,
+  onStartOver,
 }: {
-  existing?: Rule | null;
-  initialSelector?: Selector;
-  initialKind?: KindType;
+  entry: RuleEntry;
   onOpenChange: (open: boolean) => void;
+  closeRequestRef: MutableRefObject<(() => void) | null>;
+  onStartOver: () => void;
 }) {
-  const seed = existing ? existing.selector : initialSelector;
+  const existing = entry.kind === "edit" ? entry.rule : null;
+  const { me } = useAuth();
+  const draftKey = ruleDraftKey(me?.user_id ?? "", entry);
+  const [start] = useState(() => {
+    const draft = loadRuleDraft(draftKey);
+    return { state: stateOf(draft ?? seedRule(entry)), restored: draft !== undefined };
+  });
+
   // Read here rather than passed down — see the same note in `GrantDialog`
   // (review M-6).
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
-  const [name, setName] = useState(existing?.name ?? "");
-  const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? initialKind ?? "mask");
-  const [maskType, setMaskType] = useState(
-    existing?.kind.type === "mask" ? existing.kind.mask_type : "MASK",
-  );
-  const [valueExpr, setValueExpr] = useState(
-    existing?.kind.type === "mask" ? (existing.kind.value_expr ?? "") : "",
-  );
-  const [filterExpr, setFilterExpr] = useState(
-    existing?.kind.type === "row_filter" ? existing.kind.filter_expr : "",
-  );
-  const [selectorType, setSelectorType] = useState<SelectorType>(seed?.type ?? "tag");
-  const [tagKey, setTagKey] = useState(seed?.type === "tag" ? seed.key : "");
-  const [scope, setScope] = useState<Scope>(() => {
-    if (seed?.type === "path") {
-      const { catalog_id, schema, table, column } = seed;
-      return { catalog_id, schema, table, column };
-    }
-    return EMPTY_SCOPE;
-  });
-  const [exempt, setExempt] = useState<PrincipalSet>(existing?.exempt ?? EMPTY_EXEMPT);
+  const [form, setForm] = useState<FormState>(start.state);
+  const update = (patch: Partial<FormState>) => setForm((f) => ({ ...f, ...patch }));
+  const { name, kindType, maskType, valueExpr, filterExpr, selectorType, tagKey, scope, exempt } = form;
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewedFor, setPreviewedFor] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Bumped on every failure, so focus moves to the error even when its text repeats.
+  const [errorSeq, setErrorSeq] = useState(0);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const queryClient = useQueryClient();
   const invalidate = () =>
@@ -234,10 +310,28 @@ function RuleForm({
   const createRule = usePermCreateRule<ApiError>({ mutation: { onSuccess: invalidate } });
   const patchRule = usePermPatchRule<ApiError>({ mutation: { onSuccess: invalidate } });
 
-  const kind = kindOf(kindType, maskType, valueExpr, filterExpr);
-  const selector = selectorOf(selectorType, tagKey, scope);
-  const body: NewRule = { name, kind, selector, exempt };
+  const body = bodyOf(form);
+  const snapshot = JSON.stringify(body);
   const bodySnapshot = JSON.stringify({ id: existing?.id ?? null, body });
+  const dirty = snapshot !== snapshotOf(seedRule(entry));
+
+  // The draft follows the form: kept while it differs from the entry point's defaults.
+  useEffect(() => {
+    if (dirty) saveRuleDraft(draftKey, JSON.parse(snapshot) as NewRule);
+    else clearRuleDraft(draftKey);
+  }, [snapshot, draftKey, dirty]);
+  useUnsavedChangesWarning(dirty);
+
+  function requestClose() {
+    if (dirty) setConfirmDiscard(true);
+    else onOpenChange(false);
+  }
+  useEffect(() => {
+    closeRequestRef.current = requestClose;
+    return () => {
+      closeRequestRef.current = null;
+    };
+  });
 
   // D6's row-filter-by-path constraint, restated as a Save gate: `ScopePicker`
   // in `rowFilterMode` never renders a column field, but this dialog uses the
@@ -273,16 +367,14 @@ function RuleForm({
    * would send something other than what the form last showed.
    */
   function changeKind(next: KindType) {
-    setKindType(next);
-    if (next === "row_filter" && scope.column) {
-      setScope({ ...scope, column: undefined });
-    }
+    update(next === "row_filter" && scope.column ? { kindType: next, scope: { ...scope, column: undefined } } : { kindType: next });
   }
 
   const previewStale = previewedFor !== bodySnapshot;
 
   async function runPreview() {
     setPreviewError(null);
+    setSaveError(null);
     setPreview(null);
     try {
       const result = await previewMutation.mutateAsync({
@@ -296,11 +388,13 @@ function RuleForm({
         // stays blocked without a preview, but silence is the failure mode this
         // branch keeps fixing elsewhere (review M-7). Say the status.
         setPreviewError(`Preview failed (HTTP ${result.status}).`);
+        setErrorSeq((n) => n + 1);
       }
       setPreview(data ?? null);
       setPreviewedFor(bodySnapshot);
     } catch (e) {
       setPreviewError((e as ApiError).message || "Preview failed.");
+      setErrorSeq((n) => n + 1);
       setPreviewedFor(bodySnapshot);
     }
   }
@@ -313,15 +407,44 @@ function RuleForm({
       } else {
         await createRule.mutateAsync({ data: body });
       }
+      clearRuleDraft(draftKey);
       toast.success(existing ? "Rule updated." : "Rule created.");
       onOpenChange(false);
     } catch (e) {
       setSaveError((e as ApiError).message || "Failed to save the rule.");
+      setErrorSeq((n) => n + 1);
     }
   }
 
   const saving = createRule.isPending || patchRule.isPending;
-  const canSave = !blockedReason && !previewStale && !!preview && !previewError;
+  const previewing = previewMutation.isPending;
+  /**
+   * Why Create is not available, or `null` (spec C8.2): the first of what
+   * blocks the rule, a missing or out-of-date preview, and a refused preview.
+   * Shown beside the button and tied to it as its description.
+   */
+  const createReason =
+    blockedReason ??
+    (previewStale || (!preview && !previewError)
+      ? PREVIEW_TO_ENABLE_CREATE
+      : previewError
+        ? "The preview was refused. Change the rule, then preview it again."
+        : null);
+  const canSave = createReason === null;
+  const reasonId = useId();
+  const saveLabel = existing ? "Save changes" : "Create";
+
+  /** The footer's error: the latest failure, in the server's words (FE-ACTION-3). */
+  const footerError = saveError
+    ? { title: "The rule was not saved.", message: saveError }
+    : previewError
+      ? { title: "The preview was refused.", message: previewError }
+      : null;
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // The footer is sticky, so the error is in view; focus takes the reader there too.
+    if (errorSeq > 0) errorRef.current?.focus();
+  }, [errorSeq]);
 
   return (
     <>
@@ -331,190 +454,281 @@ function RuleForm({
           A named rule that masks a column or filters rows wherever a classification or a path
           matches.
         </DialogDescription>
-        </DialogHeader>
+      </DialogHeader>
 
-        <div className="space-y-5">
-          {saveError && (
-            <Alert variant="destructive">
-              <AlertDescription>{saveError}</AlertDescription>
-            </Alert>
-          )}
+      <div className="space-y-5">
+        {start.restored && (
+          <p role="status" className="text-xs text-muted-foreground">
+            Restored your unsaved rule ·{" "}
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-xs"
+              onClick={() => {
+                clearRuleDraft(draftKey);
+                onStartOver();
+              }}
+            >
+              Start over
+            </Button>
+          </p>
+        )}
 
-          <div className="space-y-1.5">
-            <Label htmlFor="rule-name">Name</Label>
-            <Input id="rule-name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="rule-kind">{TERM.kind}</Label>
-            <Select value={kindType} onValueChange={(v) => changeKind(v as KindType)}>
-              <SelectTrigger id="rule-kind">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="mask">Mask a column</SelectItem>
-                <SelectItem value="row_filter">Filter rows</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {kindType === "mask" ? (
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="rule-mask-type">Mask type</Label>
-                <Select value={maskType} onValueChange={setMaskType}>
-                  <SelectTrigger id="rule-mask-type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MASK_TYPES.map((m) => (
-                      <SelectItem key={m.value} value={m.value}>
-                        {m.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {maskType === "CUSTOM" && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="rule-value-expr">Custom expression</Label>
-                  <Textarea
-                    id="rule-value-expr"
-                    rows={2}
-                    value={valueExpr}
-                    onChange={(e) => setValueExpr(e.target.value)}
-                    placeholder="e.g. cast(NULL as {type})"
-                  />
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Label htmlFor="rule-filter-expr">Filter expression</Label>
-              <Textarea
-                id="rule-filter-expr"
-                rows={2}
-                value={filterExpr}
-                onChange={(e) => setFilterExpr(e.target.value)}
-                placeholder="e.g. region = 'us'"
-              />
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <Label htmlFor="rule-selector-type">{TERM.appliesTo}</Label>
-            <Select value={selectorType} onValueChange={(v) => setSelectorType(v as SelectorType)}>
-              <SelectTrigger id="rule-selector-type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="tag">{TERM.classification}</SelectItem>
-                <SelectItem value="path">{TERM.path}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {selectorType === "tag" ? (
-            <TagKeySelector value={tagKey} onChange={setTagKey} />
-          ) : (
-            <div className="space-y-1.5">
-              <Label>Scope</Label>
-              <ScopePicker value={scope} onChange={setScope} rowFilterMode={kindType === "row_filter"} />
-              {scope.catalog_id && (
-                <p className="text-xs text-muted-foreground">
-                  {TERM.appliesTo} {formatScope(scope, catalogName(scope.catalog_id))}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <Label>{TERM.exempt}</Label>
-            <PrincipalPicker value={exempt} onChange={setExempt} exempt />
-          </div>
-
-          {blockedReason && (
-            <Alert>
-              <AlertDescription>{blockedReason}</AlertDescription>
-            </Alert>
-          )}
-
-          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium">Preview this write</p>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => void runPreview()}
-                disabled={!!blockedReason || previewMutation.isPending}
-              >
-                {previewMutation.isPending ? "Checking…" : "Preview"}
-              </Button>
-            </div>
-
-            {previewError && (
-              <Alert variant="destructive">
-                <AlertDescription>{previewError}</AlertDescription>
-              </Alert>
-            )}
-
-            {preview && !previewStale && (
-              <div className="space-y-1 text-sm">
-                <p>
-                  Would recompile{" "}
-                  {preview.affected.length === 0
-                    ? "no profiles"
-                    : preview.affected.map((p) => p.name).join(", ")}
-                  .
-                </p>
-                <p className="text-muted-foreground">
-                  created {preview.compile.created} · updated {preview.compile.updated} · deleted{" "}
-                  {preview.compile.deleted} · unchanged {preview.compile.unchanged}
-                </p>
-                {preview.compile.skipped.length > 0 && (
-                  <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-                    {/* The index is part of the key on purpose (SP4b-2
-                        finding 4): `SkipReport` is `{source_kind, id, reason}`
-                        with no profile field, so the SAME rule skipped in two
-                        profiles produces two byte-identical entries — the
-                        normal case for a tag rule, which is catalog-unscoped
-                        and therefore the exact fan-out this panel exists to
-                        show. Keying on `source_kind`+`id` collided there and
-                        React dropped one of the two lines it was asked to
-                        render. */}
-                    {preview.compile.skipped.map((s, i) => (
-                      <li key={`${s.source_kind}-${s.id}-${i}`}>
-                        {s.source_kind} {s.id}: {s.reason}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            {!preview && !previewError && (
-              <p className="text-xs text-muted-foreground">
-                Run a preview before saving. A rule on a classification is catalog-unscoped, so this can recompile
-                every Trino profile in the installation — see which, here, before committing.
-              </p>
-            )}
-            {previewStale && (preview || previewError) && (
-              <p className="text-xs text-muted-foreground">
-                The form changed since that preview — run it again before saving.
-              </p>
-            )}
-          </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="rule-name">
+            Name
+            <RequiredMark />
+          </Label>
+          <Input
+            id="rule-name"
+            aria-required="true"
+            value={name}
+            onChange={(e) => update({ name: e.target.value })}
+            autoFocus
+          />
         </div>
 
-      <DialogFooter>
-        <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button type="button" onClick={() => void save()} disabled={!canSave || saving}>
-          {saving ? "Saving…" : existing ? "Save changes" : "Create"}
-        </Button>
-      </DialogFooter>
+        <div className="space-y-1.5">
+          <Label htmlFor="rule-kind">{TERM.kind}</Label>
+          <Select value={kindType} onValueChange={(v) => changeKind(v as KindType)}>
+            <SelectTrigger id="rule-kind">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="mask">Mask a column</SelectItem>
+              <SelectItem value="row_filter">Filter rows</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {kindType === "mask" ? (
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="rule-mask-type">Mask type</Label>
+              <Select value={maskType} onValueChange={(v) => update({ maskType: v })}>
+                <SelectTrigger id="rule-mask-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MASK_TYPES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {maskType === "CUSTOM" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="rule-value-expr">
+                  Custom expression
+                  <RequiredMark />
+                </Label>
+                <Textarea
+                  id="rule-value-expr"
+                  aria-required="true"
+                  rows={2}
+                  value={valueExpr}
+                  onChange={(e) => update({ valueExpr: e.target.value })}
+                  placeholder="e.g. cast(NULL as {type})"
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            <Label htmlFor="rule-filter-expr">
+              Filter expression
+              <RequiredMark />
+            </Label>
+            <Textarea
+              id="rule-filter-expr"
+              aria-required="true"
+              rows={2}
+              value={filterExpr}
+              onChange={(e) => update({ filterExpr: e.target.value })}
+              placeholder="e.g. region = 'us'"
+            />
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <Label htmlFor="rule-selector-type">{TERM.appliesTo}</Label>
+          <Select value={selectorType} onValueChange={(v) => update({ selectorType: v as SelectorType })}>
+            <SelectTrigger id="rule-selector-type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="tag">{TERM.classification}</SelectItem>
+              <SelectItem value="path">{TERM.path}</SelectItem>
+            </SelectContent>
+          </Select>
+          {entry.kind === "column" && selectorType === "path" && entry.classifications.length > 0 && (
+            <ul role="list" className="flex flex-wrap gap-x-3 gap-y-1">
+              {entry.classifications.map((c) => (
+                <li key={c.key}>
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto p-0 text-xs"
+                    onClick={() => update({ selectorType: "tag", tagKey: c.key })}
+                  >
+                    {`Or apply it to ${c.name}`}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {selectorType === "tag" ? (
+          <TagKeySelector value={tagKey} onChange={(key) => update({ tagKey: key })} />
+        ) : (
+          <div className="space-y-1.5">
+            <Label>Scope</Label>
+            <ScopePicker
+              value={scope}
+              onChange={(next) => update({ scope: next })}
+              rowFilterMode={kindType === "row_filter"}
+              catalogRequired
+            />
+            {kindType === "mask" && <p className="text-xs text-muted-foreground">{EMPTY_COLUMN_MASKS_EVERY_COLUMN}</p>}
+            {scope.catalog_id && (
+              <p className="text-xs text-muted-foreground">
+                {TERM.appliesTo} {formatScope(scope, catalogName(scope.catalog_id))}
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <Label>{TERM.exempt}</Label>
+          <PrincipalPicker value={exempt} onChange={(next) => update({ exempt: next })} exempt />
+        </div>
+
+        <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">Preview this write</p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              aria-disabled={!!blockedReason || previewing}
+              aria-describedby={blockedReason ? reasonId : undefined}
+              onClick={() => {
+                if (!blockedReason && !previewing) void runPreview();
+              }}
+            >
+              {previewing ? "Checking…" : "Preview"}
+            </Button>
+          </div>
+
+          {preview && !previewStale && (
+            <div className="space-y-1 text-sm">
+              <p>
+                Would recompile{" "}
+                {preview.affected.length === 0
+                  ? "no profiles"
+                  : preview.affected.map((p) => p.name).join(", ")}
+                .
+              </p>
+              <p className="text-muted-foreground">
+                created {preview.compile.created} · updated {preview.compile.updated} · deleted{" "}
+                {preview.compile.deleted} · unchanged {preview.compile.unchanged}
+              </p>
+              {preview.compile.skipped.length > 0 && (
+                <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
+                  {/* The index is part of the key on purpose (SP4b-2
+                      finding 4): `SkipReport` is `{source_kind, id, reason}`
+                      with no profile field, so the SAME rule skipped in two
+                      profiles produces two byte-identical entries — the
+                      normal case for a tag rule, which is catalog-unscoped
+                      and therefore the exact fan-out this panel exists to
+                      show. Keying on `source_kind`+`id` collided there and
+                      React dropped one of the two lines it was asked to
+                      render. */}
+                  {preview.compile.skipped.map((s, i) => (
+                    <li key={`${s.source_kind}-${s.id}-${i}`}>
+                      {s.source_kind} {s.id}: {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {!preview && !previewError && (
+            <p className="text-xs text-muted-foreground">
+              A rule on a classification is catalog-unscoped, so this can recompile every Trino profile in the
+              installation — see which, here, before committing.
+            </p>
+          )}
+          {previewStale && (preview || previewError) && (
+            <p className="text-xs text-muted-foreground">
+              The form changed since that preview — run it again before saving.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Sticky inside the dialog's scrolling body, so the reason and any error stay in view (N26). */}
+      <div
+        role="group"
+        aria-label="Rule actions"
+        className="sticky bottom-0 z-10 space-y-2 border-t border-border bg-background pt-3"
+      >
+        {footerError && (
+          <Alert ref={errorRef} variant="destructive" tabIndex={-1}>
+            <AlertTitle>{footerError.title}</AlertTitle>
+            <AlertDescription>{footerError.message}</AlertDescription>
+          </Alert>
+        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {createReason && (
+            <p id={reasonId} className="mr-auto text-xs text-muted-foreground">
+              {createReason}
+            </p>
+          )}
+          <Button type="button" variant="outline" onClick={requestClose}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            aria-disabled={!canSave || saving}
+            aria-describedby={canSave ? undefined : reasonId}
+            onClick={() => {
+              if (canSave && !saving) void save();
+            }}
+          >
+            {saving ? "Saving…" : saveLabel}
+          </Button>
+        </div>
+      </div>
+
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard this rule?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your changes to this rule are not saved. Keep editing to go back to them, or discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                clearRuleDraft(draftKey);
+                setConfirmDiscard(false);
+                onOpenChange(false);
+              }}
+            >
+              Discard
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

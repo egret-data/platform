@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -20,12 +20,18 @@ vi.mock("@/components/perm/ScopePicker", () => ({
     value,
     onChange,
     rowFilterMode,
+    catalogRequired,
   }: {
     value: unknown;
     onChange: (v: unknown) => void;
     rowFilterMode?: boolean;
+    catalogRequired?: boolean;
   }) => (
-    <div data-testid="scope-picker" data-row-filter-mode={String(!!rowFilterMode)}>
+    <div
+      data-testid="scope-picker"
+      data-row-filter-mode={String(!!rowFilterMode)}
+      data-catalog-required={String(!!catalogRequired)}
+    >
       <div data-testid="scope-value">{JSON.stringify(value)}</div>
       <button
         type="button"
@@ -50,7 +56,14 @@ import * as governance from "@/api/generated/control-plane-governance/control-pl
 import * as tagsApi from "@/api/tags";
 import { ApiError } from "@/api/client";
 import type { GovernanceCatalog, Rule } from "@/api/generated/model";
+import type { Me } from "@/api/hooks";
+import { AuthContext } from "@/auth/useAuth";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
+import { clearAllRuleDrafts, type RuleEntry } from "@/routes/governance/ruleDraft";
+
+const ME: Me = { user_id: "u1", email: "", platform_roles: ["platform_admin"], permissions: [] };
+const CLASSIFICATION_ENTRY: RuleEntry = { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" };
+const TABLE_ENTRY: RuleEntry = { kind: "table", catalogId: "cat-1", schema: "sales", table: "orders" };
 
 const CATALOG: GovernanceCatalog = {
   id: "cat-1",
@@ -104,15 +117,26 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onOpenChange = vi.fn();
   const utils = render(
-    <QueryClientProvider client={qc}>
-      <RuleDialog open onOpenChange={onOpenChange} {...props} />
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me: ME, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <RuleDialog open onOpenChange={onOpenChange} entry={CLASSIFICATION_ENTRY} {...props} />
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
   return { ...utils, onOpenChange };
 }
 
+/** A table entry switched to Applies to = Classification: the tag picker starts empty. */
+async function openWithNoClassification(user: ReturnType<typeof userEvent.setup>) {
+  renderDialog({ entry: TABLE_ENTRY });
+  await user.click(screen.getByRole("combobox", { name: "Applies to" }));
+  await user.click(await screen.findByRole("option", { name: "Classification" }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // The draft store is module-level by design (it outlives the dialog); no test inherits another's draft.
+  clearAllRuleDrafts();
   vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
     isLoading: false,
@@ -139,9 +163,9 @@ beforeEach(() => {
 describe("RuleDialog — the tag selector carries the key, not the name", () => {
   test("selecting a tag by its NAME stores the model's KEY", async () => {
     const user = userEvent.setup();
-    renderDialog();
+    await openWithNoClassification(user);
 
-    await user.type(screen.getByLabelText("Name"), "mask-pii");
+    await user.type(screen.getByLabelText(/^Name/), "mask-pii");
     await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     const option = await screen.findByRole("button", { name: /PII Data/ });
     expect(option).toHaveTextContent("Key pii_v2");
@@ -164,15 +188,17 @@ describe("RuleDialog — mask_type is a fixed list, CUSTOM reveals the expressio
     const user = userEvent.setup();
     renderDialog();
 
-    expect(screen.queryByLabelText("Custom expression")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Custom expression/)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("combobox", { name: /mask type/i }));
     await user.click(await screen.findByRole("option", { name: "Custom" }));
-    expect(screen.getByLabelText("Custom expression")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Custom expression/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Custom expression/)).toHaveAttribute("aria-required", "true");
+    expect(screen.getByText("Custom expression").closest("label")).toHaveTextContent("Custom expression (required)");
 
     await user.click(screen.getByRole("combobox", { name: /mask type/i }));
     await user.click(await screen.findByRole("option", { name: "Hash" }));
-    expect(screen.queryByLabelText("Custom expression")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Custom expression/)).not.toBeInTheDocument();
   });
 });
 
@@ -181,10 +207,10 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     const user = userEvent.setup();
     renderDialog();
 
-    await user.type(screen.getByLabelText("Name"), "filter-region");
+    await user.type(screen.getByLabelText(/^Name/), "filter-region");
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
     await user.click(await screen.findByRole("option", { name: "Filter rows" }));
-    await user.type(screen.getByLabelText("Filter expression"), "region = 'us'");
+    await user.type(screen.getByLabelText(/^Filter expression/), "region = 'us'");
     await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
 
@@ -194,10 +220,12 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     expect(
       screen.getByText(/A path-selected row filter needs exactly a catalog, schema and table/),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Preview" })).toBeDisabled();
+    const preview = screen.getByRole("button", { name: "Preview" });
+    expect(preview).toHaveAttribute("aria-disabled", "true");
+    expect(preview).toHaveAccessibleDescription(/A path-selected row filter needs exactly a catalog, schema and table/);
 
     await user.click(screen.getByRole("button", { name: "set-scope-complete" }));
-    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Preview" })).toHaveAttribute("aria-disabled", "false");
   });
 
   /**
@@ -212,7 +240,7 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     const user = userEvent.setup();
     renderDialog();
 
-    await user.type(screen.getByLabelText("Name"), "filter-region");
+    await user.type(screen.getByLabelText(/^Name/), "filter-region");
     await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
     await user.click(screen.getByRole("button", { name: "set-scope-with-column" }));
@@ -220,14 +248,14 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
 
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
     await user.click(await screen.findByRole("option", { name: "Filter rows" }));
-    await user.type(screen.getByLabelText("Filter expression"), "region = 'us'");
+    await user.type(screen.getByLabelText(/^Filter expression/), "region = 'us'");
 
     // The column is gone from the form's own state, so the form is completable.
     expect(screen.getByTestId("scope-value")).not.toHaveTextContent('"column"');
     expect(
       screen.queryByText(/A path-selected row filter needs exactly a catalog, schema and table/),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Preview" })).toHaveAttribute("aria-disabled", "false");
   });
 
   /** The reverse switch must NOT invent or keep anything: going back to `mask`
@@ -252,9 +280,9 @@ describe("RuleDialog — the preview of a tag rule can fan out to every profile 
   test("shows more than one profile when several would recompile", async () => {
     const user = userEvent.setup();
     previewMutateAsync.mockResolvedValueOnce(OK_PREVIEW_MANY);
-    renderDialog();
+    await openWithNoClassification(user);
 
-    await user.type(screen.getByLabelText("Name"), "mask-pii");
+    await user.type(screen.getByLabelText(/^Name/), "mask-pii");
     await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     await user.click(await screen.findByRole("button", { name: /PII Data/ }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
@@ -276,14 +304,14 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
 
   test("editing seeds every field and resends it unchanged", async () => {
     const user = userEvent.setup();
-    renderDialog({ existing: EXISTING });
+    renderDialog({ entry: { kind: "edit", rule: EXISTING } });
 
     expect(screen.getByDisplayValue("mask-ssn")).toBeInTheDocument();
     expect(screen.getByText("PII Data")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Preview" }));
     const saveBtn = await screen.findByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await waitFor(() => expect(saveBtn).toHaveAttribute("aria-disabled", "false"));
     await user.click(saveBtn);
 
     await waitFor(() => expect(patchMutateAsync).toHaveBeenCalled());
@@ -303,11 +331,11 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
     patchMutateAsync.mockRejectedValueOnce(
       new ApiError(409, "rule 'mask-ssn' would push profile 'trino-eu' to 2001 policies, over its 2000 ceiling"),
     );
-    renderDialog({ existing: EXISTING });
+    renderDialog({ entry: { kind: "edit", rule: EXISTING } });
 
     await user.click(screen.getByRole("button", { name: "Preview" }));
     const saveBtn = await screen.findByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await waitFor(() => expect(saveBtn).toHaveAttribute("aria-disabled", "false"));
     await user.click(saveBtn);
 
     expect(
@@ -328,12 +356,12 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
     const REFUSAL =
       'bad request: these principal refs match nobody egret knows: user "ghost" (exempt.include[0]): no user has this username';
     previewMutateAsync.mockRejectedValueOnce(new ApiError(400, REFUSAL));
-    renderDialog({ existing: EXISTING });
+    renderDialog({ entry: { kind: "edit", rule: EXISTING } });
 
     await user.click(screen.getByRole("button", { name: "Preview" }));
 
     expect(await screen.findByText(REFUSAL)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveAttribute("aria-disabled", "true");
   });
 
   const SENTENCE =
@@ -342,16 +370,16 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
   test("the 409 sentence shows beside the form and nothing the user entered is cleared", async () => {
     const user = userEvent.setup();
     patchMutateAsync.mockRejectedValueOnce(new ApiError(409, SENTENCE));
-    renderDialog({ existing: EXISTING });
+    renderDialog({ entry: { kind: "edit", rule: EXISTING } });
 
     await user.click(screen.getByRole("button", { name: "Preview" }));
     const saveBtn = await screen.findByRole("button", { name: "Save changes" });
-    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await waitFor(() => expect(saveBtn).toHaveAttribute("aria-disabled", "false"));
     await user.click(saveBtn);
 
     expect(await screen.findByText(SENTENCE)).toBeInTheDocument();
     expect(screen.getByDisplayValue("mask-ssn")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveAttribute("aria-disabled", "false");
   });
 });
 
@@ -398,8 +426,8 @@ describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
     });
 
     const user = userEvent.setup();
-    renderDialog();
-    await user.type(screen.getByLabelText("Name"), "mask-pii-columns");
+    await openWithNoClassification(user);
+    await user.type(screen.getByLabelText(/^Name/), "mask-pii-columns");
     await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     await user.click(await screen.findByRole("button", { name: /PII Data/ }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
@@ -433,10 +461,10 @@ describe("RuleDialog — it resolves the catalog's name itself (review M-6)", ()
   });
 });
 
-describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
-  test("a path selector opens on Path with the scope filled in, and is sent as given", async () => {
+describe("RuleDialog — a table entry seeds a path mask on the table", () => {
+  test("opens on Path with the scope filled in, and is sent as given", async () => {
     const user = userEvent.setup();
-    renderDialog({ initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" } });
+    renderDialog({ entry: TABLE_ENTRY });
 
     expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
     expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "")).toEqual({
@@ -445,8 +473,10 @@ describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
       table: "orders",
     });
     expect(screen.getByText(/Applies to wh\.sales\.orders/)).toBeInTheDocument();
+    // Catalog is the one level a path selector cannot do without.
+    expect(screen.getByTestId("scope-picker")).toHaveAttribute("data-catalog-required", "true");
 
-    await user.type(screen.getByLabelText("Name"), "mask-orders");
+    await user.type(screen.getByLabelText(/^Name/), "mask-orders");
     await user.click(screen.getByRole("button", { name: "Preview" }));
     await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
     expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({
@@ -457,20 +487,241 @@ describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
     });
   });
 
-  test("an existing rule's selector wins over initialSelector", () => {
+  /** Row filter stays one click away, and the table's scope completes it (spec C8.3). */
+  test("switching to Filter rows keeps the table's scope, which completes the filter", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: TABLE_ENTRY });
+
+    await user.type(screen.getByLabelText(/^Name/), "filter-orders");
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    await user.type(screen.getByLabelText(/^Filter expression/), "region = 'us'");
+
+    expect(screen.getByTestId("scope-picker")).toHaveAttribute("data-row-filter-mode", "true");
+    expect(screen.getByRole("button", { name: "Preview" })).toHaveAttribute("aria-disabled", "false");
+    expect(screen.queryByText("Leave Column empty to mask every column of the table.")).not.toBeInTheDocument();
+  });
+});
+
+describe("RuleDialog — Create always says why it is not available (C8.2)", () => {
+  test("Create stays focusable and is described by the reason in the footer", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: TABLE_ENTRY });
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    expect(create).not.toBeDisabled();
+    expect(create).toHaveAccessibleDescription("Name the rule.");
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    expect(create).toHaveAccessibleDescription("Preview the rule to enable Create.");
+    await user.click(create);
+    expect(createMutateAsync).not.toHaveBeenCalled();
+    // The reason is text in the footer, beside the button, not only a description.
+    const footer = screen.getByRole("group", { name: "Rule actions" });
+    expect(within(footer).getByText("Preview the rule to enable Create.")).toBeInTheDocument();
+  });
+
+  test("Preview follows the same pattern: focusable, with the reason tied, and a click does nothing", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: TABLE_ENTRY });
+    const preview = screen.getByRole("button", { name: "Preview" });
+    expect(preview).toHaveAttribute("aria-disabled", "true");
+    expect(preview).not.toBeDisabled();
+    expect(preview).toHaveAccessibleDescription("Name the rule.");
+    await user.click(preview);
+    expect(previewMutateAsync).not.toHaveBeenCalled();
+  });
+
+  test("after a preview, Create is available and carries no reason", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const create = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toHaveAttribute("aria-disabled", "false"));
+    expect(create).not.toHaveAccessibleDescription();
+    await user.click(create);
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  test("required labels say so", () => {
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    expect(screen.getByText("Name").closest("label")).toHaveTextContent("Name (required)");
+    expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-required", "true");
+  });
+
+  test("the classification picker and the filter expression are marked required", async () => {
+    const user = userEvent.setup();
+    await openWithNoClassification(user);
+    expect(screen.getByText("Classification", { selector: "label" })).toHaveTextContent("Classification (required)");
+    expect(screen.getByPlaceholderText("Search classifications by name…")).toHaveAttribute("aria-required", "true");
+
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    expect(screen.getByText("Filter expression").closest("label")).toHaveTextContent("Filter expression (required)");
+    expect(screen.getByLabelText(/^Filter expression/)).toHaveAttribute("aria-required", "true");
+  });
+
+  test("a path mask says that an empty column masks every column", () => {
+    renderDialog({ entry: TABLE_ENTRY });
+    expect(screen.getByText("Leave Column empty to mask every column of the table.")).toBeInTheDocument();
+  });
+});
+
+describe("RuleDialog — defaults per entry point (C8.3)", () => {
+  test("from a classification: Mask, Redact, Applies to = that classification, named after it", () => {
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Mask PII Data");
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(screen.getByRole("combobox", { name: /mask type/i })).toHaveTextContent("Redact");
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(screen.getByText("PII Data")).toBeInTheDocument();
+  });
+
+  test("from a table: Mask on the table's path, not a row filter", () => {
+    renderDialog({ entry: TABLE_ENTRY });
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({ catalog_id: "cat-1", schema: "sales", table: "orders" });
+  });
+
+  test("from a column: a mask on that column, with a switch to each classification it carries", async () => {
+    const user = userEvent.setup();
     renderDialog({
-      existing: {
-        id: "r1",
-        name: "mask-ssn",
-        kind: { type: "mask", mask_type: "MASK_HASH" },
-        selector: { type: "tag", key: "pii_v2" },
-        exempt: { include: [], exclude: [] },
+      entry: {
+        kind: "column",
+        catalogId: "cat-1",
+        schema: "sales",
+        table: "orders",
+        column: "email",
+        classifications: [{ key: "pii_v2", name: "PII Data" }],
       },
-      initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales" },
+    });
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({
+      catalog_id: "cat-1",
+      schema: "sales",
+      table: "orders",
+      column: "email",
     });
 
+    await user.type(screen.getByLabelText(/^Name/), "mask-email");
+    await user.click(screen.getByRole("button", { name: "Or apply it to PII Data" }));
     expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
-    expect(screen.queryByRole("combobox", { name: "Selects by" })).not.toBeInTheDocument();
-    expect(screen.getByText("PII Data")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({ type: "tag", key: "pii_v2" });
+  });
+
+  test("from a rule page: the rule's own kind and selector", () => {
+    renderDialog({
+      entry: {
+        kind: "edit",
+        rule: {
+          id: "r9",
+          name: "filter-us",
+          kind: { type: "row_filter", filter_expr: "region = 'us'" },
+          selector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" },
+          exempt: { include: [], exclude: [] },
+        },
+      },
+    });
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Filter rows");
+    expect(screen.getByLabelText(/^Filter expression/)).toHaveValue("region = 'us'");
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
+  });
+});
+
+describe("RuleDialog — the draft survives Cancel (C8.4)", () => {
+  test("Cancel on a dirty form asks first; Keep editing keeps everything; reopening restores it", async () => {
+    const user = userEvent.setup();
+    const entry = { kind: "table", catalogId: "cat-1", schema: "sales", table: "orders" } as const;
+    const { onOpenChange, unmount } = renderDialog({ entry });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    const ask = await screen.findByRole("alertdialog", { name: "Discard this rule?" });
+    await user.click(within(ask).getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("mask email");
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    unmount(); // the user navigates away (a detour) with the dialog open
+    renderDialog({ entry });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("mask email");
+    expect(screen.getByText(/Restored your unsaved rule/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start over" }));
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+    expect(screen.queryByText(/Restored your unsaved rule/)).not.toBeInTheDocument();
+  });
+
+  test("Escape on a dirty form asks too, and Discard closes and forgets the draft", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange, unmount } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    await user.keyboard("{Escape}");
+    const ask = await screen.findByRole("alertdialog", { name: "Discard this rule?" });
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    await user.click(within(ask).getByRole("button", { name: "Discard" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    unmount();
+    renderDialog({ entry: TABLE_ENTRY });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+    expect(screen.queryByText(/Restored your unsaved rule/)).not.toBeInTheDocument();
+  });
+
+  test("a clean form closes on Cancel without asking", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  test("a draft belongs to its entry point: another table opens clean", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    unmount();
+    renderDialog({ entry: { kind: "table", catalogId: "cat-1", schema: "sales", table: "customers" } });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+  });
+
+  test("a successful Create forgets the draft", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange, unmount } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const create = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toHaveAttribute("aria-disabled", "false"));
+    await user.click(create);
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    unmount();
+    renderDialog({ entry: TABLE_ENTRY });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+  });
+});
+
+describe("RuleDialog — errors stay with the form (C8.5)", () => {
+  test("a preview error renders in the footer, takes focus, and clears no field", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(400, "bad request: nope"));
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const footer = screen.getByRole("group", { name: "Rule actions" });
+    const err = await within(footer).findByRole("alert");
+    expect(err).toHaveTextContent("nope");
+    expect(err.contains(document.activeElement) || err === document.activeElement).toBe(true);
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Mask PII Data");
+  });
+
+  test("a save error renders in the footer too, and takes focus", async () => {
+    const user = userEvent.setup();
+    createMutateAsync.mockRejectedValueOnce(new ApiError(409, "rule name already used"));
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const create = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toHaveAttribute("aria-disabled", "false"));
+    await user.click(create);
+    const footer = screen.getByRole("group", { name: "Rule actions" });
+    const err = await within(footer).findByRole("alert");
+    expect(err).toHaveTextContent("rule name already used");
+    expect(err.contains(document.activeElement) || err === document.activeElement).toBe(true);
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Mask PII Data");
   });
 });

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
+import type { RuleEntry } from "@/routes/governance/ruleDraft";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatRuleKind, formatSelector, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
@@ -25,7 +26,7 @@ import {
   tagNamesOn,
   type PatternLevel,
 } from "@/routes/governance/data/coverage";
-import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
+import { tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
@@ -91,9 +92,9 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * §2.3, "Not new"). Add rule, Edit and Delete each need `policy:update`, the
  * permission every rule write requires (`crates/egret-perm-compile/src/routes.rs`,
  * `create_rule`, `patch_rule`, `delete_rule` and `preview`). Add rule opens
- * `RuleDialog` with a path selector naming this object; on a table it starts
- * as a row filter, which that selector completes (a mask needs a column,
- * picked in the dialog). A save or a delete
+ * `RuleDialog` from this object's entry point (spec C8.3): on a table, a mask
+ * on the table's path with Column left empty (every column) and Row filter
+ * one click away; on a catalog or schema, a mask on that path. A save or a delete
  * invalidates the rules list, so this tab refetches.
  */
 export function MasksFiltersTab({
@@ -138,7 +139,7 @@ function Rules({
   const rulesQ = usePermListRules({ query: { enabled: canRead, retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
 
-  const [dialog, setDialog] = useState<{ existing: RuleView | null } | null>(null);
+  const [dialog, setDialog] = useState<RuleEntry | null>(null);
   const [deleting, setDeleting] = useState<RuleView | null>(null);
   const queryClient = useQueryClient();
   const deleteRule = usePermDeleteRule({
@@ -214,7 +215,7 @@ function Rules({
                   extra={head ? { head, mono: g.mono } : undefined}
                   canWrite={canWrite}
                   workspaceName={workspaceName}
-                  onEdit={(rule) => setDialog({ existing: rule })}
+                  onEdit={(rule) => setDialog({ kind: "edit", rule })}
                   onDelete={setDeleting}
                 />
               </Section>
@@ -229,7 +230,7 @@ function Rules({
     <div className="space-y-4">
       {canWrite ? (
         <div className="flex justify-end">
-          <Button size="sm" onClick={() => setDialog({ existing: null })}>
+          <Button size="sm" onClick={() => setDialog(newRuleEntry(target, catalog.id))}>
             <Plus aria-hidden />
             Add rule
           </Button>
@@ -242,9 +243,7 @@ function Rules({
         onOpenChange={(open) => {
           if (!open) setDialog(null);
         }}
-        existing={dialog?.existing ?? null}
-        initialSelector={{ type: "path", ...scopeOf(target, catalog.id) }}
-        initialKind={target.object !== undefined ? "row_filter" : undefined}
+        entry={dialog ?? newRuleEntry(target, catalog.id)}
       />
       <ConfirmDeleteDialog
         open={deleting !== null}
@@ -391,4 +390,12 @@ function RuleTable({
       </TableBody>
     </Table>
   );
+}
+
+/** The rule dialog's entry point for a new rule on `p` (spec C8.3): a table, or a catalog or schema. */
+function newRuleEntry(p: ObjectPath, catalogId: string): RuleEntry {
+  if (p.schema !== undefined && p.object !== undefined) {
+    return { kind: "table", catalogId, schema: p.schema, table: p.object };
+  }
+  return { kind: "scope", catalogId, schema: p.schema };
 }

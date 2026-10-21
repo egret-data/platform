@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -133,6 +133,7 @@ export function PrincipalPicker({
         onChange={(include) => onChange({ ...value, include })}
         kinds={kinds}
         disabled={disabled}
+        listInFlow={exempt}
       />
       {!exempt && !includeOnly && (
         <PrincipalListEditor
@@ -153,12 +154,20 @@ function PrincipalListEditor({
   onChange,
   kinds,
   disabled,
+  listInFlow = false,
 }: {
   label: string;
   principals: PermPrincipal[];
   onChange: (next: PermPrincipal[]) => void;
   kinds: OfferableKind[];
   disabled?: boolean;
+  /**
+   * N26 (spec 2026-10-21-classification-ux C8.5), a rule's exemptions only:
+   * the help line sits under the search field and the suggestions follow it
+   * in the flow, instead of a popup floating over the line that explains the
+   * choice.
+   */
+  listInFlow?: boolean;
 }) {
   const [kind, setKind] = useState<OfferableKind>(kinds[0]);
   const effectiveKind = kinds.includes(kind) ? kind : kinds[0];
@@ -173,6 +182,23 @@ function PrincipalListEditor({
   function removeAt(i: number) {
     onChange(principals.filter((_, idx) => idx !== i));
   }
+
+  // J-F3 Task 1b (design R8). SP4a D7 measured that no engine egret
+  // provisions sees a group (no group provider, no usersync), so this
+  // used to warn "not enforced". The compiler now names the group's
+  // MEMBERS in the engine policy instead, and every membership change
+  // recompiles — so the fact to show at the point of choice is that
+  // the grant follows the membership, not that it does nothing.
+  // (`public`, the one group engines resolve themselves, stays a
+  // group; the sentence is still true of it in effect.)
+  const groupHelp =
+    effectiveKind === "group" ? (
+      <Badge variant="outline" className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal">
+        <Users className="mt-0.5 h-3 w-3 shrink-0" />
+        Applies to the group&apos;s current members: engines see no groups, so each member is named in the policy,
+        and adding or removing a member updates it.
+      </Badge>
+    ) : null;
 
   return (
     <div className="space-y-2">
@@ -245,28 +271,13 @@ function PrincipalListEditor({
                 label={label}
                 principals={principals}
                 onAdd={add}
+                help={listInFlow ? groupHelp : undefined}
+                listInFlow={listInFlow}
               />
             )}
           </div>
 
-          {effectiveKind === "group" && (
-            // J-F3 Task 1b (design R8). SP4a D7 measured that no engine egret
-            // provisions sees a group (no group provider, no usersync), so this
-            // used to warn "not enforced". The compiler now names the group's
-            // MEMBERS in the engine policy instead, and every membership change
-            // recompiles — so the fact to show at the point of choice is that
-            // the grant follows the membership, not that it does nothing.
-            // (`public`, the one group engines resolve themselves, stays a
-            // group; the sentence is still true of it in effect.)
-            <Badge
-              variant="outline"
-              className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
-            >
-              <Users className="mt-0.5 h-3 w-3 shrink-0" />
-              Applies to the group&apos;s current members: engines see no groups, so each member
-              is named in the policy, and adding or removing a member updates it.
-            </Badge>
-          )}
+          {listInFlow ? null : groupHelp}
         </div>
       )}
     </div>
@@ -340,11 +351,16 @@ function PrincipalSearchField({
   label,
   principals,
   onAdd,
+  help,
+  listInFlow = false,
 }: {
   kind: "user" | "group";
   label: string;
   principals: PermPrincipal[];
   onAdd: (p: PermPrincipal) => void;
+  /** Rendered under the field and before the suggestions (see `listInFlow` on `PrincipalListEditor`). */
+  help?: ReactNode;
+  listInFlow?: boolean;
 }) {
   const noticeId = `${useId()}-notice`;
   const [q, setQ] = useState("");
@@ -430,7 +446,7 @@ function PrincipalSearchField({
 
   return (
     <div className="flex-1 space-y-1.5">
-      <div ref={boxRef} className="relative">
+      <div ref={boxRef} className={listInFlow ? "space-y-1.5" : "relative"}>
         <Input
           {...combo.inputProps}
           ref={inputRef}
@@ -448,9 +464,10 @@ function PrincipalSearchField({
           }}
           placeholder={kind === "user" ? "Search users…" : "Search groups…"}
         />
+        {help}
         {combo.open ? (
           <div
-            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            className={`${listInFlow ? "" : "absolute z-10 mt-1 shadow-md "}max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1`}
             {...combo.popupProps}
           >
             <ul
