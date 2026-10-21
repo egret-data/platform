@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-label="Egret architecture: teams work in isolated workspaces on one governed platform; governed queries run on Trino and StarRocks over an Iceberg lakehouse and external sources.">
+<title>Egret architecture</title>
+<defs><filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0b2545" flood-opacity="0"/></filter><marker id="dot" markerWidth="8" markerHeight="8" refX="4" refY="4"><circle cx="4" cy="4" r="3" fill="#2dd4bf"/></marker></defs>
+<g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<rect x="380" y="10" width="440" height="30" rx="15" fill="#10243d" stroke="#2b4162"/>
+<text x="600" y="30" text-anchor="middle" font-size="14" fill="#9aa7b4">One platform · many teams · one governed data foundation</text>
+<text x="24" y="86" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">TEAMS</text>
+<rect x="24" y="100" width="206" height="46" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="38" y="128.0" font-size="14" font-weight="600" fill="#e6edf3">Analytics</text>
+<rect x="24" y="162" width="206" height="46" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="38" y="190.0" font-size="14" font-weight="600" fill="#e6edf3">Engineering</text>
+<rect x="24" y="224" width="206" height="46" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="38" y="252.0" font-size="14" font-weight="600" fill="#e6edf3">Finance</text>
+<text x="24" y="318" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">IDENTITY</text>
+<rect x="24" y="332" width="206" height="46" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="38" y="352.0" font-size="14" font-weight="600" fill="#e6edf3">OIDC / SSO</text>
+<text x="38" y="369.0" font-size="11.5" fill="#9aa7b4">Keycloak · groups from claims</text>
+<rect x="290" y="56" width="580" height="444" rx="18" fill="#0f1b2d" stroke="#2b4162" filter="url(#sh)"/>
+<path d="M290 74 a18 18 0 0 1 18 -18 H852 a18 18 0 0 1 18 18 V104 H290Z" fill="#13243b"/>
+<line x1="290" y1="104" x2="870" y2="104" stroke="#2b4162"/>
+<g transform="translate(308 66) scale(0.30)"><rect width="100" height="100" rx="22" fill="#e6edf3"/><g fill="#0d1117"><ellipse cx="64" cy="17" rx="5.8" ry="5"/><path d="M68 14.4 L95 19.5 L68 19.8Z"/><path d="M9 77 C17 62 36 47 58 43 C69 48 67 63 52 69 C38 71 23 73 9 77Z"/><path d="M56 42 C42 42 24 48 8 64 C24 54 40 50 58 47Z"/><path d="M57 45 C46 47 32 53 17 66 C32 58 44 55 58 50Z" opacity=".85"/></g><g fill="none" stroke="#0d1117" stroke-linecap="round" stroke-linejoin="round"><path stroke-width="6" d="M61 21 C50 28 69 35 58 45"/><path stroke-width="3" d="M46 70 L44 90 M44 90 H51 M53 69 L56 80 L53 90 M53 90 H60"/></g></g>
+<text x="346" y="86" font-size="20" font-weight="700" fill="#e6edf3">Egret</text>
+<text x="852" y="85" text-anchor="end" font-size="12" fill="#9aa7b4">one Rust binary · control plane + workspaces</text>
+<text x="314" y="128" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">WORKSPACES · ISOLATED PER TEAM</text>
+<rect x="314" y="138" width="164" height="64" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="328" y="167.0" font-size="14" font-weight="600" fill="#e6edf3">Workspace A</text>
+<text x="328" y="184.0" font-size="11.5" fill="#9aa7b4">datasets · charts · apps</text>
+<rect x="498" y="138" width="164" height="64" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="512" y="167.0" font-size="14" font-weight="600" fill="#e6edf3">Workspace B</text>
+<text x="512" y="184.0" font-size="11.5" fill="#9aa7b4">datasets · charts · apps</text>
+<rect x="682" y="138" width="164" height="64" rx="10" fill="#162a45" stroke="#2f4a73" stroke-width="1"  filter="url(#sh)"/>
+<text x="696" y="167.0" font-size="14" font-weight="600" fill="#e6edf3">Workspace C</text>
+<text x="696" y="184.0" font-size="11.5" fill="#9aa7b4">datasets · charts · apps</text>
+<text x="314" y="232" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">WHAT EACH WORKSPACE RUNS</text>
+<rect x="314" y="242" width="121" height="90" rx="12" fill="#162a45" stroke="#2f4a73" filter="url(#sh)"/>
+<rect x="326" y="254" width="28" height="28" rx="8" fill="#1b3a5e"/>
+<rect x="333" y="261" width="14" height="14" rx="3" fill="none" stroke="#8ec5ff" stroke-width="2"/>
+<text x="326" y="302" font-size="13.5" font-weight="600" fill="#e6edf3">Explore</text>
+<text x="326" y="316" font-size="10.5" fill="#9aa7b4">SQL Lab · charts</text>
+<text x="326" y="328" font-size="10.5" fill="#9aa7b4">dashboards · alerts</text>
+<rect x="451" y="242" width="121" height="90" rx="12" fill="#162a45" stroke="#2f4a73" filter="url(#sh)"/>
+<rect x="463" y="254" width="28" height="28" rx="8" fill="#1b3a5e"/>
+<rect x="470" y="261" width="14" height="14" rx="3" fill="none" stroke="#8ec5ff" stroke-width="2"/>
+<text x="463" y="302" font-size="13.5" font-weight="600" fill="#e6edf3">Data API</text>
+<text x="463" y="316" font-size="10.5" fill="#9aa7b4">SQL to REST</text>
+<text x="463" y="328" font-size="10.5" fill="#9aa7b4">OAuth2 clients</text>
+<rect x="588" y="242" width="121" height="90" rx="12" fill="#162a45" stroke="#2f4a73" filter="url(#sh)"/>
+<rect x="600" y="254" width="28" height="28" rx="8" fill="#1b3a5e"/>
+<rect x="607" y="261" width="14" height="14" rx="3" fill="none" stroke="#8ec5ff" stroke-width="2"/>
+<text x="600" y="302" font-size="13.5" font-weight="600" fill="#e6edf3">Workflows</text>
+<text x="600" y="316" font-size="10.5" fill="#9aa7b4">flows · schedules</text>
+<text x="600" y="328" font-size="10.5" fill="#9aa7b4">triggers · webhooks</text>
+<rect x="725" y="242" width="121" height="90" rx="12" fill="#162a45" stroke="#2f4a73" filter="url(#sh)"/>
+<rect x="737" y="254" width="28" height="28" rx="8" fill="#1b3a5e"/>
+<rect x="744" y="261" width="14" height="14" rx="3" fill="none" stroke="#8ec5ff" stroke-width="2"/>
+<text x="737" y="302" font-size="13.5" font-weight="600" fill="#e6edf3">Data Apps</text>
+<text x="737" y="316" font-size="10.5" fill="#9aa7b4">marimo apps</text>
+<text x="737" y="328" font-size="10.5" fill="#9aa7b4">run as the viewer</text>
+<rect x="314" y="348" width="532" height="76" rx="12" fill="#12324a" stroke="#2a6f86"/>
+<text x="330" y="370" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">GOVERNANCE PLANE · EVERY REQUEST, EVERY WORKSPACE</text>
+<rect x="330" y="382" width="140" height="28" rx="14" fill="#162a45" stroke="#2a6f86"/>
+<text x="400.0" y="401" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">Cedar authorization</text>
+<rect x="478" y="382" width="112" height="28" rx="14" fill="#162a45" stroke="#2a6f86"/>
+<text x="534.0" y="401" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">Ranger policy</text>
+<rect x="598" y="382" width="134" height="28" rx="14" fill="#162a45" stroke="#2a6f86"/>
+<text x="665.0" y="401" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">Per-user delegation</text>
+<rect x="740" y="382" width="92" height="28" rx="14" fill="#162a45" stroke="#2a6f86"/>
+<text x="786.0" y="401" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">Audit log</text>
+<text x="314" y="452" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">CONTROL PLANE</text>
+<text x="438" y="452" font-size="12" fill="#9aa7b4">Catalogs · Engines · Storage · Secrets · Users &amp; roles</text>
+<text x="944" y="86" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#9aa7b4">DATA PLANE</text>
+<rect x="944" y="100" width="232" height="104" rx="12" fill="#162a45" stroke="#2f4a73" filter="url(#sh)"/>
+<text x="960" y="124" font-size="12" font-weight="600" fill="#9aa7b4" letter-spacing="1">QUERY ENGINES</text>
+<rect x="960" y="138" width="98" height="40" rx="10" fill="#1b3a5e"/>
+<text x="1009" y="163" text-anchor="middle" font-size="14" font-weight="700" fill="#8ec5ff">Trino</text>
+<rect x="1068" y="138" width="98" height="40" rx="10" fill="#1b3a5e"/>
+<text x="1117" y="163" text-anchor="middle" font-size="14" font-weight="700" fill="#8ec5ff">StarRocks</text>
+<text x="960" y="196" font-size="10.5" fill="#9aa7b4">Docker or Kubernetes</text>
+<rect x="944" y="236" width="232" height="108" rx="12" fill="#162a45" stroke="#2dd4bf" stroke-width="1.8" filter="url(#sh)"/>
+<text x="960" y="262" font-size="12" font-weight="600" fill="#2dd4bf" letter-spacing="1">ICEBERG LAKEHOUSE</text>
+<text x="960" y="288" font-size="15" font-weight="700" fill="#e6edf3">Source of truth</text>
+<text x="960" y="308" font-size="11.5" fill="#9aa7b4">Embedded REST catalog (lakekeeper)</text>
+<text x="960" y="326" font-size="11.5" fill="#9aa7b4">S3-compatible object storage</text>
+<rect x="944" y="372" width="232" height="100" rx="12" fill="none" stroke="#4b6a93" stroke-dasharray="6 5"/>
+<text x="960" y="396" font-size="12" font-weight="600" fill="#9aa7b4" letter-spacing="1">EXTERNAL SOURCES</text>
+<rect x="960" y="410" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="993" y="426" text-anchor="middle" font-size="10.5" fill="#e6edf3">PostgreSQL</text>
+<rect x="1032" y="410" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="1065" y="426" text-anchor="middle" font-size="10.5" fill="#e6edf3">MySQL</text>
+<rect x="1104" y="410" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="1137" y="426" text-anchor="middle" font-size="10.5" fill="#e6edf3">Kafka</text>
+<rect x="960" y="440" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="993" y="456" text-anchor="middle" font-size="10.5" fill="#e6edf3">BigQuery</text>
+<rect x="1032" y="440" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="1065" y="456" text-anchor="middle" font-size="10.5" fill="#e6edf3">Snowflake</text>
+<rect x="1104" y="440" width="66" height="24" rx="12" fill="#10243d" stroke="#2f4a73"/>
+<text x="1137" y="456" text-anchor="middle" font-size="10.5" fill="#e6edf3">+ 30 more</text>
+<path d="M230 123 C 262 123, 262 170, 290 170" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M230 185 C 262 185, 262 188, 290 188" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M230 247 C 262 247, 262 206, 290 206" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M230 355 C 262 355, 262 386, 314 386" fill="none" stroke="#2a6f86" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M846 386 C 900 386, 900 150, 944 150" fill="none" stroke="#2dd4bf" stroke-width="2.4" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M1060 204 V 236" fill="none" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M1060 344 V 372" fill="none" stroke="#4b6a93" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 6" />
+<path d="M1176 152 H1186 Q1196 152 1196 162 V412 Q1196 422 1186 422 H1176" fill="none" stroke="#4b6a93" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 6" />
+<rect x="868" y="254" width="74" height="24" rx="12" fill="#10243d" stroke="#2dd4bf"/>
+<text x="905" y="270" text-anchor="middle" font-size="10.5" fill="#2dd4bf" font-weight="600">as the caller</text>
+<rect x="280" y="518" width="150" height="28" rx="14" fill="#10243d" stroke="#2b4162"/>
+<text x="355.0" y="537" text-anchor="middle" font-size="12" fill="#9aa7b4">Rust · one binary</text>
+<rect x="442" y="518" width="200" height="28" rx="14" fill="#10243d" stroke="#2b4162"/>
+<text x="542.0" y="537" text-anchor="middle" font-size="12" fill="#9aa7b4">Docker demo in one command</text>
+<rect x="664" y="518" width="160" height="28" rx="14" fill="#10243d" stroke="#2b4162"/>
+<text x="744.0" y="537" text-anchor="middle" font-size="12" fill="#9aa7b4">Kubernetes + Helm</text>
+<rect x="850" y="518" width="110" height="28" rx="14" fill="#10243d" stroke="#2b4162"/>
+<text x="905.0" y="537" text-anchor="middle" font-size="12" fill="#9aa7b4">Apache-2.0</text>
+</g></svg>
