@@ -19,6 +19,7 @@ import {
   getControlPlaneGovernanceTagHandwrittenQueryKey,
   getControlPlaneGovernanceTagUsageQueryKey,
 } from "./generated/control-plane-governance/control-plane-governance";
+import { getControlPlaneTagsListTagsQueryKey } from "./generated/control-plane-tags/control-plane-tags";
 
 export interface Tag {
   id: string;
@@ -75,6 +76,29 @@ export function invalidateObjectHandwritten(queryClient: QueryClient) {
   void queryClient.invalidateQueries({
     predicate: (q) => typeof q.queryKey[0] === "string" && OBJECT_HANDWRITTEN.test(q.queryKey[0]),
   });
+}
+
+/** Route `GET /governance/tags/{catalog_id}` (an object's tags), any catalog and params. */
+const OBJECT_TAGS = /^\/api\/control-plane\/governance\/tags\/[^/]+$/;
+
+/**
+ * What attaching tag `tagId` to, or removing it from, a table or column of
+ * egret's warehouse `warehouseId` changes (`PUT`/`DELETE …/resource-tags`):
+ * every object's tags (the Data header, the Overview's columns, the column
+ * panel and the rules that select by classification read them), the
+ * catalogue under both keys it is cached by (the generated `GET /tags` key
+ * and `tagsQueryKey`: counts), the tag's Where used (CL16), the hand-written
+ * sections (route A matches tag policies through the object's tags) and
+ * Control Plane's Browse tags for that warehouse.
+ */
+export function invalidateTagAssignment(queryClient: QueryClient, tagId: string, warehouseId: string) {
+  void queryClient.invalidateQueries({
+    predicate: (q) => typeof q.queryKey[0] === "string" && OBJECT_TAGS.test(q.queryKey[0]),
+  });
+  void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
+  invalidateTag(queryClient, tagId);
+  invalidateObjectHandwritten(queryClient);
+  void queryClient.invalidateQueries({ queryKey: ["control-plane", "warehouses", warehouseId, "resource-tags"] });
 }
 
 /**

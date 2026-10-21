@@ -9,7 +9,7 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`), and the rule
  * routes the Masks & filters tab and `RuleDialog` call (`…/perm/rules`, `…/perm/rules/{id}`), explain
  * (`…/perm/explain`) and the principal search its user field calls (`…/principals`), the tag
- * catalogue (`…/tags`) and the tag write (`PUT …/warehouses/{id}/resource-tags`). Answers go
+ * catalogue (`…/tags`) and the tag writes (`PUT`/`DELETE …/warehouses/{id}/resource-tags`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -72,7 +72,7 @@ export interface FakeData {
   principals?: Answer;
   /** `GET …/tags`, the tag catalogue; none is a 404. */
   tagCatalogue?: Answer;
-  /** `PUT …/warehouses/{id}/resource-tags`; default 200 `{}`. */
+  /** `PUT` and `DELETE …/warehouses/{id}/resource-tags`; default 200 `{}`. */
   tagWrite?: Answer;
   /**
    * `GET …/governance/objects/{catalog_id}/handwritten` (route A), keyed
@@ -88,8 +88,8 @@ export interface DataCalls {
   lineageCalls: string[];
   /** `METHOD /perm/...`, with each body that was sent. */
   permCalls: { call: string; body?: unknown }[];
-  /** Each tag write: the warehouse id from the path and the body. */
-  tagWrites: { warehouseId: string; body: unknown }[];
+  /** Each tag write (`PUT` attaches, `DELETE` removes): the method, the warehouse id from the path and the body. */
+  tagWrites: { method: string; warehouseId: string; body: unknown }[];
   /** Each route A read, keyed as {@link FakeData.handwritten}. */
   handwrittenCalls: string[];
 }
@@ -117,8 +117,9 @@ export function serveData(data: FakeData): DataCalls {
       if (url.pathname === "/api/control-plane/principals") return reply(data.principals ?? { status: 200, body: [] });
       if (url.pathname === "/api/control-plane/tags") return reply(data.tagCatalogue);
       const w = /^\/api\/control-plane\/warehouses\/([^/]+)\/resource-tags$/.exec(url.pathname);
-      if (w && (init?.method ?? "GET").toUpperCase() === "PUT") {
-        tagWrites.push({ warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
+      if (w && ["PUT", "DELETE"].includes((init?.method ?? "GET").toUpperCase())) {
+        const method = (init?.method ?? "GET").toUpperCase();
+        tagWrites.push({ method, warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
         return reply(data.tagWrite ?? { status: 200, body: {} });
       }
       const hw = /^\/api\/control-plane\/governance\/objects\/([^/]+)\/handwritten$/.exec(url.pathname);

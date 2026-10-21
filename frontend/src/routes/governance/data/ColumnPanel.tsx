@@ -10,6 +10,8 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatPrincipals, formatRuleKind, grantSentence } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { ClassificationChip, useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification } from "@/routes/governance/RemoveClassificationDialog";
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
@@ -173,6 +175,8 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
   const assignments = egret ? assignmentsOf(tags) : null;
   const [whoCanRead, setWhoCanRead] = useState(false);
   const [addTag, setAddTag] = useState<TagTarget | null>(null);
+  const canRemoveTag = useCanEditCatalogTags();
+  const removal = useRemoveClassification();
 
   const own = (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, path.column));
   const fromTable = (assignments ?? []).filter((a) => a.column === "");
@@ -227,7 +231,27 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
           ) : assignments === null ? null : own.length + fromTable.length === 0 ? (
             <p className="text-sm text-muted-foreground">No classification on this column</p>
           ) : (
-            <TagList column={path.column} own={own} fromTable={fromTable} />
+            <TagList
+              column={path.column}
+              own={own}
+              fromTable={fromTable}
+              label={fullPath(path)}
+              onRemove={
+                canRemoveTag && catalog.warehouseId != null
+                  ? (a) =>
+                      removal.ask({
+                        tag: a.tag,
+                        target: {
+                          warehouseId: catalog.warehouseId!,
+                          schema: a.schema,
+                          table: a.table,
+                          column: a.column,
+                          label: fullPath(path),
+                        },
+                      })
+                  : undefined
+              }
+            />
           )}
         </Section>
       ) : null}
@@ -254,6 +278,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
       )}
 
       <WhoCanReadDialog open={whoCanRead} onOpenChange={setWhoCanRead} path={path} catalogId={catalog.id} />
+      {removal.dialog}
       <AddTagDialog
         target={addTag}
         onOpenChange={(open) => {
@@ -264,22 +289,31 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
   );
 }
 
-function TagList({ column, own, fromTable }: { column: string; own: ResourceTagDto[]; fromTable: ResourceTagDto[] }) {
+function TagList({
+  column,
+  own,
+  fromTable,
+  label,
+  onRemove,
+}: {
+  column: string;
+  own: ResourceTagDto[];
+  fromTable: ResourceTagDto[];
+  /** The column as the chips name it: `ice.sales.orders.email`. */
+  label: string;
+  /** Offers Remove on the column's own classifications (spec C4). */
+  onRemove?: (a: ResourceTagDto) => void;
+}) {
   return (
     <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
-          <Badge variant="secondary" title={a.tag.key}>
-            {a.tag.name}
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} onRemove={onRemove ? () => onRemove(a) : undefined} />
         </li>
       ))}
       {fromTable.map((a) => (
         <li key={`table-${a.tag.id}`}>
-          <Badge variant="outline" title={a.tag.key}>
-            {a.tag.name}
-            <span className="font-normal text-muted-foreground">{" from table"}</span>
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} inherited />
         </li>
       ))}
     </ul>

@@ -8,6 +8,8 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { ClassificationChip, useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification } from "@/routes/governance/RemoveClassificationDialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatPrincipals, formatRuleKind, type WorkspaceNames } from "@/routes/governance/permFormat";
@@ -19,6 +21,7 @@ import {
   capitalise,
   engineTypeLabel,
   enginesOf,
+  fullPath,
   tagReach,
   type BrowseResult,
   type CatalogState,
@@ -280,6 +283,24 @@ function Columns({
   const canReadRules = usePolicyPermissions()("policy:read");
   const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
+  const canEditTags = useCanEditCatalogTags();
+  const removal = useRemoveClassification();
+  const warehouseId = catalog.warehouseId;
+  // Remove names the coordinate as stored (the server matches it exactly) and the column as the source spells it.
+  const removeFrom =
+    canEditTags && warehouseId != null
+      ? (a: ResourceTagDto) =>
+          removal.ask({
+            tag: a.tag,
+            target: {
+              warehouseId,
+              schema: a.schema,
+              table: a.table,
+              column: a.column,
+              label: fullPath({ ...path, column: columns.find((c) => sameName(c.name, a.column))?.name ?? a.column }),
+            },
+          })
+      : undefined;
   if (columns.length === 0) {
     const empty = emptyLevel(source, "columns");
     return <EmptyState icon={Columns3} title={empty.detail ? empty.title : "No columns returned"} description={empty.detail} />;
@@ -329,7 +350,13 @@ function Columns({
                       <span className="sr-only">Loading classifications</span>
                     )
                   ) : (
-                    <ColumnTags column={col.name} own={onColumn(col.name)} inherited={onTable} />
+                    <ColumnTags
+                      column={col.name}
+                      own={onColumn(col.name)}
+                      inherited={onTable}
+                      label={fullPath({ ...path, column: col.name })}
+                      onRemove={removeFrom}
+                    />
                   )}
                 </TableCell>
               ) : null}
@@ -353,27 +380,37 @@ function Columns({
           ))}
         </TableBody>
       </Table>
+      {removal.dialog}
     </div>
   );
 }
 
-function ColumnTags({ column, own, inherited }: { column: string; own: ResourceTagDto[]; inherited: ResourceTagDto[] }) {
+function ColumnTags({
+  column,
+  own,
+  inherited,
+  label,
+  onRemove,
+}: {
+  column: string;
+  own: ResourceTagDto[];
+  inherited: ResourceTagDto[];
+  /** The column as the chips name it: `ice.sales.orders.email`. */
+  label: string;
+  /** Offers Remove on the column's own classifications (spec C4). */
+  onRemove?: (a: ResourceTagDto) => void;
+}) {
   if (own.length === 0 && inherited.length === 0) return <span className="text-muted-foreground">—</span>;
   return (
     <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
-          <Badge variant="secondary" title={a.tag.key}>
-            {a.tag.name}
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} onRemove={onRemove ? () => onRemove(a) : undefined} />
         </li>
       ))}
       {inherited.map((a) => (
         <li key={`table-${a.tag.id}`}>
-          <Badge variant="outline" title={a.tag.key}>
-            {a.tag.name}
-            <span className="font-normal text-muted-foreground">{" from table"}</span>
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} inherited />
         </li>
       ))}
     </ul>

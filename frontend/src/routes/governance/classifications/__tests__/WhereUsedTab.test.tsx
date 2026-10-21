@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TagUsage } from "@/api/generated/model";
-import { fail, ok, openArea, serve, tag, TAG_READER } from "./harness";
+import { ADMIN, fail, ok, openArea, serve, tag, TAG_READER } from "./harness";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -152,5 +152,51 @@ describe("Where used: states", () => {
     expect(screen.queryByText("No BI object carries this classification.")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`)).toHaveLength(2));
+  });
+});
+
+describe("Where used: Remove", () => {
+  const ORDERS = { catalogId: "c1", catalogName: "ice", warehouseId: "wh-1", schema: "sales", table: "orders", onTable: false, columns: ["email"] };
+
+  it("removes a column's assignment through the row's warehouse after a confirm", async () => {
+    const served = serve({
+      "/tags": ok([PII]),
+      "/perm/rules": ok([]),
+      [USAGE]: ok(usage({ data: { tables: [ORDERS], tableCount: 1, columnCount: 1 } })),
+      "DELETE /warehouses/wh-1/resource-tags": ok({}),
+    });
+    openArea(URL_PII, ADMIN);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Remove PII from ice.sales.orders.email" }, T));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(served.bodies["DELETE /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "email", tag_id: "t-pii" }]),
+    );
+    // Where used is read again.
+    await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`).length).toBeGreaterThan(1));
+  });
+
+  it("removes a table-level assignment with an empty column", async () => {
+    const served = serve({
+      "/tags": ok([PII]),
+      "/perm/rules": ok([]),
+      [USAGE]: ok(usage({ data: { tables: [{ ...ORDERS, onTable: true, columns: [] }], tableCount: 1 } })),
+      "DELETE /warehouses/wh-1/resource-tags": ok({}),
+    });
+    openArea(URL_PII, ADMIN);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Remove PII from ice.sales.orders" }, T));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(served.bodies["DELETE /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "", tag_id: "t-pii" }]),
+    );
+  });
+
+  it("offers no Remove without catalog_registry:update", async () => {
+    open(usage({ data: { tables: [ORDERS], tableCount: 1, columnCount: 1 } }));
+    await screen.findByRole("link", { name: "orders" }, T);
+    expect(screen.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
   });
 });

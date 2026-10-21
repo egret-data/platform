@@ -151,6 +151,10 @@ function fixture(over: Partial<FakeData> = {}): FakeData {
   };
 }
 
+/** Each option's accessible name: Radix ties it to the option's text, not to its secondary line. */
+const optionNames = (options: HTMLElement[]) =>
+  options.map((o) => document.getElementById(o.getAttribute("aria-labelledby") ?? "")?.textContent);
+
 const STEWARD: Me = { user_id: "u1", email: "s@egret.local", platform_roles: [], permissions: ["policy:read"] };
 const TAGGER: Me = { ...STEWARD, permissions: ["policy:read", "catalog_registry:update", "tag:read"] };
 
@@ -380,7 +384,7 @@ describe("ColumnPanel", () => {
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
     await user.click(await screen.findByRole("option", { name: "SECRET" }));
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
     await waitFor(() => expect(tagWrites).toHaveLength(1));
     expect(tagWrites[0].body).toEqual({ schema: "sales", table: "orders", column: "email", tag_id: "t-secret" });
   });
@@ -498,7 +502,7 @@ describe("Who can read?", () => {
     expect(dialog).toHaveTextContent("Whether a user, or each member of a group or role, can read this, per policy profile");
 
     await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
-    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["User", "Group", "Role"]);
+    expect(optionNames(await screen.findAllByRole("option"))).toEqual(["User", "Group", "Role"]);
     await user.click(screen.getByRole("option", { name: "Role" }));
     expect(within(dialog).getByText("Explain needs a role.")).toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("Role"), "reader");
@@ -536,18 +540,18 @@ describe("Add classification", () => {
     await user.click(await within(panel).findByRole("button", { name: "Add classification" }));
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     expect(within(dialog).getByText("ice.sales.orders.email")).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Attach" })).toBeDisabled();
-    expect(within(dialog).getByRole("button", { name: "Attach" })).toHaveAccessibleDescription("Choose a classification to attach.");
+    expect(within(dialog).getByRole("button", { name: "Add classification" })).toHaveAttribute("aria-disabled", "true");
+    expect(within(dialog).getByRole("button", { name: "Add classification" })).toHaveAccessibleDescription("Choose a classification to attach.");
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
     // PII is already on the column; the table's tag is not the column's own.
-    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["CONFIDENTIAL", "FINANCE", "SECRET"]);
+    expect(optionNames(await screen.findAllByRole("option"))).toEqual(["CONFIDENTIAL", "FINANCE", "SECRET"]);
     await user.click(screen.getByRole("option", { name: "SECRET" }));
     const before = tagCalls.length;
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add classification" })).not.toBeInTheDocument());
     expect(tagWrites).toEqual([
-      { warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "email", tag_id: "t-secret" } },
+      { method: "PUT", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "email", tag_id: "t-secret" } },
     ]);
     expect(toast.success).toHaveBeenCalledWith("Classification attached.");
     await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
@@ -565,7 +569,7 @@ describe("Add classification", () => {
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
     await user.click(await screen.findByRole("option", { name: "SECRET" }));
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Classification attached."));
     const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
     expect(keys).toContainEqual(tagsQueryKey);
@@ -592,10 +596,11 @@ describe("Add classification", () => {
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     await waitFor(() => expect(within(dialog).getByText("ice.sales.orders")).toBeInTheDocument());
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
-    await user.click(await screen.findByRole("option", { name: "PII" }));
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    // SECRET: no mask selects it, so the whole table may carry it (PII's redact_pii would make the table unreadable, spec C5).
+    await user.click(await screen.findByRole("option", { name: "SECRET" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
     await waitFor(() => expect(tagWrites).toHaveLength(1));
-    expect(tagWrites[0]).toEqual({ warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-pii" } });
+    expect(tagWrites[0]).toEqual({ method: "PUT", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-secret" } });
   });
 
   it("adds a tag to the table from the header", async () => {
@@ -606,11 +611,11 @@ describe("Add classification", () => {
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
     // CONFIDENTIAL is on the table already; a column's tag is not the table's.
-    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["FINANCE", "PII", "SECRET"]);
-    await user.click(screen.getByRole("option", { name: "PII" }));
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    expect(optionNames(await screen.findAllByRole("option"))).toEqual(["FINANCE", "PII", "SECRET"]);
+    await user.click(screen.getByRole("option", { name: "SECRET" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
     await waitFor(() => expect(tagWrites).toHaveLength(1));
-    expect(tagWrites[0]).toEqual({ warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-pii" } });
+    expect(tagWrites[0]).toEqual({ method: "PUT", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-secret" } });
   });
 
   it("shows the server's refusal beside the field and keeps the choice", async () => {
@@ -621,7 +626,7 @@ describe("Add classification", () => {
     const dialog = await screen.findByRole("dialog", { name: "Add classification" });
     await user.click(within(dialog).getByRole("combobox", { name: "Classification" }));
     await user.click(await screen.findByRole("option", { name: "SECRET" }));
-    await user.click(within(dialog).getByRole("button", { name: "Attach" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add classification" }));
     expect(await within(dialog).findByText("Two mask rules would decide sales.orders.email differently.")).toBeInTheDocument();
     expect(within(dialog).getByRole("combobox", { name: "Classification" })).toHaveTextContent("SECRET");
     expect(toast.success).not.toHaveBeenCalled();
@@ -682,5 +687,28 @@ describe("the column panel's manual policies", () => {
       expect(within(section).getByRole("link", { name })).toBeInTheDocument();
     }
     expect(calls.handwrittenCalls).toContain("c-ice|sales|orders|email");
+  });
+});
+
+describe("Remove a classification from the column panel", () => {
+  // The fixture stores PII on `EMAIL`: the remove names the stored coordinate, which the server matches exactly.
+  it("removes the column's own classification, never its table's, and refetches", async () => {
+    const { tagWrites, tagCalls } = serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?column=email", TAGGER);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    const list = await within(panel).findByRole("list", { name: "Classifications of email" });
+    expect(within(list).queryByRole("button", { name: /^Remove CONFIDENTIAL/ })).not.toBeInTheDocument();
+    await user.click(within(list).getByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    const before = tagCalls.length;
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(tagWrites).toEqual([
+        { method: "DELETE", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "EMAIL", tag_id: "t-pii" } },
+      ]),
+    );
+    await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
+    expect(toast.success).toHaveBeenCalledWith("Removed PII from ice.sales.orders.email.");
   });
 });

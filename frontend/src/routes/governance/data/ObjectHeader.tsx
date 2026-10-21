@@ -3,6 +3,7 @@ import type { TagDto } from "@/api/generated/model";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ClassificationChip } from "@/routes/governance/ClassificationChip";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { dottedPath, KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { engineTypeLabel, type EngineInfo } from "@/routes/governance/data/objectData";
@@ -50,7 +51,8 @@ type ActionKey = (typeof ACTIONS)[number]["key"];
  * **Tags.** Only tables and columns carry tags (migration 0177), so a
  * catalog or schema header has no tag section, and neither has an object in a
  * catalog that is not egret's (F9). A table's header shows the tags on the
- * table itself; a column's own tags and the ones it inherits from its table
+ * table itself (`ClassificationChip`, with Remove when `onRemoveTag` is
+ * passed); a column's own tags and the ones it inherits from its table
  * are on the column's row.
  *
  * **Actions.** Each shows only when its handler is wired AND the viewer holds
@@ -67,6 +69,7 @@ export function ObjectHeader({
   onGrant,
   onAddTag,
   onWhoCanRead,
+  onRemoveTag,
   disabledReasons = {},
 }: {
   path: ObjectPath;
@@ -76,6 +79,11 @@ export function ObjectHeader({
   onGrant?: () => void;
   onAddTag?: () => void;
   onWhoCanRead?: () => void;
+  /**
+   * Offers Remove on each of the object's own classifications (spec C4); the
+   * page passes it only to a viewer who may remove (`useCanEditCatalogTags`).
+   */
+  onRemoveTag?: (tag: TagDto) => void;
   /**
    * An action shown but disabled, with the reason said beside it
    * (FE-ACTION-4): Add tag on an object outside egret's catalogs (F9). It
@@ -176,9 +184,11 @@ export function ObjectHeader({
             <ul aria-label={TERM.classifications} className="flex flex-wrap gap-1">
               {tags.tags.map((t) => (
                 <li key={t.id}>
-                  <Badge variant="secondary" title={t.key}>
-                    {t.name}
-                  </Badge>
+                  <ClassificationChip
+                    tag={t}
+                    objectLabel={dottedPath(path)}
+                    onRemove={onRemoveTag ? () => onRemoveTag(t) : undefined}
+                  />
                 </li>
               ))}
             </ul>

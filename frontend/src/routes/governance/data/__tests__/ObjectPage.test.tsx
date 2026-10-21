@@ -1313,3 +1313,72 @@ describe("manual policies on an object's tabs", () => {
     expect(within(panel()).queryByText("No manual policy reaches this object.")).not.toBeInTheDocument();
   });
 });
+
+describe("Remove a classification in place", () => {
+  const EDITOR: Me = { ...STEWARD, permissions: ["policy:read", "tag:read", "catalog_registry:update"] };
+
+  it("removes a column's own classification after a confirm, and refetches", async () => {
+    const user = userEvent.setup();
+    const { tagWrites, tagCalls } = serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    const before = tagCalls.length;
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(tagWrites).toEqual([
+        { method: "DELETE", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "email", tag_id: "t-pii" } },
+      ]),
+    );
+    await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
+    expect(toast.success).toHaveBeenCalledWith("Removed PII from ice.sales.orders.email.");
+  });
+
+  it("offers no Remove without catalog_registry:update", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await within(columns).findByText("PII");
+    expect(within(columns).queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
+    expect(within(header()).queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
+  });
+
+  it("never offers Remove on a chip a column inherits from its table", async () => {
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" });
+    expect(within(columns).queryByRole("button", { name: /^Remove CONFIDENTIAL/ })).not.toBeInTheDocument();
+  });
+
+  it("removes the table's classification from the header, naming the rules that stop applying and the columns", async () => {
+    const user = userEvent.setup();
+    const { tagWrites } = serveData(fixture({ tagCatalogue: ok([]), rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    expect(within(dialog).getByText("Rules that apply to CONFIDENTIAL stop applying here.")).toBeInTheDocument();
+    expect(await within(dialog).findByText("redact_confidential")).toBeInTheDocument();
+    expect(within(dialog).getByText("Its columns stop inheriting it.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(tagWrites).toEqual([
+        { method: "DELETE", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-confidential" } },
+      ]),
+    );
+  });
+
+  it("keeps the dialog open with the server's sentence when the remove fails", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), tagWrite: { status: 403, body: { error: "forbidden" } } }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(await within(dialog).findByText("This account cannot do that: it needs the catalog_registry:update permission.")).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" })).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+});
