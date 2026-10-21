@@ -11683,7 +11683,7 @@
             }
           },
           "409": {
-            "description": "The new name clashes with an existing secret",
+            "description": "The new name clashes with an existing secret, or the secret is managed by egret",
             "content": {
               "application/json": {
                 "schema": {
@@ -11763,7 +11763,7 @@
             }
           },
           "409": {
-            "description": "Secret is still referenced by one or more connections",
+            "description": "Secret is still referenced by one or more connections, or is managed by egret",
             "content": {
               "application/json": {
                 "schema": {
@@ -12179,7 +12179,7 @@
           {
             "name": "key",
             "in": "query",
-            "description": "Object key to download",
+            "description": "Object key to download, relative to the connection's key prefix",
             "required": true,
             "schema": {
               "type": "string"
@@ -12194,7 +12194,7 @@
             }
           },
           "400": {
-            "description": "Invalid request or object could not be read",
+            "description": "Invalid key (a `.`/`..` or empty segment, a backslash or a control character, also once percent-decoded), or the object could not be read",
             "content": {
               "application/json": {
                 "schema": {
@@ -12214,7 +12214,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission",
+            "description": "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -12267,7 +12267,7 @@
           {
             "name": "prefix",
             "in": "query",
-            "description": "Folder prefix to list under",
+            "description": "Folder prefix to list under, relative to the connection's key prefix",
             "required": false,
             "schema": {
               "type": "string"
@@ -12286,7 +12286,7 @@
             }
           },
           "400": {
-            "description": "Invalid request or bucket could not be listed",
+            "description": "Invalid prefix, or the bucket could not be listed",
             "content": {
               "application/json": {
                 "schema": {
@@ -12306,7 +12306,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission",
+            "description": "Missing storage:read permission, or the prefix is one egret writes for its users and the caller is not a platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -46137,10 +46137,16 @@
       "ListingDto": {
         "type": "object",
         "required": [
+          "root",
           "folders",
-          "objects"
+          "objects",
+          "hiddenSystemFolders"
         ],
         "properties": {
+          "root": {
+            "type": "string",
+            "description": "The connection's key prefix (`\"\"` when it has none). Every key in\nthis listing, and every `prefix`/`key` the routes take, is relative\nto it."
+          },
           "folders": {
             "type": "array",
             "items": {
@@ -46152,6 +46158,13 @@
             "items": {
               "$ref": "#/components/schemas/ObjectDto"
             }
+          },
+          "hiddenSystemFolders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Folders at this level left out because egret writes its users' data\nthere (stored SQL Lab results, Data App sources, workflow files) and\nthe caller is not a platform admin."
           }
         }
       },
@@ -51707,7 +51720,8 @@
           "created_at",
           "used_by",
           "type",
-          "keys"
+          "keys",
+          "system_managed"
         ],
         "properties": {
           "id": {
@@ -51739,6 +51753,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "system_managed": {
+            "type": "boolean",
+            "description": "Minted and managed by egret for an engine or a catalog: it cannot be\nrenamed, rotated or deleted here, and pickers leave it out (KI-207)."
           }
         }
       },

@@ -38,6 +38,10 @@ pub struct WorkspaceSecretMeta {
     pub r#type: String,
     /// Data key names (NOT values).
     pub keys: Vec<String>,
+    /// Minted by egret for an engine or a catalog
+    /// ([`WorkspaceSecretStore::create_system`]); the Secrets routes refuse to
+    /// rename, rotate or delete it (KI-207).
+    pub system_managed: bool,
 }
 
 /// One `workspace_secrets` row joined with its type, key names, and reference count.
@@ -49,10 +53,13 @@ type MetaRow = (
     i64,
     String,
     Vec<String>,
+    bool,
 );
 
 impl From<MetaRow> for WorkspaceSecretMeta {
-    fn from((id, name, description, created_at, used_by, r#type, keys): MetaRow) -> Self {
+    fn from(
+        (id, name, description, created_at, used_by, r#type, keys, system_managed): MetaRow,
+    ) -> Self {
         WorkspaceSecretMeta {
             id,
             name,
@@ -61,6 +68,7 @@ impl From<MetaRow> for WorkspaceSecretMeta {
             used_by,
             r#type,
             keys,
+            system_managed,
         }
     }
 }
@@ -91,14 +99,44 @@ impl WorkspaceSecretStore {
         plaintext: &str,
     ) -> Result<Uuid, SecretsError> {
         let vault_id = self.secrets.put("workspace_secret", plaintext).await?;
+        self.register(workspace_id, name, description, vault_id, false)
+            .await
+    }
+
+    /// [`Self::create`] for a GLOBAL secret egret mints and manages itself (an
+    /// engine's internal, monitor, keystore, delegator or root password, a
+    /// minted Catalog Client's credential): marked `system_managed`, so the
+    /// Secrets routes refuse to rename, rotate or delete it and pickers leave
+    /// it out. Its owner still rotates and deletes it through this store.
+    pub async fn create_system(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        plaintext: &str,
+    ) -> Result<Uuid, SecretsError> {
+        let vault_id = self.secrets.put("workspace_secret", plaintext).await?;
+        self.register(None, name, description, vault_id, true).await
+    }
+
+    /// Register a named entry for `vault_id`. On a duplicate name the vault
+    /// row is rolled back and `AlreadyExists` returned.
+    async fn register(
+        &self,
+        workspace_id: Option<Uuid>,
+        name: &str,
+        description: Option<&str>,
+        vault_id: Uuid,
+        system_managed: bool,
+    ) -> Result<Uuid, SecretsError> {
         let res: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
-            "INSERT INTO workspace_secrets (workspace_id, name, description, secret_ref) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
+            "INSERT INTO workspace_secrets (workspace_id, name, description, secret_ref, system_managed) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
         .bind(workspace_id)
         .bind(name)
         .bind(description)
         .bind(vault_id)
+        .bind(system_managed)
         .fetch_one(&self.db.pool)
         .await;
         match res {
@@ -129,27 +167,8 @@ impl WorkspaceSecretStore {
             .secrets
             .put_typed("workspace_secret", r#type, data)
             .await?;
-        let res: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
-            "INSERT INTO workspace_secrets (workspace_id, name, description, secret_ref) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
-        )
-        .bind(workspace_id)
-        .bind(name)
-        .bind(description)
-        .bind(vault_id)
-        .fetch_one(&self.db.pool)
-        .await;
-        match res {
-            Ok(id) => Ok(id),
-            Err(e) => {
-                let _ = self.secrets.delete(vault_id).await;
-                if is_unique_violation(&e) {
-                    Err(SecretsError::AlreadyExists(name.to_string()))
-                } else {
-                    Err(e.into())
-                }
-            }
-        }
+        self.register(workspace_id, name, description, vault_id, false)
+            .await
     }
 
     /// Rotate a named secret's type + data map (re-validates; the named id is unchanged).
@@ -176,7 +195,8 @@ impl WorkspaceSecretStore {
              + (SELECT count(*) FROM registry.catalog_secret_refs WHERE secret_id = ws.id) \
              + (SELECT count(*) FROM registry.engine_catalog_attachments WHERE credential_secret_id = ws.id) AS used_by, \
              s.type, \
-             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
+             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys, \
+             ws.system_managed \
              FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \
              WHERE ws.workspace_id IS NOT DISTINCT FROM $1 \
              ORDER BY ws.name",
@@ -200,7 +220,8 @@ impl WorkspaceSecretStore {
              + (SELECT count(*) FROM registry.catalog_secret_refs WHERE secret_id = ws.id) \
              + (SELECT count(*) FROM registry.engine_catalog_attachments WHERE credential_secret_id = ws.id) AS used_by, \
              s.type, \
-             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
+             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys, \
+             ws.system_managed \
              FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \
              WHERE ws.id = $1 AND ws.workspace_id IS NOT DISTINCT FROM $2",
         )

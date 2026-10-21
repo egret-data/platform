@@ -1975,8 +1975,7 @@ async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid,
     let name = format!("egret-delegator-{}", engine.id);
     let id = match st
         .secrets
-        .create(
-            None,
+        .create_system(
             &name,
             Some("impersonate-mode Trino delegator password"),
             &pw,
@@ -2044,7 +2043,7 @@ async fn ensure_root_password_secret(
     let name = format!("egret-root-{}", engine.id);
     let id = match st
         .secrets
-        .create(None, &name, Some("StarRocks FE root password"), &pw)
+        .create_system(&name, Some("StarRocks FE root password"), &pw)
         .await
     {
         Ok(id) => id,
@@ -2167,8 +2166,7 @@ async fn resolve_internal_secrets(
     let internal = random_internal_secret();
     let internal_id = st
         .secrets
-        .create(
-            None,
+        .create_system(
             &format!("engine-internal-{}-{generation}", engine.id),
             Some("Trino internal-communication shared secret"),
             &internal,
@@ -2178,8 +2176,7 @@ async fn resolve_internal_secrets(
     let monitor = random_internal_secret();
     let monitor_id = match st
         .secrets
-        .create(
-            None,
+        .create_system(
             &format!("engine-monitor-{}-{generation}", engine.id),
             Some("egret-monitor password for the native Trino monitor"),
             &monitor,
@@ -2420,12 +2417,7 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
     let name = format!("engine-tls-{}", engine.id);
     let sid = match st
         .secrets
-        .create(
-            None,
-            &name,
-            Some("jwt-mode coordinator keystore"),
-            &keystore,
-        )
+        .create_system(&name, Some("jwt-mode coordinator keystore"), &keystore)
         .await
     {
         Ok(id) => id,
@@ -8798,6 +8790,14 @@ mod tests {
         let (delegator_id, _) = ensure_delegator_secret(&st, &engine)
             .await
             .expect("delegator");
+        assert!(
+            st.secrets
+                .get_meta(None, delegator_id)
+                .await
+                .unwrap()
+                .system_managed,
+            "KI-207: the delegator password is a system secret"
+        );
         let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
         let internal = resolve_internal_secrets(&st, &engine, false)
             .await
@@ -9851,6 +9851,8 @@ mod tests {
         assert_eq!(id1, id2);
         assert_eq!(pw1, pw2);
         assert!(!pw1.is_empty());
+        // KI-207: minted as a system secret, so the Secrets page cannot edit it.
+        assert!(st.secrets.get_meta(None, id1).await.unwrap().system_managed);
     }
 
     /// The projection primitive resolves a `kubernetes.io/tls` named secret to
