@@ -55,14 +55,26 @@ describe("notEnforcedWarning (spec C7.2)", () => {
 
   it("says when engines exist but no policy profile covers them", () => {
     expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_profile", catalogs: [cat("wh", "no_profile"), cat("lake", "no_engine")] })).toEqual([
-      "wh has engines attached but no policy profile covers them, so this rule is stored but no query is masked. Its engines have no policy profile; bind one in Governance > Engine & policy.",
+      "wh's engines are not in a policy profile, so this rule is stored but no query is masked. Its engines have no policy profile; bind one in Governance > Engine & policy.",
       "lake has no engine attached, so this rule is stored but no query is masked. Attach an engine in Control Plane > Engines.",
+    ]);
+    expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_profile", catalogs: [cat("a", "no_profile"), cat("b", "no_profile")] })).toEqual([
+      "The engines of a and b are not in a policy profile, so this rule is stored but no query is masked. Their engines have no policy profile; bind one in Governance > Engine & policy.",
     ]);
   });
 
-  it("says when the classification is attached to nothing yet", () => {
+  it("says when the classification is attached to nothing yet, and only for a classification rule", () => {
     expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_assignment", tableCount: 0, columnCount: 0 })).toEqual([
       "This classification is not attached to any table or column a catalog serves yet, so this rule is stored but no query is masked. Attach it in Governance > Data.",
+    ]);
+    expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_assignment" }, "path")).toEqual([
+      "No catalog egret knows serves this path yet, so this rule is stored but no query is masked.",
+    ]);
+  });
+
+  it("falls back to a plain sentence when no catalog names a reason it knows", () => {
+    expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: null, catalogs: [cat("wh", null)] })).toEqual([
+      "No engine enforces it yet, so this rule is stored but no query is masked.",
     ]);
   });
 });
@@ -86,12 +98,23 @@ describe("effectivePerPrincipal (spec C6)", () => {
     ]);
     expect(lines.find((l) => l.principal === "Everyone else")?.text).toBe("masked; which mask applies is decided by engine order");
     expect(lines[0].text).toBe("sees the real value");
+    // A cut list cannot promise the real value: it holds only the masks listed.
+    expect(effectivePerPrincipal(
+      { maskType: "MASK", exempt: { include: [g("auditors")], exclude: [] } },
+      [other("A", "MASK", [g("auditors")])],
+      { truncated: true },
+    )[0].text).toBe("sees the real value (of the masks listed)");
     expect(lines[1].text).toBe("undecided: the engine applies whichever mask it evaluates first");
   });
 
   it("names the mask type when every mask agrees", () => {
     const lines = effectivePerPrincipal({ maskType: "MASK_HASH", exempt: { include: [], exclude: [] } }, [other("A", "MASK_HASH", [])]);
     expect(lines).toEqual([{ principal: "Everyone else", verdict: "masked", text: "masked (Hash)" }]);
+  });
+
+  it("two custom masks never count as agreeing: the preview carries no expression to compare", () => {
+    const lines = effectivePerPrincipal({ maskType: "CUSTOM", exempt: { include: [], exclude: [] } }, [other("A", "CUSTOM", [])]);
+    expect(lines).toEqual([{ principal: "Everyone else", verdict: "masked", text: "masked; which mask applies is decided by engine order" }]);
   });
 
   it("a principal no mask exempts but one named twice is listed once; a type not listed shows as stored", () => {

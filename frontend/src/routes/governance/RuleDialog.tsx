@@ -10,9 +10,8 @@ import {
 } from "@/api/generated/perm/perm";
 import type { NewRule, PreviewResponse, PrincipalSet, RuleKind, Scope, Selector } from "@/api/generated/model";
 import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
-import { useControlPlaneCatalogUnassignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { ApiError } from "@/api/client";
-import { invalidateTagAssignment, type Tag, useTags } from "@/api/tags";
+import { type Tag, useTags } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
 import { ScopePicker } from "@/components/perm/ScopePicker";
@@ -43,14 +42,15 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { formatScope } from "./permFormat";
 import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
-import { refusalMessage } from "@/routes/governance/policyWrites";
+import { RemoveClassificationDialog } from "@/routes/governance/RemoveClassificationDialog";
+import type { TableTagMaskConflict } from "@/routes/governance/apiErrors";
 import {
   AlreadyMaskedNotice,
   EffectSummary,
   RecompileDetails,
   RefusalBody,
   showsNotEnforced,
-  TICK_TO_CREATE,
+  tickReason,
   type ConflictActions,
 } from "@/routes/governance/RulePreview";
 import {
@@ -344,7 +344,10 @@ function RuleForm({
   const focusResultRef = useRef(false);
   // Set by Apply by path instead, so focus lands on the catalog picker once it renders.
   const focusCatalogRef = useRef(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
+  // The conflict whose Remove from table is being confirmed, and the button that asked.
+  const [removing, setRemoving] = useState<{ conflict: TableTagMaskConflict & { warehouseId: string }; opener: HTMLElement } | null>(null);
+  // The form a refused save was sent with: its actions apply only while the form still matches it.
+  const [savedFor, setSavedFor] = useState<string | null>(null);
   // Bumped on every failure, so focus moves to the error even when its text repeats.
   const [errorSeq, setErrorSeq] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -356,7 +359,6 @@ function RuleForm({
   const previewMutation = usePermPreview<ApiError>();
   const createRule = usePermCreateRule<ApiError>({ mutation: { onSuccess: invalidate } });
   const patchRule = usePermPatchRule<ApiError>({ mutation: { onSuccess: invalidate } });
-  const unassignTag = useControlPlaneCatalogUnassignResourceTag<ApiError>();
   const canRemoveTag = useCanEditCatalogTags();
 
   const body = bodyOf(form);
@@ -427,7 +429,6 @@ function RuleForm({
     setPreviewFailure(null);
     setSaveError(null);
     setSaveFailure(null);
-    setRemoveError(null);
     setTicked(false);
     setPreview(null);
     try {
@@ -455,32 +456,21 @@ function RuleForm({
   }
 
   /**
-   * Remove from table (spec C5.1): takes the classification off the whole
-   * table the conflict names, refreshes what an attach changes, and previews
-   * the same rule again, which shows the next table when there is one.
+   * After Remove from table is confirmed and done (spec C5.1; the confirm,
+   * `RemoveClassificationDialog`, refreshes what an attach changes): preview
+   * the same rule again, which shows the next table when there is one, and
+   * hand focus to its result.
    */
-  async function removeFromTable(c: { tag: string; tagId: string; warehouseId: string; schema: string; table: string }) {
-    setRemoveError(null);
-    try {
-      await unassignTag.mutateAsync({
-        warehouseId: c.warehouseId,
-        data: { schema: c.schema, table: c.table, column: "", tag_id: c.tagId },
-      });
-    } catch (e) {
-      setRemoveError(refusalMessage(e, "catalog_registry:update", `${c.tag} was not removed from the table. Try again.`));
-      return;
-    }
-    invalidateTagAssignment(queryClient, c.tagId, c.warehouseId);
-    toast.success(`Removed ${c.tag} from ${c.schema}.${c.table}.`);
+  function afterRemoved() {
+    if (blockedReason) return;
     focusResultRef.current = true;
-    await runPreview();
+    void runPreview();
   }
 
   const conflictActions: ConflictActions = {
     canRemove: canRemoveTag,
-    removing: unassignTag.isPending,
-    removeError,
-    onRemove: (c) => void removeFromTable(c),
+    removing: removing !== null,
+    onRemove: (conflict, opener) => setRemoving({ conflict, opener }),
     onApplyByPath: () => {
       update({ selectorType: "path", scope: EMPTY_SCOPE });
       focusCatalogRef.current = true;
@@ -502,6 +492,7 @@ function RuleForm({
     } catch (e) {
       setSaveError((e as ApiError).message || "Failed to save the rule.");
       setSaveFailure(e);
+      setSavedFor(bodySnapshot);
       setErrorSeq((n) => n + 1);
     }
   }
@@ -514,7 +505,8 @@ function RuleForm({
    * Shown beside the button and tied to it as its description.
    */
   const effect = preview && !previewStale ? (preview.effect ?? null) : null;
-  const needsTick = !!effect && effect.alreadyMasked.length > 0 && !ticked;
+  // Only a mask can be a second mask on a column; the server lists masks only, and the kind is checked anyway.
+  const needsTick = !!effect && effect.kind === "mask" && effect.alreadyMasked.length > 0 && !ticked;
   const createReason =
     blockedReason ??
     (previewStale || (!preview && !previewError)
@@ -522,7 +514,7 @@ function RuleForm({
       : previewError
         ? "The preview was refused. Change the rule, then preview it again."
         : needsTick
-          ? TICK_TO_CREATE
+          ? tickReason(!!existing)
           : null);
   const canSave = createReason === null;
   const reasonId = useId();
@@ -534,7 +526,7 @@ function RuleForm({
 
   /** The footer's error: the latest failure, in the server's words (FE-ACTION-3). */
   const footerError = saveError
-    ? { title: "The rule was not saved.", message: saveError, error: saveFailure, actionable: true }
+    ? { title: "The rule was not saved.", message: saveError, error: saveFailure, actionable: savedFor === bodySnapshot }
     : previewError
       ? {
           // Kept after an edit, so the server's words stay readable, but named as the earlier version's.
@@ -553,6 +545,7 @@ function RuleForm({
     if (errorSeq > 0) errorRef.current?.focus();
   }, [errorSeq]);
   const resultRef = useRef<HTMLDivElement>(null);
+  const previewButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     // A refused re-preview takes focus to its error instead (`errorSeq`).
     if (!focusResultRef.current || (!preview && !previewError)) return;
@@ -739,6 +732,7 @@ function RuleForm({
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-medium">Preview this write</p>
             <Button
+              ref={previewButtonRef}
               type="button"
               size="sm"
               variant="outline"
@@ -756,9 +750,15 @@ function RuleForm({
             <div ref={resultRef} tabIndex={-1} className="space-y-2 text-sm">
               {effect && (
                 <>
-                  <EffectSummary effect={effect} warnId={warnId} />
+                  <EffectSummary effect={effect} warnId={warnId} appliesTo={selectorType} />
                   {effect.kind === "mask" && (
-                    <AlreadyMaskedNotice effect={effect} rule={{ maskType, exempt }} ticked={ticked} onTick={setTicked} />
+                    <AlreadyMaskedNotice
+                      effect={effect}
+                      rule={{ maskType, exempt }}
+                      ticked={ticked}
+                      onTick={setTicked}
+                      editing={!!existing}
+                    />
                   )}
                 </>
               )}
@@ -821,6 +821,28 @@ function RuleForm({
           </Button>
         </div>
       </div>
+
+      {removing && (
+        <RemoveClassificationDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setRemoving(null);
+          }}
+          tag={{ id: removing.conflict.tagId, name: removing.conflict.tag, key: selectorType === "tag" ? tagKey : "" }}
+          target={{
+            warehouseId: removing.conflict.warehouseId,
+            schema: removing.conflict.schema,
+            table: removing.conflict.table,
+            column: "",
+            label: `${removing.conflict.schema}.${removing.conflict.table}`,
+          }}
+          opener={removing.opener}
+          // The Remove button leaves with the conflict: focus goes to the fresh result when it is already
+          // there, else to Preview, from which the result takes it when it arrives.
+          focusAfterRemove={() => resultRef.current ?? previewButtonRef.current}
+          onRemoved={afterRemoved}
+        />
+      )}
 
       <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
         <AlertDialogContent>

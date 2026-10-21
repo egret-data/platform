@@ -66,6 +66,7 @@ export function RemoveClassificationDialog({
   target,
   focusAfterRemove,
   opener,
+  onRemoved,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -75,6 +76,8 @@ export function RemoveClassificationDialog({
   focusAfterRemove?: () => HTMLElement | null | undefined;
   /** The control that opened the dialog; focus returns to it on Cancel or Escape. */
   opener?: HTMLElement | null;
+  /** Called once the classification is removed, after the refresh (the rule dialog previews again). */
+  onRemoved?: () => void;
 }) {
   const removed = useRef(false);
   const queryClient = useQueryClient();
@@ -98,6 +101,7 @@ export function RemoveClassificationDialog({
       .then(
         () => {
           invalidateTagAssignment(queryClient, tag.id, target.warehouseId);
+          onRemoved?.();
           toast.success(`Removed ${tag.name} from ${target.label}.`);
           removed.current = true;
           remove.reset();

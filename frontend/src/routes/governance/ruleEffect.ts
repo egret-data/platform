@@ -55,9 +55,11 @@ export function effectSentence(e: RuleEffect): string {
  * The sentences that follow "Not enforced yet." when no engine enforces the
  * rule (spec C7.2), one per reason, naming the catalogs it applies to; `null`
  * while an engine enforces it. A warning, not a refusal: the rule can still
- * be created, and is enforced once an engine serves it.
+ * be created, and is enforced once an engine serves it. `appliesTo` says what
+ * the rule is written on: a reach of nothing means an unattached
+ * classification only for a classification rule.
  */
-export function notEnforcedWarning(e: RuleEffect): string[] | null {
+export function notEnforcedWarning(e: RuleEffect, appliesTo: "tag" | "path" = "tag"): string[] | null {
   if (e.enforcedBy > 0) return null;
   const verb = e.kind === "row_filter" ? "filtered" : "masked";
   const stored = `so this rule is stored but no query is ${verb}.`;
@@ -65,14 +67,16 @@ export function notEnforcedWarning(e: RuleEffect): string[] | null {
     e.catalogs.filter((c: EffectCatalog) => c.notEnforced === reason).map((c) => c.catalogName);
 
   if (e.notEnforced === "no_assignment" || e.catalogs.length === 0) {
-    return [`This classification is not attached to any table or column a catalog serves yet, ${stored} Attach it in Governance > Data.`];
+    return appliesTo === "tag"
+      ? [`This classification is not attached to any table or column a catalog serves yet, ${stored} Attach it in Governance > Data.`]
+      : [`No catalog egret knows serves this path yet, ${stored}`];
   }
   const lines: string[] = [];
   const noProfile = named("no_profile");
   if (noProfile.length > 0) {
     const one = noProfile.length === 1;
     lines.push(
-      `${listOf(noProfile)} ${one ? "has" : "have"} engines attached but no policy profile covers them, ${stored} ` +
+      `${one ? `${noProfile[0]}'s engines` : `The engines of ${listOf(noProfile)}`} are not in a policy profile, ${stored} ` +
         `${one ? "Its" : "Their"} engines have no policy profile; bind one in Governance > Engine & policy.`,
     );
   }
@@ -82,7 +86,7 @@ export function notEnforcedWarning(e: RuleEffect): string[] | null {
       `${listOf(noEngine)} ${noEngine.length === 1 ? "has" : "have"} no engine attached, ${stored} Attach an engine in Control Plane > Engines.`,
     );
   }
-  return lines.length > 0 ? lines : [`No engine enforces this rule yet, ${stored}`];
+  return lines.length > 0 ? lines : [`No engine enforces it yet, ${stored}`];
 }
 
 /** One principal's result where several masks reach one column (spec C6). */
@@ -105,12 +109,26 @@ export const maskTypeLabel = (t: string) => MASK_TYPE_LABEL[t] ?? t;
  * From some but not all: undecided, since the engine applies whichever mask
  * it evaluates first. Only `exempt.include` is read: an exemption has no
  * `exclude` (D6).
+ *
+ * **Names as written.** Principals are compared by `{kind, ref}`: groups,
+ * roles and workspaces are expanded to people only when compiled, so a
+ * person exempted as `user alice` in one mask and through `group data-team`
+ * in another is two lines here. The caller says so beside the list. With
+ * `truncated`, masks may be missing, so "sees the real value" is qualified.
+ *
+ * Two `CUSTOM` masks never agree: `ExistingMask` carries no expression to
+ * compare.
  */
-export function effectivePerPrincipal(rule: { maskType: string; exempt: PrincipalSet }, existing: ExistingMask[]): PrincipalLine[] {
+export function effectivePerPrincipal(
+  rule: { maskType: string; exempt: PrincipalSet },
+  existing: ExistingMask[],
+  opts: { truncated?: boolean } = {},
+): PrincipalLine[] {
   const masks = [{ maskType: rule.maskType, exempt: rule.exempt }, ...existing];
   const types = new Set(masks.map((m) => m.maskType));
-  const maskedText =
-    types.size === 1 ? `masked (${maskTypeLabel(masks[0].maskType)})` : "masked; which mask applies is decided by engine order";
+  const agree = types.size === 1 && !(types.has("CUSTOM") && masks.length > 1);
+  const maskedText = agree ? `masked (${maskTypeLabel(masks[0].maskType)})` : "masked; which mask applies is decided by engine order";
+  const realText = opts.truncated ? "sees the real value (of the masks listed)" : "sees the real value";
 
   const principals = new Map<string, PermPrincipal>();
   for (const m of masks) for (const p of m.exempt.include) principals.set(principalLabel(p), p);
@@ -121,7 +139,7 @@ export function effectivePerPrincipal(rule: { maskType: string; exempt: Principa
       const p = principals.get(label) as PermPrincipal;
       const from = masks.filter((m) => m.exempt.include.some((q) => q.kind === p.kind && q.ref === p.ref)).length;
       // Every listed principal is exempt from at least one mask: the one it was read from.
-      if (from === masks.length) return { principal: label, verdict: "real", text: "sees the real value" };
+      if (from === masks.length) return { principal: label, verdict: "real", text: realText };
       return { principal: label, verdict: "undecided", text: "undecided: the engine applies whichever mask it evaluates first" };
     });
   lines.push({ principal: "Everyone else", verdict: "masked", text: maskedText });

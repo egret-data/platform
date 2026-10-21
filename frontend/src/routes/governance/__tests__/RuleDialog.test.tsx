@@ -57,6 +57,7 @@ import * as governance from "@/api/generated/control-plane-governance/control-pl
 import * as tagsApi from "@/api/tags";
 import * as catalogApi from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { MemoryRouter } from "react-router-dom";
+import { useState } from "react";
 import { ApiError } from "@/api/client";
 import type { GovernanceCatalog, Rule } from "@/api/generated/model";
 import type { Me } from "@/api/hooks";
@@ -113,6 +114,30 @@ const OK_PREVIEW_MANY = {
 };
 
 let previewMutateAsync: ReturnType<typeof vi.fn>;
+
+/**
+ * The unassign hook as the Remove confirm reads it: `unassign` is the call,
+ * and a rejection lands in `error`/`isError` the way the mutation's state would.
+ */
+function mockUnassign(unassign: (v: unknown) => unknown) {
+  vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockImplementation((() => {
+    const [error, setError] = useState<unknown>(null);
+    return {
+      mutateAsync: async (v: unknown) => {
+        try {
+          return await unassign(v);
+        } catch (e) {
+          setError(e);
+          throw e;
+        }
+      },
+      isPending: false,
+      isError: error !== null,
+      error,
+      reset: () => setError(null),
+    };
+  }) as never);
+}
 let createMutateAsync: ReturnType<typeof vi.fn>;
 let patchMutateAsync: ReturnType<typeof vi.fn>;
 
@@ -158,10 +183,12 @@ beforeEach(() => {
     mutateAsync: previewMutateAsync,
     isPending: false,
   } as unknown as ReturnType<typeof permApi.usePermPreview>);
-  vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({
-    mutateAsync: vi.fn(),
-    isPending: false,
-  } as never);
+  mockUnassign(vi.fn());
+  // The Remove confirm names the rules on the classification (Task 6's dialog).
+  vi.mocked(permApi.usePermListRules).mockReturnValue({
+    data: { status: 200, data: [] },
+    isError: false,
+  } as unknown as ReturnType<typeof permApi.usePermListRules>);
   vi.mocked(permApi.usePermCreateRule).mockReturnValue({
     mutateAsync: createMutateAsync,
     isPending: false,
@@ -877,17 +904,17 @@ describe("RuleDialog — the preview speaks in effect (C7)", () => {
     expect(details).toHaveTextContent("trino-prod");
   });
 
-  test("an enforced rule shows no warning, and exempting everyone is said as a condition, not a fact", async () => {
+  test("an enforced rule shows no warning and no description on Create", async () => {
     const user = userEvent.setup();
     previewMutateAsync.mockResolvedValueOnce({
       status: 200,
-      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], exemptEveryone: true } },
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [] } },
     });
     renderDialog({ entry: CLASSIFICATION_ENTRY });
     await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(await screen.findByText("Masks 1 column on 1 table · enforced by 1 engine · everyone exempt")).toBeInTheDocument();
+    expect(await screen.findByText("Masks 1 column on 1 table · enforced by 1 engine · 2 people exempt")).toBeInTheDocument();
     expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Exempting the public group would leave every reader unmasked/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).not.toHaveAccessibleDescription();
   });
 });
 
@@ -903,7 +930,9 @@ describe("RuleDialog — a second mask on a column is never silent (C6)", () => 
       "wh.analytics.customers.email is already masked by Hash personal data (Hash, except group data-stewards).",
     );
     expect(screen.getByRole("link", { name: "Hash personal data" })).toHaveAttribute("href", "/governance/rules/r9");
-    expect(screen.getByRole("list", { name: "Effective result" })).toHaveTextContent("group data-stewards: undecided");
+    expect(screen.getByRole("list", { name: "Result by exemption as written" })).toHaveTextContent("group data-stewards: undecided");
+    // Groups are expanded only when compiled: the lines compare names as written, and say so.
+    expect(screen.getByText("A person exempted under more than one name may see more than their line says.")).toBeInTheDocument();
     const create = screen.getByRole("button", { name: "Create" });
     expect(create).toHaveAttribute("aria-disabled", "true");
     expect(create).toHaveAccessibleDescription("Tick 'Create anyway' to create a second mask on this column.");
@@ -926,6 +955,91 @@ describe("RuleDialog — a second mask on a column is never silent (C6)", () => 
     expect(await screen.findByText(/stopped at its limit, and more masks may reach these columns/)).toBeInTheDocument();
   });
 
+  test("a cut check with no mask listed says so without a list or a tick", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], truncated: true } },
+    });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Other masks may reach these columns: the check stopped at its limit.")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
+  });
+
+  const mask = (ruleId: string, ruleName: string, coordinate: string) => ({
+    ruleId, ruleName, maskType: "MASK_HASH", coordinate, exempt: { include: [], exclude: [] },
+  });
+
+  test("a tick holds for one preview: previewing again asks again", async () => {
+    const user = userEvent.setup();
+    const effect = { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: [mask("r9", "Hash personal data", "wh.a.c.email")] };
+    previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(await screen.findByRole("checkbox", { name: /Create anyway/ }));
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toHaveAttribute("aria-disabled", "false");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("checkbox", { name: /Create anyway/ })).not.toBeChecked();
+    expect(create).toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("three masks on one column, and masks on several columns", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: [mask("a", "Hash A", "wh.s.t.email"), mask("b", "Hash B", "wh.s.t.email")] } },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: [mask("a", "Hash A", "wh.s.t.email"), mask("b", "Hash B", "wh.s.t.*")] } },
+      });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/wh\.s\.t\.email is already masked by/)).toHaveTextContent(
+      "wh.s.t.email is already masked by Hash A (Hash) and Hash B (Hash).",
+    );
+    expect(screen.getByRole("checkbox", { name: "Create anyway: I understand wh.s.t.email will have 3 masks" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("list", { name: "Result by exemption as written on every column of wh.s.t" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Result by exemption as written on wh.s.t.email" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Create anyway: I understand these columns will have more than one mask" })).toBeInTheDocument();
+  });
+
+  test("editing says Save anyway", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: [mask("r9", "Hash personal data", "wh.a.c.email")] } },
+    });
+    renderDialog({
+      entry: { kind: "edit", rule: { id: "r1", name: "m", kind: { type: "mask", mask_type: "MASK" }, selector: { type: "tag", key: "pii_v2" }, exempt: { include: [], exclude: [] } } },
+    });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("checkbox", { name: "Save anyway: I understand wh.a.c.email will have two masks" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveAccessibleDescription(
+      "Tick 'Save anyway' to save a second mask on this column.",
+    );
+  });
+
+  test("a row filter's preview never asks for the mask tick", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, kind: "row_filter", enforcedBy: 1, catalogs: [], alreadyMasked: [mask("r9", "Hash", "wh.a.c.email")] } },
+    });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await screen.findByText(/Filters rows of/);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
+  });
+
   test("a 409 rule_overlap names both rules and offers no tick", async () => {
     const user = userEvent.setup();
     previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling profile …", "rule_overlap", {
@@ -934,7 +1048,7 @@ describe("RuleDialog — a second mask on a column is never silent (C6)", () => 
     renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
     await user.click(screen.getByRole("button", { name: "Preview" }));
     expect(await screen.findByText(/would make two masks decide wh\.s\.t\.email differently/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Hash A" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Hash A" })).toHaveAttribute("href", "/governance/rules/a");
     expect(screen.getByRole("link", { name: "Null B" })).toHaveAttribute("href", "/governance/rules/b");
     expect(screen.getByText("Details").closest("details")).toHaveTextContent("recompiling profile …");
     expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
@@ -951,7 +1065,7 @@ describe("RuleDialog — the table-level classification conflict, said short (C5
   test("one sentence, Remove from table, then a fresh preview", async () => {
     const user = userEvent.setup();
     const unassign = vi.fn().mockResolvedValue({ status: 200, data: { ok: true } });
-    vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({ mutateAsync: unassign, isPending: false } as never);
+    mockUnassign(unassign);
     previewMutateAsync
       .mockRejectedValueOnce(CONFLICT())
       .mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 2, catalogs: [] } } });
@@ -961,6 +1075,10 @@ describe("RuleDialog — the table-level classification conflict, said short (C5
     expect(screen.getByText("Details").closest("details")).not.toHaveAttribute("open");
     expect(screen.queryByText(/Other tables carry it too/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Remove from table" }));
+    // A destructive action confirms first (FE-ACTION-1).
+    const ask = await screen.findByRole("alertdialog", { name: "Remove PII Data from analytics.orders?" });
+    expect(unassign).not.toHaveBeenCalled();
+    await user.click(within(ask).getByRole("button", { name: "Remove" }));
     expect(unassign).toHaveBeenCalledWith({ warehouseId: "wh-1", data: { schema: "analytics", table: "orders", column: "", tag_id: "t1" } });
     const fresh = await screen.findByText("Masks 1 column on 1 table · enforced by 2 engines · 2 people exempt");
     // The button that was pressed is gone; focus moves to the fresh result.
@@ -991,17 +1109,51 @@ describe("RuleDialog — the table-level classification conflict, said short (C5
     expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({ catalog_id: "" });
   });
 
-  test("a refused Remove says why, keeps the conflict, and previews nothing", async () => {
+  test("Cancel in the confirm sends nothing and returns focus to Remove from table", async () => {
     const user = userEvent.setup();
-    const unassign = vi.fn().mockRejectedValue(new ApiError(403, "forbidden"));
-    vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({ mutateAsync: unassign, isPending: false } as never);
+    const unassign = vi.fn();
+    mockUnassign(unassign);
     previewMutateAsync.mockRejectedValueOnce(CONFLICT());
     renderDialog({ entry: CLASSIFICATION_ENTRY });
     await user.click(screen.getByRole("button", { name: "Preview" }));
     await user.click(await screen.findByRole("button", { name: "Remove from table" }));
-    expect(await screen.findByText("This account cannot do that: it needs the catalog_registry:update permission.")).toBeInTheDocument();
+    const ask = await screen.findByRole("alertdialog", { name: "Remove PII Data from analytics.orders?" });
+    await user.click(within(ask).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(unassign).not.toHaveBeenCalled();
+    expect(previewMutateAsync).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove from table" })).toHaveFocus());
+  });
+
+  test("a refused Remove says why in the confirm, keeps the conflict, and previews nothing", async () => {
+    const user = userEvent.setup();
+    const unassign = vi.fn().mockRejectedValue(new ApiError(403, "forbidden"));
+    mockUnassign(unassign);
+    previewMutateAsync.mockRejectedValueOnce(CONFLICT());
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(await screen.findByRole("button", { name: "Remove from table" }));
+    const ask = await screen.findByRole("alertdialog", { name: "Remove PII Data from analytics.orders?" });
+    await user.click(within(ask).getByRole("button", { name: "Remove" }));
+    expect(await within(ask).findByText("This account cannot do that: it needs the catalog_registry:update permission.")).toBeInTheDocument();
     expect(previewMutateAsync).toHaveBeenCalledTimes(1);
     expect(tagsApi.invalidateTagAssignment).not.toHaveBeenCalled();
+    await user.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByText(/is on the whole table analytics\.orders/)).toBeInTheDocument();
+  });
+
+  test("a conflict refused at save keeps its actions until the form changes", async () => {
+    const user = userEvent.setup();
+    createMutateAsync.mockRejectedValueOnce(CONFLICT());
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const create = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toHaveAttribute("aria-disabled", "false"));
+    await user.click(create);
+    expect(await screen.findByRole("button", { name: "Remove from table" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^Name/), "!");
+    expect(screen.getByText(/is on the whole table analytics\.orders/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
   });
 
   test("once the form changes, the earlier refusal is explained but offers nothing to act on", async () => {

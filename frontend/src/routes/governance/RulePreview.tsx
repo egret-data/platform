@@ -22,8 +22,12 @@ import {
  * (the preview, the tick, the refusal); these parts only lay it out.
  */
 
-/** Create's reason while masks already on a column wait for the tick (spec C6.2). */
-export const TICK_TO_CREATE = "Tick 'Create anyway' to create a second mask on this column.";
+/** The tick's verb: "Create" for a new rule, "Save" when editing one. */
+const tickVerb = (editing: boolean) => (editing ? "Save" : "Create");
+
+/** Create's (or Save's) reason while masks already on a column wait for the tick (spec C6.2). */
+export const tickReason = (editing: boolean) =>
+  `Tick '${tickVerb(editing)} anyway' to ${editing ? "save" : "create"} a second mask on this column.`;
 
 const ruleHref = (id: string) => `/governance/rules/${encodeURIComponent(id)}`;
 
@@ -37,17 +41,20 @@ function coordinateText(coordinate: string): string {
  * yet" warning (spec C7.1-2). The warning is a `role="status"` region with
  * `warnId`, which Create lists in its `aria-describedby` (spec C7 A11y).
  */
-export function EffectSummary({ effect, warnId }: { effect: RuleEffect; warnId: string }) {
-  const warning = notEnforcedWarning(effect);
+export function EffectSummary({
+  effect,
+  warnId,
+  appliesTo,
+}: {
+  effect: RuleEffect;
+  warnId: string;
+  /** What the rule is written on (a reach of nothing reads differently for each). */
+  appliesTo: "tag" | "path";
+}) {
+  const warning = notEnforcedWarning(effect, appliesTo);
   return (
     <>
       <p className="font-medium">{effectSentence(effect)}</p>
-      {effect.exemptEveryone && (
-        <p className="text-xs text-muted-foreground">
-          Exempting the public group would leave every reader unmasked; egret refuses that once an engine serves the
-          catalog.
-        </p>
-      )}
       {warning && (
         <Alert role="status" id={warnId}>
           <AlertTriangle className="h-4 w-4" aria-hidden="true" />
@@ -78,27 +85,35 @@ function byCoordinate(masks: ExistingMask[]): [string, ExistingMask[]][] {
 
 /**
  * Other masks already on a column this rule reaches (spec C6.2): who masks
- * it, with a link to each rule; the effective result per principal; and the
- * tick Create waits for. A cut list (`truncated`) says more may exist.
+ * it, with a link to each rule; the result per exemption as written (names
+ * are compared as written, not expanded to people: see
+ * `effectivePerPrincipal`); and the tick Create (Save, when editing) waits
+ * for. A cut list (`truncated`) says more may exist.
  */
 export function AlreadyMaskedNotice({
   effect,
   rule,
   ticked,
   onTick,
+  editing,
 }: {
   effect: RuleEffect;
   rule: { maskType: string; exempt: PrincipalSet };
   ticked: boolean;
   onTick: (ticked: boolean) => void;
+  editing: boolean;
 }) {
   const groups = byCoordinate(effect.alreadyMasked);
+  if (groups.length === 0) {
+    return effect.truncated ? (
+      <p className="text-xs text-muted-foreground">Other masks may reach these columns: the check stopped at its limit.</p>
+    ) : null;
+  }
   const cut = effect.truncated ? (
     <p className="text-xs text-muted-foreground">
       These may not be all: the check stopped at its limit, and more masks may reach these columns.
     </p>
   ) : null;
-  if (groups.length === 0) return cut;
 
   const one = groups.length === 1;
   const target = one ? coordinateText(groups[0][0]) : "these columns";
@@ -122,20 +137,25 @@ export function AlreadyMaskedNotice({
             .
           </p>
           <ul
-            aria-label={one ? "Effective result" : `Effective result on ${coordinateText(coordinate)}`}
+            aria-label={
+              one ? "Result by exemption as written" : `Result by exemption as written on ${coordinateText(coordinate)}`
+            }
             className="list-disc space-y-0.5 pl-5 text-muted-foreground"
           >
-            {effectivePerPrincipal(rule, existing).map((l) => (
+            {effectivePerPrincipal(rule, existing, { truncated: effect.truncated }).map((l) => (
               <li key={l.principal}>{`${l.principal}: ${l.text}`}</li>
             ))}
           </ul>
         </div>
       ))}
+      <p className="text-xs text-muted-foreground">
+        A person exempted under more than one name may see more than their line says.
+      </p>
       {cut}
       <div className="flex items-start gap-2">
         <Checkbox id="rule-create-anyway" checked={ticked} onCheckedChange={(v) => onTick(v === true)} />
         <Label htmlFor="rule-create-anyway" className="font-normal">
-          {`Create anyway: I understand ${target} will have ${masks}`}
+          {`${tickVerb(editing)} anyway: I understand ${target} will have ${masks}`}
         </Label>
       </div>
     </div>
@@ -188,9 +208,10 @@ function ServerDetails({ message }: { message: string }) {
 export type ConflictActions = {
   /** Whether the viewer may remove a classification (`catalog_registry:update`). */
   canRemove: boolean;
+  /** The Remove confirm is open or its removal is in flight: neither action may start another change. */
   removing: boolean;
-  removeError: string | null;
-  onRemove: (conflict: TableTagMaskConflict & { warehouseId: string }) => void;
+  /** Opens the Remove confirm; `opener` takes focus back on Cancel. */
+  onRemove: (conflict: TableTagMaskConflict & { warehouseId: string }, opener: HTMLElement) => void;
   onApplyByPath: () => void;
 };
 
@@ -207,16 +228,24 @@ function ConflictButtons({ conflict, actions }: { conflict: TableTagMaskConflict
             size="sm"
             variant="outline"
             aria-disabled={actions.removing}
-            onClick={() => {
-              if (!actions.removing) actions.onRemove({ ...conflict, warehouseId });
+            onClick={(event) => {
+              if (!actions.removing) actions.onRemove({ ...conflict, warehouseId }, event.currentTarget);
             }}
           >
-            {actions.removing ? "Removing…" : "Remove from table"}
+            Remove from table
           </Button>
         ) : (
           <span>Removing needs the catalog_registry:update permission.</span>
         ))}
-      <Button type="button" size="sm" variant="outline" onClick={actions.onApplyByPath}>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        aria-disabled={actions.removing}
+        onClick={() => {
+          if (!actions.removing) actions.onApplyByPath();
+        }}
+      >
         Apply by path instead
       </Button>
     </div>
@@ -238,7 +267,6 @@ export function RefusalBody({ error, message, actions }: { error: unknown; messa
         <p>{`${conflict.tag} is on the whole table ${conflict.schema}.${conflict.table}, so masking by ${conflict.tag} would make that table unreadable.`}</p>
         {conflict.moreTables && <p>Other tables carry it too; each will be shown after this one.</p>}
         {actions && <ConflictButtons conflict={conflict} actions={actions} />}
-        {actions?.removeError && <p>{actions.removeError}</p>}
         <ServerDetails message={conflict.error} />
       </div>
     );
