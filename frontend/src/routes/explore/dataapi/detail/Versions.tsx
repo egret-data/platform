@@ -224,7 +224,14 @@ export default function VersionsSection() {
                   x anyway — and a Status column would be empty on every row but
                   one, which is §4.1's complaint about mostly-empty boxes
                   applied to a column instead of a card. */}
-              <TableHead className="w-32">Version</TableHead>
+              {/* KI-024: at `w-32` the Version cell is 112px of content, and
+                  `v2` + `Live` + `1 breaking change` lay out at about 200px, so
+                  under `table-fixed` + the shared cell's `whitespace-nowrap` the
+                  badge ran on top of the Note text. The cell now WRAPS its chips
+                  (below), which is what holds at every width, and the column
+                  takes a little more room — the whole run at `xl`, where `Note`
+                  can spare it. */}
+              <TableHead className="w-40 xl:w-56">Version</TableHead>
               <TableHead>Note</TableHead>
               {/* §5.1's last open mitigation, and the same instrument
                   `AccessSection` used: the freed width goes to the column that
@@ -290,8 +297,8 @@ export default function VersionsSection() {
             ) : (
               sorted.map((v) => (
                 <TableRow key={v.id} className="align-top" data-testid={`version-row-${v.id}`}>
-                  <TableCell className="py-2">
-                    <span className="inline-flex items-center gap-1.5">
+                  <TableCell className="py-2 whitespace-normal">
+                    <span className="flex flex-wrap items-center gap-1.5">
                       <span className="font-mono text-xs">v{v.version}</span>
                       {/* The same shared tone the endpoint list and the editor
                           pill wear (`chipTone.ts`), so this `Live` and the one
