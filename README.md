@@ -34,6 +34,9 @@ with access policy enforced in the query engine and every decision audited.
 
 ## What is Egret
 
+Egret is an enterprise data platform that lets many teams work on one shared data foundation. A single deployment gives the
+organization one source of truth, gives each team an isolated **workspace**, and governs and audits every access to data.
+
 Most organisations end up with one BI tool, one catalog, one access-policy stack and one workflow tool **per
 department**: silos, copies of the data, and access rules nobody can audit. Egret replaces that with
 **one deployment**:
@@ -53,9 +56,9 @@ a data-API builder and a workflow engine.
 | **Explore** | SQL Lab, datasets with metrics, 19 chart types, dashboards with filters and drill-through, alerts and reports (email and Slack, PNG and PDF). | [Docs](https://egret-data.github.io/docs/platform/explore/sql-lab) |
 | **Data API** | Publish a parameterised `SELECT` as a REST endpoint with OAuth2 clients, versions, rate limits and an activity log. | [Docs](https://egret-data.github.io/docs/platform/data-api/overview) |
 | **Data Apps** | [marimo](https://marimo.io) apps that run as the person viewing them, so the data policy follows the viewer. | [Docs](https://egret-data.github.io/docs/platform/explore/apps) |
-| **Workflows** | YAML flows with schedules, webhooks and triggers, executions with logs, namespaces and files. | [Docs](https://egret-data.github.io/docs/platform/workflows/concepts) |
+| **Workflows** | A workflow engine compatible with Kestra's flow syntax: YAML flows with schedules, webhooks and triggers, executions with logs, namespaces and files. | [Docs](https://egret-data.github.io/docs/platform/workflows/concepts) |
 | **Governance** | Cedar authorization, Ranger-compatible policy for Trino and StarRocks, tag-based masking, classifications, audit log, SSO (OIDC). | [Docs](https://egret-data.github.io/docs/platform/data-governance/overview) |
-| **Engines and catalog** | Provision Trino and StarRocks from the UI (Docker or Kubernetes); an embedded Iceberg REST catalog; query federation over 30+ connectors. | [Docs](https://egret-data.github.io/docs/platform/control-plane/query-engines) |
+| **Engines and catalog** | Provision Trino (on Docker or Kubernetes) and StarRocks (on Kubernetes) from the UI; an embedded Iceberg REST catalog; query federation over 30+ connectors. | [Docs](https://egret-data.github.io/docs/platform/control-plane/query-engines) |
 
 ## Screenshots
 
@@ -86,15 +89,16 @@ mail the demo sends lands in Mailpit at <http://localhost:8025>.
 - **Demo only.** The stack uses fixed public secrets. Never expose it to a network.
 
 The full guide, with ports, engines, Data Apps and how to reset, is [`docs/en/guides/demo-stack.md`](docs/en/guides/demo-stack.md).
-For production, see [Deploy and operate](https://egret-data.github.io/docs/platform/deploy-operate/kubernetes) (Kubernetes and Helm,
-`deploy/helm`) and the [configuration keys](https://egret-data.github.io/docs/platform/reference/configuration-keys).
+The Compose stacks and the Helm chart (`deploy/helm`) are development tooling, not a production topology: read the
+[security hardening checklist](https://egret-data.github.io/docs/platform/deploy-operate/security-hardening) before exposing a deployment, and the
+[configuration keys](https://egret-data.github.io/docs/platform/reference/configuration-keys).
 
 ## How it fits together
 
 - **Backend:** a Rust workspace (axum, tokio, sqlx) built into one binary that serves the API, the control plane and every workspace.
 - **Front end:** one React single-page app (Vite, Tailwind, Radix) with two areas: **Explore** (per workspace) and **Control Plane and Governance** (platform admins).
 - **State:** PostgreSQL for metadata and S3-compatible object storage (RustFS in the demo) for the lakehouse.
-- **Engines:** Trino and StarRocks run as containers or pods that Egret provisions and watches; each query runs **as the calling user**.
+- **Engines:** Trino runs as containers (Docker) or pods (Kubernetes) and StarRocks as pods, all provisioned and watched by Egret; each query runs **as the calling user**.
 - **Identity:** OIDC single sign-on for people; Egret mints short-lived per-user tokens for engines, so there are no shared engine passwords.
 
 Deeper reading: [platform overview](docs/en/architecture/platform-overview.md) (data plane, federation, the governed query

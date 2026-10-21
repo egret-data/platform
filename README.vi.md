@@ -34,6 +34,9 @@ với chính sách truy cập được thực thi ngay trong query engine và m�
 
 ## Egret là gì
 
+Egret là một nền tảng dữ liệu cấp doanh nghiệp, cho phép nhiều team làm việc trên một nền dữ liệu chung. Một lần triển khai
+cho cả tổ chức một nguồn sự thật duy nhất, cho mỗi team một **workspace** được cô lập, và kiểm soát, audit mọi truy cập dữ liệu.
+
 Phần lớn tổ chức cuối cùng có một công cụ BI, một catalog, một hệ thống access-policy và một công cụ workflow **cho mỗi
 phòng ban**: silo, dữ liệu bị sao chép và những quy tắc truy cập không ai audit được. Egret thay tất cả bằng
 **một lần triển khai**:
@@ -53,9 +56,9 @@ và một workflow engine.
 | **Explore** | SQL Lab, dataset có metric, 19 loại chart, dashboard có filter và drill-through, alert và report (email và Slack, PNG và PDF). | [Tài liệu](https://egret-data.github.io/docs/platform/explore/sql-lab) |
 | **Data API** | Xuất bản một câu `SELECT` có tham số thành REST endpoint, kèm OAuth2 client, version, rate limit và activity log. | [Tài liệu](https://egret-data.github.io/docs/platform/data-api/overview) |
 | **Data Apps** | App [marimo](https://marimo.io) chạy với danh tính của người đang xem, nên chính sách dữ liệu đi theo người xem. | [Tài liệu](https://egret-data.github.io/docs/platform/explore/apps) |
-| **Workflows** | Flow viết bằng YAML với schedule, webhook và trigger, execution có log, namespace và file. | [Tài liệu](https://egret-data.github.io/docs/platform/workflows/concepts) |
+| **Workflows** | Workflow engine tương thích cú pháp flow của Kestra: flow viết bằng YAML với schedule, webhook và trigger, execution có log, namespace và file. | [Tài liệu](https://egret-data.github.io/docs/platform/workflows/concepts) |
 | **Governance** | Phân quyền Cedar, policy tương thích Ranger cho Trino và StarRocks, masking theo tag, classification, audit log, SSO (OIDC). | [Tài liệu](https://egret-data.github.io/docs/platform/data-governance/overview) |
-| **Engine và catalog** | Dựng Trino và StarRocks từ giao diện (Docker hoặc Kubernetes); Iceberg REST catalog nhúng sẵn; federation qua hơn 30 connector. | [Tài liệu](https://egret-data.github.io/docs/platform/control-plane/query-engines) |
+| **Engine và catalog** | Dựng Trino (trên Docker hoặc Kubernetes) và StarRocks (trên Kubernetes) từ giao diện; Iceberg REST catalog nhúng sẵn; federation qua hơn 30 connector. | [Tài liệu](https://egret-data.github.io/docs/platform/control-plane/query-engines) |
 
 ## Ảnh chụp màn hình
 
@@ -86,15 +89,16 @@ email demo gửi ra đều nằm trong Mailpit tại <http://localhost:8025>.
 - **Chỉ dành cho demo.** Stack dùng secret công khai cố định. Không bao giờ để lộ ra mạng.
 
 Hướng dẫn đầy đủ (cổng, engine, Data Apps, cách reset) ở [`docs/en/guides/demo-stack.md`](docs/en/guides/demo-stack.md).
-Với môi trường thật, xem [Deploy and operate](https://egret-data.github.io/docs/platform/deploy-operate/kubernetes) (Kubernetes và Helm,
-`deploy/helm`) và [các khoá cấu hình](https://egret-data.github.io/docs/platform/reference/configuration-keys).
+Các stack Compose và Helm chart (`deploy/helm`) là công cụ phát triển, không phải topology production: đọc
+[checklist hardening bảo mật](https://egret-data.github.io/docs/platform/deploy-operate/security-hardening) trước khi đưa một deployment ra ngoài, và
+[các khoá cấu hình](https://egret-data.github.io/docs/platform/reference/configuration-keys).
 
 ## Các phần khớp với nhau thế nào
 
 - **Backend:** một Rust workspace (axum, tokio, sqlx) build thành một binary phục vụ API, control plane và mọi workspace.
 - **Front end:** một ứng dụng React một trang (Vite, Tailwind, Radix) với hai khu vực: **Explore** (theo workspace) và **Control Plane và Governance** (admin nền tảng).
 - **Trạng thái:** PostgreSQL cho metadata và object storage tương thích S3 (RustFS trong demo) cho lakehouse.
-- **Engine:** Trino và StarRocks chạy dưới dạng container hoặc pod do Egret dựng và theo dõi; mỗi query chạy **với danh tính người gọi**.
+- **Engine:** Trino chạy dưới dạng container (Docker) hoặc pod (Kubernetes), StarRocks chạy dưới dạng pod, tất cả do Egret dựng và theo dõi; mỗi query chạy **với danh tính người gọi**.
 - **Danh tính:** SSO OIDC cho con người; Egret cấp token ngắn hạn theo từng người dùng cho engine, nên không có mật khẩu engine dùng chung.
 
 Đọc sâu hơn: [tổng quan nền tảng](docs/vi/architecture/platform-overview.md) (data plane, federation, vòng đời query có governance,
