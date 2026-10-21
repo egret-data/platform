@@ -15,6 +15,7 @@ vi.mock("@/api/generated/perm/perm");
 // The dialog reads the Governance catalog list itself (review M-6; `policy:read`, not `catalog_registry:read`).
 vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("@/api/tags");
+vi.mock("@/api/generated/control-plane-catalog/control-plane-catalog");
 vi.mock("@/components/perm/ScopePicker", () => ({
   ScopePicker: ({
     value,
@@ -54,6 +55,8 @@ vi.mock("@/components/perm/ScopePicker", () => ({
 import * as permApi from "@/api/generated/perm/perm";
 import * as governance from "@/api/generated/control-plane-governance/control-plane-governance";
 import * as tagsApi from "@/api/tags";
+import * as catalogApi from "@/api/generated/control-plane-catalog/control-plane-catalog";
+import { MemoryRouter } from "react-router-dom";
 import { ApiError } from "@/api/client";
 import type { GovernanceCatalog, Rule } from "@/api/generated/model";
 import type { Me } from "@/api/hooks";
@@ -119,7 +122,9 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = 
   const tree = (p: Partial<React.ComponentProps<typeof RuleDialog>>) => (
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <RuleDialog open onOpenChange={onOpenChange} entry={CLASSIFICATION_ENTRY} {...p} />
+        <MemoryRouter>
+          <RuleDialog open onOpenChange={onOpenChange} entry={CLASSIFICATION_ENTRY} {...p} />
+        </MemoryRouter>
       </QueryClientProvider>
     </AuthContext.Provider>
   );
@@ -153,6 +158,10 @@ beforeEach(() => {
     mutateAsync: previewMutateAsync,
     isPending: false,
   } as unknown as ReturnType<typeof permApi.usePermPreview>);
+  vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  } as never);
   vi.mocked(permApi.usePermCreateRule).mockReturnValue({
     mutateAsync: createMutateAsync,
     isPending: false,
@@ -846,5 +855,175 @@ describe("RuleDialog — an edit draft never overwrites a newer rule (round 1 re
 
     renderDialog({ entry: { kind: "edit", rule: CHANGED } });
     expect(screen.getByText("This rule changed since your draft; the draft was discarded.")).toBeInTheDocument();
+  });
+});
+
+const EFFECT = { kind: "mask", catalogs: [{ catalogId: "cat-1", catalogName: "wh", engines: [], notEnforced: "no_engine" }], tableCount: 1, columnCount: 1, enforcedBy: 0, exemptMembers: 2, exemptEveryone: false, alreadyMasked: [], truncated: false };
+
+describe("RuleDialog — the preview speaks in effect (C7)", () => {
+  test("leads with the effect, warns when no engine enforces it, keeps profiles under details", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect: EFFECT } });
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Masks 1 column on 1 table · 2 people exempt")).toBeInTheDocument();
+    const warn = screen.getByRole("status");
+    expect(warn).toHaveTextContent("Not enforced yet. wh has no engine attached");
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAccessibleDescription(/Not enforced yet/);
+    // A warning, not a refusal: Create stays available.
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
+    const details = screen.getByText("What egret will recompile").closest("details");
+    expect(details).not.toHaveAttribute("open");
+    expect(details).toHaveTextContent("trino-prod");
+  });
+
+  test("an enforced rule shows no warning, and exempting everyone is said as a condition, not a fact", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], exemptEveryone: true } },
+    });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Masks 1 column on 1 table · enforced by 1 engine · everyone exempt")).toBeInTheDocument();
+    expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Exempting the public group would leave every reader unmasked/)).toBeInTheDocument();
+  });
+});
+
+describe("RuleDialog — a second mask on a column is never silent (C6)", () => {
+  test("names the mask already there, gives the per-group result, and asks for a tick", async () => {
+    const user = userEvent.setup();
+    const already = [{ ruleId: "r9", ruleName: "Hash personal data", maskType: "MASK_HASH", coordinate: "wh.analytics.customers.email", exempt: { include: [{ kind: "group", ref: "data-stewards" }], exclude: [] } }];
+    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: already } } });
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/wh\.analytics\.customers\.email is already masked by/)).toBeInTheDocument();
+    expect(screen.getByText(/wh\.analytics\.customers\.email is already masked by/)).toHaveTextContent(
+      "wh.analytics.customers.email is already masked by Hash personal data (Hash, except group data-stewards).",
+    );
+    expect(screen.getByRole("link", { name: "Hash personal data" })).toHaveAttribute("href", "/governance/rules/r9");
+    expect(screen.getByRole("list", { name: "Effective result" })).toHaveTextContent("group data-stewards: undecided");
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    expect(create).toHaveAccessibleDescription("Tick 'Create anyway' to create a second mask on this column.");
+    await user.click(screen.getByRole("checkbox", { name: /Create anyway/ }));
+    expect(screen.getByRole("checkbox", { name: /Create anyway/ })).toHaveAccessibleName(
+      "Create anyway: I understand wh.analytics.customers.email will have two masks",
+    );
+    expect(create).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("a cut list says there may be more", async () => {
+    const user = userEvent.setup();
+    const already = [{ ruleId: "r9", ruleName: "Hash personal data", maskType: "MASK_HASH", coordinate: "wh.a.c.email", exempt: { include: [], exclude: [] } }];
+    previewMutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 1, catalogs: [], alreadyMasked: already, truncated: true } },
+    });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/stopped at its limit, and more masks may reach these columns/)).toBeInTheDocument();
+  });
+
+  test("a 409 rule_overlap names both rules and offers no tick", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling profile …", "rule_overlap", {
+      error: "recompiling profile …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "b", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
+    }));
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/would make two masks decide wh\.s\.t\.email differently/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Hash A" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Null B" })).toHaveAttribute("href", "/governance/rules/b");
+    expect(screen.getByText("Details").closest("details")).toHaveTextContent("recompiling profile …");
+    expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("RuleDialog — the table-level classification conflict, said short (C5)", () => {
+  const CONFLICT = () =>
+    new ApiError(400, "tag \"PII Data\" is attached to the whole table…", "table_tag_mask_conflict", {
+      error: "tag \"PII Data\" is attached to the whole table…", code: "table_tag_mask_conflict", tag: "PII Data", tagId: "t1",
+      warehouseId: "wh-1", schema: "analytics", table: "orders", mask: "Mask PII Data", maskOrigin: "rule", moreTables: false,
+    });
+
+  test("one sentence, Remove from table, then a fresh preview", async () => {
+    const user = userEvent.setup();
+    const unassign = vi.fn().mockResolvedValue({ status: 200, data: { ok: true } });
+    vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({ mutateAsync: unassign, isPending: false } as never);
+    previewMutateAsync
+      .mockRejectedValueOnce(CONFLICT())
+      .mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect: { ...EFFECT, enforcedBy: 2, catalogs: [] } } });
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("PII Data is on the whole table analytics.orders, so masking by PII Data would make that table unreadable.")).toBeInTheDocument();
+    expect(screen.getByText("Details").closest("details")).not.toHaveAttribute("open");
+    expect(screen.queryByText(/Other tables carry it too/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove from table" }));
+    expect(unassign).toHaveBeenCalledWith({ warehouseId: "wh-1", data: { schema: "analytics", table: "orders", column: "", tag_id: "t1" } });
+    const fresh = await screen.findByText("Masks 1 column on 1 table · enforced by 2 engines · 2 people exempt");
+    // The button that was pressed is gone; focus moves to the fresh result.
+    await waitFor(() => expect(fresh.parentElement).toHaveFocus());
+    expect(previewMutateAsync).toHaveBeenCalledTimes(2);
+    expect(tagsApi.invalidateTagAssignment).toHaveBeenCalledWith(expect.anything(), "t1", "wh-1");
+  });
+
+  test("other tables are announced, and without catalog_registry:update Remove is replaced by the reason", async () => {
+    const user = userEvent.setup();
+    const err = CONFLICT();
+    (err.body as { moreTables: boolean }).moreTables = true;
+    previewMutateAsync.mockRejectedValueOnce(err);
+    renderDialog({ entry: CLASSIFICATION_ENTRY }, { ...ME, platform_roles: [], permissions: ["policy:create"] });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Other tables carry it too; each will be shown after this one.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
+    expect(screen.getByText("Removing needs the catalog_registry:update permission.")).toBeInTheDocument();
+  });
+
+  test("Apply by path instead switches Applies to = Path with an empty scope", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(CONFLICT());
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(await screen.findByRole("button", { name: "Apply by path instead" }));
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
+    expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({ catalog_id: "" });
+  });
+
+  test("a refused Remove says why, keeps the conflict, and previews nothing", async () => {
+    const user = userEvent.setup();
+    const unassign = vi.fn().mockRejectedValue(new ApiError(403, "forbidden"));
+    vi.mocked(catalogApi.useControlPlaneCatalogUnassignResourceTag).mockReturnValue({ mutateAsync: unassign, isPending: false } as never);
+    previewMutateAsync.mockRejectedValueOnce(CONFLICT());
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(await screen.findByRole("button", { name: "Remove from table" }));
+    expect(await screen.findByText("This account cannot do that: it needs the catalog_registry:update permission.")).toBeInTheDocument();
+    expect(previewMutateAsync).toHaveBeenCalledTimes(1);
+    expect(tagsApi.invalidateTagAssignment).not.toHaveBeenCalled();
+  });
+
+  test("once the form changes, the earlier refusal is explained but offers nothing to act on", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(CONFLICT());
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("button", { name: "Remove from table" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^Name/), "!");
+    expect(screen.getByText(/is on the whole table analytics\.orders/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply by path instead" })).not.toBeInTheDocument();
+  });
+
+  test("an attach-path conflict (no warehouse) offers no Remove", async () => {
+    const user = userEvent.setup();
+    const err = CONFLICT();
+    (err.body as { warehouseId: string | null }).warehouseId = null;
+    previewMutateAsync.mockRejectedValueOnce(err);
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/is on the whole table analytics\.orders/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
   });
 });

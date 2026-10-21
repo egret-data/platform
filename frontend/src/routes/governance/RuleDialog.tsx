@@ -10,8 +10,9 @@ import {
 } from "@/api/generated/perm/perm";
 import type { NewRule, PreviewResponse, PrincipalSet, RuleKind, Scope, Selector } from "@/api/generated/model";
 import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
+import { useControlPlaneCatalogUnassignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { ApiError } from "@/api/client";
-import { type Tag, useTags } from "@/api/tags";
+import { invalidateTagAssignment, type Tag, useTags } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
 import { ScopePicker } from "@/components/perm/ScopePicker";
@@ -41,6 +42,17 @@ import { Textarea } from "@/components/ui/textarea";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { formatScope } from "./permFormat";
 import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
+import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { refusalMessage } from "@/routes/governance/policyWrites";
+import {
+  AlreadyMaskedNotice,
+  EffectSummary,
+  RecompileDetails,
+  RefusalBody,
+  showsNotEnforced,
+  TICK_TO_CREATE,
+  type ConflictActions,
+} from "@/routes/governance/RulePreview";
 import {
   clearRuleDraft,
   loadStoredRuleDraft,
@@ -321,8 +333,18 @@ function RuleForm({
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // The refusal itself, so a coded one (spec C5, C6.3) can be explained rather than quoted.
+  const [previewFailure, setPreviewFailure] = useState<unknown>(null);
   const [previewedFor, setPreviewedFor] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveFailure, setSaveFailure] = useState<unknown>(null);
+  // "Create anyway" for a second mask on a column (spec C6.2); every preview asks again.
+  const [ticked, setTicked] = useState(false);
+  // Set by Remove from table, so the fresh preview's result takes focus from the button that left.
+  const focusResultRef = useRef(false);
+  // Set by Apply by path instead, so focus lands on the catalog picker once it renders.
+  const focusCatalogRef = useRef(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   // Bumped on every failure, so focus moves to the error even when its text repeats.
   const [errorSeq, setErrorSeq] = useState(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -334,6 +356,8 @@ function RuleForm({
   const previewMutation = usePermPreview<ApiError>();
   const createRule = usePermCreateRule<ApiError>({ mutation: { onSuccess: invalidate } });
   const patchRule = usePermPatchRule<ApiError>({ mutation: { onSuccess: invalidate } });
+  const unassignTag = useControlPlaneCatalogUnassignResourceTag<ApiError>();
+  const canRemoveTag = useCanEditCatalogTags();
 
   const body = bodyOf(form);
   const snapshot = JSON.stringify(body);
@@ -400,7 +424,11 @@ function RuleForm({
 
   async function runPreview() {
     setPreviewError(null);
+    setPreviewFailure(null);
     setSaveError(null);
+    setSaveFailure(null);
+    setRemoveError(null);
+    setTicked(false);
     setPreview(null);
     try {
       const result = await previewMutation.mutateAsync({
@@ -420,13 +448,48 @@ function RuleForm({
       setPreviewedFor(bodySnapshot);
     } catch (e) {
       setPreviewError((e as ApiError).message || "Preview failed.");
+      setPreviewFailure(e);
       setErrorSeq((n) => n + 1);
       setPreviewedFor(bodySnapshot);
     }
   }
 
+  /**
+   * Remove from table (spec C5.1): takes the classification off the whole
+   * table the conflict names, refreshes what an attach changes, and previews
+   * the same rule again, which shows the next table when there is one.
+   */
+  async function removeFromTable(c: { tag: string; tagId: string; warehouseId: string; schema: string; table: string }) {
+    setRemoveError(null);
+    try {
+      await unassignTag.mutateAsync({
+        warehouseId: c.warehouseId,
+        data: { schema: c.schema, table: c.table, column: "", tag_id: c.tagId },
+      });
+    } catch (e) {
+      setRemoveError(refusalMessage(e, "catalog_registry:update", `${c.tag} was not removed from the table. Try again.`));
+      return;
+    }
+    invalidateTagAssignment(queryClient, c.tagId, c.warehouseId);
+    toast.success(`Removed ${c.tag} from ${c.schema}.${c.table}.`);
+    focusResultRef.current = true;
+    await runPreview();
+  }
+
+  const conflictActions: ConflictActions = {
+    canRemove: canRemoveTag,
+    removing: unassignTag.isPending,
+    removeError,
+    onRemove: (c) => void removeFromTable(c),
+    onApplyByPath: () => {
+      update({ selectorType: "path", scope: EMPTY_SCOPE });
+      focusCatalogRef.current = true;
+    },
+  };
+
   async function save() {
     setSaveError(null);
+    setSaveFailure(null);
     try {
       if (existing) {
         await patchRule.mutateAsync({ id: existing.id, data: body });
@@ -438,6 +501,7 @@ function RuleForm({
       onOpenChange(false);
     } catch (e) {
       setSaveError((e as ApiError).message || "Failed to save the rule.");
+      setSaveFailure(e);
       setErrorSeq((n) => n + 1);
     }
   }
@@ -449,25 +513,36 @@ function RuleForm({
    * blocks the rule, a missing or out-of-date preview, and a refused preview.
    * Shown beside the button and tied to it as its description.
    */
+  const effect = preview && !previewStale ? (preview.effect ?? null) : null;
+  const needsTick = !!effect && effect.alreadyMasked.length > 0 && !ticked;
   const createReason =
     blockedReason ??
     (previewStale || (!preview && !previewError)
       ? PREVIEW_TO_ENABLE_CREATE
       : previewError
         ? "The preview was refused. Change the rule, then preview it again."
-        : null);
+        : needsTick
+          ? TICK_TO_CREATE
+          : null);
   const canSave = createReason === null;
   const reasonId = useId();
+  const warnId = useId();
+  // The reason when Create waits, and the "Not enforced yet" warning even when it does not (spec C7 A11y).
+  const createDescribedBy =
+    [canSave ? null : reasonId, showsNotEnforced(effect) ? warnId : null].filter(Boolean).join(" ") || undefined;
   const saveLabel = existing ? "Save changes" : "Create";
 
   /** The footer's error: the latest failure, in the server's words (FE-ACTION-3). */
   const footerError = saveError
-    ? { title: "The rule was not saved.", message: saveError }
+    ? { title: "The rule was not saved.", message: saveError, error: saveFailure, actionable: true }
     : previewError
       ? {
           // Kept after an edit, so the server's words stay readable, but named as the earlier version's.
           title: previewStale ? "The preview of an earlier version was refused." : "The preview was refused.",
           message: previewError,
+          error: previewFailure,
+          // An earlier version's refusal is explained, but its actions act on the current form only after a new preview.
+          actionable: !previewStale,
         }
       : null;
   // Focus goes to the error's title, not the `role="alert"` container, which is announced already.
@@ -477,6 +552,18 @@ function RuleForm({
     // The footer is sticky, so the error is in view; focus takes the reader there too.
     if (errorSeq > 0) errorRef.current?.focus();
   }, [errorSeq]);
+  const resultRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // A refused re-preview takes focus to its error instead (`errorSeq`).
+    if (!focusResultRef.current || (!preview && !previewError)) return;
+    if (preview) resultRef.current?.focus();
+    focusResultRef.current = false;
+  }, [preview, previewError]);
+  useEffect(() => {
+    if (selectorType !== "path" || !focusCatalogRef.current) return;
+    document.getElementById("scope-catalog")?.focus();
+    focusCatalogRef.current = false;
+  }, [selectorType]);
 
   return (
     <>
@@ -666,36 +753,17 @@ function RuleForm({
           </div>
 
           {preview && !previewStale && (
-            <div className="space-y-1 text-sm">
-              <p>
-                Would recompile{" "}
-                {preview.affected.length === 0
-                  ? "no profiles"
-                  : preview.affected.map((p) => p.name).join(", ")}
-                .
-              </p>
-              <p className="text-muted-foreground">
-                created {preview.compile.created} · updated {preview.compile.updated} · deleted{" "}
-                {preview.compile.deleted} · unchanged {preview.compile.unchanged}
-              </p>
-              {preview.compile.skipped.length > 0 && (
-                <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-                  {/* The index is part of the key on purpose (SP4b-2
-                      finding 4): `SkipReport` is `{source_kind, id, reason}`
-                      with no profile field, so the SAME rule skipped in two
-                      profiles produces two byte-identical entries — the
-                      normal case for a tag rule, which is catalog-unscoped
-                      and therefore the exact fan-out this panel exists to
-                      show. Keying on `source_kind`+`id` collided there and
-                      React dropped one of the two lines it was asked to
-                      render. */}
-                  {preview.compile.skipped.map((s, i) => (
-                    <li key={`${s.source_kind}-${s.id}-${i}`}>
-                      {s.source_kind} {s.id}: {s.reason}
-                    </li>
-                  ))}
-                </ul>
+            <div ref={resultRef} tabIndex={-1} className="space-y-2 text-sm">
+              {effect && (
+                <>
+                  <EffectSummary effect={effect} warnId={warnId} />
+                  {effect.kind === "mask" && (
+                    <AlreadyMaskedNotice effect={effect} rule={{ maskType, exempt }} ticked={ticked} onTick={setTicked} />
+                  )}
+                </>
               )}
+              {/* Without an effect (an older server), the recompile is all there is to say: shown open. */}
+              <RecompileDetails preview={preview} open={effect ? undefined : true} />
             </div>
           )}
 
@@ -724,7 +792,13 @@ function RuleForm({
             <AlertTitle ref={errorRef} tabIndex={-1}>
               {footerError.title}
             </AlertTitle>
-            <AlertDescription>{footerError.message}</AlertDescription>
+            <AlertDescription>
+              <RefusalBody
+                error={footerError.error}
+                message={footerError.message}
+                actions={footerError.actionable ? conflictActions : undefined}
+              />
+            </AlertDescription>
           </Alert>
         )}
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -738,7 +812,7 @@ function RuleForm({
           <Button
             type="button"
             aria-disabled={!canSave || saving}
-            aria-describedby={canSave ? undefined : reasonId}
+            aria-describedby={createDescribedBy}
             onClick={() => {
               if (canSave && !saving) void save();
             }}
