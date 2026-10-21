@@ -1219,7 +1219,7 @@ async fn ds_remove(
         return Err(crate::BiError::InUse {
             message: format!(
                 "{n} {} built on this dataset would be deleted with it; confirm with the dataset name to delete {}",
-                if n == 1 { "chart is" } else { "charts are" },
+                if n == 1 { "chart" } else { "charts" },
                 if n == 1 { "both" } else { "them all" },
             ),
             charts,
