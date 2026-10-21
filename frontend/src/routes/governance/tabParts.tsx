@@ -11,6 +11,11 @@ import { Button } from "@/components/ui/button";
  */
 
 /** `The <what> could not be loaded. Retry, or reload the page.` */
+/** "(required)" after a label's text (spec C8.1); the field itself carries `aria-required`. */
+export function RequiredMark() {
+  return <span className="font-normal text-muted-foreground"> (required)</span>;
+}
+
 export function failedText(what: string): string {
   return `The ${what} could not be loaded. Retry, or reload the page.`;
 }

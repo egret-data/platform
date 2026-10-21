@@ -1,7 +1,6 @@
 import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { MoreHorizontal, Plus, SearchX, Tags, Trash2 } from "lucide-react";
-import { ApiError } from "@/api/client";
 import { type Tag, useCreateTag, useTags } from "@/api/tags";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
@@ -28,14 +27,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
-import { TabError } from "@/routes/governance/tabParts";
+import { RequiredMark, TabError } from "@/routes/governance/tabParts";
+import { tagKeyInvalid, tagKeyTaken, tagNameTaken } from "@/routes/governance/apiErrors";
 import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import {
   ClearanceCell,
+  ColourField,
   dataCounts,
   DEFAULT_COLOR,
+  NameTaken,
+  nameHolder,
   slugifyTagKey,
+  TAG_KEY_PATTERN,
+  TAG_KEY_RULE_ERROR,
   TagSwatch,
   useCanManageTags,
 } from "@/routes/governance/classifications/tagParts";
@@ -66,6 +71,8 @@ export default function ClassificationsIndex() {
   // The row's Actions button that opened the menu: the delete dialog returns focus to it.
   const menuOpener = useRef<HTMLButtonElement | null>(null);
   const createOpener = useRef<HTMLButtonElement | null>(null);
+  // The header's New classification: where focus goes once a deleted row (and its Actions button) is gone.
+  const headerNew = useRef<HTMLButtonElement | null>(null);
   const searchId = useId();
 
   const setQ = (next: string) =>
@@ -85,18 +92,21 @@ export default function ClassificationsIndex() {
     return rows && needle ? rows.filter((t) => haystack(t).includes(needle)) : rows;
   }, [rows, q]);
 
-  const newButton = canManage ? (
-    <Button
-      size="sm"
-      onClick={(e) => {
-        createOpener.current = e.currentTarget;
-        setCreating(true);
-      }}
-    >
-      <Plus className="mr-1 h-4 w-4" aria-hidden />
-      New classification
-    </Button>
-  ) : null;
+  const newButtonAt = (ref?: RefObject<HTMLButtonElement | null>) =>
+    canManage ? (
+      <Button
+        ref={ref}
+        size="sm"
+        onClick={(e) => {
+          createOpener.current = e.currentTarget;
+          setCreating(true);
+        }}
+      >
+        <Plus className="mr-1 h-4 w-4" aria-hidden />
+        New classification
+      </Button>
+    ) : null;
+  const newButton = newButtonAt();
 
   const columns: Column<Tag>[] = [
     {
@@ -230,7 +240,7 @@ export default function ClassificationsIndex() {
     <ListPageShell
       title={TERM.classifications}
       description={`${TERM.classifications} label data and BI objects, and set the ${TERM.clearance.toLowerCase()} each one requires.`}
-      action={newButton}
+      action={newButtonAt(headerNew)}
     >
       <div className="space-y-4">
         {rows ? (
@@ -271,6 +281,8 @@ export default function ClassificationsIndex() {
           }}
           where="the classification's page"
           opener={menuOpener}
+          // After the closed dialog's own focus return (Radix defers it a task), which a fast answer can precede.
+          onDeleted={() => window.setTimeout(() => headerNew.current?.focus(), 0)}
         />
       ) : null}
     </ListPageShell>
@@ -311,11 +323,19 @@ function HowClassificationWorks({ newButton }: { newButton: ReactNode }) {
   );
 }
 
+/** The create dialog's field errors: each sits under its own field (FE-FORM-4). */
+type FieldError = ReactNode | null;
+
 /**
- * New classification (spec §3, FE-PAGE-3): the key follows the name until
- * edited. A refusal keeps the dialog and every input (FE-ACTION-3); a 409 (the
- * key is taken) is shown beside Key (FE-FORM-4). Success opens the new page,
- * without a toast (FE-ACTION-2).
+ * New classification (spec §3, FE-PAGE-3, C10): the key follows the name
+ * until edited. The key is checked as you type against the server's rule
+ * (`TAG_KEY_PATTERN`), and the name against the loaded list
+ * (case-insensitive), so Create waits, `aria-disabled` with the reason tied,
+ * while either is wrong or empty. The server stays the authority: its coded
+ * refusals land under their own field (`tag_key_taken`, `tag_key_invalid`
+ * under Key; `tag_name_taken` under Name), anything else over the form. A
+ * refusal keeps the dialog and every input (FE-ACTION-3). Success opens the
+ * new page, without a toast (FE-ACTION-2).
  */
 function NewClassificationDialog({
   open,
@@ -328,15 +348,26 @@ function NewClassificationDialog({
   opener: RefObject<HTMLElement | null>;
 }) {
   const create = useCreateTag();
+  const tags = useTags();
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [keyEdited, setKeyEdited] = useState(false);
   const [description, setDescription] = useState("");
   const [color, setColor] = useState(DEFAULT_COLOR);
-  const [keyError, setKeyError] = useState<string | null>(null);
+  const [serverKeyError, setServerKeyError] = useState<FieldError>(null);
+  const [serverNameError, setServerNameError] = useState<FieldError>(null);
   const [error, setError] = useState<string | null>(null);
-  const ids = { name: useId(), key: useId(), keyHelp: useId(), keyError: useId(), description: useId(), color: useId() };
+  const ids = {
+    name: useId(),
+    nameError: useId(),
+    key: useId(),
+    keyHelp: useId(),
+    keyError: useId(),
+    description: useId(),
+    color: useId(),
+    waits: useId(),
+  };
 
   const close = (next: boolean) => {
     if (!next) {
@@ -345,28 +376,56 @@ function NewClassificationDialog({
       setKeyEdited(false);
       setDescription("");
       setColor(DEFAULT_COLOR);
-      setKeyError(null);
+      setServerKeyError(null);
+      setServerNameError(null);
       setError(null);
       create.reset();
     }
     onOpenChange(next);
   };
 
+  const trimmedKey = key.trim();
+  const holder = nameHolder(tags.data, name);
+  const keyError: FieldError =
+    serverKeyError ?? (trimmedKey && !TAG_KEY_PATTERN.test(trimmedKey) ? TAG_KEY_RULE_ERROR : null);
+  const nameError: FieldError = serverNameError ?? (holder ? <NameTaken holder={holder} /> : null);
+  const empty = !name.trim() || !trimmedKey;
+  const waiting = empty || !!keyError || !!nameError || create.isPending;
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    setKeyError(null);
+    if (waiting) return;
+    setServerKeyError(null);
+    setServerNameError(null);
     setError(null);
     create.mutate(
-      { key: key.trim(), name: name.trim(), description: description.trim(), color },
+      { key: trimmedKey, name: name.trim(), description: description.trim(), color },
       {
         onSuccess: (t) => {
           close(false);
           navigate(tagUrl(t.id));
         },
         onError: (err) => {
-          const message = err.message || "The classification could not be created. Try again.";
-          if (err instanceof ApiError && err.status === 409) setKeyError(message);
-          else setError(message);
+          const keyTaken = tagKeyTaken(err);
+          const nameTaken = tagNameTaken(err);
+          const keyInvalid = tagKeyInvalid(err);
+          if (keyTaken) {
+            setServerKeyError(
+              <>
+                {`Key ${keyTaken.key} is taken by `}
+                <Link to={tagUrl(keyTaken.existing.id)} className="font-medium underline">
+                  {keyTaken.existing.name}
+                </Link>
+                .
+              </>,
+            );
+          } else if (nameTaken) {
+            setServerNameError(<NameTaken holder={nameTaken.existing} />);
+          } else if (keyInvalid) {
+            setServerKeyError(keyInvalid.error);
+          } else {
+            setError(err.message || "The classification could not be created. Try again.");
+          }
         },
       },
     );
@@ -386,51 +445,56 @@ function NewClassificationDialog({
         <form onSubmit={submit} className="space-y-4">
           <DialogHeader>
             <DialogTitle>New classification</DialogTitle>
-            <DialogDescription>A tag to classify tables, columns and BI objects with.</DialogDescription>
+            <DialogDescription>A label to classify tables, columns and BI objects with.</DialogDescription>
           </DialogHeader>
           {error ? (
             <Alert variant="destructive">
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           ) : null}
-          <div className="flex items-end gap-3">
-            <div className="flex-1 space-y-1.5">
-              <Label htmlFor={ids.name}>Name</Label>
-              <Input
-                id={ids.name}
-                value={name}
-                required
-                autoFocus
-                onChange={(e) => {
-                  setName(e.target.value);
-                  if (!keyEdited) setKey(slugifyTagKey(e.target.value));
-                }}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor={ids.color}>Colour</Label>
-              <Input
-                id={ids.color}
-                type="color"
-                className="h-9 w-12 p-1"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-              />
-            </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={ids.name}>
+              Name
+              <RequiredMark />
+            </Label>
+            <Input
+              id={ids.name}
+              value={name}
+              aria-required="true"
+              autoFocus
+              aria-invalid={nameError ? true : undefined}
+              aria-describedby={nameError ? ids.nameError : undefined}
+              onChange={(e) => {
+                setName(e.target.value);
+                setServerNameError(null);
+                if (!keyEdited) {
+                  setKey(slugifyTagKey(e.target.value));
+                  setServerKeyError(null);
+                }
+              }}
+            />
+            {nameError ? (
+              <p id={ids.nameError} className="text-sm text-destructive">
+                {nameError}
+              </p>
+            ) : null}
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={ids.key}>Key</Label>
+            <Label htmlFor={ids.key}>
+              {TERM.key}
+              <RequiredMark />
+            </Label>
             <Input
               id={ids.key}
               value={key}
-              required
+              aria-required="true"
               className="font-mono text-xs"
               aria-invalid={keyError ? true : undefined}
-              aria-describedby={keyError ? `${ids.keyHelp} ${ids.keyError}` : ids.keyHelp}
+              aria-describedby={keyError ? `${ids.keyError} ${ids.keyHelp}` : ids.keyHelp}
               onChange={(e) => {
                 setKey(e.target.value);
                 setKeyEdited(true);
-                setKeyError(null);
+                setServerKeyError(null);
               }}
             />
             {keyError ? (
@@ -439,10 +503,10 @@ function NewClassificationDialog({
               </p>
             ) : null}
             <p id={ids.keyHelp} className="text-xs text-muted-foreground">
-              Fixed once created. Follows the name until you edit it. Lowercase letters, digits, <code>-</code>,{" "}
-              <code>_</code> and <code>:</code>.
+              Fixed once created. Follows the name until you edit it. Lowercase letters, digits, - and :.
             </p>
           </div>
+          <ColourField id={ids.color} color={color} onChange={setColor} />
           <div className="space-y-1.5">
             <Label htmlFor={ids.description}>Description</Label>
             <Textarea
@@ -452,11 +516,22 @@ function NewClassificationDialog({
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
-          <DialogFooter>
+          <DialogFooter className="items-center">
+            {empty ? (
+              <p id={ids.waits} className="text-xs text-muted-foreground">
+                Enter a name and a key.
+              </p>
+            ) : null}
             <Button type="button" variant="outline" onClick={() => close(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={create.isPending || !key.trim() || !name.trim()}>
+            <Button
+              type="submit"
+              aria-disabled={waiting ? true : undefined}
+              aria-describedby={
+                empty ? ids.waits : nameError ? ids.nameError : keyError ? ids.keyError : undefined
+              }
+            >
               Create classification
             </Button>
           </DialogFooter>

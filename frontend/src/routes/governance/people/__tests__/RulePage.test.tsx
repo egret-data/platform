@@ -1,6 +1,6 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -17,6 +17,7 @@ vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("@/api/tags");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/routes/governance/RuleDialog", async () => {
   const actual = await vi.importActual<typeof import("@/routes/governance/RuleDialog")>("@/routes/governance/RuleDialog");
   return {
@@ -35,6 +36,7 @@ import type { RuleView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { AuthContext } from "@/auth/useAuth";
 import RulePage from "@/routes/governance/people/RulePage";
+import { toast } from "sonner";
 
 const ADMIN: Me = { user_id: "u1", email: "a@example.com", platform_roles: ["platform_admin"], permissions: [] };
 const WRITER: Me = { user_id: "u3", email: "w@example.com", platform_roles: [], permissions: ["policy:read", "policy:update", "tag:read"] };
@@ -93,11 +95,18 @@ function renderAt(url: string, me: Me | null = ADMIN) {
         <MemoryRouter initialEntries={[url]}>
           <Routes>
             <Route path="/governance/rules/:id" element={<RulePage />} />
+            <Route path="*" element={<p>elsewhere</p>} />
           </Routes>
+          <Where />
         </MemoryRouter>
       </QueryClientProvider>
     </AuthContext.Provider>,
   );
+}
+
+function Where() {
+  const loc = useLocation();
+  return <output data-testid="where">{loc.pathname + loc.search}</output>;
 }
 
 const detail = (label: string) => screen.getByText(label, { selector: "dt" }).nextElementSibling as HTMLElement;
@@ -305,15 +314,71 @@ describe("RulePage: Edit and Delete", () => {
     expect(screen.getByText("Editing or deleting a rule needs the policy:update permission.")).toBeInTheDocument();
   });
 
-  test("Delete asks first, then deletes this rule", async () => {
+  test("Delete asks for the rule's name, then deletes this rule", async () => {
     serveRules([maskRule()]);
     renderPage("r1", WRITER);
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
     const confirm = await screen.findByRole("alertdialog");
     expect(confirm).toHaveTextContent('Delete "mask-ssn"?');
+    expect(confirm).toHaveTextContent("Type mask-ssn to confirm");
     await userEvent.type(within(confirm).getByRole("textbox"), "delete");
+    expect(within(confirm).getByRole("button", { name: "Delete" })).toBeDisabled();
+    await userEvent.clear(within(confirm).getByRole("textbox"));
+    await userEvent.type(within(confirm).getByRole("textbox"), "MASK-SSN");
     await userEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
-    expect(deleteMutate).toHaveBeenCalledWith({ id: "r1" });
+    expect(deleteMutate).toHaveBeenCalledWith({ id: "r1" }, expect.anything());
+  });
+
+  const deletes = () => {
+    const del = vi.fn((_v: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    vi.mocked(permApi.usePermDeleteRule).mockReturnValue({
+      mutate: del,
+      mutateAsync: vi.fn().mockResolvedValue({}),
+      isPending: false,
+    } as never);
+    return del;
+  };
+
+  async function deleteIt() {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    await user.type(await screen.findByRole("textbox"), "mask-ssn");
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+  }
+
+  test("deleting returns to where the page was opened from, and toasts", async () => {
+    deletes();
+    serveRules([maskRule()]);
+    renderAt("/governance/rules/r1?from=classification:t-pii", WRITER);
+    await deleteIt();
+    expect(await screen.findByTestId("where")).toHaveTextContent("/governance/classifications/t-pii?tab=rules");
+    expect(toast.success).toHaveBeenCalledWith("Rule mask-ssn deleted.");
+    expect(screen.queryByText(/No rule has this id/)).not.toBeInTheDocument();
+  });
+
+  test("deleting a rule opened from a Data page returns there", async () => {
+    deletes();
+    serveRules([maskRule()]);
+    const path = "/governance/data/wh/sales/orders";
+    renderAt(`/governance/rules/r1?from=data:${encodeURIComponent(path)}`, WRITER);
+    await deleteIt();
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(path));
+  });
+
+  test("deleting a classification rule opened from nowhere returns to its classification's Rules tab", async () => {
+    deletes();
+    serveRules([maskRule()]);
+    renderAt("/governance/rules/r1", WRITER);
+    await deleteIt();
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/governance/classifications/tag-9?tab=rules"));
+  });
+
+  test("deleting a path rule opened from nowhere returns to People & groups, where its back link goes", async () => {
+    deletes();
+    serveRules([pathRule({ id: "r1", name: "mask-ssn" })]);
+    renderAt("/governance/rules/r1", WRITER);
+    await deleteIt();
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(/^\/governance\/people$/));
   });
 });
 

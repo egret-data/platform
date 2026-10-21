@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -18,6 +18,7 @@ import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policy
 import { TabError } from "@/routes/governance/tabParts";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governance/people/itemParts";
+import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
 import { DATA_BASE } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
 
@@ -32,24 +33,16 @@ export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:up
  * exemptions linked to their People pages, and Edit and Delete with
  * `policy:update`. The rule comes from `GET /perm/rules`, the whole list
  * (there is no read by id). Its way back names where it was opened from
- * (`?from=`, `RuleHeader`).
+ * (`?from=`, `RuleHeader`). Delete asks for the rule's name (spec C11, the one
+ * delete convention) and, done, goes back where the page was opened from
+ * (`ruleDeletedTo`) with a toast, the page itself being gone.
  */
 export default function RulePage() {
   const { id = "" } = useParams();
   const rulesQ = usePermListRules({ query: { retry: false } });
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const queryClient = useQueryClient();
-  const deleteRule = usePermDeleteRule({
-    mutation: {
-      // Stays on the page, which then says the id names no rule; the toast says why.
-      onSuccess: () => {
-        void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
-        toast.success("Rule deleted.");
-      },
-      onError: (e) => toast.error(refusalMessage(e, "policy:update", "The rule could not be deleted.")),
-    },
-  });
+  const canReadTags = usePolicyPermissions()("tag:read");
 
   let body: ReactNode;
   let rule: RuleView | undefined;
@@ -73,17 +66,59 @@ export default function RulePage() {
     <>
       <RuleBody rule={found} onEdit={() => setEditing(true)} onDelete={() => setDeleting(true)} />
       <EditRuleDialog rule={found} open={editing} onOpenChange={setEditing} />
-      <ConfirmDeleteDialog
-        open={deleting}
-        onOpenChange={setDeleting}
-        title={`Delete "${found.name}"?`}
-        description="This rule is permanently removed and every profile it reaches recompiles."
-        onConfirm={() => {
-          deleteRule.mutate({ id: found.id });
-          setDeleting(false);
-        }}
-      />
+      {canReadTags && found.selector.type === "tag" ? (
+        <DeleteRuleDialogWithTags rule={found} open={deleting} onOpenChange={setDeleting} />
+      ) : (
+        <DeleteRuleDialog rule={found} open={deleting} onOpenChange={setDeleting} />
+      )}
     </>
+  );
+}
+
+type DeleteRuleProps = { rule: RuleView; open: boolean; onOpenChange: (open: boolean) => void };
+
+/** `DeleteRuleDialog` for a `tag:read` holder: the classifications list names where a classification rule goes back to. */
+function DeleteRuleDialogWithTags(props: DeleteRuleProps) {
+  const tags = useTags();
+  return <DeleteRuleDialog {...props} tags={tags.data} />;
+}
+
+/**
+ * Delete this rule: type its name (spec C11). Done, the page leaves for where
+ * it was opened from (`ruleDeletedTo`) and toasts, the page itself being gone
+ * (FE-ACTION-2's exception). It leaves before the rules list refreshes, so
+ * the list without this rule never renders here as "No rule has this id".
+ */
+function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & { tags?: { id: string; key: string }[] }) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [search] = useSearchParams();
+  const deleteRule = usePermDeleteRule({
+    mutation: {
+      onError: (e) => toast.error(refusalMessage(e, "policy:update", "The rule could not be deleted.")),
+    },
+  });
+  return (
+    <ConfirmDeleteDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`Delete "${rule.name}"?`}
+      description="This rule is permanently removed and every profile it reaches recompiles."
+      confirmText={rule.name}
+      onConfirm={() => {
+        const to = ruleDeletedTo(parseRuleFrom(search.get("from")), rule, tags);
+        deleteRule.mutate(
+          { id: rule.id },
+          {
+            onSuccess: () => {
+              navigate(to);
+              toast.success(`Rule ${rule.name} deleted.`);
+              void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
+            },
+          },
+        );
+      }}
+    />
   );
 }
 
@@ -216,6 +251,20 @@ function parseRuleFrom(from: string | null): RuleFrom {
     return { kind: "data", back: { to, label } };
   }
   return null;
+}
+
+/**
+ * Where a deleted rule's page goes: where it was opened from (`?from=`); else,
+ * for a rule on a classification the reader can see, that classification's
+ * Rules tab (where such rules are listed); else People & groups, where the
+ * page's way back points.
+ */
+function ruleDeletedTo(from: RuleFrom, rule: RuleView, tags: { id: string; key: string }[] | undefined): string {
+  if (from?.kind === "classification") return tagUrl(from.id, "rules");
+  if (from?.kind === "data") return from.back.to;
+  const selector = rule.selector;
+  const tagId = selector.type === "tag" ? tags?.find((t) => t.key === selector.key)?.id : undefined;
+  return tagId ? tagUrl(tagId, "rules") : PEOPLE_BASE;
 }
 
 /** The rule page's header: kind "Rule", and the way back `?from=` names. */

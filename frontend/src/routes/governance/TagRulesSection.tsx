@@ -15,17 +15,13 @@ import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { Section, TabError } from "@/routes/governance/tabParts";
+import { classificationRuleUrl } from "@/routes/governance/classifications/tagUrl";
 
 /** How a listed rule reaches the classification: written on it, or on another one whose name matches. */
 function reachText(r: RuleView, tag: { key: string; name: string }): string {
   if (r.selector.type !== "tag" || r.selector.key === tag.key) return `This ${TERM.classification.toLowerCase()}`;
   if (r.tag_name === tag.name) return `${TERM.classification} ${r.selector.key}, which has the same name`;
   return `${TERM.classification} ${r.selector.key}, whose name “${r.tag_name}” matches this one's`;
-}
-
-/** A rule's page, opened from this classification's Rules tab, so its way back returns here. */
-function ruleHref(ruleId: string, tagId: string): string {
-  return `/governance/rules/${encodeURIComponent(ruleId)}?from=classification:${encodeURIComponent(tagId)}`;
 }
 
 /**
@@ -77,7 +73,7 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
             {rules.map((r) => (
               <TableRow key={r.id}>
                 <TableCell className="whitespace-normal">
-                  <Link to={ruleHref(r.id, tagId)} className="font-medium text-primary hover:underline">
+                  <Link to={classificationRuleUrl(r.id, tagId)} className="font-medium text-primary hover:underline">
                     {r.name}
                   </Link>
                 </TableCell>

@@ -1,16 +1,30 @@
+import { Link } from "react-router-dom";
 import { Lock } from "lucide-react";
 import type { Tag } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 
 /** The colour a tag without one is drawn in. */
 export const DEFAULT_COLOR = "#6366f1";
 
-/** A valid tag key from a name: lowercase, every run outside `[a-z0-9:_-]` → `-`. */
+/**
+ * The server's rule for a classification key (`validate_key`,
+ * `crates/egret-bi/src/tags.rs`: lowercase ascii letters, digits, `:` and
+ * `-`), written once on this side so the form checks it as you type.
+ */
+export const TAG_KEY_PATTERN = /^[a-z0-9:-]+$/;
+
+/** What the key field says while its value breaks `TAG_KEY_PATTERN`. */
+export const TAG_KEY_RULE_ERROR = "Use lowercase letters, digits, - and : only.";
+
+/** A valid tag key from a name: lowercase, every run outside `[a-z0-9:-]` (an `_` included) → `-`. */
 export function slugifyTagKey(s: string): string {
   return s
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9:_-]+/g, "-")
+    .replace(/[^a-z0-9:-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 }
@@ -58,5 +72,63 @@ export function ClearanceCell({ tag }: { tag: Pick<Tag, "required_roles" | "requ
       <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden />
       <span className="tabular-nums">{counts}</span>
     </span>
+  );
+}
+
+/** A name as the server compares names for duplicates: `lower(btrim(name))`. */
+const foldName = (name: string) => name.trim().toLowerCase();
+
+/**
+ * The classification in `tags` that already has `name` (case-insensitive,
+ * trimmed, as the server's `tag_name_taken` check compares), other than
+ * `exceptId`. The server stays the authority: this only says it sooner.
+ */
+export function nameHolder(tags: Tag[] | undefined, name: string, exceptId?: string): { id: string; name: string } | null {
+  const folded = foldName(name);
+  if (!folded || !tags) return null;
+  return tags.find((t) => t.id !== exceptId && foldName(t.name) === folded) ?? null;
+}
+
+/** "A classification named <Public> already exists.", the holder linked to its page. */
+export function NameTaken({ holder }: { holder: { id: string; name: string } }) {
+  return (
+    <>
+      {"A classification named "}
+      <Link to={tagUrl(holder.id)} className="font-medium underline">
+        {holder.name}
+      </Link>
+      {" already exists."}
+    </>
+  );
+}
+
+/**
+ * A classification's colour: the native colour picker under its label, and a
+ * line that says what the colour is for and its value as text (spec C10.4),
+ * so the value reads without opening the picker.
+ */
+export function ColourField({ id, color, onChange }: { id: string; color: string; onChange: (color: string) => void }) {
+  const helpId = `${id}-help`;
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>Colour</Label>
+      <div className="flex items-center gap-2">
+        <Input
+          id={id}
+          type="color"
+          className="h-9 w-12 shrink-0 p-1"
+          value={color}
+          aria-describedby={helpId}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <p id={helpId} className="text-xs text-muted-foreground">
+          {"Colour of the swatch shown next to the name. "}
+          <span className="inline-flex items-center gap-1 font-mono">
+            <TagSwatch color={color} />
+            {color}
+          </span>
+        </p>
+      </div>
+    </div>
   );
 }

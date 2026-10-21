@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Lock, Pencil } from "lucide-react";
 import { toast } from "sonner";
-import { type Tag, useUpdateTag } from "@/api/tags";
+import { type Tag, useTags, useUpdateTag } from "@/api/tags";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
-import { DEFAULT_COLOR, TagSwatch, useCanManageTags } from "@/routes/governance/classifications/tagParts";
+import {
+  ColourField,
+  DEFAULT_COLOR,
+  NameTaken,
+  nameHolder,
+  TagSwatch,
+  useCanManageTags,
+} from "@/routes/governance/classifications/tagParts";
+import { tableTagMaskConflict, tagNameTaken } from "@/routes/governance/apiErrors";
 import { TERM } from "@/routes/governance/glossary";
 
 /**
@@ -80,14 +88,24 @@ export function TagHeader({ tag, actions }: { tag: Tag; actions?: ReactNode }) {
   );
 }
 
-/** The inline edit form: only changed fields are sent; a refusal keeps the form and its edits (FE-ACTION-3). */
+/**
+ * The inline edit form: only changed fields are sent; a refusal keeps the form
+ * and its edits (FE-ACTION-3). A rename onto another classification's name
+ * (case-insensitive) is said under Name before Save, which then waits; the
+ * name as it stands is never checked, so a duplicate pair that already exists
+ * does not block editing the other fields (the server checks only a real
+ * rename). The server's `tag_name_taken` and `table_tag_mask_conflict` sit
+ * under Name too; anything else over the form.
+ */
 function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
   const update = useUpdateTag();
+  const tags = useTags();
   const [name, setName] = useState(tag.name);
   const [color, setColor] = useState(tag.color || DEFAULT_COLOR);
   const [description, setDescription] = useState(tag.description);
+  const [serverNameError, setServerNameError] = useState<ReactNode>(null);
   const [error, setError] = useState<string | null>(null);
-  const ids = { name: useId(), color: useId(), description: useId() };
+  const ids = { name: useId(), nameError: useId(), color: useId(), description: useId() };
 
   const changes: { name?: string; color?: string; description?: string } = {};
   if (name.trim() !== tag.name) changes.name = name.trim();
@@ -96,13 +114,19 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
   const dirty = Object.keys(changes).length > 0;
   useUnsavedChangesWarning(dirty);
 
+  const holder = changes.name !== undefined ? nameHolder(tags.data, changes.name, tag.id) : null;
+  const nameError: ReactNode = serverNameError ?? (holder ? <NameTaken holder={holder} /> : null);
+  const waiting = !name.trim() || !!nameError || update.isPending;
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (waiting) return;
     if (!dirty) {
       onDone();
       return;
     }
     setError(null);
+    setServerNameError(null);
     update.mutate(
       { id: tag.id, ...changes },
       {
@@ -110,7 +134,16 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
           toast.success("Classification saved.");
           onDone();
         },
-        onError: (err) => setError(err.message || "The classification could not be saved. Try again."),
+        onError: (err) => {
+          const taken = tagNameTaken(err);
+          const conflict = tableTagMaskConflict(err);
+          if (taken) setServerNameError(<NameTaken holder={taken.existing} />);
+          else if (conflict) {
+            setServerNameError(
+              `${conflict.tag} is masked by ${conflict.mask} while it sits on the whole table ${conflict.schema}.${conflict.table}; attach it to columns first.`,
+            );
+          } else setError(err.message || "The classification could not be saved. Try again.");
+        },
       },
     );
   };
@@ -122,31 +155,41 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      <div className="flex items-end gap-3">
-        <div className="flex-1 space-y-1.5">
-          <Label htmlFor={ids.name}>Name</Label>
-          <Input id={ids.name} value={name} required autoFocus onChange={(e) => setName(e.target.value)} />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor={ids.color}>Colour</Label>
-          <Input
-            id={ids.color}
-            type="color"
-            className="h-9 w-12 p-1"
-            value={color}
-            onChange={(e) => setColor(e.target.value)}
-          />
-        </div>
+      <div className="space-y-1.5">
+        <Label htmlFor={ids.name}>Name</Label>
+        <Input
+          id={ids.name}
+          value={name}
+          aria-required="true"
+          autoFocus
+          aria-invalid={nameError ? true : undefined}
+          aria-describedby={nameError ? ids.nameError : undefined}
+          onChange={(e) => {
+            setName(e.target.value);
+            setServerNameError(null);
+          }}
+        />
+        {nameError ? (
+          <p id={ids.nameError} className="text-sm text-destructive">
+            {nameError}
+          </p>
+        ) : null}
       </div>
+      <ColourField id={ids.color} color={color} onChange={setColor} />
       <div className="space-y-1.5">
         <Label htmlFor={ids.description}>Description</Label>
         <Textarea id={ids.description} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
       </div>
       <p className="text-xs text-muted-foreground">
-        Key <span className="font-mono">{tag.key}</span> is fixed once created.
+        {TERM.key} <span className="font-mono">{tag.key}</span> is fixed once created.
       </p>
       <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={update.isPending || !name.trim()}>
+        <Button
+          type="submit"
+          size="sm"
+          aria-disabled={waiting ? true : undefined}
+          aria-describedby={nameError ? ids.nameError : undefined}
+        >
           Save
         </Button>
         <Button type="button" size="sm" variant="outline" onClick={onDone}>

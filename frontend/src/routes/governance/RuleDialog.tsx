@@ -44,6 +44,7 @@ import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { RemoveClassificationDialog } from "@/routes/governance/RemoveClassificationDialog";
 import type { TableTagMaskConflict } from "@/routes/governance/apiErrors";
+import { RequiredMark } from "@/routes/governance/tabParts";
 import {
   AlreadyMaskedNotice,
   EffectSummary,
@@ -77,11 +78,6 @@ export const EMPTY_COLUMN_MASKS_EVERY_COLUMN = "Leave Column empty to mask every
 
 type KindType = RuleKind["type"];
 type SelectorType = Selector["type"];
-
-/** "(required)" after a label's text (spec C8.1); the field itself carries `aria-required`. */
-function RequiredMark() {
-  return <span className="font-normal text-muted-foreground"> (required)</span>;
-}
 
 /**
  * A tag selector for a rule. **The model selects by `key`, while

@@ -145,9 +145,10 @@ function Rules({
   const queryClient = useQueryClient();
   const deleteRule = usePermDeleteRule({
     mutation: {
-      onSuccess: () => {
+      onSuccess: (_data, { id }) => {
         void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
-        toast.success("Rule deleted.");
+        const name = rulesQ.data?.status === 200 ? rulesQ.data.data.find((r) => r.id === id)?.name : undefined;
+        toast.success(name ? `Rule ${name} deleted.` : "Rule deleted.");
       },
       onError: (e) => toast.error(refusalMessage(e, "policy:update", "The rule could not be deleted.")),
     },
@@ -253,6 +254,7 @@ function Rules({
         }}
         title={deleting ? `Delete "${deleting.name}"?` : "Delete rule?"}
         description={deleteDescription(deleting)}
+        confirmText={deleting?.name ?? "delete"}
         onConfirm={() => {
           if (deleting) deleteRule.mutate({ id: deleting.id });
           setDeleting(null);

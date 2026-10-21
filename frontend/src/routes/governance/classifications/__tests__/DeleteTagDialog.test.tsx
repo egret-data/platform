@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import type { RuleView, TagUsage } from "@/api/generated/model";
-import { fail, ok, openArea, serve, STEWARD, tag, TAG_MANAGER, where, type Answer } from "./harness";
+import { ADMIN, fail, ok, openArea, serve, STEWARD, tag, TAG_MANAGER, where, type Answer } from "./harness";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
@@ -38,8 +38,12 @@ const rule = (id: string, key: string, tagName: string): RuleView => ({
 // Two rules select this tag's key; one on another tag that shares the name does not block the delete.
 const RULES = [rule("r1", "pii", "PII"), rule("r2", "pii", "PII"), rule("r3", "pii_v2", "PII")];
 
+/** Only the rule on another classification with the same name: nothing blocks the delete. */
+const FREE = [rule("r3", "pii_v2", "PII")];
+const HASH_RULE: RuleView = { ...rule("r1", "pii", "PII"), name: "Hash email" };
+
 function open(extra: Record<string, Answer> = {}, as = STEWARD, url = PAGE) {
-  const served = serve({ "/tags": ok([PII]), [USAGE]: ok(USED), "/perm/rules": ok(RULES), ...extra });
+  const served = serve({ "/tags": ok([PII]), [USAGE]: ok(USED), "/perm/rules": ok(FREE), ...extra });
   openArea(url, as);
   return served;
 }
@@ -52,24 +56,24 @@ async function openDialog(user: ReturnType<typeof userEvent.setup>) {
 describe("Delete a classification (CL14)", () => {
   it("states every consequence and the refusal sentence", async () => {
     const user = userEvent.setup();
-    open();
+    open({ "/perm/rules": ok(RULES) });
     const dialog = await openDialog(user);
     await waitFor(() => expect(dialog).toHaveTextContent("Removes it from 2 tables and 3 columns."));
     expect(dialog).toHaveTextContent("Removes it from 1 BI object, and 4 you cannot read.");
     expect(dialog).toHaveTextContent("Removes its clearance (1 role, 2 groups).");
-    await waitFor(() =>
-      expect(dialog).toHaveTextContent(
-        "2 rules select it: the delete will be refused until they are deleted or retargeted.",
-      ),
-    );
+    await waitFor(() => expect(dialog).toHaveTextContent("Delete or change these rules first:"));
+    expect(within(dialog).getByRole("link", { name: "rule-r1" })).toHaveAttribute("href", "/governance/rules/r1?from=classification:t-pii");
+    expect(within(dialog).getByRole("link", { name: "rule-r2" })).toBeInTheDocument();
+    // A rule on another classification with the same name does not block the delete.
+    expect(within(dialog).queryByRole("link", { name: "rule-r3" })).not.toBeInTheDocument();
   });
 
   it("says no rule selects it when none does, without the refusal", async () => {
     const user = userEvent.setup();
-    open({ "/perm/rules": ok([rule("r3", "pii_v2", "PII")]) });
+    open();
     const dialog = await openDialog(user);
     await waitFor(() => expect(dialog).toHaveTextContent("No rule selects it."));
-    expect(dialog).not.toHaveTextContent(/will be refused/);
+    expect(dialog).not.toHaveTextContent(/these rules first/);
   });
 
   it("without policy:read says rules need it, and asks for none", async () => {
@@ -87,41 +91,102 @@ describe("Delete a classification (CL14)", () => {
     expect(await within(dialog).findByText("Usage could not be read: database unavailable", {}, T)).toBeInTheDocument();
   });
 
-  it("enables Delete only for the exact key, not the name", async () => {
+  it("asks for the classification's NAME, not its key, in any case", async () => {
     const user = userEvent.setup();
-    open();
+    const CARD = tag({ id: "t-card", key: "card", name: "Card numbers" });
+    serve({ "/tags": ok([CARD]), "/classifications/t-card/usage": ok(USED), "/perm/rules": ok([]) });
+    openArea("/governance/classifications/t-card", STEWARD);
     const dialog = await openDialog(user);
+    expect(within(dialog).getByText(/Type/)).toHaveTextContent("Type Card numbers to confirm");
     const confirm = within(dialog).getByRole("button", { name: "Delete" });
-    const input = within(dialog).getByPlaceholderText("pii");
-    await user.type(input, "PII");
+    const input = within(dialog).getByRole("textbox");
+    await user.type(input, "card");
     expect(confirm).toBeDisabled();
     await user.clear(input);
-    await user.type(input, "pii");
+    await user.type(input, "card NUMBERS");
     expect(confirm).toBeEnabled();
+  });
+
+  it("cannot delete while rules use it: Delete says why and links each rule", async () => {
+    const user = userEvent.setup();
+    open({ "/perm/rules": ok([HASH_RULE]) }, ADMIN);
+    const dialog = await openDialog(user);
+    const del = within(dialog).getByRole("button", { name: "Delete" });
+    await waitFor(() => expect(del).toHaveAttribute("aria-disabled", "true"));
+    expect(del).toHaveAccessibleDescription(/Delete or change these rules first/);
+    expect(within(dialog).getByRole("link", { name: "Hash email" })).toHaveAttribute(
+      "href",
+      "/governance/rules/r1?from=classification:t-pii",
+    );
+    expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("a tag_in_use refusal without policy:read toasts the count and the rules' names, never perm.rules", async () => {
+    const user = userEvent.setup();
+    open(
+      {
+        "DELETE /tags/t-pii": {
+          status: 409,
+          body: {
+            error: "Rules still use this classification: Hash email. Delete them or change what they apply to first. (perm.rules)",
+            code: "tag_in_use",
+            rules: [{ id: "r1", name: "Hash email" }],
+          },
+        },
+      },
+      TAG_MANAGER,
+      "/governance/classifications",
+    );
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByRole("textbox"), "PII");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("PII is still used by 1 rule.", expect.anything()));
+    expect(JSON.stringify(vi.mocked(toast.error).mock.calls)).not.toContain("perm.rules");
+    expect(JSON.stringify(vi.mocked(toast.error).mock.calls)).toContain("Hash email");
+  });
+
+  it("a tag_in_use refusal for a policy:read holder offers Show rules", async () => {
+    const user = userEvent.setup();
+    open(
+      { "DELETE /tags/t-pii": { status: 409, body: { error: "x", code: "tag_in_use", rules: [{ id: "r1", name: "a" }, { id: "r2", name: "b" }] } } },
+      STEWARD,
+      "/governance/classifications",
+    );
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByRole("textbox"), "pii");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    const [message, opts] = vi.mocked(toast.error).mock.calls[0] as unknown as [string, { action: { label: string; onClick: () => void } }];
+    expect(message).toBe("PII is still used by 2 rules.");
+    expect(opts.action.label).toBe("Show rules");
+    opts.action.onClick();
+    await waitFor(() => expect(where()).toBe("/governance/classifications/t-pii?tab=rules"));
   });
 
   it("deletes and goes to the index without a toast", async () => {
     const user = userEvent.setup();
     const served = open({ "DELETE /tags/t-pii": { status: 204, body: null } });
     const dialog = await openDialog(user);
-    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.type(within(dialog).getByRole("textbox"), "pii");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(where()).toBe("/governance/classifications"));
     expect(served.asked).toContain("DELETE /tags/t-pii");
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it("a 409 toasts the refusal, closes the dialog and returns focus to Delete", async () => {
+  it("an uncoded failure toasts the server's message, closes the dialog and returns focus to Delete", async () => {
     const user = userEvent.setup();
-    const sentence = "this tag is still selected by a permission rule (perm.rules) — delete or retarget that rule first";
-    open({ "DELETE /tags/t-pii": fail(409, sentence) });
+    const sentence = "database unavailable";
+    open({ "DELETE /tags/t-pii": fail(500, sentence) });
     const dialog = await openDialog(user);
-    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.type(within(dialog).getByRole("textbox"), "pii");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
-    const [message, opts] = vi.mocked(toast.error).mock.calls[0] as unknown as [string, { description: string }];
-    expect(message).toBe(sentence);
-    expect(opts.description).toBe('The "Rules" tab on this page lists the rules that use this classification.');
+    expect(vi.mocked(toast.error).mock.calls[0][0]).toBe(sentence);
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Delete" })).toHaveFocus());
     expect(where()).toBe(PAGE);
@@ -140,12 +205,14 @@ describe("Delete a classification (CL14)", () => {
     await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog", {}, T);
-    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.type(within(dialog).getByRole("textbox"), "pii");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Classification PII deleted."));
     expect(served.asked).toContain("DELETE /tags/t-pii");
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(where()).toBe("/governance/classifications");
+    // The row's Actions button goes with the row: focus lands on a control that stays.
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "New classification" })[0]).toHaveFocus());
   });
 
   it("a 409 from the index is toasted too", async () => {
@@ -154,7 +221,7 @@ describe("Delete a classification (CL14)", () => {
     await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog", {}, T);
-    await user.type(within(dialog).getByPlaceholderText("pii"), "pii");
+    await user.type(within(dialog).getByRole("textbox"), "pii");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     expect(toast.success).not.toHaveBeenCalled();

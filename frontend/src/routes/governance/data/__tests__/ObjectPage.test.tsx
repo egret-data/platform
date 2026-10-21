@@ -1266,12 +1266,13 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.type(within(dialog).getByRole("textbox"), "delete");
+    // A rule's delete asks for its name (spec C11, the one delete convention).
+    await user.type(within(dialog).getByRole("textbox"), "us_only");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
     expect(await within(panel()).findByText("No rule applies to this table.")).toBeInTheDocument();
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "DELETE /perm/rules/us_only", "GET /perm/rules"]);
-    expect(toast.success).toHaveBeenCalledWith("Rule deleted.");
+    expect(toast.success).toHaveBeenCalledWith("Rule us_only deleted.");
   });
 
   it("says how far a pattern rule reaches before deleting it", async () => {
@@ -1289,7 +1290,8 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.type(within(dialog).getByRole("textbox"), "delete");
+    // A rule's delete asks for its name (spec C11, the one delete convention).
+    await user.type(within(dialog).getByRole("textbox"), "us_only");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("This account cannot do that: it needs the policy:update permission."),

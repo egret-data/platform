@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogCancel,
@@ -29,6 +29,14 @@ interface ConfirmDeleteDialogProps {
    */
   confirmDisabled?: boolean;
   /**
+   * Why the action cannot happen, when the caller knows it will be refused
+   * (FE-ACTION-4). Given, the type-to-confirm field is not shown, and the
+   * confirm button stays focusable but `aria-disabled`, with this reason as
+   * its description; a click does nothing. The reason may hold links (the
+   * things to change first). Optional; omitted, nothing changes.
+   */
+  confirmDisabledReason?: React.ReactNode;
+  /**
    * Match `confirmText` exactly, case included. Defaults to `false` (every
    * existing call site types a word whose case does not matter). A
    * classification's key and name can differ only in case (`pii` / `PII`),
@@ -48,15 +56,17 @@ interface ConfirmDeleteDialogProps {
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
   open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete',
-  confirmDisabled = false, caseSensitive = false, onCloseAutoFocus, onConfirm, children,
+  confirmDisabled = false, confirmDisabledReason, caseSensitive = false, onCloseAutoFocus, onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
+  const reasonId = useId();
+  const blocked = confirmDisabledReason !== undefined && confirmDisabledReason !== null;
   const matches = caseSensitive
     ? inputValue === confirmText
     : inputValue.toLowerCase() === confirmText.toLowerCase();
 
   const handleConfirm = () => {
-    if (confirmDisabled) return;
+    if (confirmDisabled || blocked) return;
     if (matches) {
       onConfirm();
       setInputValue('');
@@ -72,22 +82,28 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         {children && <div className="text-sm text-muted-foreground">{children}</div>}
-        <div className="space-y-2">
-          <p className="text-sm">Type <span className="font-mono font-bold">{confirmText}</span> to confirm:</p>
-          <Input
-            value={inputValue}
-            onChange={e => setInputValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleConfirm(); }}
-            placeholder={confirmText}
-            autoFocus
-          />
-        </div>
+        {blocked ? (
+          <div id={reasonId} className="text-sm">{confirmDisabledReason}</div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm">Type <span className="font-mono font-bold">{confirmText}</span> to confirm:</p>
+            <Input
+              value={inputValue}
+              onChange={e => setInputValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleConfirm(); }}
+              placeholder={confirmText}
+              autoFocus
+            />
+          </div>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel onClick={() => setInputValue('')}>Cancel</AlertDialogCancel>
           <Button
             variant="destructive"
             onClick={handleConfirm}
-            disabled={confirmDisabled || !matches}
+            disabled={!blocked && (confirmDisabled || !matches)}
+            aria-disabled={blocked ? true : undefined}
+            aria-describedby={blocked ? reasonId : undefined}
           >
             {confirmLabel}
           </Button>
