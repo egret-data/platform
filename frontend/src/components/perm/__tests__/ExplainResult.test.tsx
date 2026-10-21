@@ -2086,7 +2086,16 @@ describe("ExplainResultView — an engine grant (F11)", () => {
 describe("ExplainResultView — verdict first, internals folded (C12)", () => {
   test("leads with the verdict, keeps one visible limit line, and folds the rest", () => {
     wrap(<ExplainResultView result={TWO_PROFILES} />);
-    expect(screen.getByText(/Masks on Trino and row filters are not shown here/)).toBeVisible();
+    const line = screen.getByText(/Masks on Trino and row filters are not shown here/);
+    expect(line).toBeVisible();
+    expect(line).toHaveTextContent(/so Allowed can still return masked values or filtered rows/);
+    // A Denied verdict's caveat is visible too, and says what the folded roles
+    // paragraph says: a manual role/group policy matches nobody, here OR on the
+    // engines — never "may still be allowed", which would be false.
+    expect(line).toHaveTextContent(
+      /a manual policy that names a role or a group other than public matches nobody, here or on the engines\./,
+    );
+    expect(line).not.toHaveTextContent(/may still be allowed/i);
     // The verdicts precede the limits block in document order.
     const result = screen.getByTestId("explain-result");
     const firstProfile = within(result).getAllByTestId("explain-profile")[0];
@@ -2115,5 +2124,11 @@ describe("ExplainResultView — verdict first, internals folded (C12)", () => {
     ).toBeVisible();
     const details = screen.getByText("How this answer was worked out").closest("details") as HTMLElement;
     expect(within(details).getByText(/no policy set egret compiles\s+covers it/)).toBeInTheDocument();
+    // There are no verdicts, so the visible limit names none: no "Allowed", no
+    // role/group caveat about a verdict that does not exist.
+    const line = screen.getByText("Masks on Trino and row filters are not shown here.");
+    expect(line).toBeVisible();
+    expect(line.closest("details")).toBeNull();
+    expect(screen.queryByText(/Allowed/)).not.toBeVisible();
   });
 });

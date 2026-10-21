@@ -1275,14 +1275,34 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
       <Alert data-testid="honest-limits">
         <AlertDescription className="space-y-1 text-xs">
           {/* Classification UX C12: the verdict above is read first, so ONE
-              limit stays visible here — the one that changes what "Allowed"
-              means. Every other paragraph of this block folds under a closed
-              disclosure, text unchanged and one click away. */}
-          <p>
-            Masks on Trino and row filters are not shown here, so{" "}
-            <span className="italic">Allowed</span> can still return masked values or
-            filtered rows.
-          </p>
+              line of limits stays visible here — the ones that change what a
+              verdict means. Every other paragraph of this block folds under a
+              closed disclosure, text unchanged and one click away.
+
+              ⚠ **The role/group clause is the folded roles paragraph in short,
+              and it must stay TRUE to it.** A manual policy naming a role or a
+              group other than `public` matches nobody on these engines (no roles
+              download, no usersync) and explain sends neither, so a "Denied"
+              that such a policy was meant to lift is also the engine's answer.
+              The tempting "a person with access through a role may still be
+              allowed" is FALSE: egret's own grants through a role are compiled
+              to usernames and ARE evaluated here, and a manual one lifts
+              nothing on the engine either.
+
+              ⚠ Under `no_profile_serves_the_catalog` there are no verdicts, so
+              the line names no "Allowed" and no verdict-level caveat: prose
+              about an absent thing teaches a reader to discount the rest. */}
+          {result.profiles.length > 0 ? (
+            <p>
+              Masks on Trino and row filters are not shown here, so{" "}
+              <span className="italic">Allowed</span> can still return masked values or
+              filtered rows, and a manual policy that names a role or a group other than{" "}
+              <span className="font-mono">public</span> matches nobody, here or on the
+              engines.
+            </p>
+          ) : (
+            <p>Masks on Trino and row filters are not shown here.</p>
+          )}
           <details>
             <summary className="cursor-pointer text-xs font-medium">How this answer was worked out</summary>
             <div className="mt-1 space-y-1">
@@ -1310,7 +1330,7 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
                   argument this whole block is introduced with. */}
               {result.profiles.length > 0 && (
                 <>
-              {/* ⚠ Narrowed with the block itself (review H1/H2/H3). This said
+                  {/* ⚠ Narrowed with the block itself (review H1/H2/H3). This said
                       "the set every verdict HERE was computed from" under a single
                       list below every profile — which asserted per verdict what was
                       true per request, and said it even when there were no verdicts.

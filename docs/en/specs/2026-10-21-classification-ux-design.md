@@ -529,7 +529,9 @@ Concretely:
 **New.**
 
 - The verdict stays first.
-- **One visible line** holds the limit that changes the answer's meaning: "Masks on Trino and row filters are not shown here, so *Allowed* can still return masked values or filtered rows."
+- **One visible line** holds the limits that change what a verdict means: "Masks on Trino and row filters are not shown here, so *Allowed* can still return masked values or filtered rows, and a manual policy that names a role or a group other than `public` matches nobody, here or on the engines."
+  - The role/group clause is the folded roles paragraph in short, and it must stay true to it. egret serves no roles download and runs no usersync, and explain sends neither, so a manual policy that names a role or a group matches nobody, here or on the engine. A *Denied* that such a policy was meant to lift is therefore also the engine's answer. Wording such as "a person with access through a role may still be allowed" is false: egret's own grants through a role or group are compiled to usernames and are evaluated here.
+  - With no profile (`no_profile_serves_the_catalog`) there are no verdicts, so the line is only "Masks on Trino and row filters are not shown here." It names no *Allowed* and gives no verdict caveat.
 - Everything else moves into `<details><summary>How this answer was worked out</summary>…</details>`, text unchanged.
 - The "Nothing is enforcing" state keeps its badge. Its paragraph shortens to: "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it." The current long sentence moves under the details.
 

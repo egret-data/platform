@@ -12,7 +12,7 @@ const HOME = { to: "/", label: "Go to the home page" };
  * "403 — Forbidden" stays as the eyebrow: it is the status code a reader may
  * quote to an admin, and routing tests key on it.
  */
-export function Forbidden({ reason, back = HOME }: { reason?: string; back?: { to: string; label: string } } = {}) {
+export function Forbidden({ reason, back = HOME }: { reason?: string; back?: { to: string; label: string } }) {
   return (
     <div className="p-4 sm:p-10">
       <Card className="space-y-2 p-6">

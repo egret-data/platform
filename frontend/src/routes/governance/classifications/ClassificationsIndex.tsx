@@ -50,9 +50,10 @@ export const NO_CLASSIFICATION_YET = "No classification yet.";
 /** Data and BI carriers: a tag carried by neither is unused. */
 const isUnused = (t: Tag) => !(t.catalog_tables ?? 0) && !(t.catalog_columns ?? 0) && t.assignment_count === 0;
 
-/** The words a row searches by (the shared table's own search is off: this page owns `?q=`). */
 /** A column that drops below `md`; FilterableTable puts it on the header and every cell. */
 const HIDDEN_BELOW_MD = "hidden md:table-cell";
+
+/** The words a row searches by (the shared table's own search is off: this page owns `?q=`). */
 const haystack = (t: Tag) => `${t.name} ${t.key} ${t.description}`.toLowerCase();
 
 /**

@@ -531,7 +531,9 @@ Cụ thể:
 **Mới.**
 
 - Phán quyết vẫn đứng đầu.
-- **Một dòng hiện rõ** mang giới hạn làm đổi nghĩa câu trả lời: "Masks on Trino and row filters are not shown here, so *Allowed* can still return masked values or filtered rows."
+- **Một dòng hiện rõ** mang các giới hạn làm đổi nghĩa phán quyết: "Masks on Trino and row filters are not shown here, so *Allowed* can still return masked values or filtered rows, and a manual policy that names a role or a group other than `public` matches nobody, here or on the engines."
+  - Vế role/group là đoạn role đã gập, viết ngắn lại, và phải đúng với đoạn đó. egret không phục vụ bản tải roles, không chạy usersync, và explain không gửi role lẫn group, nên một policy thủ công nêu tên role hay group không khớp ai, ở đây lẫn trên engine. Vì thế một *Denied* mà policy kiểu đó định gỡ cũng chính là câu trả lời của engine. Câu kiểu "người có quyền qua một role vẫn có thể được phép" là sai: grant của chính egret qua role hay group được biên dịch thành username và được đánh giá ở đây.
+  - Khi không có profile (`no_profile_serves_the_catalog`) thì không có phán quyết nào, nên dòng này chỉ là "Masks on Trino and row filters are not shown here." Nó không nêu *Allowed* và không đưa lưu ý nào về phán quyết.
 - Mọi thứ khác chuyển vào `<details><summary>How this answer was worked out</summary>…</details>`, chữ giữ nguyên.
 - Trạng thái "Nothing is enforcing" giữ huy hiệu của nó. Đoạn văn rút gọn thành: "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it." Câu dài hiện tại chuyển vào details.
 
