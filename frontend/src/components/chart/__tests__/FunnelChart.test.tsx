@@ -2,9 +2,11 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { FunnelChart } from "../FunnelChart";
 
+// A size-aware option (a function of the measured size) is resolved here the way the real renderer
+// resolves it, against a 1440px editor's chart column.
 vi.mock("../echarts/EChartsRenderer", () => ({
-  EChartsRenderer: ({ option }: { option: Record<string, unknown> }) => (
-    <div data-testid="echarts" data-option={JSON.stringify(option)} />
+  EChartsRenderer: ({ option }: { option: Record<string, unknown> | ((size: { width: number; height: number }) => Record<string, unknown>) }) => (
+    <div data-testid="echarts" data-option={JSON.stringify(typeof option === "function" ? option({ width: 700, height: 600 }) : option)} />
   ),
 }));
 
@@ -81,6 +83,16 @@ describe("FunnelChart", () => {
   // not a hand-drawn row of blocks. Each step is its OWN series, which is what gives it its own
   // colour and legend entry, and they are stacked so the four land in four x positions rather than
   // being grouped side by side inside each one.
+  // KI-164: built without the measured size, the bar mode left the x axis to ECharts' `interval:
+  // "auto"`, which dropped every other stage name at 1440px. With the size the shared label fit
+  // decides, and a decided axis draws every name (upright or rotated) or none — never a subset.
+  it("lets the x-axis label fit decide in bar mode, so no step loses its name", () => {
+    draw({ type: "bar" });
+    const opt = JSON.parse(screen.getByTestId("echarts").getAttribute("data-option")!);
+    const xAxis = Array.isArray(opt.xAxis) ? opt.xAxis[0] : opt.xAxis;
+    expect(xAxis.axisLabel.interval).toBe(0);
+  });
+
   it("renders a real bar chart, one series per step, in bar mode", () => {
     const { container } = draw({ type: "bar" });
     expect(container.querySelectorAll("polygon")).toHaveLength(0);
