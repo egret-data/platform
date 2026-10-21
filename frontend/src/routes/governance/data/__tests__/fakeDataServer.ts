@@ -60,13 +60,19 @@ export interface FakeData {
   grantWrite?: Answer;
   /** `GET …/perm/rules`. A list is answered in order, its last answer repeating; none is a 404. */
   rules?: Answer | Answer[];
+  /** `GET …/perm/rules/enforcement?ids=`; none is a 404 (so nothing is said about enforcement). */
+  ruleEnforcement?: Answer;
   /** Every rule write (`POST …/perm/rules`, `PATCH`/`DELETE …/perm/rules/{id}`); default 200 `{}`. */
   ruleWrite?: Answer;
   /** `POST …/perm/explain`; none is a 404. A function answers each call when the promise it returns settles. */
   explain?: Answer | (() => Promise<Answer>);
   /** `POST …/perm/explain/principal`; none is a 404. */
   explainPrincipal?: Answer;
-  /** `GET …/perm/people` (a group or role subject's search); default 200 with no items. */
+  /**
+   * `GET …/perm/people` (a group or role subject's search, a typed user's
+   * username lookup); default 200 with no items, except a username lookup,
+   * which by default finds one user with that username.
+   */
   people?: Answer;
   /** `GET …/principals`; default 200 `[]`. */
   principals?: Answer;
@@ -189,6 +195,7 @@ export function serveData(data: FakeData): DataCalls {
           const a = data.rules;
           return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
         }
+        if (call === "GET /perm/rules/enforcement") return reply(data.ruleEnforcement);
         if (call === "POST /perm/preview") return reply(data.preview);
         if (call === "POST /perm/explain") {
           const e = data.explain;

@@ -137,3 +137,33 @@ describe("TagRulesSection", () => {
     expect(within(region()).queryByText("No rule uses this classification yet.")).not.toBeInTheDocument();
   });
 });
+
+describe("TagRulesSection: enforcement", () => {
+  test("a rule no engine enforces says so on its row; an enforced one says nothing", async () => {
+    const { AuthContext } = await import("@/auth/useAuth");
+    serveRules([tagRule({ id: "r-off", name: "mask ssn" }), tagRule({ id: "r-on", name: "hash email" })]);
+    vi.mocked(permApi.usePermRulesEnforcement).mockReturnValue({
+      data: {
+        status: 200,
+        data: [
+          { ruleId: "r-off", enforcedBy: 0, notEnforced: "no_engine" },
+          { ruleId: "r-on", enforcedBy: 1, notEnforced: null },
+        ],
+      },
+    } as unknown as ReturnType<typeof permApi.usePermRulesEnforcement>);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthContext.Provider value={{ me: { user_id: "u", email: "", platform_roles: [], permissions: ["policy:read"] }, isLoading: false }}>
+          <MemoryRouter>
+            <TagRulesSection tag={TAG} tagId="t-eu" />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </QueryClientProvider>,
+    );
+    const row = (name: string) => screen.getByRole("link", { name }).closest("tr") as HTMLElement;
+    expect(row("mask ssn")).toHaveTextContent("Not enforced yet — no engine attached");
+    expect(row("hash email")).not.toHaveTextContent("Not enforced");
+    expect(vi.mocked(permApi.usePermRulesEnforcement).mock.calls.at(-1)?.[0]).toEqual({ ids: "r-off,r-on" });
+  });
+});

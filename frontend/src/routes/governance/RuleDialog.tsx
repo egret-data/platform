@@ -45,6 +45,7 @@ import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { RemoveClassificationDialog } from "@/routes/governance/RemoveClassificationDialog";
 import type { TableTagMaskConflict } from "@/routes/governance/apiErrors";
 import { RequiredMark } from "@/routes/governance/tabParts";
+import { invalidateRuleEnforcement } from "@/routes/governance/ruleEnforcementCache";
 import {
   AlreadyMaskedNotice,
   EffectSummary,
@@ -349,8 +350,11 @@ function RuleForm({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const queryClient = useQueryClient();
-  const invalidate = () =>
+  const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
+    // A changed rule may reach other catalogs: its "Not enforced yet" is asked again.
+    invalidateRuleEnforcement(queryClient);
+  };
 
   const previewMutation = usePermPreview<ApiError>();
   const createRule = usePermCreateRule<ApiError>({ mutation: { onSuccess: invalidate } });

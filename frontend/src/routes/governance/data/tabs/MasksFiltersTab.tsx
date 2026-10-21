@@ -14,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import type { RuleEntry } from "@/routes/governance/ruleDraft";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
-import { formatRuleKind, formatSelector, type WorkspaceNames } from "@/routes/governance/permFormat";
+import { formatRuleKind, formatSelector, RULE_DELETE_DESCRIPTION, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
@@ -34,6 +34,8 @@ import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
 import { TERM } from "@/routes/governance/glossary";
+import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
+import type { RuleEnforcement } from "@/api/generated/model";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -96,7 +98,8 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * `RuleDialog` from this object's entry point (spec C8.3): on a table, a mask
  * on the table's path with Column left empty (every column) and Row filter
  * one click away; on a catalog or schema, a mask on that path. A save or a delete
- * invalidates the rules list, so this tab refetches.
+ * invalidates the rules list, so this tab refetches. A rule no engine enforces
+ * says "Not enforced yet — <reason>" on its row (`GET /perm/rules/enforcement`).
  */
 export function MasksFiltersTab({
   path,
@@ -154,6 +157,20 @@ function Rules({
     },
   });
 
+  // The object itself: the column panel's `?column=` is not this tab's subject.
+  const target: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
+  const reach = tagReach(target, catalog, tags);
+  const assignments = reach.status === "ok" ? reach.assignments : null;
+  const rows =
+    rulesQ.data?.status === 200 && reach.status !== "loading"
+      ? rulesQ.data.data.flatMap((r) => {
+          const row = rowOf(r, target, catalog.id, assignments);
+          return row ? [row] : [];
+        })
+      : [];
+  // Whether each listed rule is enforced: said on its row once the server says so.
+  const enforcement = useRuleEnforcement(rows.map((r) => r.rule.id));
+
   if (!canRead) {
     return (
       <Alert>
@@ -162,21 +179,12 @@ function Rules({
     );
   }
 
-  // The object itself: the column panel's `?column=` is not this tab's subject.
-  const target: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
-  const reach = tagReach(target, catalog, tags);
-
   let body;
   if (rulesQ.isError) {
     body = <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   } else if (rulesQ.data?.status !== 200 || reach.status === "loading") {
     body = <ListSkeleton rows={4} cols={3} />;
   } else {
-    const assignments = reach.status === "ok" ? reach.assignments : null;
-    const rows = rulesQ.data.data.flatMap((r) => {
-      const row = rowOf(r, target, catalog.id, assignments);
-      return row ? [row] : [];
-    });
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     const unresolved = assignments === null ? [] : rulesQ.data.data.filter(tagUnresolved).map((r) => r.name).sort();
     body = (
@@ -217,6 +225,7 @@ function Rules({
                   extra={head ? { head, mono: g.mono } : undefined}
                   canWrite={canWrite}
                   workspaceName={workspaceName}
+                  enforcement={enforcement}
                   onEdit={(rule) => setDialog({ kind: "edit", rule })}
                   onDelete={setDeleting}
                 />
@@ -311,12 +320,12 @@ function patternText(p: PatternLevel): string {
 
 /** The delete confirmation's text; a rule that reaches more than this object says how far. */
 function deleteDescription(r: RuleView | null): string {
-  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const removed = "It is permanently removed, and the engines that enforce it stop applying it.";
   if (r?.selector.type === "tag") {
     return `This rule applies to everything carrying the classification “${r.tag_name || r.selector.key}”, in every catalog, not one object. ${removed}`;
   }
   const patterns = r ? patternLevels(r.selector) : [];
-  if (patterns.length === 0) return "This rule is permanently removed and every profile it reaches recompiles.";
+  if (patterns.length === 0) return RULE_DELETE_DESCRIPTION;
   const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
   return `This rule selects ${reach}, not one object. ${removed}`;
 }
@@ -332,6 +341,7 @@ function RuleTable({
   extra,
   canWrite,
   workspaceName,
+  enforcement,
   onEdit,
   onDelete,
 }: {
@@ -340,6 +350,8 @@ function RuleTable({
   extra?: { head: string; mono?: boolean };
   canWrite: boolean;
   workspaceName: WorkspaceNames;
+  /** `null` while unknown: then no row says anything about enforcement. */
+  enforcement: ReadonlyMap<string, RuleEnforcement> | null;
   onEdit: (r: RuleView) => void;
   onDelete: (r: RuleView) => void;
 }) {
@@ -371,6 +383,7 @@ function RuleTable({
                   </Link>
                 </p>
                 <p className="text-xs break-words text-muted-foreground">{formatSelector(rule)}</p>
+                <NotEnforcedBadge enforcement={enforcement?.get(rule.id)} appliesTo={rule.selector.type} />
               </div>
             </TableCell>
             <TableCell className="whitespace-normal break-words">{formatRuleKind(rule)}</TableCell>

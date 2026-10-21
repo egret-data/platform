@@ -22,6 +22,7 @@ import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenS
 import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
+import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants and rules.
@@ -363,17 +364,21 @@ function TagList({
 function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
-  if (rulesQ.isError) return <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   const reach = tagReach(path, catalog, tags);
-  if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const names = reach.status === "ok" ? tagNamesOn(reach.assignments, path) : [];
   const selected: { rule: RuleView; by: "path" | "tag" }[] = [];
-  for (const r of rulesQ.data.data) {
-    if (r.kind.type !== "mask") continue;
-    const by = ruleSelects(r, path, catalog.id, names);
-    if (by) selected.push({ rule: r, by });
+  if (rulesQ.data?.status === 200 && reach.status !== "loading") {
+    for (const r of rulesQ.data.data) {
+      if (r.kind.type !== "mask") continue;
+      const by = ruleSelects(r, path, catalog.id, names);
+      if (by) selected.push({ rule: r, by });
+    }
   }
   selected.sort((a, b) => a.rule.name.localeCompare(b.rule.name));
+  // Whether each rule is enforced: said beside it once the server says so.
+  const enforcement = useRuleEnforcement(selected.map((s) => s.rule.id));
+  if (rulesQ.isError) return <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
+  if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const unchecked =
     reach.status === "error" && rulesQ.data.data.some((r) => r.kind.type === "mask" && r.selector.type === "tag") ? (
       <p className="text-xs text-muted-foreground">Rules on classifications not checked: the classifications could not be loaded.</p>
@@ -397,6 +402,7 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
               {by === "path" ? "by path" : `by classification ${rule.tag_name ?? ""}`}
               {rule.exempt.include.length > 0 ? ` · except ${formatPrincipals(rule.exempt.include, workspaceName)}` : ""}
             </span>
+            <NotEnforcedBadge enforcement={enforcement?.get(rule.id)} appliesTo={rule.selector.type} className="ml-1" />
           </li>
         ))}
       </ul>
@@ -424,7 +430,7 @@ function Grants({ path, catalogId, canExplain }: { path: ColumnPath; catalogId: 
   if (onColumn.length === 0) {
     return (
       <>
-        <p className="text-sm text-muted-foreground">No egret grant is set on this column</p>
+        <p className="text-sm text-muted-foreground">No grant is set on this column</p>
         {note}
       </>
     );

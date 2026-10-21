@@ -227,6 +227,16 @@ describe("ColumnPanel", () => {
     }
   });
 
+  it("says beside a rule that no engine enforces it, and nothing while that is unknown", async () => {
+    serveData({ ...fixture(), ruleEnforcement: ok([{ ruleId: "hash_email", enforcedBy: 0, notEnforced: "no_engine" }]) });
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await waitFor(() => expect(within(panel).getByRole("list", { name: "Rules of email" })).toHaveTextContent("Not enforced yet — no engine attached"));
+    const lines = items(panel, "Rules of email");
+    expect(lines.filter((l) => l?.includes("Not enforced"))).toHaveLength(1);
+    expect(lines.find((l) => l?.startsWith("hash_email"))).toContain("Not enforced yet — no engine attached");
+  });
+
   it("names a workspace exemption by the workspace's name", async () => {
     const withWorkspace = { ...ICE, workspaces: [{ id: "w1", name: "Finance", slug: "finance" }] };
     const exempted = { ...pathRule("hash_email", { schema: "sales", table: "orders", column: "email" }, HASH), exempt: { include: [{ kind: "workspace_members" as const, ref: "w1" }], exclude: [] } };
@@ -259,7 +269,7 @@ describe("ColumnPanel", () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=id");
     const panel = await screen.findByRole("dialog", { name: "id" });
-    expect(await within(panel).findByText("No egret grant is set on this column")).toBeInTheDocument();
+    expect(await within(panel).findByText("No grant is set on this column")).toBeInTheDocument();
     expect(within(panel).getByText(/^egret grants are above; manual policies below\./)).toBeInTheDocument();
     // The table's tag still reaches it, and so does the rule on that tag.
     await waitFor(() => expect(items(panel, "Rules of id")).toEqual(["redact_confidential Mask · Redact · by classification CONFIDENTIAL"]));
@@ -272,7 +282,7 @@ describe("ColumnPanel", () => {
     const panel = await screen.findByRole("dialog", { name: "email" });
     expect(await within(panel).findByText("The grants could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
     expect(within(panel).getByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(panel).queryByText("No egret grant is set on this column")).not.toBeInTheDocument();
+    expect(within(panel).queryByText("No grant is set on this column")).not.toBeInTheDocument();
   });
 
   it("tells a viewer without policy:read why, and never asks for grants or rules", async () => {

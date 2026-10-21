@@ -1,26 +1,28 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2 } from "lucide-react";
+import { AlertTriangle, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { RuleView } from "@/api/generated/model";
-import { getPermListRulesQueryKey, usePermDeleteRule, usePermListRules } from "@/api/generated/perm/perm";
+import { getPermListRulesQueryKey, usePermDeleteRule, usePermListRules, usePermRuleEffect } from "@/api/generated/perm/perm";
 import { useTags } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { OpenInDataLink, scopeToDataLink, useCatalogNameById, useWorkspaceNames } from "@/routes/governance/openInData";
-import { formatSelector } from "@/routes/governance/permFormat";
+import { formatSelector, RULE_DELETE_DESCRIPTION } from "@/routes/governance/permFormat";
 import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
+import { NOT_ENFORCED_YET } from "@/routes/governance/NotEnforced";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governance/people/itemParts";
 import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
 import { DATA_BASE } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
+import { effectSentence, notEnforcedWarning } from "@/routes/governance/ruleEffect";
 
 /** What a reader without `policy:update` reads instead of Edit and Delete. Also this module's bundle marker. */
 export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:update permission.";
@@ -107,7 +109,7 @@ function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & 
       onOpenChange={onOpenChange}
       title={`${TERM.delete} "${rule.name}"?`}
       confirmLabel={TERM.delete}
-      description="This rule is permanently removed and every profile it reaches recompiles."
+      description={RULE_DELETE_DESCRIPTION}
       confirmText={rule.name}
       onConfirm={() => {
         const to = ruleDeletedTo(parseRuleFrom(search.get("from")), rule, tags);
@@ -183,7 +185,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
           {r.selector.type === "tag" ? (
             r.tag_name ? (
               can("tag:read") ? (
-                <TagLink tagKey={r.selector.key} subject={r.name} />
+                <TagLink tagKey={r.selector.key} subject={r.tag_name} />
               ) : null
             ) : (
               <span className="block text-xs text-muted-foreground">{`No classification has the key ${r.selector.key} now.`}</span>
@@ -203,8 +205,36 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
             </>
           ) : null}
         </Detail>
+        <RuleEffectDetail rule={r} />
       </dl>
     </div>
+  );
+}
+
+/**
+ * What the stored rule does (`GET /perm/rules/{id}/effect`, the preview's own
+ * computation): what it reaches, by how many engines, who is exempt, and, when
+ * no engine enforces it, "Not enforced yet." with the preview's reasons.
+ * Rendered only once the effect is loaded: never a claim while it is loading,
+ * failed or refused.
+ */
+function RuleEffectDetail({ rule }: { rule: RuleView }) {
+  const effectQ = usePermRuleEffect(rule.id, { query: { retry: false, staleTime: 0 } });
+  if (effectQ?.data?.status !== 200) return null;
+  const effect = effectQ.data.data;
+  const warning = notEnforcedWarning(effect, rule.selector.type);
+  return (
+    <Detail term="Effect">
+      <span className="block">{effectSentence(effect)}</span>
+      {warning ? (
+        <span role="status" className="mt-1 flex items-start gap-1.5 text-sm">
+          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <span>
+            <strong>{`${NOT_ENFORCED_YET}.`}</strong> {warning.join(" ")}
+          </span>
+        </span>
+      ) : null}
+    </Detail>
   );
 }
 

@@ -62,6 +62,38 @@ describe("the Effect strip", () => {
     expect(strip()).not.toHaveTextContent("Does nothing yet.");
   });
 
+  it("says a stored rule is not enforced yet, and why, once the server says so", async () => {
+    serve({
+      "/tags": ok([PII]),
+      "/classifications/t-pii/usage": ok(USAGE_TWO),
+      "/perm/rules": ok([HASH]),
+      "/perm/rules/enforcement?ids=r1": ok([{ ruleId: "r1", enforcedBy: 0, notEnforced: "no_engine" }]),
+    });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    await waitFor(() => expect(strip()).toHaveTextContent("Mask · Hash: Hash email"), T);
+    await waitFor(() => expect(strip()).toHaveTextContent("Not enforced yet — no engine attached"), T);
+  });
+
+  it("says nothing about enforcement for an enforced rule, or while the answer is unknown", async () => {
+    serve({
+      "/tags": ok([PII]),
+      "/classifications/t-pii/usage": ok(USAGE_TWO),
+      "/perm/rules": ok([NULLIFY, HASH]),
+      "/perm/rules/enforcement?ids=r1,r2": ok([
+        { ruleId: "r1", enforcedBy: 1, notEnforced: null },
+        { ruleId: "r2", enforcedBy: 0, notEnforced: "no_profile" },
+      ]),
+    });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    // One of two not enforced: said as a count, never as the rule shown first.
+    await waitFor(() => expect(strip()).toHaveTextContent("Not enforced yet — 1 of 2 rules: its engines have no policy profile"), T);
+
+    serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_TWO), "/perm/rules": ok([HASH]), "/perm/rules/enforcement?ids=r1": "never" });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    await waitFor(() => expect(screen.getAllByRole("region", { name: "Effect" })[1]).toHaveTextContent("Mask · Hash: Hash email"), T);
+    expect(screen.getAllByRole("region", { name: "Effect" })[1]).not.toHaveTextContent("Not enforced");
+  });
+
   it.each([
     [{ required_roles: ["cleared"] }, "Only holders of 1 role, and platform admins, may open data with it in egret."],
     [

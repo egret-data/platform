@@ -1103,7 +1103,22 @@ describe("MasksFiltersTab", () => {
     ]);
     expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "Mask · Redact", "table “ord*”", "—", ""]]);
     expect(within(panel()).queryByText(/pii_filter|hash_customers|pg_mask|redact_secret/)).not.toBeInTheDocument();
-    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules"]);
+    // The rules, then whether the listed ones are enforced (one request for every row).
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "GET /perm/rules/enforcement"]);
+  });
+
+  it("says on a rule's row that no engine enforces it, once the server says so", async () => {
+    const { permCalls } = serveData(
+      fixture({
+        rules: ok(ALL_RULES),
+        ruleEnforcement: ok(ALL_RULES.map((r) => ({ ruleId: r.id, enforcedBy: r.name === "us_only" ? 0 : 1, notEnforced: r.name === "us_only" ? "no_profile" : null }))),
+      }),
+    );
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — its engines have no policy profile"));
+    expect(within(within(panel()).getByRole("table", { name: "Inherited" })).queryByText(/Not enforced/)).not.toBeInTheDocument();
+    expect(permCalls.filter((c) => c.call === "GET /perm/rules/enforcement")).toHaveLength(1);
   });
 
   it("links each rule to its page, with the way back to this Data page", async () => {
@@ -1284,7 +1299,12 @@ describe("MasksFiltersTab", () => {
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
     expect(await within(panel()).findByText("No rule applies to this table.")).toBeInTheDocument();
-    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "DELETE /perm/rules/us_only", "GET /perm/rules"]);
+    // Enforcement reads (`GET /perm/rules/enforcement`) follow the list; this test is about the writes and the list.
+    expect(permCalls.map((c) => c.call).filter((c) => c !== "GET /perm/rules/enforcement")).toEqual([
+      "GET /perm/rules",
+      "DELETE /perm/rules/us_only",
+      "GET /perm/rules",
+    ]);
     expect(toast.success).toHaveBeenCalledWith("Rule us_only deleted.");
   });
 
@@ -1294,7 +1314,10 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete star_orders" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toBeInTheDocument();
+    expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toHaveTextContent(
+      "This rule selects every table matching “ord*”, not one object. It is permanently removed, and the engines that enforce it stop applying it.",
+    );
+    expect(dialog).not.toHaveTextContent(/profile|recompile/);
   });
 
   it("shows a refused delete's reason and keeps the rule", async () => {

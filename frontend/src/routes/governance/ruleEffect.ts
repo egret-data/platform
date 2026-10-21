@@ -89,6 +89,27 @@ export function notEnforcedWarning(e: RuleEffect, appliesTo: "tag" | "path" = "t
   return lines.length > 0 ? lines : [`No engine enforces it yet, ${stored}`];
 }
 
+/**
+ * Why a STORED rule is not enforced, as the short phrase after "Not enforced
+ * yet —" (`NotEnforcedBadge`): the reasons of {@link notEnforcedWarning},
+ * without the catalog names a list of rules does not carry. `null` (no reason
+ * known) reads as a plain "no engine enforces it".
+ */
+export function notEnforcedReason(reason: NotEnforced | null | undefined, appliesTo: "tag" | "path"): string {
+  switch (reason) {
+    case "no_engine":
+      return "no engine attached";
+    case "no_profile":
+      return "its engines have no policy profile";
+    case "no_assignment":
+      return appliesTo === "tag"
+        ? "this classification is not attached to any data a catalog serves"
+        : "no catalog egret knows serves this path";
+    default:
+      return "no engine enforces it";
+  }
+}
+
 /** One principal's result where several masks reach one column (spec C6). */
 export type PrincipalLine = { principal: string; verdict: "real" | "masked" | "undecided"; text: string };
 

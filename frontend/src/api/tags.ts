@@ -20,6 +20,7 @@ import {
   getControlPlaneGovernanceTagUsageQueryKey,
 } from "./generated/control-plane-governance/control-plane-governance";
 import { getControlPlaneTagsListTagsQueryKey } from "./generated/control-plane-tags/control-plane-tags";
+import { invalidateRuleEnforcement } from "@/routes/governance/ruleEnforcementCache";
 
 export interface Tag {
   id: string;
@@ -88,8 +89,9 @@ const OBJECT_TAGS = /^\/api\/control-plane\/governance\/tags\/[^/]+$/;
  * panel and the rules that select by classification read them), the
  * catalogue under both keys it is cached by (the generated `GET /tags` key
  * and `tagsQueryKey`: counts), the tag's Where used (CL16), the hand-written
- * sections (route A matches tag policies through the object's tags) and
- * Control Plane's Browse tags for that warehouse.
+ * sections (route A matches tag policies through the object's tags),
+ * Control Plane's Browse tags for that warehouse, and every stored rule's
+ * enforcement and effect (what a classification rule reaches).
  */
 export function invalidateTagAssignment(queryClient: QueryClient, tagId: string, warehouseId: string) {
   void queryClient.invalidateQueries({
@@ -99,6 +101,8 @@ export function invalidateTagAssignment(queryClient: QueryClient, tagId: string,
   invalidateTag(queryClient, tagId);
   invalidateObjectHandwritten(queryClient);
   void queryClient.invalidateQueries({ queryKey: ["control-plane", "warehouses", warehouseId, "resource-tags"] });
+  // What a classification rule reaches, so whether it is enforced (`NotEnforcedBadge`).
+  invalidateRuleEnforcement(queryClient);
 }
 
 /**

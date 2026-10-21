@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { TERM } from "@/routes/governance/glossary";
+import { NotEnforcedSummary, useRuleEnforcement } from "@/routes/governance/NotEnforced";
 import { formatRuleKind } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
@@ -81,7 +82,9 @@ function Needs({ children }: { children: string }) {
  * changes it. Every fact has its own loading and error (FE-STATE-1); a fact the
  * viewer may not read says which permission reads it. "Does nothing yet." is
  * said only when all three are known to be empty, never while one is unknown.
- * The strip claims no enforcement: it repeats what is stored.
+ * The strip claims no enforcement it cannot see: it repeats what is stored,
+ * and says "Not enforced yet — <reason>" for a rule only when
+ * `GET /perm/rules/enforcement` says no engine enforces it.
  *
  * Refreshing: it reads `GET /perm/rules` (invalidated by every rule write),
  * the tag list (`tagsQueryKey`, invalidated by every clearance write) and the
@@ -99,6 +102,10 @@ export function EffectStrip({ tag }: { tag: Tag }) {
   const [, setSearch] = useSearchParams();
   const [adding, setAdding] = useState(false);
 
+  // Whether each rule on the tag is enforced: shown only once the server says so.
+  const enforcement = useRuleEnforcement(
+    rulesQ.data?.status === 200 ? rulesOnTag(rulesQ.data.data, tag).map((r) => r.id) : [],
+  );
   // Rules: null while unknown (no permission, loading, failed).
   let rules: RuleView[] | null = null;
   let rulesFact: ReactNode;
@@ -112,7 +119,14 @@ export function EffectStrip({ tag }: { tag: Tag }) {
   else if (rulesQ.data?.status !== 200) rulesFact = <Loading />;
   else {
     rules = rulesOnTag(rulesQ.data.data, tag);
-    rulesFact = <dd className="text-sm">{rules.length === 0 ? NO_RULE_YET : rulesText(rules)}</dd>;
+    rulesFact = (
+      <>
+        <dd className="text-sm">{rules.length === 0 ? NO_RULE_YET : rulesText(rules)}</dd>
+        <dd>
+          <NotEnforcedSummary rules={rules.map((r) => ({ id: r.id, appliesTo: r.selector.type }))} enforcement={enforcement} />
+        </dd>
+      </>
+    );
   }
 
   // Where used: null while unknown.

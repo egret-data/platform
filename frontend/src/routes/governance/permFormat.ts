@@ -170,3 +170,6 @@ export function formatRuleKind(rule: Rule): string {
   }
   return `${TERM.rowFilter} · ${rule.kind.filter_expr}`;
 }
+
+/** A rule delete's consequence, in words (no "profile" or "recompile" jargon). */
+export const RULE_DELETE_DESCRIPTION = "This rule is permanently removed, and the engines that enforce it stop applying it.";

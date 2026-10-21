@@ -414,3 +414,54 @@ describe("RulePage: states", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Rule");
   });
 });
+
+describe("RulePage: enforcement (Task 13)", () => {
+  const effect = (over: Record<string, unknown>) => ({
+    kind: "mask",
+    catalogs: [{ catalogId: "cat-1", catalogName: "wh", engines: [], notEnforced: "no_engine" }],
+    tableCount: 1,
+    columnCount: 1,
+    enforcedBy: 0,
+    notEnforced: "no_engine",
+    exemptMembers: 1,
+    exemptEveryone: false,
+    alreadyMasked: [],
+    truncated: false,
+    ...over,
+  });
+  const serveEffect = (data: unknown) =>
+    vi.mocked(permApi.usePermRuleEffect).mockReturnValue({ data } as unknown as ReturnType<typeof permApi.usePermRuleEffect>);
+
+  test("a rule no engine enforces says so, why, and what it reaches, from the stored rule's effect", () => {
+    serveRules([maskRule()]);
+    serveEffect({ status: 200, data: effect({}) });
+    renderPage();
+    expect(vi.mocked(permApi.usePermRuleEffect).mock.calls.at(-1)?.[0]).toBe("r1");
+    expect(detail("Effect")).toHaveTextContent("Masks 1 column on 1 table · 1 person exempt");
+    expect(detail("Effect")).toHaveTextContent(
+      "Not enforced yet. wh has no engine attached, so this rule is stored but no query is masked. Attach an engine in Control Plane > Engines.",
+    );
+  });
+
+  test("an enforced rule says by how many engines, and no warning", () => {
+    serveRules([maskRule()]);
+    serveEffect({ status: 200, data: effect({ enforcedBy: 2, notEnforced: null, catalogs: [] }) });
+    renderPage();
+    expect(detail("Effect")).toHaveTextContent("Masks 1 column on 1 table · enforced by 2 engines · 1 person exempt");
+    expect(screen.queryByText(/Not enforced/)).not.toBeInTheDocument();
+  });
+
+  test("says nothing about enforcement while the effect is loading or refused", () => {
+    serveRules([maskRule()]);
+    serveEffect(undefined);
+    renderPage();
+    expect(screen.queryByText("Effect", { selector: "dt" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not enforced/)).not.toBeInTheDocument();
+  });
+
+  test("Open classification is named by the classification, not by the rule", () => {
+    serveRules([maskRule()]);
+    renderPage("r1", TAG_READER);
+    expect(screen.getByRole("link", { name: "Open classification: PII Data" })).toBeInTheDocument();
+  });
+});

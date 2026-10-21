@@ -12,6 +12,7 @@ import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { TERM } from "@/routes/governance/glossary";
 import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
+import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { Section, TabError } from "@/routes/governance/tabParts";
@@ -34,13 +35,18 @@ function reachText(r: RuleView, tag: { key: string; name: string }): string {
  * from `GET /perm/rules`, so the page renders this only for a `policy:read`
  * holder. **Add rule** (toolbar and empty state, `policy:update`) opens the
  * rule dialog on this classification (spec C2, entry `classification`);
- * without the permission the section says so (FE-ACTION-4).
+ * without the permission the section says so (FE-ACTION-4). A rule no engine
+ * enforces says "Not enforced yet — <reason>" on its row, once
+ * `GET /perm/rules/enforcement` says so.
  */
 export default function TagRulesSection({ tag, tagId }: { tag: { key: string; name: string }; tagId: string }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames();
   const canAdd = usePolicyPermissions()("policy:update");
   const [adding, setAdding] = useState(false);
+  const listedRules =
+    rulesQ.data?.status === 200 ? rulesOnTag(rulesQ.data.data, tag).sort((a, b) => a.name.localeCompare(b.name)) : [];
+  const enforcement = useRuleEnforcement(listedRules.map((r) => r.id));
   const addButton = (
     <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
       <Plus className="mr-1 h-4 w-4" aria-hidden />
@@ -54,7 +60,7 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
   if (rulesQ.isError) body = <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   else if (rulesQ.data?.status !== 200) body = <ListSkeleton rows={3} cols={3} />;
   else {
-    const rules = rulesOnTag(rulesQ.data.data, tag).sort((a, b) => a.name.localeCompare(b.name));
+    const rules = listedRules;
     listed = rules.length;
     body =
       rules.length === 0 ? (
@@ -76,6 +82,9 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
                   <Link to={classificationRuleUrl(r.id, tagId)} className="font-medium text-primary hover:underline">
                     {r.name}
                   </Link>
+                  <div>
+                    <NotEnforcedBadge enforcement={enforcement?.get(r.id)} appliesTo={r.selector.type} />
+                  </div>
                 </TableCell>
                 <TableCell className="whitespace-normal break-words text-sm">
                   <RuleKindLabel rule={r} />
