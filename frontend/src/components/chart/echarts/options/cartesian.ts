@@ -1627,6 +1627,8 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
      */
     xAxis: {
       type: "value", name: xTitle, nameLocation: "middle", nameGap: 28,
+      // The family's title ink (`baseOption`'s axes do the same); ECharts' default reads far paler.
+      nameTextStyle: { color: axisLabelColor },
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(xMetric, widestOfMetric(0)) },
       axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.xAxisTicks !== false },
@@ -1671,6 +1673,7 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
       type: cfg.logScale ? ("log" as const) : ("value" as const),
       scale: unpinFromZeroOn(cfg),
       name: yTitle,
+      nameTextStyle: { color: axisLabelColor },
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(yMetric, widestOfMetric(1)) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
