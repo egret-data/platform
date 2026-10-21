@@ -156,7 +156,7 @@ describe("Check (spec §6.1)", () => {
   it.each([
     ["egret-seeded", { policyName: "egret-delegator-impersonate", attribution: null }],
     ["egret-compiled", { policyName: "perm-grant-0b8f2c1e-1111-4222-8333-444455556666", attribution: { kind: "grant", grant_id: "0b8f2c1e-1111-4222-8333-444455556666" } }],
-    ["hand-written", { policyName: "ops can become anyone", attribution: null }],
+    ["manual", { policyName: "ops can become anyone", attribution: null }],
   ] as const)("names the deciding policy's source: %s", async (source, over) => {
     const { answer } = await ask(
       explain({

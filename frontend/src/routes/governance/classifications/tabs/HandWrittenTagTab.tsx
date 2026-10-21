@@ -158,7 +158,7 @@ function Body({ tagId }: { tagId: string }) {
           </Table>
         </div>
       )}
-      <UnreadablePolicies policies={d.unreadable} what="tag policy" adjective="manual" />
+      <UnreadablePolicies policies={d.unreadable} what="tag policy" />
     </div>
   );
 }

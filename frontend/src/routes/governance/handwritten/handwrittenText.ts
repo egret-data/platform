@@ -47,12 +47,12 @@ export const DENY_ALL_ELSE = "Denies every access its items do not allow (deny a
 
 /** Spec §4.2: why route A could not determine the policies reaching an object. */
 export const NOT_DETERMINED: Record<NotDeterminedReason, string> = {
-  no_engine_attached: "No engine is attached to this catalog, so no hand-written policy reaches it.",
-  no_profile: "The engines attached to this catalog have no policy profile, so no hand-written policy reaches it.",
+  no_engine_attached: "No engine is attached to this catalog, so no manual policy reaches it.",
+  no_profile: "The engines attached to this catalog have no policy profile, so no manual policy reaches it.",
   catalog_not_in_profile:
-    "No policy profile of the attached engines lists this catalog, so hand-written policies could not be matched to it.",
+    "No policy profile of the attached engines lists this catalog, so manual policies could not be matched to it.",
 };
 
 /** Without `policy:read` (no request is made). */
 export const NEEDS_POLICY_READ =
-  "Hand-written policies are read with the policy:read permission, which this account does not have.";
+  "Manual policies are read with the policy:read permission, which this account does not have.";

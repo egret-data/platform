@@ -29,7 +29,7 @@ const RULE_BUCKETS: Bucket[] = ["mask", "row_filter"];
 const isRuleType = (t: string) => t === "masking" || t === "rowfilter";
 
 export const NO_USERNAME_SENTENCE =
-  "This user has no username, so no hand-written policy item can name them on an engine.";
+  "This user has no username, so no manual policy item can name them on an engine.";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
@@ -72,7 +72,7 @@ export function PrincipalHandWrittenSection({ subject, show }: { subject: Princi
   const canRead = usePolicyPermissions()("policy:read");
   if (!canRead) {
     return (
-      <Section title="Hand-written policies">
+      <Section title="Manual policies">
         <p className="text-sm text-muted-foreground">{NEEDS_POLICY_READ}</p>
       </Section>
     );
@@ -85,14 +85,14 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
   if (q.isError) {
     const message = (q.error as unknown as ApiError | null)?.message;
     return (
-      <Section title="Hand-written policies">
-        <TabError what="hand-written policies" onRetry={() => void q.refetch()} detail={message} />
+      <Section title="Manual policies">
+        <TabError what="manual policies" onRetry={() => void q.refetch()} detail={message} />
       </Section>
     );
   }
   if (q.data?.status !== 200) {
     return (
-      <Section title="Hand-written policies">
+      <Section title="Manual policies">
         <ListSkeleton rows={2} cols={3} />
       </Section>
     );
@@ -110,10 +110,10 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
     <Section
       title={
         d.state === "no_username"
-          ? "Hand-written policies"
+          ? "Manual policies"
           : unreadable.length > 0
-            ? `Hand-written policies (${policies.length} readable, ${unreadable.length} unreadable)`
-            : `Hand-written policies (${policies.length})`
+            ? `Manual policies (${policies.length} readable, ${unreadable.length} unreadable)`
+            : `Manual policies (${policies.length})`
       }
     >
       {d.state === "no_username" ? (
@@ -124,8 +124,8 @@ function Body({ subject, show }: { subject: PrincipalSubject; show: "access" | "
           icon={FileCode2}
           title={
             unreadable.length > 0
-              ? "No readable hand-written policy names this principal."
-              : "No hand-written policy names this principal."
+              ? "No readable manual policy names this principal."
+              : "No manual policy names this principal."
           }
         />
       ) : (
@@ -182,7 +182,7 @@ function Group({
                       ) : (
                         <span className="break-all font-medium">{p.name}</span>
                       )}
-                      <Badge variant="outline">Hand-written</Badge>
+                      <Badge variant="outline">Manual</Badge>
                     </span>
                     <span className="block text-xs text-muted-foreground">
                       {policyTypeWord(p.policyType)} · {p.service}
@@ -231,7 +231,7 @@ function Everyone({ entries }: { entries: { id: number; name: string; service: s
   return (
     <Section title="Applies to everyone">
       <p className="text-sm text-muted-foreground">
-        {`${n} hand-written ${n === 1 ? "policy names" : "policies name"} everyone.`}{" "}
+        {`${n} manual ${n === 1 ? "policy names" : "policies name"} everyone.`}{" "}
         <Button variant="link" size="sm" className="h-auto p-0" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
           {open ? "Hide them" : "Show them"}
         </Button>

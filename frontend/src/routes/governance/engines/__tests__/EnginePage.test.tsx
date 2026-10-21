@@ -143,7 +143,7 @@ describe("the engine page's banners (EP14)", () => {
 });
 
 describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
-  it("lists the six tabs in order when the profile has a hand-written policy", async () => {
+  it("lists the six tabs in order when the profile has a manual policy", async () => {
     serve(engineAnswers());
     openArea(`/governance/engines/${E_TR}`, READER);
     await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(6), T);
@@ -151,7 +151,7 @@ describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
     expect(screen.getByRole("tab", { name: "Engine permissions" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("hides Migrate while the profile and its tag service hold no hand-written policy", async () => {
+  it("hides Migrate while the profile and its tag service hold no manual policy", async () => {
     serve(
       engineAnswers({
         "/policies/services": ok([
@@ -167,7 +167,7 @@ describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
     await waitFor(() => expect(tabNames()).toEqual(["Engine permissions", "Policies", "Overlaps", "Plugin", "Advanced"]));
   });
 
-  it("shows Migrate when only the tag service holds a hand-written policy", async () => {
+  it("shows Migrate when only the tag service holds a manual policy", async () => {
     serve(
       engineAnswers({
         "/policies/services": ok([

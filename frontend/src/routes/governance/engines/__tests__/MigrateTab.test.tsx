@@ -37,9 +37,9 @@ const CATALOG_BLOCKER =
 const MIGRATED_SENTENCE =
   "This policy was migrated into egret's permission model on 2026-10-10T08:00:00Z by admin@egret.local (1 grant, 0 rules); undo the migration to restore it.";
 const GENERATED_NOTICE =
-  "After this migration every listed profile is compiled by egret's permission model. Its remaining hand-written policies can still be edited and deleted, but a NEW hand-written policy can no longer be created in it — add grants or rules instead.";
+  "After this migration every listed profile is compiled by egret's permission model. Its remaining manual policies can still be edited and deleted, but a NEW manual policy can no longer be created in it — add grants or rules instead.";
 const UNDO_NOTICE =
-  "Every profile this migration recompiled stays compiled by egret's permission model after the undo: its hand-written policies can be edited and deleted, but a NEW hand-written policy still cannot be created in it.";
+  "Every profile this migration recompiled stays compiled by egret's permission model after the undo: its manual policies can be edited and deleted, but a NEW manual policy still cannot be created in it.";
 const BUDGET_REFUSAL =
   "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. The work grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
 

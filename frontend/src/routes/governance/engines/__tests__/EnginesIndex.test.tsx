@@ -122,10 +122,10 @@ describe("the Engine & policy index (spec §5)", () => {
     const strip = screen.getByText("engines").parentElement!.parentElement!;
     expect(strip).toHaveTextContent("3engines");
     expect(strip).toHaveTextContent("1profile without an engine");
-    expect(strip).toHaveTextContent("4hand-written policies");
+    expect(strip).toHaveTextContent("4manual policies");
   });
 
-  it("counts a tag service's hand-written policies once when two profiles name it", async () => {
+  it("counts a tag service's manual policies once when two profiles name it", async () => {
     // Nothing makes a tag service one profile's own: `config.tagService` is free
     // JSON, and migration 0182 bumps every profile linking one. lake-tr-b's 2
     // is its own 1 plus the shared tag service's 1, which lake-tr's 3 holds too.
@@ -143,7 +143,7 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(await screen.findByText("engines", {}, T)).toBeInTheDocument();
     const strip = screen.getByText("engines").parentElement!.parentElement!;
     // zeta-sr 1 + orphan 0 + lake-tr-tag 1 + lake-tr 2 + lake-tr-b 1.
-    expect(strip).toHaveTextContent("5hand-written policies");
+    expect(strip).toHaveTextContent("5manual policies");
   });
 
   it("with engine:read lists every engine, an unbound one as No profile, with plugin state and grant counts", async () => {
@@ -164,13 +164,13 @@ describe("the Engine & policy index (spec §5)", () => {
     // The worst kind state of the plugin route wins: tags behind beats policies up to date.
     expect(await within(tr).findByText("Behind", {}, T)).toBeInTheDocument();
     expect(cellText(section, tr, "Engine grants")).toBe("2");
-    expect(cellText(section, tr, "Hand-written policies")).toBe("3");
+    expect(cellText(section, tr, "Manual policies")).toBe("3");
 
     const sr = rowOf(section, "sr-prod");
     expect(within(sr).getByText("External")).toBeInTheDocument();
     expect(await within(sr).findByText("Not judged: external", {}, T)).toBeInTheDocument();
     expect(cellText(section, sr, "Engine grants")).toBe("1");
-    expect(cellText(section, sr, "Hand-written policies")).toBe("1");
+    expect(cellText(section, sr, "Manual policies")).toBe("1");
 
     const un = rowOf(section, "unbound-rw");
     expect(within(un).getByText("No profile")).toBeInTheDocument();

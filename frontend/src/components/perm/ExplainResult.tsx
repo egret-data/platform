@@ -914,7 +914,7 @@ function ProfileBlock({
             <span className="font-mono text-xs">count(*)</span>; when no column is unmasked, on an
             Iceberg table it checks the hidden <span className="font-mono text-xs">_file</span> /{" "}
             <span className="font-mono text-xs">_pos</span> columns. Measured on StarRocks 4.1.6, for
-            the clearance’s mask and for a hand-written MASK_NULL; Trino checks access on a masked
+            the clearance’s mask and for a manual MASK_NULL; Trino checks access on a masked
             column.
           </li>
         )}
@@ -1330,7 +1330,7 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
             <span className="font-mono">public</span>, matches nobody on these engines:
             egret serves no roles download and runs no usersync, so explain sends
             neither. That is why egret’s own compiler names a role’s holders and a
-            group’s members instead, by username — so only a hand-written policy can
+            group’s members instead, by username — so only a manual policy can
             still name one.{" "}
             <span className="font-mono">public</span> is the exception and it does
             decide — Ranger matches it by name whatever the request carries, and egret’s

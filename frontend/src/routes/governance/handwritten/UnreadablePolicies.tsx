@@ -27,19 +27,10 @@ function editHref(p: UnreadablePolicy): string | null {
  * incomplete. Each is named with its parse error and an editor link, as route
  * A's "Could not be matched" rows are; never dropped (spec §4.2.6).
  */
-export function UnreadablePolicies({
-  policies,
-  what,
-  adjective = "hand-written",
-}: {
-  policies: UnreadablePolicy[];
-  what: "policy" | "tag policy";
-  /** The word before the noun: "hand-written" (Data, People), "manual" (a classification's Manual policies tab). */
-  adjective?: string;
-}) {
+export function UnreadablePolicies({ policies, what }: { policies: UnreadablePolicy[]; what: "policy" | "tag policy" }) {
   if (policies.length === 0) return null;
   const n = policies.length;
-  const noun = n === 1 ? `${adjective} ${what}` : `${adjective} ${what === "policy" ? "policies" : "tag policies"}`;
+  const noun = n === 1 ? `manual ${what}` : `manual ${what === "policy" ? "policies" : "tag policies"}`;
   return (
     <Section title="Could not be read">
       <p className="text-sm">{`${n} ${noun} could not be read, so this list may be incomplete.`}</p>

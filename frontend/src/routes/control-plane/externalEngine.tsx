@@ -160,7 +160,7 @@ export function ServerRefusal({ error, testId }: { error: unknown; testId?: stri
                 <li key={`${r.id ?? "hand"}-${i}`}>
                   <span className="font-mono">{r.name}</span>
                   <span className="text-muted-foreground">
-                    {r.id != null ? ` (compiled rule ${r.id})` : " (hand-written policy)"}
+                    {r.id != null ? ` (compiled rule ${r.id})` : " (manual policy)"}
                   </span>
                 </li>
               ))}

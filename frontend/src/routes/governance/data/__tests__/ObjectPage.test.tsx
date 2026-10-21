@@ -728,7 +728,7 @@ describe("PermissionsTab", () => {
 
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
@@ -809,7 +809,7 @@ describe("PermissionsTab", () => {
     await within(panel()).findByRole("table", { name: "Here" });
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
@@ -840,16 +840,16 @@ describe("PermissionsTab", () => {
   });
 
   const EGRET_ONLY =
-    "egret grants are above; hand-written policies below. To see who can actually read, use Who can read?";
+    "egret grants are above; manual policies below. To see who can actually read, use Who can read?";
 
-  it("says no egret grant reaches the object, and points at the hand-written policies below", async () => {
+  it("says no egret grant reaches the object, and points at the manual policies below", async () => {
     serveData(fixture({ grants: ok(UNRELATED) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     expect(await within(panel()).findByText("No egret grant reaches this table")).toBeInTheDocument();
     expect(within(panel()).getByText(EGRET_ONLY)).toBeInTheDocument();
   });
 
-  it("says, below the grants it lists, that hand-written policies follow", async () => {
+  it("says, below the grants it lists, that manual policies follow", async () => {
     serveData(fixture({ grants: ok([ON_TABLE]) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     await within(panel()).findByRole("table", { name: "Here" });
@@ -1064,7 +1064,7 @@ describe("MasksFiltersTab", () => {
 
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
@@ -1115,7 +1115,7 @@ describe("MasksFiltersTab", () => {
     expect(rowsOf("Here").map((r) => r[0])).toEqual(["ice_filterice.*"]);
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inside this catalog",
@@ -1285,9 +1285,9 @@ describe("MasksFiltersTab", () => {
 });
 
 /** #4b spec §6 (F12): the hand-written policies on the Data pages, from route A. */
-describe("hand-written policies on an object's tabs", () => {
+describe("manual policies on an object's tabs", () => {
   const HW = { "c-ice|sales|orders|": handwrittenAnswer("c-ice") };
-  const hwSection = () => within(panel()).getByRole("region", { name: /^Hand-written policies/ });
+  const hwSection = () => within(panel()).getByRole("region", { name: /^Manual policies/ });
 
   it("Permissions lists the access rows only, below the grants", async () => {
     const calls = serveData(fixture({ grants: ok([]), handwritten: HW }));
@@ -1309,7 +1309,7 @@ describe("hand-written policies on an object's tabs", () => {
   it("shows a failing read as an error, never as none", async () => {
     serveData(fixture({ grants: ok([]), handwritten: { "c-ice|sales|orders|": { status: 500, body: { error: "boom" } } } }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
-    expect(await within(panel()).findByText(/The hand-written policies could not be loaded/)).toBeInTheDocument();
-    expect(within(panel()).queryByText("No hand-written policy reaches this object.")).not.toBeInTheDocument();
+    expect(await within(panel()).findByText(/The manual policies could not be loaded/)).toBeInTheDocument();
+    expect(within(panel()).queryByText("No manual policy reaches this object.")).not.toBeInTheDocument();
   });
 });

@@ -74,7 +74,7 @@ afterEach(() => {
   hwAsked.length = 0;
 });
 /** egret's own sections: the hand-written one (#4b) is tested on its own. */
-const notHandWritten = (t: string | null) => !t?.startsWith("Hand-written") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
+const notHandWritten = (t: string | null) => !t?.startsWith("Manual") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
 
 
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
@@ -237,7 +237,7 @@ describe("a principal's Rules tab", () => {
     open("/governance/people/users/u-ana?tab=masks");
 
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByText(/^Rules are above; hand-written policies below\./)).toBeInTheDocument();
+    expect(await within(panel).findByText(/^Rules are above; manual policies below\./)).toBeInTheDocument();
     expect(within(panel).getByRole("link", { name: "Check access" })).toHaveAttribute(
       "href",
       "/governance/people/users/u-ana?tab=check",
@@ -318,7 +318,7 @@ describe("a principal's Rules tab", () => {
 });
 
 /** #4b spec §6: the hand-written masking and row-filter policies naming the principal (route B). */
-describe("hand-written policies on a People page's Rules tab", () => {
+describe("manual policies on a People page's Rules tab", () => {
   it("lists the masking and row-filter rows, not the access ones", async () => {
     const row = (id: number, name: string, policyType: string, bucket: string) => ({
       id,
@@ -344,7 +344,7 @@ describe("hand-written policies on a People page's Rules tab", () => {
     };
     serve({ "users/u-ana": ok(ANA) }, ok([]));
     open("/governance/people/users/u-ana?tab=masks");
-    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies (2)" });
+    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Manual policies (2)" });
     expect(within(section).getByText("hw-mask")).toBeInTheDocument();
     expect(within(section).getByText("hw-filter")).toBeInTheDocument();
     expect(within(section).queryByText("hw-access")).not.toBeInTheDocument();

@@ -86,7 +86,7 @@ export function HandWrittenPointer({
   /** The sentence before the control's name. */
   lead?: string;
 }) {
-  const first = `${subject} are above; hand-written policies below.`;
+  const first = `${subject} are above; manual policies below.`;
   if (!explainLabel) return <p className="text-xs text-muted-foreground">{first}</p>;
   const end = explainLabel.endsWith("?") ? "" : ".";
   return (

@@ -79,11 +79,11 @@ function open(a: Answer, as: Me = READER, show: HandWrittenShow = "access", colu
   return served;
 }
 
-const section = () => screen.getByRole("region", { name: /^Hand-written policies/ });
+const section = () => screen.getByRole("region", { name: /^Manual policies/ });
 const rowOf = (name: string) => within(section()).getByRole("link", { name }).closest("tr") as HTMLElement;
 
 describe("HandWrittenSection", () => {
-  it("lists rows by match level, each badged Hand-written with its level word (Q2)", async () => {
+  it("lists rows by match level, each badged Manual with its level word (Q2)", async () => {
     open(
       ok(
         answer({
@@ -96,10 +96,11 @@ describe("HandWrittenSection", () => {
         }),
       ),
     );
-    await within(await screen.findByRole("region", { name: "Hand-written policies (4)" }, T)).findByRole("link", { name: "p-applies" });
+    await within(await screen.findByRole("region", { name: "Manual policies (4)" }, T)).findByRole("link", { name: "p-applies" });
+    expect(screen.queryByText(/hand-written/i)).not.toBeInTheDocument();
     const names = within(section()).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("link")[0]?.textContent);
     expect(names).toEqual(["p-applies", "p-part", "p-parent", "p-unknown"]);
-    expect(rowOf("p-applies")).toHaveTextContent("Hand-written");
+    expect(rowOf("p-applies")).toHaveTextContent("Manual");
     expect(rowOf("p-applies")).toHaveTextContent("Applies to this object · through a pattern");
     expect(rowOf("p-part")).toHaveTextContent("Applies to part of it");
     expect(rowOf("p-parent")).toHaveTextContent("Set on a parent");
@@ -208,7 +209,7 @@ describe("HandWrittenSection", () => {
     open(ok(answer({ policies })), READER, "access");
     await screen.findByRole("link", { name: "acc" }, T);
     expect(within(section()).queryByRole("link", { name: "msk" })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Hand-written policies (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Manual policies (1)" })).toBeInTheDocument();
   });
 
   it.each([["rules" as const], ["all" as const]])("show=%s", async (show) => {
@@ -225,7 +226,7 @@ describe("HandWrittenSection", () => {
 
   it("asks route A for the column when given one", async () => {
     const served = open(ok(answer()), READER, "all", "email");
-    await screen.findByText("No hand-written policy reaches this object.", {}, T);
+    await screen.findByText("No manual policy reaches this object.", {}, T);
     expect(served.asked).toContain(`${KEY}&column=email`);
   });
 
@@ -272,23 +273,23 @@ describe("HandWrittenSection", () => {
   });
 
   it.each([
-    ["no_engine_attached", "No engine is attached to this catalog, so no hand-written policy reaches it."],
-    ["no_profile", "The engines attached to this catalog have no policy profile, so no hand-written policy reaches it."],
+    ["no_engine_attached", "No engine is attached to this catalog, so no manual policy reaches it."],
+    ["no_profile", "The engines attached to this catalog have no policy profile, so no manual policy reaches it."],
     [
       "catalog_not_in_profile",
-      "No policy profile of the attached engines lists this catalog, so hand-written policies could not be matched to it.",
+      "No policy profile of the attached engines lists this catalog, so manual policies could not be matched to it.",
     ],
   ] as const)("not_determined %s says why", async (reason, sentence) => {
     open(ok(answer({ state: "not_determined", reason, profiles: [] })));
     expect(await screen.findByText(sentence, {}, T)).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written policy reaches this object.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No manual policy reaches this object.")).not.toBeInTheDocument();
   });
 
   it("explains, and asks nothing, without policy:read", async () => {
     const served = open(ok(answer()), me(["tag:read"]));
     expect(
       await screen.findByText(
-        "Hand-written policies are read with the policy:read permission, which this account does not have.",
+        "Manual policies are read with the policy:read permission, which this account does not have.",
         {},
         T,
       ),
@@ -299,15 +300,15 @@ describe("HandWrittenSection", () => {
   it("shows a failure with Retry, never None", async () => {
     const user = userEvent.setup();
     const served = open(fail(500));
-    expect(await screen.findByText(/The hand-written policies could not be loaded/, {}, T)).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written policy reaches this object.")).not.toBeInTheDocument();
+    expect(await screen.findByText(/The manual policies could not be loaded/, {}, T)).toBeInTheDocument();
+    expect(screen.queryByText("No manual policy reaches this object.")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === KEY)).toHaveLength(2));
   });
 
   it("says so when none reaches the object", async () => {
     open(ok(answer()));
-    expect(await screen.findByText("No hand-written policy reaches this object.", {}, T)).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Hand-written policies (0)" })).toBeInTheDocument();
+    expect(await screen.findByText("No manual policy reaches this object.", {}, T)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Manual policies (0)" })).toBeInTheDocument();
   });
 });

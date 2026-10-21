@@ -25,9 +25,9 @@ import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 
 export const ADVANCED_WARNING =
-  "Hand-written policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them hand-written. Prefer Engine permissions or grants on Data.";
+  "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
 export const GENERATED_REFUSES =
-  "egret compiles this profile, so new hand-written policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
+  "egret compiles this profile, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
 export const SEED_EXPLAINED =
   "Adds egret's default Trino set (group admin: all access). Existing policies are not changed.";
 
@@ -100,7 +100,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
   } else if (policies.isLoading) {
     list = <ListSkeleton rows={3} cols={4} />;
   } else if (handWritten.length === 0) {
-    list = <EmptyState icon={FileText} title="This profile has no hand-written policy." />;
+    list = <EmptyState icon={FileText} title="This profile has no manual policy." />;
   } else {
     list = <HandWrittenTable rows={handWritten} ctx={ctx} />;
   }
@@ -137,7 +137,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
           <AlertDescription>{seedError}</AlertDescription>
         </Alert>
       ) : null}
-      <Section title="Hand-written policies">{list}</Section>
+      <Section title="Manual policies">{list}</Section>
     </div>
   );
 }
@@ -177,7 +177,7 @@ function CreatePolicyMenu({ ctx }: { ctx: TabContext }) {
 function HandWrittenTable({ rows, ctx }: { rows: PolicySummary[]; ctx: TabContext }) {
   const tagService = ctx.profile?.tagService ?? null;
   return (
-    <Table aria-label="Hand-written policies" className={STACKED_TABLE}>
+    <Table aria-label="Manual policies" className={STACKED_TABLE}>
       <TableHeader>
         <TableRow>
           <TableHead>Name</TableHead>

@@ -103,7 +103,7 @@ afterEach(() => {
   hwAsked.length = 0;
 });
 /** egret's own sections: the hand-written one (#4b) is tested on its own. */
-const notHandWritten = (t: string | null) => !t?.startsWith("Hand-written") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
+const notHandWritten = (t: string | null) => !t?.startsWith("Manual") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
 
 
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
@@ -277,7 +277,7 @@ describe("a principal's Permissions tab", () => {
     serve({ "groups/public": ok(PUBLIC) }, ok(GRANTS));
     open("/governance/people/groups/public");
     const note = await within(await screen.findByRole("tabpanel")).findByText(/^egret grants are above;/);
-    expect(note.textContent).toBe("egret grants are above; hand-written policies below.");
+    expect(note.textContent).toBe("egret grants are above; manual policies below.");
     expect(within(note).queryByRole("link")).not.toBeInTheDocument();
   });
 
@@ -295,12 +295,12 @@ describe("a principal's Permissions tab", () => {
     ).toBeInTheDocument();
   });
 
-  it("points at the hand-written policies below, with a link to Check access (P10)", async () => {
+  it("points at the manual policies below, with a link to Check access (P10)", async () => {
     serve({ "users/u-ana": ok(ANA) }, ok(GRANTS));
     open("/governance/people/users/u-ana?tab=permissions");
     const note = await within(await screen.findByRole("tabpanel")).findByText(/^egret grants are above;/);
     expect(note).toHaveTextContent(
-      "egret grants are above; hand-written policies below. To see the engines' answer, use Check access.",
+      "egret grants are above; manual policies below. To see the engines' answer, use Check access.",
     );
     await userEvent.click(within(note).getByRole("link", { name: "Check access" }));
     expect(where()).toBe("/governance/people/users/u-ana?tab=check");
@@ -576,7 +576,7 @@ describe("Engine permissions on a principal page (spec §7)", () => {
 });
 
 /** #4b spec §6: the hand-written access policies naming the principal (route B). */
-describe("hand-written policies on a People page's Permissions tab", () => {
+describe("manual policies on a People page's Permissions tab", () => {
   const listed = (over: Record<string, unknown> = {}) => ({
     principal: { kind: "user", id: "u-ana", label: "Ana", username: "ana" },
     state: "listed",
@@ -629,32 +629,32 @@ describe("hand-written policies on a People page's Permissions tab", () => {
     HW = { "user/u-ana": ok(listed()) as { status: number; body: unknown } };
     serve({ "users/u-ana": ok(ANA) }, ok([]));
     open("/governance/people/users/u-ana?tab=permissions");
-    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies (2)" });
+    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Manual policies (2)" });
     expect(within(within(section).getByRole("region", { name: "Direct" })).getByRole("link", { name: "hw-direct" })).toBeInTheDocument();
     const via = within(section).getByRole("region", { name: "Through a group or role" });
     expect(via).toHaveTextContent("Names group analysts, which this user is in. Engines resolve no groups, so on the engine it reaches nobody.");
-    expect(within(section).getByRole("region", { name: "Applies to everyone" })).toHaveTextContent("1 hand-written policy names everyone.");
+    expect(within(section).getByRole("region", { name: "Applies to everyone" })).toHaveTextContent("1 manual policy names everyone.");
     expect(hwAsked).toEqual(["user/u-ana"]);
   });
 
   it("a group's page and a role's page ask route B by name", async () => {
     serve({ "groups/analysts": ok(GROUP) }, ok([]));
     const g = open("/governance/people/groups/analysts?tab=permissions");
-    await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies" });
+    await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Manual policies" });
     expect(hwAsked).toEqual(["group/analysts"]);
     g.unmount();
     hwAsked.length = 0;
     serve({ "roles/steward": ok(ROLE) }, ok([]));
     open("/governance/people/roles/steward?tab=permissions");
-    await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies" });
+    await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Manual policies" });
     expect(hwAsked).toEqual(["role/steward"]);
   });
 
-  it("the public page has no hand-written section and asks nothing", async () => {
+  it("the public page has no manual section and asks nothing", async () => {
     serve({ "groups/public": ok({ ...GROUP, name: "public", source: null, isPublic: true }) }, ok([]));
     open("/governance/people/groups/public");
     await within(await screen.findByRole("tabpanel")).findByText(/^egret grants are above;/);
-    expect(screen.queryByRole("region", { name: /^Hand-written policies/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /^Manual policies/ })).not.toBeInTheDocument();
     expect(hwAsked).toEqual([]);
   });
 
@@ -669,7 +669,7 @@ describe("hand-written policies on a People page's Permissions tab", () => {
     open("/governance/people/users/u-ana?tab=permissions");
     expect(
       await within(await screen.findByRole("tabpanel")).findByText(
-        "This user has no username, so no hand-written policy item can name them on an engine.",
+        "This user has no username, so no manual policy item can name them on an engine.",
       ),
     ).toBeInTheDocument();
   });
@@ -678,7 +678,7 @@ describe("hand-written policies on a People page's Permissions tab", () => {
     HW = { "user/u-ana": { status: 500, body: { error: "boom" } } };
     serve({ "users/u-ana": ok(ANA) }, ok([]));
     open("/governance/people/users/u-ana?tab=permissions");
-    expect(await within(await screen.findByRole("tabpanel")).findByText(/The hand-written policies could not be loaded/)).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written policy names this principal.")).not.toBeInTheDocument();
+    expect(await within(await screen.findByRole("tabpanel")).findByText(/The manual policies could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText("No manual policy names this principal.")).not.toBeInTheDocument();
   });
 });

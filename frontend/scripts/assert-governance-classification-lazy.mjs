@@ -42,7 +42,7 @@ const MARKERS = [
   ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
   // The Rules tab without policy:read (spec §5.3).
   ["src/routes/governance/classifications/tabs/RulesTab.tsx", "Rules are read with the policy:read permission"],
-  // The Hand-written tab's empty state (spec §5.5).
+  // The Manual policies tab's empty state (spec §5.5).
   ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No manual tag policy names this classification."],
 ];
 
@@ -60,9 +60,9 @@ const AREA_ANCHORS = {
 };
 const HANDWRITTEN = [
   // Route A's section (Data).
-  ["src/routes/governance/handwritten/HandWrittenSection.tsx", "No hand-written policy reaches this object.", ["Data"]],
+  ["src/routes/governance/handwritten/HandWrittenSection.tsx", "No manual policy reaches this object.", ["Data"]],
   // Route B's section (People).
-  ["src/routes/governance/handwritten/PrincipalHandWrittenSection.tsx", "No hand-written policy names this principal.", ["People"]],
+  ["src/routes/governance/handwritten/PrincipalHandWrittenSection.tsx", "No manual policy names this principal.", ["People"]],
   // The shared words: Q1's sentence.
   ["src/routes/governance/handwritten/handwrittenText.ts", "Engines resolve no groups, so on the engine it reaches nobody.", ["Data", "People", "Classification"]],
   // The item summary's empty item.
@@ -135,4 +135,4 @@ for (const [module, marker, areas] of HANDWRITTEN) {
 }
 
 if (failed) process.exit(1);
-console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks; the hand-written views load with Data, People and Classification.`);
+console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks; the manual-policy views load with Data, People and Classification.`);

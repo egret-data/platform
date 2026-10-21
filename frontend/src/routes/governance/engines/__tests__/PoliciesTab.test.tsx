@@ -30,7 +30,7 @@ const WRITER = me(["policy:read", "policy:update", "policy:delete", "tag:read"])
 
 /** Not pre-sorted: the hand-written row first, a tag-service row in the middle (FE-TEST-1). */
 const MAIN = [
-  policy(10, "operator", { name: "zeta hand-written", policy_type: "masking" }),
+  policy(10, "operator", { name: "zeta manual", policy_type: "masking" }),
   policy(11, "compiler", { name: `perm-grant-${G}` }),
   policy(12, "infra", { name: "egret-admin - catalog, schema, table, column" }),
   policy(13, "compiler", { name: `perm-rule-${R}`, policy_type: "rowfilter" }),
@@ -73,7 +73,7 @@ describe("the Policies tab lists the profile and its tag service (spec §6.2)", 
     await table();
     expect(asked).toContain("GET /policies?service=lake-tr");
     expect(asked).toContain("GET /policies?service=lake-tr-tag");
-    expect(screen.getByText("zeta hand-written")).toBeInTheDocument();
+    expect(screen.getByText("zeta manual")).toBeInTheDocument();
     expect(screen.getByText("alpha by tag")).toBeInTheDocument();
     expect(screen.getByText(`perm-clearance-${TAG}`)).toBeInTheDocument();
   });
@@ -82,7 +82,7 @@ describe("the Policies tab lists the profile and its tag service (spec §6.2)", 
     serve(answers());
     open();
     await table();
-    expect(screen.getByText("9 policies: 6 egret-compiled · 1 egret-seeded · 2 hand-written")).toBeInTheDocument();
+    expect(screen.getByText("9 policies: 6 egret-compiled · 1 egret-seeded · 2 manual")).toBeInTheDocument();
   });
 
   it("writes the singular", async () => {
@@ -94,7 +94,7 @@ describe("the Policies tab lists the profile and its tag service (spec §6.2)", 
     );
     open();
     await table();
-    expect(screen.getByText("1 policy: 0 egret-compiled · 0 egret-seeded · 1 hand-written")).toBeInTheDocument();
+    expect(screen.getByText("1 policy: 0 egret-compiled · 0 egret-seeded · 1 manual")).toBeInTheDocument();
   });
 
   it("offers the Tag type only when the profile has a tag service", async () => {
@@ -129,7 +129,7 @@ describe("the Policies tab lists the profile and its tag service (spec §6.2)", 
       answers({
         "/perm/policies/services/2/warnings": ok({
           warningCount: 1,
-          policies: [{ id: 10, name: "zeta hand-written", warnings: [{ kind: "level_gap", sentence: "A level is missing." }] }],
+          policies: [{ id: 10, name: "zeta manual", warnings: [{ kind: "level_gap", sentence: "A level is missing." }] }],
         }),
       }),
     );
@@ -143,7 +143,7 @@ describe("filters live in the URL", () => {
     serve(answers());
     open("&source=operator");
     await table();
-    expect(screen.getByText("zeta hand-written")).toBeInTheDocument();
+    expect(screen.getByText("zeta manual")).toBeInTheDocument();
     expect(screen.getByText("alpha by tag")).toBeInTheDocument();
     expect(screen.queryByText(`perm-grant-${G}`)).not.toBeInTheDocument();
   });
@@ -152,7 +152,7 @@ describe("filters live in the URL", () => {
     serve(answers());
     const first = open("&type=masking");
     await table();
-    expect(screen.getByText("zeta hand-written")).toBeInTheDocument();
+    expect(screen.getByText("zeta manual")).toBeInTheDocument();
     expect(screen.queryByText(`perm-rule-${R}`)).not.toBeInTheDocument();
     expect(screen.queryByText("alpha by tag")).not.toBeInTheDocument();
     first.unmount();
@@ -161,14 +161,14 @@ describe("filters live in the URL", () => {
     await table();
     expect(screen.getByText("alpha by tag")).toBeInTheDocument();
     expect(screen.getByText(`perm-clearance-${TAG}`)).toBeInTheDocument();
-    expect(screen.queryByText("zeta hand-written")).not.toBeInTheDocument();
+    expect(screen.queryByText("zeta manual")).not.toBeInTheDocument();
   });
 
   it("?q= searches names, and typing writes it to the URL", async () => {
     serve(answers());
     open("&q=zeta");
     await table();
-    expect(screen.getByText("zeta hand-written")).toBeInTheDocument();
+    expect(screen.getByText("zeta manual")).toBeInTheDocument();
     expect(screen.queryByText("alpha by tag")).not.toBeInTheDocument();
     const box = screen.getByRole("searchbox", { name: "Search policies" });
     await userEvent.clear(box);
@@ -185,7 +185,7 @@ describe("filters live in the URL", () => {
     await userEvent.click(await screen.findByRole("option", { name: "egret-seeded" }));
     await waitFor(() => expect(where()).toContain("source=infra"));
     expect(screen.getByText("egret-admin - catalog, schema, table, column")).toBeInTheDocument();
-    expect(screen.queryByText("zeta hand-written")).not.toBeInTheDocument();
+    expect(screen.queryByText("zeta manual")).not.toBeInTheDocument();
   });
 
   it("a filter that matches nothing says so and clears", async () => {
@@ -269,7 +269,7 @@ describe("controls follow the row's source", () => {
     expect(within(row).queryByRole("button", { name: /Delete/ })).not.toBeInTheDocument();
   });
 
-  it("a hand-written row toggles, deletes and edits with the permissions", async () => {
+  it("a manual row toggles, deletes and edits with the permissions", async () => {
     const { asked } = serve(
       answers({
         "PUT /policies/10/enabled": ok({}),
@@ -278,15 +278,15 @@ describe("controls follow the row's source", () => {
     );
     open("", WRITER);
     await table();
-    const row = rowOf("zeta hand-written");
+    const row = rowOf("zeta manual");
     expect(within(row).getByText("Not managed by egret")).toBeInTheDocument();
-    expect(within(row).getByRole("link", { name: "Edit zeta hand-written" })).toHaveAttribute(
+    expect(within(row).getByRole("link", { name: "Edit zeta manual" })).toHaveAttribute(
       "href",
       `/governance/engines/${E_TR}/advanced/policies/masking/10`,
     );
-    await userEvent.click(within(row).getByRole("switch", { name: "Enable zeta hand-written" }));
+    await userEvent.click(within(row).getByRole("switch", { name: "Enable zeta manual" }));
     await waitFor(() => expect(asked).toContain("PUT /policies/10/enabled"));
-    await userEvent.click(within(row).getByRole("button", { name: "Delete zeta hand-written" }));
+    await userEvent.click(within(row).getByRole("button", { name: "Delete zeta manual" }));
     const dialog = await screen.findByRole("alertdialog");
     await userEvent.type(within(dialog).getByRole("textbox"), "delete");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
@@ -307,7 +307,7 @@ describe("controls follow the row's source", () => {
     serve(answers());
     open("", READER);
     await table();
-    const row = rowOf("zeta hand-written");
+    const row = rowOf("zeta manual");
     expect(within(row).queryByRole("switch")).not.toBeInTheDocument();
     expect(within(row).queryByRole("link", { name: /^Edit/ })).not.toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: /Delete/ })).not.toBeInTheDocument();
@@ -318,7 +318,7 @@ describe("controls follow the row's source", () => {
     serve(answers({ "PUT /policies/10/enabled": fail(409, "the profile is busy") }));
     open("", WRITER);
     await table();
-    await userEvent.click(within(rowOf("zeta hand-written")).getByRole("switch", { name: "Enable zeta hand-written" }));
+    await userEvent.click(within(rowOf("zeta manual")).getByRole("switch", { name: "Enable zeta manual" }));
     expect(await screen.findByText("the profile is busy", {}, T)).toBeInTheDocument();
   });
 
@@ -327,7 +327,7 @@ describe("controls follow the row's source", () => {
     serve(answers({ "PUT /policies/10/enabled": fail(403, "forbidden") }));
     open("", WRITER);
     await table();
-    await userEvent.click(within(rowOf("zeta hand-written")).getByRole("switch", { name: "Enable zeta hand-written" }));
+    await userEvent.click(within(rowOf("zeta manual")).getByRole("switch", { name: "Enable zeta manual" }));
     expect(await screen.findByText(/needs the policy:update permission/, {}, T)).toBeInTheDocument();
     expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
   });

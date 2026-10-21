@@ -295,7 +295,7 @@ export function EnginePermissionsTab({
             ))}
           </ul>
           <p className="text-sm">
-            {"A hand-written policy in "}
+            {"A manual policy in "}
             <Link
               to={engineUrl(engineId, "advanced")}
               className="text-primary underline focus-visible:ring-2 focus-visible:ring-ring"
