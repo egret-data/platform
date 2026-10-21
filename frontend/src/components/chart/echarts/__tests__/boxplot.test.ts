@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildBoxplotOption, boxStats, pointsModeFor } from "../options/boxplot";
+import { labelOverhangRight, buildBoxplotOption, boxStats, pointsModeFor } from "../options/boxplot";
 import { SERIES_PALETTE } from "../palette";
 
 const cols = [{ name: "g", type: "varchar" }, { name: "v", type: "double" }];
@@ -352,5 +352,31 @@ describe("buildBoxplotOption — the category's own format", () => {
     expect(opt.tooltip.formatter({ seriesType: "boxplot", dataIndex: 0 })).toContain("January 2026");
     expect(opt.aria.label.description).toContain("January 2026");
     expect(opt.aria.label.description).not.toContain("2026-01-01");
+  });
+});
+
+/**
+ * KI-165: the last box's value label ran past the card's right edge and was clipped ("31.6" for
+ * "31.6K"). The reserve is solved for, so after reserving it the label ends exactly inside.
+ */
+describe("labelOverhangRight", () => {
+  const ends = (o: { labelWidth: number; distance: number; plotWidth: number; categories: number; gridRight: number }, extra: number) =>
+    o.distance + o.labelWidth - (o.plotWidth - extra) / (2 * o.categories) - (o.gridRight + extra);
+
+  it("reserves nothing when the label fits in the last half band and the margin", () => {
+    expect(labelOverhangRight({ labelWidth: 30, distance: 34, plotWidth: 700, categories: 4, gridRight: 16 })).toBe(0);
+  });
+
+  it("reserves enough that the label no longer runs past the edge, after the plot narrows", () => {
+    const o = { labelWidth: 40, distance: 34, plotWidth: 260, categories: 4, gridRight: 16 };
+    const extra = labelOverhangRight(o);
+    expect(extra).toBeGreaterThan(0);
+    expect(ends(o, extra)).toBeLessThanOrEqual(0);
+    expect(ends(o, extra - 1)).toBeGreaterThan(0);
+  });
+
+  it("reserves nothing it cannot measure", () => {
+    expect(labelOverhangRight({ labelWidth: 0, distance: 34, plotWidth: 260, categories: 4, gridRight: 16 })).toBe(0);
+    expect(labelOverhangRight({ labelWidth: 40, distance: 34, plotWidth: 260, categories: 0, gridRight: 16 })).toBe(0);
   });
 });
