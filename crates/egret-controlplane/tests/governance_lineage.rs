@@ -370,6 +370,9 @@ fn app(f: &Fixture, w: &Wiring) -> axum::Router {
         catalog_lister: Arc::new(UnwiredCatalogLister),
         browse_timeout: w.timeout,
         audit_retention_days: Some(90),
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::default(),
+        ),
     })
 }
 

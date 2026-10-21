@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Plus, Trash2 } from "lucide-react";
 
 import { type Secret, listSecrets } from "@/api/controlPlane";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -89,6 +90,7 @@ export function EngineSecurity(props: {
     queryFn: listSecrets,
     retry: false,
   });
+  const pickable = pickableSecrets(secrets.data ?? []);
 
   // A stored jwt/impersonate engine is "already delegated" — the "None" opt-out
   // is disabled for it (see the `storedDelegationMode` prop doc). Mirrors
@@ -133,12 +135,12 @@ export function EngineSecurity(props: {
                   <SelectValue placeholder="Password secret" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(secrets.data ?? []).length === 0 ? (
+                  {pickable.length === 0 ? (
                     <SelectItem value="__none__" disabled>
                       No secrets
                     </SelectItem>
                   ) : (
-                    (secrets.data ?? []).map((s) => (
+                    pickable.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name}
                       </SelectItem>
@@ -176,7 +178,7 @@ export function EngineSecurity(props: {
             <Plus className="h-4 w-4" />
             Add user
           </Button>
-          {(secrets.data ?? []).length === 0 && (
+          {pickable.length === 0 && (
             <p className="text-xs text-muted-foreground">
               No secrets yet.{" "}
               <Link
@@ -400,7 +402,7 @@ export function EngineSecurity(props: {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">None (default)</SelectItem>
-                    {(secrets.data ?? [])
+                    {pickable
                       .filter((s) => s.type === "kubernetes.io/tls")
                       .map((s) => (
                         <SelectItem key={s.id} value={s.id}>

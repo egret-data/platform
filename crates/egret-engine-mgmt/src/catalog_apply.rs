@@ -744,8 +744,7 @@ pub(crate) async fn store_client_credential(
 ) -> Result<Uuid, CpError> {
     Ok(st
         .secrets
-        .create(
-            None,
+        .create_system(
             &format!("catalog-client-{}", client.id),
             Some("Catalog Client credential an engine presents to egret's catalog"),
             &format!("{}:{}", client.client_id, client.client_secret),

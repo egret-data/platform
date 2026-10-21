@@ -18,6 +18,7 @@ import {
   type controlPlaneCatalogRegistryListRegistryCatalogsResponse,
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -167,7 +168,7 @@ export default function EngineCreate() {
   const provisioned = (warehouses.data ?? []).filter(
     (w) => w.lakekeeperWarehouseId,
   );
-  const tlsSecrets = (secrets.data ?? []).filter(
+  const tlsSecrets = pickableSecrets(secrets.data ?? []).filter(
     (s) => s.type === "kubernetes.io/tls",
   );
 

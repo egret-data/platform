@@ -128,9 +128,16 @@ export interface StorageObject {
   size: number;
   lastModified: string | null;
 }
+/**
+ * One folder of a connection. Keys are relative to the connection's Key
+ * prefix (`root`, `""` when it has none), and `prefix`/`key` arguments are too.
+ */
 export interface StorageListing {
+  root: string;
   folders: string[];
   objects: StorageObject[];
+  /** Folders egret writes for its users (SQL Lab results, app sources, workflow files) left out for a non-admin (KI-206). */
+  hiddenSystemFolders: string[];
 }
 export async function browseStorageObjects(id: string, prefix: string): Promise<StorageListing> {
   return (await controlPlaneStorageBrowseObjects(id, { prefix })).data as StorageListing;
@@ -169,6 +176,9 @@ export interface Secret {
   type: string;
   // Data key names (NOT values).
   keys: string[];
+  // Minted and managed by egret for an engine or a catalog (KI-207): the
+  // server refuses to rename, rotate or delete it, and pickers leave it out.
+  system_managed: boolean;
 }
 
 export interface SecretInput {

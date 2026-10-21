@@ -17,6 +17,7 @@ const SECRET: api.Secret = {
   used_by: 0,
   type: "Opaque",
   keys: ["value"],
+  system_managed: false,
 };
 
 function renderPage() {
@@ -49,5 +50,25 @@ describe("ControlPlaneSecrets", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /Add secret/i })).toBeInTheDocument(),
     );
+  });
+
+  test("marks a system secret and does not offer to delete it (KI-207)", async () => {
+    vi.mocked(api.listSecrets).mockResolvedValue([
+      SECRET,
+      {
+        ...SECRET,
+        id: "sys-1",
+        name: "engine-internal-e1-g1",
+        description: "Trino internal-communication shared secret",
+        system_managed: true,
+      },
+    ]);
+    renderPage();
+    await screen.findByText("engine-internal-e1-g1");
+    expect(screen.getAllByText("System")).toHaveLength(1);
+    const sysDelete = screen.getByRole("button", { name: "Delete engine-internal-e1-g1" });
+    expect(sysDelete).toBeDisabled();
+    expect(sysDelete).toHaveAttribute("title", expect.stringMatching(/Managed by egret/));
+    expect(screen.getByRole("button", { name: "Delete prod-s3-secret" })).toBeEnabled();
   });
 });

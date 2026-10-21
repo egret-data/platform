@@ -13,6 +13,7 @@ import {
   listStorage,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -329,7 +330,7 @@ export function AddStorageDialog({
     }
   }
 
-  const items = secrets.data ?? [];
+  const items = pickableSecrets(secrets.data ?? []);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>

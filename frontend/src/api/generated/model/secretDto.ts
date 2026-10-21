@@ -18,4 +18,9 @@ export interface SecretDto {
   used_by: number;
   type: string;
   keys: string[];
+  /**
+     * Minted and managed by egret for an engine or a catalog: it cannot be
+     * renamed, rotated or deleted here, and pickers leave it out (KI-207).
+     */
+  system_managed: boolean;
 }

@@ -11,6 +11,7 @@ import {
   listSecrets,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { SYSTEM_SECRET_REASON } from "@/lib/systemSecrets";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -79,6 +80,11 @@ export default function ControlPlaneSecrets() {
           <Link to={`/control-plane/secrets/${s.id}`} className="text-primary hover:underline">
             {s.name}
           </Link>
+          {s.system_managed && (
+            <Badge variant="secondary" className="ml-2 text-xs" title={SYSTEM_SECRET_REASON}>
+              System
+            </Badge>
+          )}
           {s.keys.length > 0 && (
             <div className="font-mono text-xs font-normal text-muted-foreground">
               {s.keys.join(", ")}
@@ -130,6 +136,11 @@ export default function ControlPlaneSecrets() {
       className: "w-10 text-right",
       cell: (s) => {
         const inUse = s.used_by > 0;
+        const reason = s.system_managed
+          ? SYSTEM_SECRET_REASON
+          : inUse
+            ? `In use by ${s.used_by} connection${s.used_by === 1 ? "" : "s"}`
+            : undefined;
         return (
           <div className="flex justify-end">
             <Button
@@ -137,12 +148,8 @@ export default function ControlPlaneSecrets() {
               size="sm"
               className="text-muted-foreground hover:text-destructive"
               onClick={() => setDeleteTarget(s)}
-              disabled={inUse}
-              title={
-                inUse
-                  ? `In use by ${s.used_by} connection${s.used_by === 1 ? "" : "s"}`
-                  : undefined
-              }
+              disabled={s.system_managed || inUse}
+              title={reason}
               aria-label={`Delete ${s.name}`}
             >
               <Trash2 className="h-4 w-4" />
@@ -161,7 +168,8 @@ export default function ControlPlaneSecrets() {
           <h1 className="text-2xl font-semibold leading-tight">Secrets</h1>
           <p className="text-sm text-muted-foreground">
             Global named secrets that storage and database connections across the platform can
-            reference. Values are never displayed.
+            reference. Values are never displayed. Secrets marked System are created by egret for
+            engines and catalogs and are managed with them.
           </p>
         </div>
         <Button className="shrink-0" onClick={() => setAddOpen(true)}>
