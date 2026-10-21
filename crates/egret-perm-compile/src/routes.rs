@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,8 @@ pub fn perm_router() -> Router<PermState> {
             axum::routing::patch(patch_grant).delete(delete_grant),
         )
         .route("/perm/rules", get(list_rules).post(create_rule))
+        .route("/perm/rules/enforcement", get(rules_enforcement))
+        .route("/perm/rules/{id}/effect", get(rule_effect))
         .route(
             "/perm/rules/{id}",
             axum::routing::patch(patch_rule).delete(delete_rule),
@@ -207,6 +209,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         patch_grant,
         delete_grant,
         list_rules,
+        rule_effect,
+        rules_enforcement,
         create_rule,
         patch_rule,
         delete_rule,
@@ -299,6 +303,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::ExistingMask,
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
+        crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,
@@ -1892,6 +1897,117 @@ async fn list_rules(
             })
             .collect(),
     ))
+}
+
+/// What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview
+/// returns, from the same [`crate::effect::rule_effect`], so a surface showing
+/// a stored rule can say "Not enforced yet" with the preview's reason.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/rules/{id}/effect",
+    tag = "perm",
+    params(("id" = Uuid, Path, description = "Rule id")),
+    responses(
+        (status = 200, description = "The stored rule's effect: reach, the engines that enforce it (or why none does), exemptions and the other masks on its columns. The same computation, and the same shape, as `effect` on `POST /perm/preview`", body = crate::effect::RuleEffect),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such rule", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rule_effect(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::effect::RuleEffect>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot, as `list_overlaps`.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let Some(r) = get_rule_via(&mut tx, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    let rule = NewRule {
+        name: r.name,
+        kind: r.kind,
+        selector: r.selector,
+        exempt: r.exempt,
+    };
+    // `editing = id`: the rule is not "already masked" by itself.
+    let effect = crate::effect::rule_effect(&mut tx, Some(id), &rule).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(effect))
+}
+
+/// `?ids=` of [`rules_enforcement`]: comma-separated rule ids.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RuleIdsQuery {
+    /// Comma-separated rule ids, at most 100 distinct.
+    #[serde(default)]
+    pub ids: String,
+}
+
+/// Whether each listed STORED rule is enforced — the `enforcedBy` /
+/// `notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same
+/// functions, for surfaces that list rules. Bounded by
+/// [`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/rules/enforcement",
+    tag = "perm",
+    params(RuleIdsQuery),
+    responses(
+        (status = 200, description = "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0", body = Vec<crate::effect::RuleEnforcement>),
+        (status = 400, description = "An id is not a UUID, or more than 100 distinct ids were asked for", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rules_enforcement(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Query(q): Query<RuleIdsQuery>,
+) -> Result<Json<Vec<crate::effect::RuleEnforcement>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut ids: Vec<Uuid> = Vec::new();
+    for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id = raw
+            .parse::<Uuid>()
+            .map_err(|_| PermHttpError::BadRequest(format!("`{raw}` is not a rule id")))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.len() > crate::effect::RULE_ENFORCEMENT_CAP {
+        return Err(PermHttpError::BadRequest(format!(
+            "at most {} rule ids per request",
+            crate::effect::RULE_ENFORCEMENT_CAP
+        )));
+    }
+    if ids.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let mut stored: std::collections::HashMap<Uuid, egret_perm::model::Rule> =
+        list_rules_via(&mut tx)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r))
+            .collect();
+    let rules: Vec<egret_perm::model::Rule> =
+        ids.iter().filter_map(|id| stored.remove(id)).collect();
+    let answer = crate::effect::rules_enforcement(&mut tx, &rules).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(answer))
 }
 
 #[utoipa::path(

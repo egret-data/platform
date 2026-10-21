@@ -8669,3 +8669,203 @@ async fn a_tag_assigned_nowhere_is_not_enforced_for_no_assignment() {
     assert_eq!(e["tableCount"], 0, "{e}");
     assert_eq!(e["truncated"], false, "{e}");
 }
+
+// ---------------------------------------------------------------------------
+// A STORED rule's effect (classification UX Task 13: "Not enforced yet" after
+// Create). `GET /perm/rules/{id}/effect` and `GET /perm/rules/enforcement`.
+// ---------------------------------------------------------------------------
+
+async fn get_json(f: &Fixture, token: &str, uri: &str) -> (StatusCode, Value) {
+    into_json(f.app().oneshot(req("GET", uri, token, None)).await.unwrap()).await
+}
+
+/// The stored rule's effect is the SAME computation the preview runs: the
+/// effect a preview of the stored body (as a patch of that id) returns, field
+/// for field — including the reason it is not enforced.
+#[tokio::test]
+async fn a_stored_rules_effect_is_what_its_preview_says() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-stored").await;
+    let body = mask_rule(
+        "eff-stored",
+        json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"}),
+        json!([]),
+    );
+    let id = store_rule(&f, &token, body.clone()).await;
+
+    let (status, got) = get_json(&f, &token, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["enforcedBy"], 0, "{got}");
+    assert_eq!(got["notEnforced"], "no_engine", "{got}");
+    assert_eq!(got["tableCount"], 1, "{got}");
+
+    let (status, preview) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": id, "rule": body })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(got, preview["effect"], "one computation, one answer");
+}
+
+/// An enforced stored rule says so; an unknown id is a 404; `policy:read`
+/// alone reaches it and a caller without it is refused.
+#[tokio::test]
+async fn a_stored_rules_effect_is_a_policy_read_and_404s_an_unknown_id() {
+    let Some(mut f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let admin = admin_session(&f).await;
+    // The fixture's catalog has an engine bound to a profile. A unique table
+    // keeps this mask from meeting any other test's.
+    let table = unique("eff_enf");
+    let id = store_rule(
+        &f,
+        &admin,
+        mask_rule(
+            "eff-enf",
+            json!({"type": "path", "catalog_id": f.catalog_id, "schema": "s", "table": table, "column": "email"}),
+            json!([]),
+        ),
+    )
+    .await;
+
+    let reader = session_with_permission(&mut f, "policy:read").await;
+    let (status, got) = get_json(&f, &reader, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["enforcedBy"], 1, "{got}");
+    assert!(got["notEnforced"].is_null(), "{got}");
+
+    let (status, got) = get_json(
+        &f,
+        &reader,
+        &format!("/perm/rules/{}/effect", Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{got}");
+
+    let outsider = session_with_permission(&mut f, "tag:read").await;
+    let (status, got) = get_json(&f, &outsider, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{got}");
+}
+
+/// The compact list form: one entry per KNOWN id, in the order asked, with the
+/// same `enforcedBy`/`notEnforced` the single read gives; unknown ids are left
+/// out, a repeated id is answered once.
+#[tokio::test]
+async fn rule_enforcement_answers_each_known_id_like_the_single_read() {
+    let Some(mut f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let admin = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-batch").await;
+    let not_enforced = store_rule(
+        &f,
+        &admin,
+        mask_rule(
+            "eff-batch-no",
+            json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"}),
+            json!([]),
+        ),
+    )
+    .await;
+    let enforced = store_rule(
+        &f,
+        &admin,
+        mask_rule(
+            "eff-batch-yes",
+            json!({"type": "path", "catalog_id": f.catalog_id, "schema": "s", "table": unique("eff_b"), "column": "email"}),
+            json!([]),
+        ),
+    )
+    .await;
+    let (key, _) = classification_named(&f, &unique("EffBatchNowhere")).await;
+    let nowhere = store_rule(
+        &f,
+        &admin,
+        mask_rule(
+            "eff-batch-tag",
+            json!({"type": "tag", "key": key}),
+            json!([]),
+        ),
+    )
+    .await;
+    let unknown = Uuid::new_v4();
+
+    let reader = session_with_permission(&mut f, "policy:read").await;
+    let uri = format!(
+        "/perm/rules/enforcement?ids={not_enforced},{unknown},{enforced},{nowhere},{not_enforced}"
+    );
+    let (status, got) = get_json(&f, &reader, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(
+        got,
+        json!([
+            {"ruleId": not_enforced, "enforcedBy": 0, "notEnforced": "no_engine"},
+            {"ruleId": enforced, "enforcedBy": 1, "notEnforced": null},
+            {"ruleId": nowhere, "enforcedBy": 0, "notEnforced": "no_assignment"},
+        ]),
+        "{got}"
+    );
+
+    // Each entry agrees with the single read.
+    for (id, entry) in [&not_enforced, &enforced, &nowhere]
+        .into_iter()
+        .zip(got.as_array().unwrap())
+    {
+        let (status, single) = get_json(&f, &reader, &format!("/perm/rules/{id}/effect")).await;
+        assert_eq!(status, StatusCode::OK, "{single}");
+        assert_eq!(single["enforcedBy"], entry["enforcedBy"], "{id}");
+        assert_eq!(single["notEnforced"], entry["notEnforced"], "{id}");
+    }
+
+    let outsider = session_with_permission(&mut f, "tag:read").await;
+    let (status, got) = get_json(&f, &outsider, &uri).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{got}");
+}
+
+/// Bounded: more than `RULE_ENFORCEMENT_CAP` (100) distinct ids, or an id that
+/// is not a UUID, is refused before anything is read; no ids is an empty list.
+#[tokio::test]
+async fn rule_enforcement_is_capped_at_one_hundred_ids() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    assert_eq!(egret_perm_compile::effect::RULE_ENFORCEMENT_CAP, 100);
+
+    let ids = |n: usize| {
+        (0..n)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let (status, got) = get_json(
+        &f,
+        &token,
+        &format!("/perm/rules/enforcement?ids={}", ids(100)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "100 is allowed: {got}");
+    assert_eq!(got, json!([]), "unknown ids are left out");
+
+    let (status, got) = get_json(
+        &f,
+        &token,
+        &format!("/perm/rules/enforcement?ids={}", ids(101)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+
+    let (status, got) = get_json(&f, &token, "/perm/rules/enforcement?ids=not-a-uuid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+
+    let (status, got) = get_json(&f, &token, "/perm/rules/enforcement?ids=").await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got, json!([]));
+}

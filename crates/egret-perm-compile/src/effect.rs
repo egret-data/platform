@@ -4,7 +4,10 @@
 //! engine attachments — never from compiled downloads, so it answers on a
 //! catalog no engine serves, which is exactly where the compiler's overlap
 //! check (`crate::overlap`) sees nothing. Read-only; `routes::preview` runs it
-//! inside the preview's rolled-back transaction, before `write_rule`.
+//! inside the preview's rolled-back transaction, before `write_rule`, and
+//! `GET /perm/rules/{id}/effect` runs it on a STORED rule. The enforcement
+//! half alone ([`rules_enforcement`], `GET /perm/rules/enforcement`) answers a
+//! list of stored rules through the same functions.
 //!
 //! **Bounded.** Reach is COUNTED in SQL (one aggregate per tag), never by
 //! loading every assignment. The catalogs listed are the distinct registry
@@ -34,6 +37,10 @@ pub const COORD_SCAN_CAP: i64 = 50;
 /// At most this many classification assignments are read for the overlap
 /// check, across every target table, in one query.
 pub const CLASSIFICATION_ROW_CAP: i64 = 1000;
+
+/// At most this many distinct rule ids are answered by one
+/// `GET /perm/rules/enforcement` request.
+pub const RULE_ENFORCEMENT_CAP: usize = 100;
 
 /// `mask` or `row_filter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -193,10 +200,9 @@ fn to_u32(n: i64) -> u32 {
     u32::try_from(n.max(0)).unwrap_or(u32::MAX)
 }
 
-/// The reach of a rule: catalogs `(id, name)`, the tables the overlap check
+/// The reach of a rule beyond its catalogs: the tables the overlap check
 /// examines, and the two counts.
 struct Reach {
-    catalogs: Vec<(Uuid, String)>,
     targets: Vec<Target>,
     /// The scan cap cut `targets`.
     targets_truncated: bool,
@@ -210,16 +216,13 @@ pub async fn rule_effect(
     rule: &NewRule,
 ) -> Result<RuleEffect, PermHttpError> {
     let is_mask = matches!(rule.kind, RuleKind::Mask { .. });
+    let reached = reached_catalogs(conn, &rule.selector).await?;
 
     let reach = match &rule.selector {
         Selector::Tag { key } => tag_reach(conn, key, is_mask).await?,
         Selector::Path(scope) => {
-            let name: Option<String> =
-                sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
-                    .bind(scope.catalog_id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(PermHttpError::db)?;
+            // `reached` is this path's catalog, or nothing for an unknown id.
+            let name = reached.first().map(|(_, n)| n.clone());
             let literal = |v: &Option<String>| v.as_deref().is_some_and(|s| !is_pattern(s));
             let table_exact = literal(&scope.schema) && literal(&scope.table);
             let column_exact = table_exact && literal(&scope.column);
@@ -228,10 +231,10 @@ pub async fn rule_effect(
                 Some(c) if is_pattern(c) => ColumnSel::Pattern(c.to_string()),
                 Some(c) => ColumnSel::Exact(c.to_string()),
             };
-            let targets = match (&name, table_exact && is_mask) {
+            let targets = match (name, table_exact && is_mask) {
                 (Some(catalog_name), true) => vec![Target {
                     catalog_id: scope.catalog_id,
-                    catalog_name: catalog_name.clone(),
+                    catalog_name,
                     schema: scope.schema.clone().unwrap_or_default(),
                     table: scope.table.clone().unwrap_or_default(),
                     column,
@@ -239,8 +242,6 @@ pub async fn rule_effect(
                 _ => Vec::new(),
             };
             Reach {
-                // An unknown catalog lists nothing; the write refuses it after.
-                catalogs: name.map(|n| (scope.catalog_id, n)).into_iter().collect(),
                 targets,
                 targets_truncated: false,
                 table_count: table_exact.then_some(1),
@@ -249,25 +250,150 @@ pub async fn rule_effect(
         }
     };
 
-    // Engines of every reached catalog, in one query.
-    let ids: Vec<Uuid> = reach.catalogs.iter().map(|(id, _)| *id).collect();
-    let attached: Vec<(Uuid, Uuid, String, String, bool)> = if ids.is_empty() {
-        Vec::new()
+    let ids: Vec<Uuid> = reached.iter().map(|(id, _)| *id).collect();
+    let attached = attached_engines(conn, &ids).await?;
+    let (catalogs, enforced_by, not_enforced) = enforcement(&reached, &attached);
+
+    let (exempt_members, exempt_everyone) = count_exempt(conn, &rule.exempt).await?;
+
+    let (already_masked, scan_truncated) = if is_mask {
+        already_masked(conn, editing, &reach.targets).await?
     } else {
-        sqlx::query_as(
-            "SELECT a.catalog_id, e.id, e.name, e.type, e.authz_service_id IS NOT NULL \
-               FROM registry.engine_catalog_attachments a \
-               JOIN engine_mgmt.engines e ON e.id = a.engine_id \
-              WHERE a.catalog_id = ANY($1) ORDER BY e.name, e.id",
+        (Vec::new(), false)
+    };
+
+    Ok(RuleEffect {
+        kind: if is_mask {
+            EffectKind::Mask
+        } else {
+            EffectKind::RowFilter
+        },
+        catalogs,
+        table_count: reach.table_count,
+        column_count: reach.column_count,
+        enforced_by,
+        not_enforced,
+        exempt_members,
+        exempt_everyone,
+        already_masked,
+        truncated: is_mask && (reach.targets_truncated || scan_truncated),
+    })
+}
+
+/// Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced` half of
+/// [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleEnforcement {
+    pub rule_id: Uuid,
+    /// Distinct engines, bound to a profile, attached to a catalog the rule
+    /// reaches (as `enforcedBy` in the rule's effect).
+    pub enforced_by: u32,
+    /// `null` when some engine enforces the rule; otherwise why not, as
+    /// `notEnforced` in the rule's effect.
+    pub not_enforced: Option<NotEnforced>,
+}
+
+/// [`RuleEnforcement`] for each of `rules`, in their order, computed by the
+/// same functions [`rule_effect`] uses ([`reached_catalogs`],
+/// [`attached_engines`], [`enforcement`]), so the two cannot disagree.
+/// One catalog query per rule and ONE engine query for all of them; the
+/// caller bounds `rules` by [`RULE_ENFORCEMENT_CAP`].
+pub async fn rules_enforcement(
+    conn: &mut sqlx::PgConnection,
+    rules: &[Rule],
+) -> Result<Vec<RuleEnforcement>, PermHttpError> {
+    let mut reached = Vec::with_capacity(rules.len());
+    for rule in rules {
+        reached.push(reached_catalogs(conn, &rule.selector).await?);
+    }
+    let ids: Vec<Uuid> = reached
+        .iter()
+        .flatten()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let attached = attached_engines(conn, &ids).await?;
+    Ok(rules
+        .iter()
+        .zip(&reached)
+        .map(|(rule, reached)| {
+            let (_, enforced_by, not_enforced) = enforcement(reached, &attached);
+            RuleEnforcement {
+                rule_id: rule.id,
+                enforced_by,
+                not_enforced,
+            }
+        })
+        .collect())
+}
+
+/// Every registry catalog a selector reaches, `(id, name)`: a path's catalog
+/// (nothing for an unknown id; the write refuses it after), or each catalog
+/// fronting a warehouse the tag is assigned in, by name.
+async fn reached_catalogs(
+    conn: &mut sqlx::PgConnection,
+    selector: &Selector,
+) -> Result<Vec<(Uuid, String)>, PermHttpError> {
+    match selector {
+        Selector::Path(scope) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+                    .bind(scope.catalog_id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?;
+            Ok(name.map(|n| (scope.catalog_id, n)).into_iter().collect())
+        }
+        Selector::Tag { key } => sqlx::query_as(
+            "SELECT DISTINCT c.id, c.name \
+               FROM catalog_tag_assignments a \
+               JOIN tags t ON t.id = a.tag_id \
+               JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+              WHERE t.key = $1 \
+              ORDER BY c.name",
         )
-        .bind(&ids)
+        .bind(key)
         .fetch_all(&mut *conn)
         .await
-        .map_err(PermHttpError::db)?
-    };
-    let mut catalogs = Vec::with_capacity(reach.catalogs.len());
+        .map_err(PermHttpError::db),
+    }
+}
+
+/// An engine attached to a catalog: `(catalog id, engine id, engine name,
+/// engine type, bound to a policy profile)`.
+type Attached = (Uuid, Uuid, String, String, bool);
+
+/// The engines attached to any of `catalog_ids`, in ONE query.
+async fn attached_engines(
+    conn: &mut sqlx::PgConnection,
+    catalog_ids: &[Uuid],
+) -> Result<Vec<Attached>, PermHttpError> {
+    if catalog_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT a.catalog_id, e.id, e.name, e.type, e.authz_service_id IS NOT NULL \
+           FROM registry.engine_catalog_attachments a \
+           JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+          WHERE a.catalog_id = ANY($1) ORDER BY e.name, e.id",
+    )
+    .bind(catalog_ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)
+}
+
+/// Who enforces a rule that reaches `reached`, given the `attached` engines:
+/// per catalog, the distinct enforcing engines, and why none does.
+fn enforcement(
+    reached: &[(Uuid, String)],
+    attached: &[Attached],
+) -> (Vec<EffectCatalog>, u32, Option<NotEnforced>) {
+    let mut catalogs = Vec::with_capacity(reached.len());
     let mut engine_ids = BTreeSet::new();
-    for (catalog_id, catalog_name) in &reach.catalogs {
+    for (catalog_id, catalog_name) in reached {
         let here: Vec<_> = attached.iter().filter(|a| a.0 == *catalog_id).collect();
         let engines: Vec<EffectEngine> = here
             .iter()
@@ -305,35 +431,15 @@ pub async fn rule_effect(
     } else {
         Some(NotEnforced::NoEngine)
     };
-
-    let (exempt_members, exempt_everyone) = count_exempt(conn, &rule.exempt).await?;
-
-    let (already_masked, scan_truncated) = if is_mask {
-        already_masked(conn, editing, &reach.targets).await?
-    } else {
-        (Vec::new(), false)
-    };
-
-    Ok(RuleEffect {
-        kind: if is_mask {
-            EffectKind::Mask
-        } else {
-            EffectKind::RowFilter
-        },
+    (
         catalogs,
-        table_count: reach.table_count,
-        column_count: reach.column_count,
-        enforced_by: u32::try_from(engine_ids.len()).unwrap_or(u32::MAX),
+        u32::try_from(engine_ids.len()).unwrap_or(u32::MAX),
         not_enforced,
-        exempt_members,
-        exempt_everyone,
-        already_masked,
-        truncated: is_mask && (reach.targets_truncated || scan_truncated),
-    })
+    )
 }
 
-/// A tag selector's reach: every assignment of the tag in a warehouse a
-/// registry catalog fronts. Counted in SQL; only the first
+/// A tag selector's reach (its catalogs come from [`reached_catalogs`]): every
+/// assignment of the tag in a warehouse a registry catalog fronts. Counted in SQL; only the first
 /// [`COORD_SCAN_CAP`] columns are loaded as targets.
 async fn tag_reach(
     conn: &mut sqlx::PgConnection,
@@ -351,19 +457,6 @@ async fn tag_reach(
     )
     .bind(key)
     .fetch_one(&mut *conn)
-    .await
-    .map_err(PermHttpError::db)?;
-
-    let catalogs: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT DISTINCT c.id, c.name \
-           FROM catalog_tag_assignments a \
-           JOIN tags t ON t.id = a.tag_id \
-           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-          WHERE t.key = $1 \
-          ORDER BY c.name",
-    )
-    .bind(key)
-    .fetch_all(&mut *conn)
     .await
     .map_err(PermHttpError::db)?;
 
@@ -396,7 +489,6 @@ async fn tag_reach(
     };
 
     Ok(Reach {
-        catalogs,
         targets,
         targets_truncated: is_mask && columns > COORD_SCAN_CAP,
         table_count: Some(to_u32(tables)),

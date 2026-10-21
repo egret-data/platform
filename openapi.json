@@ -9893,6 +9893,81 @@
         }
       }
     },
+    "/api/control-plane/perm/rules/enforcement": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Whether each listed STORED rule is enforced — the `enforcedBy` /\n`notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same\nfunctions, for surfaces that list rules. Bounded by\n[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.",
+        "operationId": "rules_enforcement",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Comma-separated rule ids, at most 100 distinct.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RuleEnforcement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An id is not a UUID, or more than 100 distinct ids were asked for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/rules/{id}": {
       "delete": {
         "tags": [
@@ -10049,6 +10124,79 @@
           },
           "409": {
             "description": "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/rules/{id}/effect": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview\nreturns, from the same [`crate::effect::rule_effect`], so a surface showing\na stored rule can say \"Not enforced yet\" with the preview's reason.",
+        "operationId": "rule_effect",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored rule's effect: reach, the engines that enforce it (or why none does), exemptions and the other masks on its columns. The same computation, and the same shape, as `effect` on `POST /perm/preview`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleEffect"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule",
             "content": {
               "application/json": {
                 "schema": {
@@ -51349,6 +51497,37 @@
           "truncated": {
             "type": "boolean",
             "description": "`alreadyMasked` may be incomplete: a cap cut the columns examined\n(50), the classifications read (1000) or the entries listed (20)."
+          }
+        }
+      },
+      "RuleEnforcement": {
+        "type": "object",
+        "description": "Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced` half of\n[`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).",
+        "required": [
+          "ruleId",
+          "enforcedBy"
+        ],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "enforcedBy": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct engines, bound to a profile, attached to a catalog the rule\nreaches (as `enforcedBy` in the rule's effect).",
+            "minimum": 0
+          },
+          "notEnforced": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule; otherwise why not, as\n`notEnforced` in the rule's effect."
+              }
+            ]
           }
         }
       },
