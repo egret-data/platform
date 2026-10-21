@@ -27,6 +27,7 @@ import type {
 import type {
   AllocatedUsername,
   ClassifiedPolicy,
+  ClearedPeople,
   CompileResponse,
   EngineCapabilitiesResponse,
   EngineGrantView,
@@ -82,6 +83,134 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type permClearedPeopleResponse200 = {
+  data: ClearedPeople
+  status: 200
+}
+
+export type permClearedPeopleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permClearedPeopleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permClearedPeopleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permClearedPeopleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permClearedPeopleResponseSuccess = (permClearedPeopleResponse200) & {
+  headers: Headers;
+};
+export type permClearedPeopleResponseError = (permClearedPeopleResponse401 | permClearedPeopleResponse403 | permClearedPeopleResponse404 | permClearedPeopleResponse500) & {
+  headers: Headers;
+};
+
+export type permClearedPeopleResponse = (permClearedPeopleResponseSuccess | permClearedPeopleResponseError)
+
+export const getPermClearedPeopleUrl = (tagId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/clearances/${encodeURIComponent(tagId)}/people`
+}
+
+export const permClearedPeople = async (tagId: string, options?: Parameters<typeof customInstance>[1]): Promise<permClearedPeopleResponse> => {
+
+  return customInstance<permClearedPeopleResponse>(getPermClearedPeopleUrl(tagId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermClearedPeopleQueryKey = (tagId: string,) => {
+    return [
+    `/api/control-plane/perm/clearances/${encodeURIComponent(tagId)}/people`
+    ] as const;
+    }
+
+
+export const getPermClearedPeopleQueryOptions = <TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermClearedPeopleQueryKey(tagId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permClearedPeople>>> = ({ signal }) => permClearedPeople(tagId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: tagId !== null && tagId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermClearedPeopleQueryResult = NonNullable<Awaited<ReturnType<typeof permClearedPeople>>>
+export type PermClearedPeopleQueryError = ErrorBody
+
+
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClearedPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permClearedPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClearedPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permClearedPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermClearedPeopleQueryOptions(tagId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type permCompileResponse200 = {
   data: CompileResponse

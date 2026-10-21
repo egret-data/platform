@@ -21,10 +21,10 @@ function usage(over: { data?: Partial<TagUsage["data"]>; bi?: Partial<TagUsage["
 
 /** Not in display order: catalogs, schemas and tables all arrive shuffled. */
 const TABLES: TagUsage["data"]["tables"] = [
-  { catalogId: "c-z", catalogName: "zeta", schema: "s", table: "t9", onTable: true, columns: [] },
-  { catalogId: "c-i", catalogName: "ice", schema: "sales", table: "orders", onTable: false, columns: ["phone", "email"] },
-  { catalogId: "c-i", catalogName: "ice", schema: "crm", table: "people", onTable: true, columns: ["email"] },
-  { catalogId: "c-i", catalogName: "ice", schema: "crm", table: "accounts", onTable: true, columns: [] },
+  { catalogId: "c-z", catalogName: "zeta", warehouseId: "w-z", schema: "s", table: "t9", onTable: true, columns: [] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "sales", table: "orders", onTable: false, columns: ["phone", "email"] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "crm", table: "people", onTable: true, columns: ["email"] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "crm", table: "accounts", onTable: true, columns: [] },
 ];
 
 const open = (u: TagUsage | "error" | "never") => {

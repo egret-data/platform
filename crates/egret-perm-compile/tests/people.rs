@@ -1354,3 +1354,231 @@ async fn platform_admin_clears_in_egret_only_when_held_at_platform_scope() {
     let body = principal(&e, &format!("/perm/people/users/{pretender}")).await;
     assert_eq!(clearance(&body, a)["egret"], json!({"kind": "not_cleared"}));
 }
+
+// ---------------------------------------------------------------------------
+// Classification UX Task 4: who a clearance admits
+// ---------------------------------------------------------------------------
+
+async fn insert_tag_with_clearance(pool: &sqlx::PgPool, roles: &[String], groups: &[Uuid]) -> Uuid {
+    let t = tag();
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(format!("clr-{t}"))
+        .bind(format!("Clr {t}"))
+        .fetch_one(pool)
+        .await
+        .expect("tag");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(id)
+    .bind(roles)
+    .bind(groups)
+    .execute(pool)
+    .await
+    .expect("clearance");
+    id
+}
+
+/// Spec C9: role holders and group members, each person once, an expired
+/// grant, a deny grant and a role held only through a group not counted (the
+/// compiler's `role_holders_via`), and `onEngines` only through a required
+/// role.
+#[tokio::test]
+async fn cleared_people_lists_role_holders_and_group_members_once() {
+    let Some(e) = env().await else { return };
+    let p = &e.db.pool;
+    let t = tag();
+    let both = insert_user(
+        p,
+        &format!("clr_both_{t}@egret.local"),
+        "Both",
+        Some(&format!("clr_both_{t}")),
+    )
+    .await;
+    let role_only = insert_user(
+        p,
+        &format!("clr_role_{t}@egret.local"),
+        "Role only",
+        Some(&format!("clr_role_{t}")),
+    )
+    .await;
+    let group_only = insert_user(p, &format!("clr_grp_{t}@egret.local"), "Group only", None).await;
+    let expired = insert_user(
+        p,
+        &format!("clr_exp_{t}@egret.local"),
+        "Expired",
+        Some(&format!("clr_exp_{t}")),
+    )
+    .await;
+    let denied = insert_user(
+        p,
+        &format!("clr_deny_{t}@egret.local"),
+        "Denied",
+        Some(&format!("clr_deny_{t}")),
+    )
+    .await;
+    let through_group = insert_user(
+        p,
+        &format!("clr_thru_{t}@egret.local"),
+        "Through group",
+        Some(&format!("clr_thru_{t}")),
+    )
+    .await;
+    let role_name = format!("clr_role_{t}");
+    let role = insert_role(p, "platform", &role_name).await;
+    insert_grant(p, "user", both, role, "platform", None, "allow", false).await;
+    insert_grant(p, "user", role_only, role, "platform", None, "allow", false).await;
+    insert_grant(p, "user", expired, role, "platform", None, "allow", true).await;
+    insert_grant(p, "user", denied, role, "platform", None, "deny", false).await;
+    let holder_group = insert_group(p, &format!("clr_holder_{t}"), &[through_group]).await;
+    insert_grant(
+        p,
+        "group",
+        holder_group,
+        role,
+        "platform",
+        None,
+        "allow",
+        false,
+    )
+    .await;
+    let group_name = format!("clr_group_{t}");
+    let group = insert_group(p, &group_name, &[both, group_only]).await;
+    let tag_id = insert_tag_with_clearance(p, std::slice::from_ref(&role_name), &[group]).await;
+
+    let body = principal(&e, &format!("/perm/clearances/{tag_id}/people")).await;
+    assert_eq!(body["count"], 3, "{body}");
+    assert_eq!(body["truncated"], false);
+    let people = body["people"].as_array().unwrap();
+    let labels: Vec<&str> = people
+        .iter()
+        .map(|p| p["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["Both", "Group only", "Role only"],
+        "sorted by label: {body}"
+    );
+    let both_row = &people[0];
+    assert_eq!(both_row["userId"], json!(both));
+    assert_eq!(
+        both_row["via"],
+        json!([{"kind": "role", "name": role_name}, {"kind": "group", "name": group_name}]),
+        "{both_row}"
+    );
+    assert_eq!(both_row["onEngines"], true);
+    assert_eq!(both_row["username"], json!(format!("clr_both_{t}")));
+    assert_eq!(
+        people[1]["onEngines"], false,
+        "a group member is not named on engines"
+    );
+    assert!(people[1]["username"].is_null());
+    assert_eq!(
+        people[1]["via"],
+        json!([{"kind": "group", "name": group_name}])
+    );
+    assert_eq!(people[2]["onEngines"], true);
+    assert_eq!(
+        people[2]["via"],
+        json!([{"kind": "role", "name": role_name}])
+    );
+}
+
+#[tokio::test]
+async fn cleared_people_is_gated_and_answers_404_and_empty() {
+    let Some(e) = env().await else { return };
+    let tag_id = insert_tag_with_clearance(&e.db.pool, &[], &[]).await;
+    let path = format!("/perm/clearances/{tag_id}/people");
+    let (status, _) = get_path(&e, &e.nobody, &path).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = get_path(&e, &e.reader, &path).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"count": 0, "people": [], "truncated": false}));
+    // A tag with no clearance row at all answers the same.
+    let t = tag();
+    let bare: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+            .bind(format!("clr-bare-{t}"))
+            .fetch_one(&e.db.pool)
+            .await
+            .expect("tag");
+    let (status, body) = get_path(&e, &e.reader, &format!("/perm/clearances/{bare}/people")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"count": 0, "people": [], "truncated": false}));
+    let (status, _) = get_path(
+        &e,
+        &e.reader,
+        &format!("/perm/clearances/{}/people", Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A role holder with no username yet is cleared (listed) but not named on
+/// engines until a compile mints one, and a required group id no group has
+/// any more admits nobody.
+#[tokio::test]
+async fn cleared_people_marks_an_unnamed_role_holder_and_ignores_a_gone_group() {
+    let Some(e) = env().await else { return };
+    let p = &e.db.pool;
+    let t = tag();
+    let unnamed = insert_user(p, &format!("clr_unn_{t}@egret.local"), "", None).await;
+    let role_name = format!("clr_unn_role_{t}");
+    let role = insert_role(p, "workspace", &role_name).await;
+    insert_grant(
+        p,
+        "user",
+        unnamed,
+        role,
+        "workspace",
+        Some(Uuid::new_v4()),
+        "allow",
+        false,
+    )
+    .await;
+    let tag_id =
+        insert_tag_with_clearance(p, std::slice::from_ref(&role_name), &[Uuid::new_v4()]).await;
+    let body = principal(&e, &format!("/perm/clearances/{tag_id}/people")).await;
+    assert_eq!(body["count"], 1, "{body}");
+    let row = &body["people"][0];
+    assert_eq!(
+        row["label"],
+        json!(format!("clr_unn_{t}@egret.local")),
+        "no name: the label is the email"
+    );
+    assert!(row["username"].is_null());
+    assert_eq!(row["onEngines"], false, "{row}");
+    assert_eq!(row["via"], json!([{"kind": "role", "name": role_name}]));
+}
+
+/// The list is capped at 200 people; `count` still counts everyone.
+#[tokio::test]
+async fn cleared_people_is_capped_and_says_so() {
+    let Some(e) = env().await else { return };
+    let p = &e.db.pool;
+    let t = tag();
+    let group = insert_group(p, &format!("clr_cap_{t}"), &[]).await;
+    sqlx::query(
+        "WITH u AS ( \
+            INSERT INTO users (provider, email, name) \
+            SELECT 'local', format('clr_cap_%s_%s@egret.local', $1::text, i), \
+                   format('Cap %s', lpad(i::text, 3, '0')) \
+              FROM generate_series(0, 200) AS i \
+            RETURNING id) \
+         INSERT INTO user_groups (user_id, group_id) SELECT id, $2 FROM u",
+    )
+    .bind(&t)
+    .bind(group)
+    .execute(p)
+    .await
+    .expect("201 members");
+    let tag_id = insert_tag_with_clearance(p, &[], &[group]).await;
+    let body = principal(&e, &format!("/perm/clearances/{tag_id}/people")).await;
+    assert_eq!(body["count"], 201, "{}", body["count"]);
+    assert_eq!(body["truncated"], true);
+    let people = body["people"].as_array().unwrap();
+    assert_eq!(people.len(), 200);
+    assert_eq!(people[0]["label"], "Cap 000");
+    assert_eq!(people[199]["label"], "Cap 199");
+}

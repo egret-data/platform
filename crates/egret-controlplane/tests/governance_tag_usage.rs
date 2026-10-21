@@ -444,10 +444,10 @@ async fn data_is_grouped_by_table_and_orphans_are_counted() {
     assert_eq!(
         body["data"]["tables"],
         json!([
-            { "catalogId": cat, "catalogName": name, "schema": "s", "table": "t", "onTable": true,
-              "columns": ["email", "phone"] },
-            { "catalogId": cat, "catalogName": name, "schema": "s", "table": "u", "onTable": false,
-              "columns": ["b"] }
+            { "catalogId": cat, "catalogName": name, "warehouseId": wh, "schema": "s",
+              "table": "t", "onTable": true, "columns": ["email", "phone"] },
+            { "catalogId": cat, "catalogName": name, "warehouseId": wh, "schema": "s",
+              "table": "u", "onTable": false, "columns": ["b"] }
         ])
     );
     assert_eq!(body["data"]["tableCount"], 1);

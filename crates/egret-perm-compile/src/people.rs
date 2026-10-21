@@ -1398,3 +1398,168 @@ pub(crate) async fn principal_members_via(
     let ids: Vec<Uuid> = ids.into_iter().collect();
     member_refs_via(conn, &ids).await.map(Some)
 }
+
+// ---------------------------------------------------------------------------
+// Who a clearance admits (classification UX Task 4, spec C9)
+// ---------------------------------------------------------------------------
+
+/// At most this many people are listed by [`cleared_people_via`];
+/// [`ClearedPeople::count`] still counts every one.
+pub const CLEARED_PEOPLE_LIMIT: usize = 200;
+
+/// How a person comes to be cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClearedViaKind {
+    /// Holds one of the gate's `required_roles`.
+    Role,
+    /// Is a direct member of one of the gate's `required_groups`.
+    Group,
+}
+
+/// One required role or group a person is cleared through.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedVia {
+    pub kind: ClearedViaKind,
+    /// The role's or group's name.
+    pub name: String,
+}
+
+/// One person a clearance admits.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedPerson {
+    pub user_id: Uuid,
+    /// Name, else email.
+    pub label: String,
+    /// The stored engine username; null when none is allocated yet.
+    pub username: Option<String>,
+    /// Every required role, then every required group, that clears them,
+    /// each sorted by name.
+    pub via: Vec<ClearedVia>,
+    /// Whether the compiled engine deny excepts them: they hold a required
+    /// role directly, unexpired, and have a username. A required group never
+    /// does (a group-only gate compiles to nothing on engines, and a gate with
+    /// roles excepts only role holders), and a holder with no username is
+    /// named once a compile mints one.
+    pub on_engines: bool,
+}
+
+/// The people a classification's clearance admits, as egret's membership
+/// reads see them: the live, direct, `allow` holders of any of its
+/// `required_roles` (at any scope; [`crate::members::role_holders_via`]) and
+/// the direct members of any of its `required_groups`
+/// ([`crate::members::group_members_via`]), each person once. Not listed:
+/// people holding a required role only through a group (egret clears them,
+/// engines do not), and platform admins, whom egret exempts from every gate
+/// but engines do not.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedPeople {
+    /// Every person admitted.
+    pub count: u32,
+    /// The first [`CLEARED_PEOPLE_LIMIT`] (200) of them, sorted by label.
+    pub people: Vec<ClearedPerson>,
+    /// More people are admitted than are listed.
+    pub truncated: bool,
+}
+
+/// Who the clearance of tag `tag_id` admits. `None` when no tag has this id.
+/// A tag with no clearance, or one whose lists are both empty (no gate),
+/// admits nobody listed here: it gates nothing.
+///
+/// Membership is the compiler's own reads ([`role_holders_via`],
+/// [`group_members_via`]), never a predicate written here, so the people
+/// marked `on_engines` are exactly those a compile excepts from the deny
+/// (`crate::clearance`, which reads [`crate::members::role_usernames`] over
+/// the same [`role_holders_via`]).
+pub async fn cleared_people_via(
+    conn: &mut sqlx::PgConnection,
+    tag_id: Uuid,
+) -> Result<Option<ClearedPeople>, CompileError> {
+    let gate: Option<(Vec<String>, Vec<Uuid>)> = sqlx::query_as(
+        "SELECT required_roles, required_groups FROM classification_policies WHERE tag_id = $1",
+    )
+    .bind(tag_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db)?;
+    let Some((roles, group_ids)) = gate else {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tags WHERE id = $1)")
+            .bind(tag_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db)?;
+        return Ok(exists.then(|| ClearedPeople {
+            count: 0,
+            people: Vec::new(),
+            truncated: false,
+        }));
+    };
+    let roles: Vec<String> = roles
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // A gate stores group ids; membership is read by name, the key the
+    // compiler expands. An id no group has any more admits nobody.
+    let groups: Vec<String> = if group_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar("SELECT name FROM groups WHERE id = ANY($1)")
+            .bind(&group_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db)?
+    };
+
+    #[derive(Default)]
+    struct Clears {
+        via: BTreeSet<ClearedVia>,
+        on_engines: bool,
+    }
+    let mut cleared: BTreeMap<Uuid, Clears> = BTreeMap::new();
+    for h in role_holders_via(conn, &roles).await? {
+        let c = cleared.entry(h.user_id).or_default();
+        c.via.insert(ClearedVia {
+            kind: ClearedViaKind::Role,
+            name: h.role_name,
+        });
+        c.on_engines |= h.username.is_some();
+    }
+    for m in group_members_via(conn, &groups).await? {
+        cleared
+            .entry(m.user_id)
+            .or_default()
+            .via
+            .insert(ClearedVia {
+                kind: ClearedViaKind::Group,
+                name: m.group_name,
+            });
+    }
+
+    let count = u32::try_from(cleared.len()).unwrap_or(u32::MAX);
+    let ids: Vec<Uuid> = cleared.keys().copied().collect();
+    let mut refs = member_refs_via(conn, &ids).await?;
+    let truncated = cleared.len() > CLEARED_PEOPLE_LIMIT;
+    refs.truncate(CLEARED_PEOPLE_LIMIT);
+    let people = refs
+        .into_iter()
+        .map(|r| {
+            let c = cleared.remove(&r.user_id).unwrap_or_default();
+            ClearedPerson {
+                user_id: r.user_id,
+                label: r.label,
+                username: r.username,
+                via: c.via.into_iter().collect(),
+                on_engines: c.on_engines,
+            }
+        })
+        .collect();
+    Ok(Some(ClearedPeople {
+        count,
+        people,
+        truncated,
+    }))
+}

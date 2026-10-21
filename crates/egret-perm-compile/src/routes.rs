@@ -161,6 +161,10 @@ pub fn perm_router() -> Router<PermState> {
         )
         .route("/perm/people/groups/{name}", get(people::read_group))
         .route("/perm/people/roles/{name}", get(people::read_role))
+        .route(
+            "/perm/clearances/{tag_id}/people",
+            get(people::cleared_people),
+        )
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route(
@@ -220,6 +224,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         people::allocate_username,
         people::read_group,
         people::read_role,
+        people::cleared_people,
         people::explain_principal,
         preview,
         explain,
@@ -272,6 +277,10 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::people::EngineClearance,
         crate::people::EgretClearance,
         crate::people::EngineNotClearedReason,
+        crate::people::ClearedPeople,
+        crate::people::ClearedPerson,
+        crate::people::ClearedVia,
+        crate::people::ClearedViaKind,
         people::ExplainPrincipalRequest,
         people::ExplainPrincipalRef,
         people::ExplainPrincipalResponse,

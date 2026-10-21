@@ -7765,6 +7765,78 @@
         }
       }
     },
+    "/api/control-plane/perm/clearances/{tag_id}/people": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "cleared_people",
+        "parameters": [
+          {
+            "name": "tag_id",
+            "in": "path",
+            "description": "The classification's (tag's) id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The people the classification's clearance admits, each once with every required role and group that clears them: live, direct, allow holders of a required role (any scope) and direct members of a required group, as the compiler reads them (service accounts included). Not listed: people holding a required role only through a group, and platform admins (egret exempts them; engines do not). `onEngines` is true only for a required-role holder with a username, whom the compiled engine deny excepts. `count` counts everyone; `people` is the first 200 sorted by label, and `truncated` says more exist. A tag with no clearance answers no one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearedPeople"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No classification has this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/compile/{service_id}": {
       "post": {
         "tags": [
@@ -39659,6 +39731,97 @@
           }
         }
       },
+      "ClearedPeople": {
+        "type": "object",
+        "description": "The people a classification's clearance admits, as egret's membership\nreads see them: the live, direct, `allow` holders of any of its\n`required_roles` (at any scope; [`crate::members::role_holders_via`]) and\nthe direct members of any of its `required_groups`\n([`crate::members::group_members_via`]), each person once. Not listed:\npeople holding a required role only through a group (egret clears them,\nengines do not), and platform admins, whom egret exempts from every gate\nbut engines do not.",
+        "required": [
+          "count",
+          "people",
+          "truncated"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Every person admitted.",
+            "minimum": 0
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearedPerson"
+            },
+            "description": "The first [`CLEARED_PEOPLE_LIMIT`] (200) of them, sorted by label."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More people are admitted than are listed."
+          }
+        }
+      },
+      "ClearedPerson": {
+        "type": "object",
+        "description": "One person a clearance admits.",
+        "required": [
+          "userId",
+          "label",
+          "via",
+          "onEngines"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string",
+            "description": "Name, else email."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stored engine username; null when none is allocated yet."
+          },
+          "via": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearedVia"
+            },
+            "description": "Every required role, then every required group, that clears them,\neach sorted by name."
+          },
+          "onEngines": {
+            "type": "boolean",
+            "description": "Whether the compiled engine deny excepts them: they hold a required\nrole directly, unexpired, and have a username. A required group never\ndoes (a group-only gate compiles to nothing on engines, and a gate with\nroles excepts only role holders), and a holder with no username is\nnamed once a compile mints one."
+          }
+        }
+      },
+      "ClearedVia": {
+        "type": "object",
+        "description": "One required role or group a person is cleared through.",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ClearedViaKind"
+          },
+          "name": {
+            "type": "string",
+            "description": "The role's or group's name."
+          }
+        }
+      },
+      "ClearedViaKind": {
+        "type": "string",
+        "description": "How a person comes to be cleared.",
+        "enum": [
+          "role",
+          "group"
+        ]
+      },
       "ClientDto": {
         "type": "object",
         "required": [
@@ -53388,6 +53551,7 @@
         "required": [
           "catalogId",
           "catalogName",
+          "warehouseId",
           "schema",
           "table",
           "onTable",
@@ -53400,6 +53564,11 @@
           },
           "catalogName": {
             "type": "string"
+          },
+          "warehouseId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The warehouse the assignment is stored under (the catalog's\n`warehouse_id`): what a write to this table's classification names."
           },
           "schema": {
             "type": "string"

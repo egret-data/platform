@@ -14,8 +14,9 @@ use uuid::Uuid;
 
 use super::{PermHttpError, PermState};
 use crate::people::{
-    list_people_via, principal_members_via, read_group_via, read_role_via, read_user_via,
-    GroupPrincipal, ListKind, PeopleFilter, PeopleList, RolePrincipal, UserPrincipal,
+    cleared_people_via, list_people_via, principal_members_via, read_group_via, read_role_via,
+    read_user_via, ClearedPeople, GroupPrincipal, ListKind, PeopleFilter, PeopleList,
+    RolePrincipal, UserPrincipal,
 };
 
 /// The default page size, and the largest one a caller may ask for.
@@ -307,6 +308,31 @@ pub(super) async fn read_role(
     let role = snapshot!(st, |conn| read_role_via(conn, &name));
     role.map(Json)
         .ok_or_else(|| PermHttpError::Missing(format!("No role is named {name}.")))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/clearances/{tag_id}/people",
+    tag = "perm",
+    params(("tag_id" = Uuid, Path, description = "The classification's (tag's) id")),
+    responses(
+        (status = 200, description = "The people the classification's clearance admits, each once with every required role and group that clears them: live, direct, allow holders of a required role (any scope) and direct members of a required group, as the compiler reads them (service accounts included). Not listed: people holding a required role only through a group, and platform admins (egret exempts them; engines do not). `onEngines` is true only for a required-role holder with a username, whom the compiled engine deny excepts. `count` counts everyone; `people` is the first 200 sorted by label, and `truncated` says more exist. A tag with no clearance answers no one", body = ClearedPeople),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No classification has this id", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn cleared_people(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(tag_id): Path<Uuid>,
+) -> Result<Json<ClearedPeople>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let cleared = snapshot!(st, |conn| cleared_people_via(conn, tag_id));
+    cleared
+        .map(Json)
+        .ok_or_else(|| PermHttpError::Missing("No classification has this id.".to_string()))
 }
 
 // ---------------------------------------------------------------------------
