@@ -31,8 +31,14 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - name: Warn when user-visible code changes without a docs mention
+        # The PR body and the base branch name are attacker-controlled text: pass them through the
+        # environment. Writing `${{ ... }}` straight into the script made the shell run any backtick or
+        # `$(...)` in a PR description.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-          if echo "$changed" | grep -qE '^(frontend/src|crates/.*/src)/' && ! grep -qi "docs" <<<"${{ github.event.pull_request.body }}"; then
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          if echo "$changed" | grep -qE '^(frontend/src|crates/.*/src)/' && ! grep -qi "docs" <<<"$PR_BODY"; then
             echo "::warning::This PR changes frontend/crates but the description never mentions docs. Link the egret-data/docs PR or state 'docs: not applicable'."
           fi
