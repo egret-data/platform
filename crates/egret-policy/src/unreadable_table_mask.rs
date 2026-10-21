@@ -221,8 +221,12 @@ pub struct UnreadableTableMask {
     pub warehouse_id: Option<Uuid>,
     pub schema: String,
     pub table: String,
-    /// The tag sits whole on more than one table; `schema`/`table` name the
-    /// first in `(schema, table)` order.
+    /// The tag has other table-level attachments besides the one named here.
+    /// An attachment is a `(warehouse, schema, table)`: the same `schema.table`
+    /// attached in two warehouses is two attachments, so this is `true` then
+    /// too. `warehouse_id`/`schema`/`table` name the first in
+    /// `(schema, table, warehouse)` order, so the one reported is stable.
+    /// Always `false` for the Attachment arm, which reads no attachment.
     pub more_tables: bool,
 }
 
@@ -430,8 +434,10 @@ impl<'a> From<TagRef<'a>> for TagBy<'a> {
 /// caught a second spelling of "table-level" inside its first fix (commit
 /// `95c15014`), which is why this is a function and not three queries.
 ///
-/// Returns the first table-level attachment in `(schema, table)` order and
-/// whether there is more than one. Exactly one of the three bindings is
+/// Returns the first table-level attachment in `(schema, table, warehouse)`
+/// order — the warehouse is the tiebreaker that keeps the reported one stable
+/// when one `schema.table` is attached in two warehouses — and whether there
+/// is any other attachment. Exactly one of the three bindings is
 /// non-NULL by construction of [`TagBy`]; the `IS NULL OR` shape is what lets
 /// one statement serve all three.
 async fn table_level_attachment_of(
@@ -452,7 +458,7 @@ async fn table_level_attachment_of(
             AND ($1::text IS NULL OR t.key = $1) \
             AND ($2::text IS NULL OR t.name = $2) \
             AND ($3::uuid IS NULL OR t.id = $3) \
-          ORDER BY a.schema_name, a.table_name \
+          ORDER BY a.schema_name, a.table_name, a.warehouse_id \
           LIMIT 2",
     )
     .bind(key)
@@ -655,23 +661,6 @@ pub async fn unreadable_table_mask_for(
 mod tests {
     use super::*;
 
-    /// The refusal must carry **all three** remedies and the table, from either
-    /// direction — the steward needs to know which box to change, and there are
-    /// three boxes.
-    ///
-    /// **This assertion CHANGED DIRECTION in SP4d debt Task 16, deliberately,
-    /// and the change is stated here at the site.** It was
-    /// `the_refusal_names_the_table_and_both_remedies` and it asserted exactly
-    /// two remedies. The third ("edit the policy so it addresses the table by
-    /// path") did not exist as a remedy while `PUT /policies/{id}` had no
-    /// `is_tag_kind` branch — the only way to change an editor-authored tag mask
-    /// was delete-and-recreate. Task 16 added the branch, so a two-remedy
-    /// assertion would now be pinning a worse message as the desired one.
-    ///
-    /// Asserted by substring and not against a golden string: a golden copy of
-    /// the sentence is a second place to edit it, and the thing that must not
-    /// regress is the presence of the three remedies, not the wording around
-    /// them.
     #[test]
     fn the_refusal_body_carries_the_sentence_and_every_field_the_ui_acts_on() {
         let tag_id = Uuid::new_v4();
@@ -701,6 +690,23 @@ mod tests {
         assert_eq!(body["moreTables"], true);
     }
 
+    /// The refusal must carry **all three** remedies and the table, from either
+    /// direction — the steward needs to know which box to change, and there are
+    /// three boxes.
+    ///
+    /// **This assertion CHANGED DIRECTION in SP4d debt Task 16, deliberately,
+    /// and the change is stated here at the site.** It was
+    /// `the_refusal_names_the_table_and_both_remedies` and it asserted exactly
+    /// two remedies. The third ("edit the policy so it addresses the table by
+    /// path") did not exist as a remedy while `PUT /policies/{id}` had no
+    /// `is_tag_kind` branch — the only way to change an editor-authored tag mask
+    /// was delete-and-recreate. Task 16 added the branch, so a two-remedy
+    /// assertion would now be pinning a worse message as the desired one.
+    ///
+    /// Asserted by substring and not against a golden string: a golden copy of
+    /// the sentence is a second place to edit it, and the thing that must not
+    /// regress is the presence of the three remedies, not the wording around
+    /// them.
     #[test]
     fn the_refusal_names_the_table_and_all_three_remedies() {
         for (origin, noun) in [

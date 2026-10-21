@@ -549,6 +549,18 @@ async fn the_pair_the_rename_would_create_is_the_shape_the_engine_downloads() {
         .await
         .expect_err("renaming INTO a masked name must be refused");
     let msg = err.to_string();
+    // Classification UX spec C5: the rename refusal carries the same stable
+    // code and ids as the other two write paths, with the warehouse READ from
+    // the table-level attachment (the rename writes no attachment of its own).
+    let egret_bi::BiError::Coded { status, body } = &err else {
+        panic!("the rename refusal must be a coded 400; got {err:?}");
+    };
+    assert_eq!(*status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "table_tag_mask_conflict", "{body}");
+    assert_eq!(body["tagId"], tag.id.to_string(), "{body}");
+    assert_eq!(body["warehouseId"], f.warehouse_id.to_string(), "{body}");
+    assert_eq!(body["maskOrigin"], "policy", "{body}");
+    assert_eq!(body["moreTables"], false, "{body}");
     assert!(
         msg.contains("sales.orders") && msg.contains(&mask_name) && msg.contains(&new_name),
         "the refusal must name the table, the policy to edit and the tag; got {msg}"

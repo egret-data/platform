@@ -7949,6 +7949,13 @@ async fn a_rule_patch_keeping_a_since_deleted_exemption_is_accepted() {
 /// Spec C5: a classification mask over a classification that sits on a whole
 /// table is refused with a stable code and the ids the UI needs to offer
 /// "Remove from table" — on preview, before anything is created.
+///
+/// Also pins `moreTables` end to end and which attachment is reported: one
+/// attachment → `false`; another table → `true`, still naming the first in
+/// `(schema, table, warehouse)` order; the SAME `schema.table` in a second
+/// warehouse is a second attachment → `true`, and the warehouse tiebreaker
+/// makes the reported warehouse the smaller id rather than whichever row
+/// Postgres returns first.
 #[tokio::test]
 async fn a_tag_mask_over_a_table_level_attachment_answers_table_tag_mask_conflict() {
     let Some(f) = setup().await else { return };
@@ -7962,34 +7969,61 @@ async fn a_tag_mask_over_a_table_level_attachment_answers_table_tag_mask_conflic
     .fetch_one(&f.db.pool)
     .await
     .expect("the fixture's assignment");
+    let attach = |warehouse: Uuid, table: &'static str| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+                 VALUES ($1, $2, 'sales', $3, '')",
+            )
+            .bind(tag_id)
+            .bind(warehouse)
+            .bind(table)
+            .execute(&pool)
+            .await
+            .expect("table-level attachment");
+        }
+    };
+    let preview = || {
+        let rule = json!({
+            "name": unique("mask-on-table-tag"),
+            "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+            "selector": { "type": "tag", "key": f.tag_key },
+            "exempt": { "include": [], "exclude": [] }
+        });
+        let app = f.app();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(
+                    "POST",
+                    "/perm/preview",
+                    &token,
+                    Some(json!({ "rule": rule })),
+                ))
+                .await
+                .unwrap(),
+            )
+            .await
+        }
+    };
+
+    attach(wh, "orders").await;
+    let (status, one) = preview().await;
+    // A table that sorts AFTER `orders`, so the reported one stays `orders`.
+    attach(wh, "zz_orders").await;
+    let (_, two_tables) = preview().await;
     sqlx::query(
-        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
-         VALUES ($1, $2, 'sales', 'orders', '')",
+        "DELETE FROM catalog_tag_assignments WHERE tag_id = $1 AND column_name = '' \
+           AND table_name = 'zz_orders'",
     )
     .bind(tag_id)
-    .bind(wh)
     .execute(&f.db.pool)
     .await
-    .expect("table-level attachment");
-
-    let rule = json!({
-        "name": unique("mask-on-table-tag"),
-        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
-        "selector": { "type": "tag", "key": f.tag_key },
-        "exempt": { "include": [], "exclude": [] }
-    });
-    let (status, body) = into_json(
-        f.app()
-            .oneshot(req(
-                "POST",
-                "/perm/preview",
-                &token,
-                Some(json!({ "rule": rule })),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
+    .expect("drop the second table");
+    let other_wh = Uuid::new_v4();
+    attach(other_wh, "orders").await;
+    let (_, two_warehouses) = preview().await;
 
     sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = $1 AND column_name = ''")
         .bind(tag_id)
@@ -7997,17 +8031,42 @@ async fn a_tag_mask_over_a_table_level_attachment_answers_table_tag_mask_conflic
         .await
         .expect("clean up");
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "table_tag_mask_conflict");
-    assert_eq!(body["tagId"], tag_id.to_string());
-    assert_eq!(body["warehouseId"], wh.to_string());
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{one}");
+    assert_eq!(one["code"], "table_tag_mask_conflict");
+    assert_eq!(one["tagId"], tag_id.to_string());
+    assert_eq!(one["warehouseId"], wh.to_string());
     assert_eq!(
-        (body["schema"].as_str(), body["table"].as_str()),
+        (one["schema"].as_str(), one["table"].as_str()),
         (Some("sales"), Some("orders"))
     );
-    assert_eq!(body["maskOrigin"], "rule");
+    assert_eq!(one["maskOrigin"], "rule");
+    assert_eq!(one["moreTables"], false, "one attachment: {one}");
     assert!(
-        body["error"].as_str().unwrap().starts_with("tag \""),
-        "the sentence is kept: {body}"
+        one["error"].as_str().unwrap().starts_with("tag \""),
+        "the sentence is kept: {one}"
+    );
+
+    assert_eq!(
+        two_tables["code"], "table_tag_mask_conflict",
+        "{two_tables}"
+    );
+    assert_eq!(two_tables["moreTables"], true, "two tables: {two_tables}");
+    assert_eq!(
+        two_tables["table"], "orders",
+        "the first in order: {two_tables}"
+    );
+
+    assert_eq!(
+        two_warehouses["code"], "table_tag_mask_conflict",
+        "{two_warehouses}"
+    );
+    assert_eq!(
+        two_warehouses["moreTables"], true,
+        "one table in two warehouses is two attachments: {two_warehouses}"
+    );
+    assert_eq!(
+        two_warehouses["warehouseId"],
+        wh.min(other_wh).to_string(),
+        "the warehouse tiebreaker reports the smaller id: {two_warehouses}"
     );
 }
