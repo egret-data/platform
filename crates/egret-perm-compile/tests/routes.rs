@@ -7945,3 +7945,69 @@ async fn a_rule_patch_keeping_a_since_deleted_exemption_is_accepted() {
     let (status, resp) = send(&f, "PATCH", &format!("/perm/rules/{id}"), &token, renamed).await;
     assert_eq!(status, StatusCode::OK, "body: {resp}");
 }
+
+/// Spec C5: a classification mask over a classification that sits on a whole
+/// table is refused with a stable code and the ids the UI needs to offer
+/// "Remove from table" — on preview, before anything is created.
+#[tokio::test]
+async fn a_tag_mask_over_a_table_level_attachment_answers_table_tag_mask_conflict() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, wh): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT a.tag_id, a.warehouse_id FROM catalog_tag_assignments a JOIN tags t ON t.id = a.tag_id \
+          WHERE t.key = $1 LIMIT 1",
+    )
+    .bind(&f.tag_key)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the fixture's assignment");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 'sales', 'orders', '')",
+    )
+    .bind(tag_id)
+    .bind(wh)
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
+
+    let rule = json!({
+        "name": unique("mask-on-table-tag"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "tag", "key": f.tag_key },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "rule": rule })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = $1 AND column_name = ''")
+        .bind(tag_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("clean up");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "table_tag_mask_conflict");
+    assert_eq!(body["tagId"], tag_id.to_string());
+    assert_eq!(body["warehouseId"], wh.to_string());
+    assert_eq!(
+        (body["schema"].as_str(), body["table"].as_str()),
+        (Some("sales"), Some("orders"))
+    );
+    assert_eq!(body["maskOrigin"], "rule");
+    assert!(
+        body["error"].as_str().unwrap().starts_with("tag \""),
+        "the sentence is kept: {body}"
+    );
+}

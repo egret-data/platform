@@ -317,7 +317,10 @@ impl TagRepo {
             )
             .await?
             {
-                return Err(BiError::BadRequest(pair.refusal()));
+                return Err(BiError::Coded {
+                    status: StatusCode::BAD_REQUEST,
+                    body: pair.refusal_body(),
+                });
             }
         }
         // **SP4d-4 Task 3 fix round 3 (re-review M-2): the rename's own

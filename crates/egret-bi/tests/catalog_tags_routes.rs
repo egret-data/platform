@@ -445,6 +445,17 @@ async fn a_table_level_assignment_is_refused_when_a_tag_mask_names_the_tag() {
             StatusCode::BAD_REQUEST,
             "the {surface} surface's mask must make a table-level assignment a 400; got {body}"
         );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(json["code"], "table_tag_mask_conflict", "{surface}: {json}");
+        assert_eq!(
+            json["maskOrigin"],
+            if surface == "rule" { "rule" } else { "policy" }
+        );
+        assert_eq!(json["tagId"], tag.id.to_string());
+        assert!(
+            json["warehouseId"].is_null(),
+            "the attachment in flight is the table-level one"
+        );
         assert!(
             body.contains("sales.orders"),
             "the refusal must name the table that would become unreadable; got {body}"

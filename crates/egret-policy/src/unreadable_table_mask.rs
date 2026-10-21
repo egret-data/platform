@@ -212,8 +212,18 @@ pub struct UnreadableTableMask {
     /// `tags.name` — what the engine matches a tag policy on, and what the
     /// steward sees in the tag picker.
     pub tag: String,
+    /// `tags.id` — what the UI acts on ("Remove from table").
+    pub tag_id: Uuid,
+    /// The warehouse of the table-level attachment. `Some` when the
+    /// attachment was READ (the Mask and Rename arms); `None` for the
+    /// Attachment arm, where the write in flight IS that attachment and the
+    /// caller already knows where it is going.
+    pub warehouse_id: Option<Uuid>,
     pub schema: String,
     pub table: String,
+    /// The tag sits whole on more than one table; `schema`/`table` name the
+    /// first in `(schema, table)` order.
+    pub more_tables: bool,
 }
 
 impl UnreadableTableMask {
@@ -261,6 +271,7 @@ impl UnreadableTableMask {
             tag,
             schema,
             table,
+            ..
         } = self;
         let noun = mask_origin.noun();
         format!(
@@ -272,6 +283,28 @@ impl UnreadableTableMask {
              {mask:?} by catalog/schema/table/column path instead of by tag, or edit {mask:?} \
              so it addresses {schema}.{table} by path."
         )
+    }
+
+    /// The structured refusal every route that refuses this pair answers with
+    /// (classification UX spec C5): `error` is [`Self::refusal`] verbatim, so a
+    /// client that reads only `error` keeps working, and `code` plus the ids let
+    /// the UI offer the remedy ("Remove from table") without parsing the sentence.
+    pub fn refusal_body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": self.refusal(),
+            "code": "table_tag_mask_conflict",
+            "tag": self.tag,
+            "tagId": self.tag_id,
+            "warehouseId": self.warehouse_id,
+            "schema": self.schema,
+            "table": self.table,
+            "mask": self.mask,
+            "maskOrigin": match self.mask_origin {
+                MaskOrigin::Rule => "rule",
+                MaskOrigin::Policy => "policy",
+            },
+            "moreTables": self.more_tables,
+        })
     }
 }
 
@@ -397,20 +430,22 @@ impl<'a> From<TagRef<'a>> for TagBy<'a> {
 /// caught a second spelling of "table-level" inside its first fix (commit
 /// `95c15014`), which is why this is a function and not three queries.
 ///
-/// Returns `(tags.name, schema, table)`. Exactly one of the three bindings is
+/// Returns the first table-level attachment in `(schema, table)` order and
+/// whether there is more than one. Exactly one of the three bindings is
 /// non-NULL by construction of [`TagBy`]; the `IS NULL OR` shape is what lets
 /// one statement serve all three.
 async fn table_level_attachment_of(
     conn: &mut sqlx::PgConnection,
     tag: TagBy<'_>,
-) -> Result<Option<(String, String, String)>, sqlx::Error> {
+) -> Result<Option<(TableLevel, bool)>, sqlx::Error> {
     let (key, name, id) = match tag {
         TagBy::Key(k) => (Some(k), None, None),
         TagBy::Name(n) => (None, Some(n), None),
         TagBy::Id(i) => (None, None, Some(i)),
     };
-    sqlx::query_as(
-        "SELECT t.name, a.schema_name, a.table_name \
+    let mut rows: Vec<TableLevel> = sqlx::query_as(
+        "SELECT t.id AS tag_id, t.name AS tag, a.warehouse_id, \
+                a.schema_name AS schema, a.table_name AS table \
            FROM catalog_tag_assignments a \
            JOIN tags t ON t.id = a.tag_id \
           WHERE a.column_name = '' \
@@ -418,13 +453,26 @@ async fn table_level_attachment_of(
             AND ($2::text IS NULL OR t.name = $2) \
             AND ($3::uuid IS NULL OR t.id = $3) \
           ORDER BY a.schema_name, a.table_name \
-          LIMIT 1",
+          LIMIT 2",
     )
     .bind(key)
     .bind(name)
     .bind(id)
-    .fetch_optional(conn)
-    .await
+    .fetch_all(conn)
+    .await?;
+    let more = rows.len() > 1;
+    rows.truncate(1);
+    Ok(rows.pop().map(|row| (row, more)))
+}
+
+/// One table-level attachment, as [`table_level_attachment_of`] reads it.
+#[derive(Debug, sqlx::FromRow)]
+struct TableLevel {
+    tag_id: Uuid,
+    tag: String,
+    warehouse_id: Uuid,
+    schema: String,
+    table: String,
 }
 
 /// **THE MASK HALF, spelled once, both mask surfaces in one statement.** Does
@@ -529,12 +577,15 @@ pub async fn unreadable_table_mask_for(
     match write {
         TagWrite::Mask { tag, origin, name } => Ok(table_level_attachment_of(conn, tag.into())
             .await?
-            .map(|(tag, schema, table)| UnreadableTableMask {
+            .map(|(row, more_tables)| UnreadableTableMask {
                 mask_origin: origin,
                 mask: name.to_string(),
-                tag,
-                schema,
-                table,
+                tag: row.tag,
+                tag_id: row.tag_id,
+                warehouse_id: Some(row.warehouse_id),
+                schema: row.schema,
+                table: row.table,
+                more_tables,
             })),
         TagWrite::Attachment {
             tag_id,
@@ -559,8 +610,12 @@ pub async fn unreadable_table_mask_for(
                     mask_origin,
                     mask,
                     tag: tag_name,
+                    tag_id,
+                    // The write in flight IS the table-level attachment.
+                    warehouse_id: None,
                     schema: schema.to_string(),
                     table: table.to_string(),
+                    more_tables: false,
                 }))
         }
         TagWrite::Rename { tag_id, new_name } => {
@@ -568,7 +623,7 @@ pub async fn unreadable_table_mask_for(
             // SAME predicate the Mask arm asks, located by id because the name
             // is the thing in flight. A tag with no table-level attachment
             // cannot be half of this pair whatever it is called.
-            let Some((_old_name, schema, table)) =
+            let Some((attachment, more_tables)) =
                 table_level_attachment_of(&mut *conn, TagBy::Id(tag_id)).await?
             else {
                 return Ok(None);
@@ -586,8 +641,11 @@ pub async fn unreadable_table_mask_for(
                     // The NEW name: it is what the engine would match the
                     // policy on the moment the rename commits.
                     tag: new_name.to_string(),
-                    schema,
-                    table,
+                    tag_id,
+                    warehouse_id: Some(attachment.warehouse_id),
+                    schema: attachment.schema,
+                    table: attachment.table,
+                    more_tables,
                 }))
         }
     }
@@ -615,6 +673,35 @@ mod tests {
     /// regress is the presence of the three remedies, not the wording around
     /// them.
     #[test]
+    fn the_refusal_body_carries_the_sentence_and_every_field_the_ui_acts_on() {
+        let tag_id = Uuid::new_v4();
+        let wh = Uuid::new_v4();
+        let pair = UnreadableTableMask {
+            mask_origin: MaskOrigin::Rule,
+            mask: "hash email".into(),
+            tag: "PII".into(),
+            tag_id,
+            warehouse_id: Some(wh),
+            schema: "analytics".into(),
+            table: "orders".into(),
+            more_tables: true,
+        };
+        let body = pair.refusal_body();
+        assert_eq!(body["error"], pair.refusal());
+        assert_eq!(body["code"], "table_tag_mask_conflict");
+        assert_eq!(body["tag"], "PII");
+        assert_eq!(body["tagId"], tag_id.to_string());
+        assert_eq!(body["warehouseId"], wh.to_string());
+        assert_eq!(
+            (body["schema"].as_str(), body["table"].as_str()),
+            (Some("analytics"), Some("orders"))
+        );
+        assert_eq!(body["mask"], "hash email");
+        assert_eq!(body["maskOrigin"], "rule");
+        assert_eq!(body["moreTables"], true);
+    }
+
+    #[test]
     fn the_refusal_names_the_table_and_all_three_remedies() {
         for (origin, noun) in [
             (MaskOrigin::Rule, "mask rule"),
@@ -624,8 +711,11 @@ mod tests {
                 mask_origin: origin,
                 mask: "mask-pii".into(),
                 tag: "PII".into(),
+                tag_id: Uuid::nil(),
+                warehouse_id: None,
                 schema: "sales".into(),
                 table: "orders".into(),
+                more_tables: false,
             }
             .refusal();
             assert!(msg.contains("sales.orders"), "names the table: {msg}");

@@ -1486,7 +1486,10 @@ pub(crate) async fn write_rule(
         .await
         .map_err(PermHttpError::db)?
         {
-            return Err(PermHttpError::BadRequest(pair.refusal()));
+            return Err(PermHttpError::Coded {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                body: pair.refusal_body(),
+            });
         }
     }
 
@@ -1879,7 +1882,7 @@ async fn list_rules(
     request_body = NewRule,
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
-        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -1923,7 +1926,7 @@ async fn create_rule(
                    at all.",
     responses(
         (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
@@ -2050,7 +2053,7 @@ async fn name_profiles(
                    from what the write would do.",
     responses(
         (status = 200, description = "The profiles the write would touch, and what its recompile would do", body = PreviewResponse),
-        (status = 400, description = "The same refusal the write itself would have returned", body = ErrorBody),
+        (status = 400, description = "The same refusal the write itself would have returned (including code `table_tag_mask_conflict` for a tag-addressed mask over a table-level attachment)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
