@@ -36,7 +36,8 @@ returns on every read; a `Log` that printed it stored it in
 - Existing rows: SQL cannot tell which inputs are SECRET (that is the YAML in
   `source`), so egret-bin runs `secret_inputs::backfill` at startup: every
   execution whose source declares a SECRET input and whose `secret_inputs` is
-  NULL gets its values masked and, with a key, sealed. Idempotent.
+  NULL gets its values masked and, with a key, sealed; the log lines and run
+  messages its runs stored are masked too. Idempotent.
 
 **Read paths checked by the tests** (all through the real routes): the
 start's answer; `GET .../executions/{id}`; `GET .../executions` and

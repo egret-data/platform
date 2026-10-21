@@ -428,6 +428,16 @@ async fn the_backfill_masks_and_seals_a_secret_stored_in_clear(pool: sqlx::PgPoo
     .fetch_one(&f.pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow.task_logs (workspace_id, execution_id, level, ts, message) \
+         VALUES ($1, $2, 2, now(), $3)",
+    )
+    .bind(f.ws)
+    .bind(old)
+    .bind(format!("pw={PLAIN} len=18"))
+    .execute(&f.pool)
+    .await
+    .unwrap();
 
     // Act
     let changed = egret_workflow::secret_inputs::backfill(&f.pool)
@@ -448,6 +458,17 @@ async fn the_backfill_masks_and_seals_a_secret_stored_in_clear(pool: sqlx::PgPoo
     assert_eq!(inputs, json!({"pw": MASK, "who": "world"}));
     let (revealed, _) = egret_workflow::secret_inputs::reveal(inputs, sealed.as_deref()).unwrap();
     assert_eq!(revealed, json!({"pw": PLAIN, "who": "world"}));
+    let line: String =
+        sqlx::query_scalar("SELECT message FROM workflow.task_logs WHERE execution_id = $1")
+            .bind(old)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        line,
+        format!("pw={MASK} len=18"),
+        "the stored line is masked too"
+    );
     assert_masked(
         "the old execution's detail",
         &f.get(&format!("/workflows/executions/{old}")).await,

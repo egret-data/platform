@@ -118,9 +118,9 @@ fn split_with(
 }
 
 /// Executions stored before migration 0203 hold their SECRET values in clear
-/// in `inputs`. Masks them, and seals them when this process has a cipher (so a
-/// replay of such an execution still runs with the value); without one the
-/// value is only masked. Idempotent: a row already sealed, or whose SECRET
+/// in `inputs`, and their runs' log lines and messages may too. Masks them, and
+/// seals the inputs when this process has a cipher (so a replay of such an
+/// execution still runs with the value); without one the value is only masked. Idempotent: a row already sealed, or whose SECRET
 /// values already read [`MASK`], is left alone. Returns the rows changed.
 pub async fn backfill(pool: &sqlx::PgPool) -> Result<u64> {
     let db_err = |e: sqlx::Error| Error::Internal(anyhow::anyhow!("secret inputs backfill: {e}"));
@@ -159,8 +159,37 @@ pub async fn backfill(pool: &sqlx::PgPool) -> Result<u64> {
                 Some(c) => split_with(&flow, Value::Object(clear.clone()), Some(c))?,
                 None => (mask_only(&flow, Value::Object(clear.clone())), None),
             };
-            if masked == Value::Object(clear) {
+            if masked == Value::Object(clear.clone()) {
                 continue;
+            }
+            // The lines and messages its runs already stored carry the value
+            // too (`RunLog::masked` came with this change): mask them, longest
+            // value first, as `logs::mask` does.
+            let mut values: Vec<String> = secret_ids(&flow)
+                .filter_map(|sid| clear.get(sid))
+                .filter(|v| !v.is_null())
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .filter(|v| !v.is_empty())
+                .collect();
+            values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+            for value in &values {
+                for statement in [
+                    "UPDATE workflow.task_logs SET message = replace(message, $2, $3) \
+                      WHERE execution_id = $1 AND strpos(message, $2) > 0",
+                    "UPDATE workflow.task_runs SET message = replace(message, $2, $3) \
+                      WHERE execution_id = $1 AND strpos(message, $2) > 0",
+                ] {
+                    sqlx::query(statement)
+                        .bind(id)
+                        .bind(value)
+                        .bind(MASK)
+                        .execute(pool)
+                        .await
+                        .map_err(db_err)?;
+                }
             }
             let Value::Object(mut masked) = masked else {
                 continue;
