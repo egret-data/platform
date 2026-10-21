@@ -405,7 +405,7 @@ describe("Who can read?", () => {
     await user.click(await within(await screen.findByRole("dialog", { name: "email" })).findByRole("button", { name: "Who can read this column?" }));
     const dialog = await screen.findByRole("dialog", { name: "Who can read?" });
     const explain = within(dialog).getByRole("button", { name: "Explain" });
-    expect(explain).toBeDisabled();
+    expect(explain).toHaveAttribute("aria-disabled", "true");
     expect(within(dialog).getByText("Explain needs a user.")).toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("User"), "alice");
     await user.click(explain);
@@ -475,7 +475,7 @@ describe("Who can read?", () => {
     // The answer for alice arrives after the field names someone else.
     await user.type(field, "2");
     answer(ok(EXPLAIN));
-    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Explain" })).toBeEnabled());
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Explain" })).not.toHaveAttribute("aria-disabled"));
     expect(within(dialog).queryByTestId("explain-result")).not.toBeInTheDocument();
 
     // A refusal for one user is gone once the field names another.
@@ -499,7 +499,7 @@ describe("Who can read?", () => {
     renderPage("/governance/data/ice/sales/orders");
     await user.click(await screen.findByRole("button", { name: "Who can read?" }));
     const dialog = await screen.findByRole("dialog", { name: "Who can read?" });
-    expect(dialog).toHaveTextContent("Whether a user, or each member of a group or role, can read this, per policy profile");
+    expect(dialog).toHaveTextContent("Whether a user, or each member of a group or role, can read this, as each engine that serves its catalog would decide it.");
 
     await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
     expect(optionNames(await screen.findAllByRole("option"))).toEqual(["User", "Group", "Role"]);

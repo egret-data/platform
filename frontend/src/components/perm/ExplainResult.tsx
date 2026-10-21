@@ -1082,6 +1082,7 @@ export function SubjectUserField({
   label = "User",
   invalid = false,
   describedBy,
+  listInFlow = false,
 }: {
   value: string;
   onChange: (username: string) => void;
@@ -1092,6 +1093,12 @@ export function SubjectUserField({
   invalid?: boolean;
   /** Ids of the help or error text under the field. */
   describedBy?: string;
+  /**
+   * Renders the suggestions in the flow under the field instead of over what
+   * follows it, so they push the next control down rather than cover it (the
+   * Explain button at 390 px, live result §5).
+   */
+  listInFlow?: boolean;
 }) {
   const sent = useDebounced(value);
   // Searched from the first focus on (as the list first opens), never on mount.
@@ -1124,7 +1131,7 @@ export function SubjectUserField({
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
-      <div ref={boxRef} className="relative">
+      <div ref={boxRef} className={listInFlow ? "space-y-1" : "relative"}>
         <Input
           id={id}
           {...combo.inputProps}
@@ -1145,7 +1152,7 @@ export function SubjectUserField({
         />
         {combo.open && (
           <div
-            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            className={`${listInFlow ? "" : "absolute z-10 mt-1 shadow-md "}max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1`}
             {...combo.popupProps}
           >
             <ul id={combo.listId} role="listbox" aria-label="User suggestions">
@@ -1205,6 +1212,30 @@ export function SubjectUserField({
   );
 }
 
+/** The "nothing is enforcing" state's badge and sentence: one wording for a user's answer and a group's or role's. */
+export const NOTHING_ENFORCING_TITLE = "Nothing is enforcing";
+export const NOTHING_ENFORCING_TEXT =
+  "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.";
+
+/**
+ * The `no_profile_serves_the_catalog` state (see `ExplainResultView`): a
+ * user's answer, and a group's or role's when every member asked got it
+ * (`MembersExplainView`; the outcome depends on the catalog alone).
+ */
+export function NothingEnforcing() {
+  return (
+    <Alert data-testid="no-profile-state">
+      <AlertDescription className="space-y-1">
+        <Badge variant="outline" className="gap-1">
+          <Server className="h-3 w-3" />
+          {NOTHING_ENFORCING_TITLE}
+        </Badge>
+        <p className="text-sm">{NOTHING_ENFORCING_TEXT}</p>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 /**
  * One explain answer: a block per policy profile, or the "nothing is
  * enforcing" state, then the limits of what it says. Moved out of the former
@@ -1233,17 +1264,7 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
 
            Classification UX C12: the visible sentence is the short one; the
            long one, unchanged, is under "How this answer was worked out". */
-        <Alert data-testid="no-profile-state">
-          <AlertDescription className="space-y-1">
-            <Badge variant="outline" className="gap-1">
-              <Server className="h-3 w-3" />
-              Nothing is enforcing
-            </Badge>
-            <p className="text-sm">
-              No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.
-            </p>
-          </AlertDescription>
-        </Alert>
+        <NothingEnforcing />
       ) : (
         <div className="space-y-3">
           {result.profiles.map((profile) => (

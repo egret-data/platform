@@ -167,7 +167,17 @@ export function serveData(data: FakeData): DataCalls {
         const method = (init?.method ?? "GET").toUpperCase();
         const call = `${method} ${perm[1]}`;
         permCalls.push({ call, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
-        if (call === "GET /perm/people") return reply(data.people ?? { status: 200, body: { items: [], total: 0 } });
+        if (call === "GET /perm/people") {
+          // A typed user's exact-username lookup (Who can read?): by default every username is a known user.
+          const username = url.searchParams.get("username");
+          if (username !== null && !data.people) {
+            return reply({
+              status: 200,
+              body: { items: [{ kind: "user", key: `u-${username}`, label: username, username, serviceAccount: false }], total: 1 },
+            });
+          }
+          return reply(data.people ?? { status: 200, body: { items: [], total: 0 } });
+        }
         if (call === "POST /perm/explain/principal") return reply(data.explainPrincipal);
         if (call === "GET /perm/grants") {
           const asked = permCalls.filter((c) => c.call === call).length - 1;

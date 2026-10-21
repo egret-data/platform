@@ -3,7 +3,7 @@ import { keepPreviousData } from "@tanstack/react-query";
 import { Loader2, Search } from "lucide-react";
 import type { ApiError } from "@/api/client";
 import type { Action, ExplainPrincipalResponse, ExplainResponse, Scope } from "@/api/generated/model";
-import { usePermExplain, usePermExplainPrincipal, usePermListPeople } from "@/api/generated/perm/perm";
+import { permListPeople, usePermExplain, usePermExplainPrincipal, usePermListPeople } from "@/api/generated/perm/perm";
 import { ExplainResultView, SubjectUserField } from "@/components/perm/ExplainResult";
 import { MembersExplainView } from "@/components/perm/MembersExplainView";
 import { ScopePicker } from "@/components/perm/ScopePicker";
@@ -66,13 +66,16 @@ export function SubjectField({
   kind,
   value,
   onChange,
+  listInFlow = false,
 }: {
   kind: SubjectKind;
   value: string;
   onChange: (ref: string) => void;
+  /** Suggestions in the flow under the field, pushing what follows down instead of covering it. */
+  listInFlow?: boolean;
 }) {
-  if (kind === "user") return <SubjectUserField value={value} onChange={onChange} />;
-  return <SubjectNameField kind={kind} value={value} onChange={onChange} />;
+  if (kind === "user") return <SubjectUserField value={value} onChange={onChange} listInFlow={listInFlow} />;
+  return <SubjectNameField kind={kind} value={value} onChange={onChange} listInFlow={listInFlow} />;
 }
 
 /**
@@ -85,10 +88,12 @@ function SubjectNameField({
   kind,
   value,
   onChange,
+  listInFlow,
 }: {
   kind: "group" | "role";
   value: string;
   onChange: (name: string) => void;
+  listInFlow: boolean;
 }) {
   const id = useId();
   const q = useDebounced(value);
@@ -103,7 +108,7 @@ function SubjectNameField({
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{SUBJECT_KIND_LABEL[kind]}</Label>
-      <div ref={boxRef} className="relative">
+      <div ref={boxRef} className={listInFlow ? "space-y-1" : "relative"}>
         <Input
           id={id}
           {...combo.inputProps}
@@ -122,7 +127,7 @@ function SubjectNameField({
         />
         {combo.open ? (
           <div
-            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            className={`${listInFlow ? "" : "absolute z-10 mt-1 shadow-md "}max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1`}
             {...combo.popupProps}
           >
             <ul id={combo.listId} role="listbox" aria-label={`${SUBJECT_KIND_LABEL[kind]} suggestions`}>
@@ -216,17 +221,27 @@ export type SubjectAnswer =
 export function useSubjectExplain() {
   const [answer, setAnswer] = useState<SubjectAnswer | null>(null);
   const [failure, setFailure] = useState<{ key: string; error: ApiError } | null>(null);
+  const [unknown, setUnknown] = useState<{ key: string; subject: Subject } | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const user = usePermExplain<ApiError>();
   const members = usePermExplainPrincipal<ApiError>();
   const latest = useRef<number>(0);
 
-  const ask = (q: Question) => {
+  /**
+   * `lookUpUser`: a typed user is first looked up by exact username
+   * (`GET /perm/people?username=`, the column explain's subject names), since
+   * explain answers for any username, known or not (live result finding 3).
+   * Only a lookup that answers "none" stops the question; one that cannot be
+   * made (refused, failed) asks explain as before, so nothing here claims
+   * there is no such user without the server saying so.
+   */
+  const ask = (q: Question, { lookUpUser = false }: { lookUpUser?: boolean } = {}) => {
     const key = questionKey(q);
     const asked = ++latest.current;
     const current = () => latest.current === asked;
     setAnswer(null);
     setFailure(null);
+    setUnknown(null);
     setPendingKey(key);
     const settle = () => setPendingKey((k) => (k === key ? null : k));
     const fail = (error: ApiError) => {
@@ -235,15 +250,33 @@ export function useSubjectExplain() {
       settle();
     };
     if (q.subject.kind === "user") {
-      user.mutate(
-        { data: { subject: { user: q.subject.ref }, action: q.action, target: q.target } },
-        {
-          onSuccess: (res) => {
-            if (!current()) return;
-            if (res.status === 200) setAnswer({ key, kind: "user", response: res.data });
-            settle();
+      const send = () =>
+        user.mutate(
+          { data: { subject: { user: q.subject.ref }, action: q.action, target: q.target } },
+          {
+            onSuccess: (res) => {
+              if (!current()) return;
+              if (res.status === 200) setAnswer({ key, kind: "user", response: res.data });
+              settle();
+            },
+            onError: fail,
           },
-          onError: fail,
+        );
+      if (!lookUpUser) {
+        send();
+        return;
+      }
+      // FE-DATA-2 exception: parameters computed at fetch time (the username being asked about), once per Explain.
+      permListPeople({ kind: "user", username: q.subject.ref, limit: 1 }).then(
+        (res) => {
+          if (!current()) return;
+          if (res.status === 200 && res.data.total === 0) {
+            setUnknown({ key, subject: q.subject });
+            settle();
+          } else send();
+        },
+        () => {
+          if (current()) send();
         },
       );
     } else {
@@ -268,18 +301,45 @@ export function useSubjectExplain() {
     pendingFor: (key: string) => pendingKey === key,
     answerFor: (key: string) => (answer?.key === key ? answer : null),
     failureFor: (key: string) => (failure?.key === key ? failure.error : null),
+    /** The typed subject no one has, when the lookup for the question `key` names said so. */
+    unknownFor: (key: string) => (unknown?.key === key ? unknown.subject : null),
   };
 }
 
-/** A refused explain, in words: the server's sentence (a 400 says why), or the permission it needs. */
+/** `No group named data. Pick a group from the suggestions.` (FE-COPY-2: what happened, and what to do). */
+export function noSubjectNamed(kind: SubjectKind, name: string): string {
+  const noun = kind === "user" ? "user" : kind === "group" ? "group" : "role";
+  return `No ${noun} named ${name}. Pick ${subjectNoun(kind)} from the suggestions.`;
+}
+
+/**
+ * The server's refusal of a group or role it does not have
+ * (`routes/people.rs` `explain_principal`: 400 `no group is named <name>`,
+ * after the `bad request: ` prefix), read back into kind and name.
+ */
+const NO_PRINCIPAL_NAMED = /\bno (group|role) is named (.+)$/;
+
+/** A refused explain, in words: a group or role nobody has, the permission it needs, or the server's sentence. */
 export function ExplainFailure({ error }: { error: ApiError }) {
+  const unknown = error.status === 400 ? NO_PRINCIPAL_NAMED.exec(error.message) : null;
   return (
     <Alert variant="destructive">
       <AlertDescription>
-        {error.status === 403
-          ? "Explaining access needs the policy:read permission."
-          : error.message || "Access could not be explained. Try again."}
+        {unknown
+          ? noSubjectNamed(unknown[1] as SubjectKind, unknown[2])
+          : error.status === 403
+            ? "Explaining access needs the policy:read permission."
+            : error.message || "Access could not be explained. Try again."}
       </AlertDescription>
+    </Alert>
+  );
+}
+
+/** A typed subject no one has: said instead of an answer. */
+function UnknownSubject({ subject }: { subject: Subject }) {
+  return (
+    <Alert variant="destructive">
+      <AlertDescription>{noSubjectNamed(subject.kind, subject.ref)}</AlertDescription>
     </Alert>
   );
 }
@@ -296,8 +356,11 @@ const EMPTY_SCOPE: Scope = { catalog_id: "" };
  * The whole question-and-answer: whatever of subject, action and target the
  * caller does not fix is a field (subject kind and subject, `ActionField`,
  * `ScopePicker`), then Explain, then the refusal or the answer for exactly the
- * question on screen (`useSubjectExplain`). Explain is disabled until the
- * question is complete, and says what is missing (FE-ACTION-4).
+ * question on screen (`useSubjectExplain`). Explain is `aria-disabled` until
+ * the question is complete, says what is missing (FE-ACTION-4) through
+ * `aria-describedby`, and stays in the tab order (N22); a press while blocked
+ * does nothing. A typed user is looked up first (`useSubjectExplain`'s
+ * `lookUpUser`); a page's own subject is not.
  */
 export function SubjectExplainForm({
   subject: fixedSubject,
@@ -332,7 +395,9 @@ export function SubjectExplainForm({
     .join(" and ");
   const pending = explain.pendingFor(key);
   const failure = explain.failureFor(key);
+  const unknown = explain.unknownFor(key);
   const answer = explain.answerFor(key);
+  const blocked = missing !== "" || pending;
 
   const parts = {
     subject: fixedSubject ? null : (
@@ -344,14 +409,22 @@ export function SubjectExplainForm({
             setRef("");
           }}
         />
-        <SubjectField kind={kind} value={ref} onChange={setRef} />
+        {/* In flow: an overlaid list covered Explain at 390 px (live result §5). */}
+        <SubjectField kind={kind} value={ref} onChange={setRef} listInFlow />
       </>
     ),
     action: fixedAction ? null : <ActionField value={action} onChange={setAction} />,
     target: fixedTarget ? null : <ScopePicker value={target} onChange={setTarget} />,
     submit: (
       <>
-        <Button type="submit" disabled={missing !== "" || pending} aria-describedby={missing ? needsId : undefined}>
+        <Button
+          type="submit"
+          aria-disabled={blocked || undefined}
+          aria-describedby={missing ? needsId : undefined}
+          onClick={(e) => {
+            if (blocked) e.preventDefault();
+          }}
+        >
           {pending ? <Loader2 aria-hidden className="animate-spin" /> : <Search aria-hidden />}
           Explain
         </Button>
@@ -369,7 +442,7 @@ export function SubjectExplainForm({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (missing === "" && !pending) explain.ask(question);
+          if (!blocked) explain.ask(question, { lookUpUser: !fixedSubject });
         }}
       >
         {layout ? (
@@ -384,6 +457,7 @@ export function SubjectExplainForm({
         )}
       </form>
       {failure ? <ExplainFailure error={failure} /> : null}
+      {unknown ? <UnknownSubject subject={unknown} /> : null}
       {answer ? <SubjectExplainAnswer answer={answer} /> : null}
     </div>
   );

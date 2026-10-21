@@ -2,15 +2,23 @@ import { Fragment, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Users } from "lucide-react";
 import type { ExplainPrincipalResponse, ExplainProfile, ExplainResponse, MemberVerdict } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
-import { decisionLabel, ExplainResultView, maskDecisionText } from "@/components/perm/ExplainResult";
+import { decisionLabel, ExplainResultView, maskDecisionText, NothingEnforcing } from "@/components/perm/ExplainResult";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
-/** Above the counts: why there is no single verdict (P5). */
+/**
+ * Above the counts: why there is no single verdict (P5). Each verdict is one
+ * policy profile's, and a profile is what an engine serving the catalog
+ * downloads, so "as each engine … would decide it" is what the rows show
+ * (engines sharing one profile decide alike, and it is shown once).
+ */
 export const NO_SINGLE_VERDICT =
-  "Each member's own answer, per policy profile. A group's or role's access is its members' access, and members can differ, so there is no single verdict.";
+  "Each member's own answer, as each engine that serves this catalog would decide it. A group's or role's access is its members' access, and members can differ, so there is no single verdict.";
+
+/** In place of the counts when no member has a username, so nobody was asked: four zeros would read as an answer. */
+export const NOBODY_ASKED = "No member could be asked: none has a username yet, so there is no answer here.";
 
 /**
  * Every access in every profile allowed; at least one profile answered. An
@@ -81,7 +89,10 @@ export function truncatedText(r: ExplainPrincipalResponse): string {
  * profile, refused by at least one, undecidable on at least one, read masked
  * on at least one — a row per evaluated
  * member with each profile's verdicts and mask (`profileVerdictText`), a "Refused only" filter, and
- * the member's full `ExplainResultView` on expand. There is no overall verdict
+ * the member's full `ExplainResultView` on expand. When no profile serves the
+ * catalog, the user answer's "nothing is enforcing" state (`NothingEnforcing`)
+ * replaces the counts; when no member could be asked, a sentence does (four
+ * zeros would read as an answer). There is no overall verdict
  * and nothing here makes one up: one member allowed and another refused is
  * two answers, not a third. A member with no username is listed under "Not
  * asked" with the reason, never dropped; when the server stopped at its limit
@@ -106,6 +117,10 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
     );
   }
 
+  // Whether a profile serves the catalog depends on the catalog alone, so the
+  // members asked all got the same outcome; with nothing enforcing there is no
+  // count to make (live result finding 4).
+  const nothingEnforcing = evaluated.length > 0 && evaluated.every((m) => m.result.outcome === "no_profile_serves_the_catalog");
   const allowed = evaluated.filter((m) => allowedEverywhere(m.result)).length;
   const refused = evaluated.filter((m) => anyDecision(m.result, "denied")).length;
   const undecidable = evaluated.filter((m) => anyDecision(m.result, "undecidable")).length;
@@ -123,21 +138,13 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
 
   return (
     <div data-testid="members-explain" className="space-y-4 rounded-lg border border-border p-4 md:p-6">
-      <p className="text-sm text-muted-foreground">{NO_SINGLE_VERDICT}</p>
-      <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-        {[
-          // Each count is of members, so none reads as the group's own access.
-          ["Members allowed by every profile", allowed],
-          ["Members refused by at least one", refused],
-          ["Members undecidable on at least one", undecidable],
-          ["Members whose read is masked on at least one", masked],
-        ].map(([label, n]) => (
-          <div key={label} className="flex items-baseline gap-2">
-            <dt className="text-muted-foreground">{label}</dt>
-            <dd className="font-semibold tabular-nums">{n}</dd>
-          </div>
-        ))}
-      </dl>
+      {nothingEnforcing ? (
+        <NothingEnforcing />
+      ) : evaluated.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{NOBODY_ASKED}</p>
+      ) : (
+        <MemberCounts allowed={allowed} refused={refused} undecidable={undecidable} masked={masked} />
+      )}
       {skipsAccess ? <p className="text-sm text-muted-foreground">{MASK_NULL_NOT_ALLOWED}</p> : null}
       {truncated ? <p className="text-sm">{truncatedText(response)}</p> : null}
 
@@ -191,6 +198,31 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
         </section>
       ) : null}
     </div>
+  );
+}
+
+/** Why there is no single verdict, then the four counts of members. */
+function MemberCounts({ allowed, refused, undecidable, masked }: { allowed: number; refused: number; undecidable: number; masked: number }) {
+  return (
+    <>
+      <p className="text-sm text-muted-foreground">{NO_SINGLE_VERDICT}</p>
+      <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+        {(
+          [
+            // Each count is of members, so none reads as the group's own access.
+            ["Members allowed by every profile", allowed],
+            ["Members refused by at least one", refused],
+            ["Members undecidable on at least one", undecidable],
+            ["Members whose read is masked on at least one", masked],
+          ] as const
+        ).map(([label, n]) => (
+          <div key={label} className="flex items-baseline gap-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="font-semibold tabular-nums">{n}</dd>
+          </div>
+        ))}
+      </dl>
+    </>
   );
 }
 
