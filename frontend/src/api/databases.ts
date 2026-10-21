@@ -39,6 +39,7 @@ import type {
   ConnOptions,
   DatabaseDetailDto,
   DatabaseInput,
+  DatabaseListDto,
   Engine,
   TestOutcome,
   WsEngineCatalogDto,
@@ -49,6 +50,18 @@ import type {
 export type { ConnOptions, Engine, TestOutcome, WsEngineCatalogDto, WsEngineDetailDto };
 export type DatabaseConn = DatabaseDetailDto;
 export type DatabaseConnInput = DatabaseInput;
+/**
+ * One row of `GET /ws/{ws}/databases`. A workspace admin gets the full
+ * connection (`DatabaseConn`); a member who may only run queries or read
+ * datasets gets the redacted summary (`DatabaseListDto`: id, name, engine,
+ * delegated — no host, port, options or secret).
+ */
+export type DatabaseListEntry = DatabaseConn | DatabaseListDto;
+
+/** True for a row that carries the admin-only connection detail. */
+export function isFullConnection(d: DatabaseListEntry): d is DatabaseConn {
+  return "host" in d;
+}
 
 /** Back-compat query-key helper; delegates to the generated key factory. */
 export const databaseKeys = {
@@ -56,13 +69,13 @@ export const databaseKeys = {
 };
 
 export function useDatabases(ws: string) {
-  return useDatabasesList<DatabaseConn[], ApiError>(ws, {
+  return useDatabasesList<DatabaseListEntry[], ApiError>(ws, {
     query: {
-      // 403 (non-admin) is an expected outcome — surface it immediately instead
-      // of retrying 3× before the workspace-admin notice can render.
+      // 403 (no query:run or dataset:read) is an expected outcome — surface it
+      // immediately instead of retrying before the notice can render.
       retry: false,
       // Unwrap orval's `{ data, status, headers }` envelope to the list body.
-      select: (r) => r.data as DatabaseConn[],
+      select: (r) => r.data as DatabaseListEntry[],
     },
   });
 }

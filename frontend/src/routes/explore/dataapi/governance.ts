@@ -12,7 +12,9 @@ import type { DatabaseConn } from "@/api/databases";
  * the server side once; the copy of the rule that lives here must not
  * re-introduce it in the advice it gives an author.
  */
-export function runsPerPrincipal(db: Pick<DatabaseConn, "delegated" | "options">): boolean {
+export function runsPerPrincipal(
+  db: Pick<DatabaseConn, "delegated"> & Partial<Pick<DatabaseConn, "options">>,
+): boolean {
   return db.delegated || db.options?.impersonate === true;
 }
 
@@ -26,12 +28,13 @@ export function runsPerPrincipal(db: Pick<DatabaseConn, "delegated" | "options">
  * allowed to gate a request, because a client-side rule that gates is a rule
  * that can be skipped.
  *
- * A connection that has not loaded yet answers `false`. An author is not warned
- * about a database the page does not know about, which is right for a hint and
- * would be wrong for a gate.
+ * A connection that has not loaded yet answers `false`, and so does the
+ * redacted row a non-admin lists (no `governed`, no `options`). An author is not
+ * warned about a database the page does not know about, which is right for a
+ * hint and would be wrong for a gate.
  */
 export function governedWithoutPerPrincipal(
-  db: Pick<DatabaseConn, "delegated" | "options" | "governed"> | undefined,
+  db: (Pick<DatabaseConn, "delegated"> & Partial<Pick<DatabaseConn, "options" | "governed">>) | undefined,
 ): boolean {
   return !!db?.governed && !runsPerPrincipal(db);
 }

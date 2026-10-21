@@ -15,7 +15,8 @@ const testMutateAsync = vi.fn();
 const testMutation = vi.fn();
 const wsEngineViewMock = vi.fn();
 
-vi.mock("@/api/databases", () => ({
+vi.mock("@/api/databases", async (importOriginal) => ({
+  isFullConnection: (await importOriginal<typeof import("@/api/databases")>()).isFullConnection,
   useDatabases: () => databasesMock(),
   useCreateDatabase: () => createMutation(),
   useUpdateDatabase: () => updateMutation(),
@@ -197,6 +198,24 @@ describe("DatabasesPage", () => {
     expect(
       screen.getByText("Requires workspace-admin to manage engines."),
     ).toBeInTheDocument();
+    expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
+  });
+
+  // KI-159: a member with query:run or dataset:read now gets 200 with the
+  // redacted rows; this management page must not render them as connections.
+  it("shows the workspace-admin notice for the redacted non-admin listing", () => {
+    databasesMock.mockReturnValue({
+      data: [{ id: "db-1", name: "prod-trino", engine: "trino", delegated: false }],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+
+    expect(
+      screen.getByText("Requires workspace-admin to manage engines."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("prod-trino")).not.toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
 

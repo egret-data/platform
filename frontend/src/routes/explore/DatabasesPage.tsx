@@ -19,6 +19,7 @@ import {
   type DatabaseConn,
   type DatabaseConnInput,
   type Engine,
+  isFullConnection,
   useCreateDatabase,
   useDatabases,
   useDeleteDatabase,
@@ -68,6 +69,18 @@ function humanizeStatus(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
+function AdminOnlyNotice() {
+  return (
+    <Alert>
+      <DatabaseIcon className="h-4 w-4" />
+      <AlertTitle>Insufficient permissions</AlertTitle>
+      <AlertDescription>
+        Requires workspace-admin to manage engines.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 export default function DatabasesPage() {
   const ws = useParams().workspace!;
   const dbs = useDatabases(ws);
@@ -112,17 +125,7 @@ export default function DatabasesPage() {
 
   if (dbs.isError) {
     const status = (dbs.error as ApiError | null)?.status;
-    if (status === 403) {
-      return (
-        <Alert>
-          <DatabaseIcon className="h-4 w-4" />
-          <AlertTitle>Insufficient permissions</AlertTitle>
-          <AlertDescription>
-            Requires workspace-admin to manage engines.
-          </AlertDescription>
-        </Alert>
-      );
-    }
+    if (status === 403) return <AdminOnlyNotice />;
     return (
       <Alert variant="destructive">
         <AlertTitle>Failed to load engines</AlertTitle>
@@ -131,7 +134,12 @@ export default function DatabasesPage() {
     );
   }
 
-  const rows = dbs.data ?? [];
+  const listed = dbs.data ?? [];
+  // A member who may run queries or read datasets gets the redacted listing
+  // (no host, options or secret). This page manages connections, so it stays
+  // admin-only rather than rendering rows it cannot fill.
+  if (!listed.every(isFullConnection)) return <AdminOnlyNotice />;
+  const rows = listed.filter(isFullConnection);
 
   const columns: Column<DatabaseConn>[] = [
     {
