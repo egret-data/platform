@@ -73,12 +73,15 @@ function makeAccount(id: string, name: string): DataApiServiceAccountDto {
   };
 }
 
-function makeGrant(serviceAccountId: string, name: string): DataApiEndpointGrantDto {
+/** `inheritsInvoke` is the server's answer to "would this account keep invoke
+ *  through the workspace if this grant were revoked?" (KI-180). */
+function makeGrant(serviceAccountId: string, name: string, inheritsInvoke = false): DataApiEndpointGrantDto {
   return {
     id: `g-${serviceAccountId}`,
     service_account_id: serviceAccountId,
     service_account_name: name,
     created_at: "2026-02-01T00:00:00Z",
+    inherits_invoke: inheritsInvoke,
   };
 }
 
@@ -382,14 +385,35 @@ describe("AccessSection — condition 1, invoke", () => {
   it("warns when an account is granted here AND also reaches invoke through the workspace", async () => {
     setup({
       accounts: [SA_GRANTED],
-      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, true)],
       canInvoke: { [SA_GRANTED.id]: true },
     });
     renderAccess();
 
     const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
     expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(within(row).getByText("Revoking will not remove access")).toBeInTheDocument();
     expect(within(row).getByText(/also reaches invoke through the workspace/i)).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+  });
+
+  // KI-180. The per-endpoint probe says YES for every granted account — the
+  // grant itself is what it sees — so reading the note off it put "Revoking
+  // will not remove access" on accounts with no workspace role, whose next call
+  // after a revoke is a 403. The note now follows the grant's own
+  // `inherits_invoke`, and the probe saying yes must not bring it back.
+  it("does not warn on a granted account that has no workspace role", async () => {
+    setup({
+      accounts: [SA_GRANTED],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, false)],
+      canInvoke: { [SA_GRANTED.id]: true },
+    });
+    renderAccess();
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(within(row).queryByText(/remove access/i)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/also reaches invoke through the workspace/i)).not.toBeInTheDocument();
     expect(within(row).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
   });
 
@@ -416,7 +440,7 @@ describe("AccessSection — condition 1, invoke", () => {
       accounts: [SA_GRANTED],
       grants: [
         makeGrant(SA_GRANTED.id, SA_GRANTED.name),
-        { id: "g-ghost", service_account_id: "sa-ghost", service_account_name: null, created_at: "2026-02-01T00:00:00Z" },
+        { id: "g-ghost", service_account_id: "sa-ghost", service_account_name: null, created_at: "2026-02-01T00:00:00Z", inherits_invoke: false },
       ],
       canInvoke: { [SA_GRANTED.id]: true },
     });
@@ -442,37 +466,31 @@ describe("AccessSection — condition 1, invoke", () => {
     expect(within(row).getByText(/could not check/i)).toBeInTheDocument();
   });
 
-  // Reviewer finding (Important #1). The unchecked state used to be discarded
-  // on the GRANTED arm — three branches hard-coded `alsoInherited: false` — so
-  // a granted row whose probe failed rendered the negative claim by OMISSION:
-  // no caveat, a live Revoke button, nothing said. `can_invoke` propagates PDP
-  // errors as errors by design (`invoke.rs`), so an account holding BOTH an
-  // object-scoped grant and `ws_admin` would show a clean "Granted on this
-  // endpoint", the admin would click Revoke, the grant would really be deleted,
-  // and the account would keep invoking through the cascade — the same "clicked
-  // revoke, nothing happened" surprise this section exists to prevent, reached
-  // through the error path instead of the inherited one.
-  it("warns that revoking may not remove access when a granted row's inherited check failed", async () => {
-    setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)], openapiError: true });
+  // A granted row's note does not depend on the per-endpoint probe at all: the
+  // grant list carries the answer, so a probe that failed — or an endpoint that
+  // is not live, where it never runs — leaves the row saying exactly what the
+  // server said.
+  it("keeps a granted row's note when the per-endpoint probe failed", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, true)], openapiError: true });
     renderAccess();
 
     const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
     expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
-    // The point of the assertion: the row must not present Revoke as if it were
-    // known to be the only thing holding the access up.
-    expect(within(row).getByText(/could not check.*also reaches invoke.*may not remove access/i)).toBeInTheDocument();
-    expect(within(row).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+    expect(within(row).getByText("Revoking will not remove access")).toBeInTheDocument();
+    expect(within(row).queryByText(/could not check/i)).not.toBeInTheDocument();
   });
 
-  // Same discard, reached by the other unchecked path: granted on an endpoint
-  // that is not live, where the probe never runs at all.
-  it("warns that revoking may not remove access on a granted row of an endpoint that is not live", async () => {
-    setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)] });
+  it("says whether revoking removes access on an endpoint that is not live", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_GRANTED_2],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, true), makeGrant(SA_GRANTED_2.id, SA_GRANTED_2.name, false)],
+    });
     renderAccess(makeEndpoint({ state: "draft", live_version_id: null }));
 
-    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
-    expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
-    expect(within(row).getByText(/cannot check.*also reaches invoke.*may not remove access/i)).toBeInTheDocument();
+    const inherits = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    const only = screen.getByTestId(`access-row-${SA_GRANTED_2.id}`);
+    expect(within(inherits).getByText("Revoking will not remove access")).toBeInTheDocument();
+    expect(within(only).queryByText(/remove access/i)).not.toBeInTheDocument();
   });
 
   // A disabled endpoint WAS published and then switched off, so "take effect
@@ -856,7 +874,7 @@ describe("AccessSection — the row-scoped caveat", () => {
   function renderGrantedAndAlsoInherited(endpoint?: DataApiEndpointDto) {
     setup({
       accounts: [SA_GRANTED],
-      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, true)],
       canInvoke: { [SA_GRANTED.id]: true },
     });
     return renderAccess(endpoint);
@@ -901,15 +919,15 @@ describe("AccessSection — the row-scoped caveat", () => {
    * A `<summary>` is not a form control. That is the whole reason it is one.
    */
   it("keeps the caveat openable on a trashed endpoint, where a Radix trigger could not be", async () => {
-    // Trashing an endpoint disables it, so the probe cannot run and this row's
-    // caveat is the "may not" one rather than the "will not" one. Same
-    // `Caveat`, which is what this test is about — and it is the caveat that
-    // matters most here, because the reader is deciding whether to restore.
+    // Trashing an endpoint disables it; the caveat still renders, because it
+    // comes from the grant list rather than from the probe a disabled endpoint
+    // cannot answer — and it matters most here, where the reader is deciding
+    // whether to restore.
     renderGrantedAndAlsoInherited(
       makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" } as Partial<DataApiEndpointDto>),
     );
     const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
-    const headline = within(row).getByText("Revoking may not remove access");
+    const headline = within(row).getByText("Revoking will not remove access");
     const summary = headline.closest("summary");
     expect(summary).not.toBeNull();
 
@@ -1052,7 +1070,7 @@ describe("AccessSection — a trashed endpoint", () => {
   it("keeps Try it and the caveat reachable on a trashed endpoint", async () => {
     setup({
       accounts: [SA_GRANTED],
-      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name, true)],
       canInvoke: {},
     });
     renderAccess(makeEndpoint(TRASHED));
@@ -1073,9 +1091,9 @@ describe("AccessSection — a trashed endpoint", () => {
     expect(tryIt.tagName).toBe("A");
     expect(tryIt).not.toHaveAttribute("aria-disabled");
 
-    const details = within(row).getByText("Revoking may not remove access").closest("details")!;
+    const details = within(row).getByText("Revoking will not remove access").closest("details")!;
     expect(details).not.toHaveAttribute("open");
-    fireEvent.click(within(row).getByText("Revoking may not remove access"));
+    fireEvent.click(within(row).getByText("Revoking will not remove access"));
     expect(details).toHaveAttribute("open");
   });
 

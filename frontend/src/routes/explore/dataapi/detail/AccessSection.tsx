@@ -58,13 +58,16 @@ type InheritedCheck = { known: true; inherited: boolean } | { known: false; reas
  * applied to every object in the workspace by the Cedar cascade) — there is no
  * object-scoped row, so revoking here would delete nothing and change nothing.
  *
- * `granted` carries the WHOLE [`InheritedCheck`], not a boolean: being granted
- * here says nothing about whether the account also reaches invoke another way,
- * and that second question can be unanswered on a granted row just as easily as
- * on an ungranted one.
+ * `granted` carries whether the account ALSO reaches invoke through the
+ * workspace, and that answer comes from the grant list (`inherits_invoke`),
+ * which the server asks of the PDP at WORKSPACE scope where this grant cannot
+ * count. It used to come from the per-account probe below, which asks "may it
+ * invoke THIS endpoint?" — a question the grant itself answers yes — so every
+ * granted row carried "Revoking will not remove access", including accounts
+ * with no workspace role, for which it was false (KI-180).
  */
 type InvokeStatus =
-  | { kind: "granted"; also: InheritedCheck }
+  | { kind: "granted"; inherits: boolean }
   | { kind: "inherited" }
   | { kind: "none" }
   /** The effective-invoke question was not answered. NEVER rendered as "no". */
@@ -126,6 +129,11 @@ type InvokeStatus =
  * that account and emits the path only if it says yes. A non-empty `paths` is
  * therefore "this account may invoke this endpoint", cascade included.
  *
+ * That probe is asked only for an account with NO grant here. For a granted
+ * account it says yes because of the grant, so it cannot tell whether revoking
+ * would remove the access; the grant list answers that instead
+ * (`inherits_invoke`, asked of the PDP at workspace scope — KI-180).
+ *
  * The alternative considered and rejected was reading `useWorkspaceMembers` and
  * treating `ws_admin` as invoke. That is one query for the whole page instead of
  * one per account, but it copies a rule the backend owns (migration 0124) into
@@ -135,8 +143,8 @@ type InvokeStatus =
  * 0124 explicitly contemplates. A checklist that is confidently wrong about
  * access is worse than one that costs an extra request.
  *
- * **The cost accepted:** one request per service account, each of which runs a
- * Cedar authorize server-side. Twenty service accounts is twenty requests on
+ * **The cost accepted:** one request per service account without a grant here,
+ * each of which runs a Cedar authorize server-side. Twenty such accounts is twenty requests on
  * opening this section. They are react-query-cached and only fire when the
  * endpoint is live (below), but nothing hides that this is N calls.
  *
@@ -172,7 +180,7 @@ export default function AccessSection() {
   const grantsQuery = useDataApiListEndpointGrants(ws, id, { query: { enabled: !!ws && !!id } });
   const grantsEnvelope = grantsQuery.data;
   const grants: DataApiEndpointGrantDto[] = grantsEnvelope?.status === 200 ? grantsEnvelope.data : [];
-  const grantedIds = new Set(grants.map((g) => g.service_account_id));
+  const grantsById = new Map(grants.map((g) => [g.service_account_id, g]));
 
   // A grant whose principal is not in the service-account list — the account was
   // deleted, or the row was written for a principal this workspace no longer
@@ -187,8 +195,8 @@ export default function AccessSection() {
   const qc = useQueryClient();
   // Both halves of condition 1 move when a grant does: the `/grants` list, and
   // every account's generated document (the prefix key, without params, covers
-  // all of them). Skipping the second would leave a just-revoked row claiming
-  // "also reaches invoke through the workspace" from a cached probe.
+  // all of them). Skipping the second would leave a just-revoked row reading
+  // its invoke status from a probe cached while it still held the grant.
   const invalidate = useCallback(() => {
     qc.invalidateQueries({ queryKey: getDataApiListEndpointGrantsQueryKey(ws, id) });
     qc.invalidateQueries({ queryKey: getDataApiGetOpenapiQueryKey(ws) });
@@ -459,7 +467,7 @@ export default function AccessSection() {
                     ws={ws}
                     endpointId={id}
                     account={account}
-                    grantedHere={grantedIds.has(account.id)}
+                    grant={grantsById.get(account.id)}
                     probeEnabled={isLive}
                     trashed={trashed}
                     busy={busyId === account.id}
@@ -479,7 +487,7 @@ export default function AccessSection() {
                       email: "",
                       created_at: g.created_at,
                     }}
-                    grantedHere
+                    grant={g}
                     orphaned
                     // Nothing to probe: the account is not one this workspace
                     // lists, so the document route answers 404 for it by design.
@@ -515,7 +523,7 @@ function AccessRow({
   ws,
   endpointId,
   account,
-  grantedHere,
+  grant,
   probeEnabled,
   orphaned = false,
   trashed,
@@ -526,7 +534,8 @@ function AccessRow({
   ws: string;
   endpointId: string;
   account: DataApiServiceAccountDto;
-  grantedHere: boolean;
+  /** This account's grant on this endpoint, if it holds one. */
+  grant: DataApiEndpointGrantDto | undefined;
   probeEnabled: boolean;
   /** The grant names a principal this workspace no longer lists as an account. */
   orphaned?: boolean;
@@ -546,10 +555,13 @@ function AccessRow({
   onGrant: (accountId: string) => void;
   onRevoke: (accountId: string) => void;
 }) {
+  // Only an account WITHOUT a grant here needs the probe: for a granted one it
+  // would answer yes because of the grant, which is the question it cannot
+  // separate from the inherited one (KI-180). The grant carries that answer.
   const probe = useDataApiGetOpenapi(
     ws,
     { service_account_id: account.id, endpoint_id: endpointId },
-    { query: { enabled: probeEnabled && !!ws && !!account.id } },
+    { query: { enabled: probeEnabled && !grant && !!ws && !!account.id } },
   );
   const probeEnvelope = probe.data;
   const doc = probeEnvelope?.status === 200 ? (probeEnvelope.data as OpenApiInvokeProbe) : undefined;
@@ -557,11 +569,9 @@ function AccessRow({
   // for this account — the same expression the serving path evaluates.
   const effective = doc ? Object.keys(doc.paths ?? {}).length > 0 : undefined;
 
-  // Computed ONCE, ahead of `grantedHere`, and consumed by both arms below.
-  // The previous shape asked "granted?" first and re-derived the check inside
-  // each branch, which is what let three of those branches quietly answer
-  // `false` for a question nobody had asked the PDP (reviewer Important #1).
-  // With the check hoisted there is no branch left that can drop it.
+  // The probe's answer for an account with no grant here. Kept three-valued:
+  // an unanswered probe must never render as "Not granted" (reviewer
+  // Important #1).
   const check: InheritedCheck = !probeEnabled
     ? { known: false, reason: "not-live" }
     : probe.isError
@@ -570,8 +580,8 @@ function AccessRow({
         ? { known: false, reason: "loading" }
         : { known: true, inherited: effective };
 
-  const status: InvokeStatus = grantedHere
-    ? { kind: "granted", also: check }
+  const status: InvokeStatus = grant
+    ? { kind: "granted", inherits: grant.inherits_invoke }
     : check.known
       ? check.inherited
         ? { kind: "inherited" }
@@ -640,7 +650,7 @@ function AccessRow({
             {status.kind === "unchecked" && <Badge variant="outline">No grant on this endpoint</Badge>}
           </div>
 
-          {status.kind === "granted" && status.also.known && status.also.inherited && (
+          {status.kind === "granted" && status.inherits && (
             // The consequence is the summary; the reason is behind it. Measured
             // at a 786px content box this sentence alone made the row 293px.
             <Caveat summary="Revoking will not remove access">
@@ -650,31 +660,6 @@ function AccessRow({
                 Workspace membership
               </LeaveGuardLink>
             </Caveat>
-          )}
-          {/* The caveat that used to be missing. A granted row whose check did
-              not land must not present Revoke as if it were known to be the
-              only thing holding the access up.
-
-              Skipped for an orphaned grant: there the probe was never going to
-              run (the principal is not a listed account, so the document route
-              404s for it by design), and "revoking may not remove access" would
-              imply a workspace membership for a principal this workspace does
-              not list. That row carries its own explanation instead.
-
-              The `loading` arm is NOT a `Caveat`: it is transient, six words
-              long, and has no explanation to hold — collapsing it would cost a
-              click to reveal nothing. §11.2's rule, applied per caveat rather
-              than per section: collapse a thing because it is big. */}
-          {status.kind === "granted" && !status.also.known && !orphaned && (
-            status.also.reason === "loading" ? (
-              <span className="block text-muted-foreground">Checking workspace-inherited invoke…</span>
-            ) : (
-              <Caveat summary="Revoking may not remove access">
-                {status.also.reason === "error"
-                  ? "egret could not check whether this account also reaches invoke through the workspace, so revoking here may not remove access."
-                  : "egret cannot check whether this account also reaches invoke through the workspace until this endpoint is live, so revoking here may not remove access once it is."}
-              </Caveat>
-            )
           )}
           {status.kind === "inherited" && (
             // The row offers no Revoke at all, so the headline is what the
@@ -704,9 +689,10 @@ function AccessRow({
 
               Invisible at the one service account the audit ran against;
               measured in the browser at seven, it was seven identical lines
-              directly under the paragraph that had just said it. The `granted`
-              arm's "Revoking may not remove access" caveat stays: that one
-              qualifies a control the row actually offers. */}
+              directly under the paragraph that had just said it. A `granted`
+              row needs no such line: its "Revoking will not remove access"
+              answer comes from the grant list, which knows it on any endpoint
+              state. */}
           {status.kind === "unchecked" && status.reason === "loading" && (
             <span className="block text-muted-foreground">Checking workspace-inherited invoke…</span>
           )}
