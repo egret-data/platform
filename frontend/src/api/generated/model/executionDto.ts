@@ -33,4 +33,12 @@ export type ExecutionDto = ExecutionListItemDto & {
      * winning. Empty when the frozen source does not parse.
      */
   effective_labels: LabelDto[];
+  /**
+     * Whether this deployment runs the workflow worker
+     * (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
+     * default). **False: an execution is created and stays `RUNNING`, and
+     * nothing runs it until an administrator turns the worker on** (KI-013).
+     * The same flag the trigger routes echo ([`TriggerFlags`]).
+     */
+  worker_enabled: boolean;
 };

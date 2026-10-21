@@ -2012,6 +2012,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             enabled: config.workflow.worker_enabled,
             tick_interval: std::time::Duration::from_secs(config.workflow.tick_interval_secs),
             batch: config.workflow.batch,
+            max_concurrent_runs: config.workflow.max_concurrent_runs,
             reaper_interval: std::time::Duration::from_secs(config.workflow.reaper_interval_secs),
             working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
             container_default_timeout: std::time::Duration::from_secs(

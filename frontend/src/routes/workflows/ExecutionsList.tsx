@@ -27,6 +27,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { SummaryStrip, type SummaryStripItem } from "@/components/explore/SummaryStrip";
 import { StateChip } from "@/components/workflows/StateChip";
+import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -53,10 +54,11 @@ import {
 } from "@/routes/workflows/executionsListModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
-/** One page as the list shows it: the rows and the whole match's size. */
+/** One page as the list shows it: the rows, the whole match's size, and whether the server's worker runs. */
 interface ListPage {
   rows: ExecutionListItemDto[];
   total: number;
+  workerEnabled: boolean;
 }
 
 /**
@@ -76,7 +78,7 @@ async function fetchPage(
   // FE-DATA-2 exception: a generated fetcher called directly, for parameters computed at fetch time (`since` from the time preset).
   const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), pins), { signal });
   if (res.status !== 200) throw new Error("The executions could not be loaded.");
-  return { rows: res.data.rows, total: res.data.total };
+  return { rows: res.data.rows, total: res.data.total, workerEnabled: res.data.worker_enabled };
 }
 
 const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.message : "the request failed");
@@ -164,6 +166,8 @@ export default function ExecutionsList({
 
   const body = (
     <>
+      {/* KI-013. Not on the flow's tab: the flow page above it says so already. */}
+      {page && !page.workerEnabled && !flowPinned ? <WorkerOffNotice className="mb-3" /> : null}
       <FilterBar
         showNamespace={!embedded}
         showFlow={!flowPinned}

@@ -811,6 +811,18 @@ pub struct WorkflowConfig {
     #[serde(default = "default_batch")]
     pub batch: usize,
 
+    /// **How many claimed task runs one replica runs at once** (KI-187).
+    ///
+    /// The claim loop starts every run it claims and keeps ticking while they
+    /// run, so a `Sleep` or any slow task holds one of these slots and not the
+    /// whole replica. A tick claims at most the free slots (and at most
+    /// [`batch`](Self::batch)), so a claimed run always starts at once and its
+    /// lease is renewed from the claim on; a runnable run beyond the bound
+    /// stays unclaimed for another replica or a later tick. Default `8`; `0`
+    /// is a boot error. `EGRET_WORKFLOW__MAX_CONCURRENT_RUNS=8`.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+
     /// Seconds between reaper passes. Coarser than the claim tick on purpose: a
     /// pass reclaims only leases already past `working_timeout_s`, so running it
     /// more often cannot reclaim anything sooner.
@@ -1574,6 +1586,11 @@ fn default_batch() -> usize {
     8
 }
 
+/// `8` — see [`WorkflowConfig::max_concurrent_runs`].
+fn default_max_concurrent_runs() -> usize {
+    8
+}
+
 /// `60` — see [`WorkflowConfig::reaper_interval_secs`].
 fn default_reaper_interval_secs() -> u64 {
     60
@@ -1652,6 +1669,7 @@ fn default_workflow() -> WorkflowConfig {
         worker_enabled: default_worker_enabled(),
         tick_interval_secs: default_tick_interval_secs(),
         batch: default_batch(),
+        max_concurrent_runs: default_max_concurrent_runs(),
         reaper_interval_secs: default_reaper_interval_secs(),
         working_timeout_s: default_working_timeout_s(),
         container_default_timeout_s: default_container_default_timeout_s(),
@@ -1972,6 +1990,11 @@ impl Config {
                  (EGRET_WORKFLOW__KILL_POLL_MS)",
                 self.workflow.kill_poll_ms
             ));
+        }
+        if self.workflow.max_concurrent_runs == 0 {
+            return Err("workflow.max_concurrent_runs must be >= 1 \
+                 (EGRET_WORKFLOW__MAX_CONCURRENT_RUNS)"
+                .into());
         }
         if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
             return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
@@ -3489,6 +3512,20 @@ values = { allowed-images = [] }
         assert!(err.contains("workflow.kill_poll_ms"), "{err}");
         cfg.workflow.kill_poll_ms = MIN_KILL_POLL_MS;
         assert!(cfg.validate().is_ok(), "the minimum itself is allowed");
+    }
+
+    #[test]
+    fn validate_refuses_zero_concurrent_runs() {
+        let mut cfg = Config::default();
+        cfg.storage.bucket = "test-bucket".into();
+        cfg.storage.access_key = "test-key".into();
+        cfg.storage.secret_key = "test-secret".into();
+        assert_eq!(cfg.workflow.max_concurrent_runs, 8, "the default");
+        cfg.workflow.max_concurrent_runs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("workflow.max_concurrent_runs"), "{err}");
+        cfg.workflow.max_concurrent_runs = 1;
+        assert!(cfg.validate().is_ok(), "one is allowed");
     }
 
     #[test]

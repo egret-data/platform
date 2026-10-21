@@ -31,7 +31,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StateChip } from "@/components/workflows/StateChip";
-import { formatDuration } from "@/components/workflows/executionState";
+import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
+import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 import type { GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLogsTab";
@@ -158,6 +159,12 @@ function ExecutionLoader({ ws, id, tab }: { ws: string; id: string; tab: Executi
               </Button>
             </AlertDescription>
           </Alert>
+        </div>
+      ) : null}
+      {/* KI-013: an execution that has not ended stays where it is while the worker is off. */}
+      {!execution.worker_enabled && !isTerminalState(execution.state) ? (
+        <div className="px-4 pt-4">
+          <WorkerOffNotice />
         </div>
       ) : null}
       <ExecutionFrame ws={ws} tab={tab} execution={execution} />
