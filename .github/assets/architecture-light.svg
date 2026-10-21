@@ -69,13 +69,14 @@
 <text x="314" y="452" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#5b6b7d">CONTROL PLANE</text>
 <text x="438" y="452" font-size="12" fill="#5b6b7d">Catalogs · Engines · Storage · Secrets · Users &amp; roles</text>
 <text x="944" y="86" text-anchor="start" font-size="11" font-weight="600" letter-spacing="1.4" fill="#5b6b7d">DATA PLANE</text>
-<rect x="944" y="100" width="232" height="104" rx="12" fill="#ffffff" stroke="#d7e2ee" filter="url(#sh)"/>
+<rect x="944" y="100" width="232" height="118" rx="12" fill="#ffffff" stroke="#d7e2ee" filter="url(#sh)"/>
 <text x="960" y="124" font-size="12" font-weight="600" fill="#5b6b7d" letter-spacing="1">QUERY ENGINES</text>
 <rect x="960" y="138" width="98" height="40" rx="10" fill="#e6efff"/>
 <text x="1009" y="163" text-anchor="middle" font-size="14" font-weight="700" fill="#2563eb">Trino</text>
 <rect x="1068" y="138" width="98" height="40" rx="10" fill="#e6efff"/>
 <text x="1117" y="163" text-anchor="middle" font-size="14" font-weight="700" fill="#2563eb">StarRocks</text>
-<text x="960" y="196" font-size="10.5" fill="#5b6b7d">Docker or Kubernetes</text>
+<text x="960" y="195" font-size="10.5" fill="#5b6b7d">Trino: Docker or Kubernetes</text>
+<text x="960" y="208" font-size="10.5" fill="#5b6b7d">StarRocks: Kubernetes</text>
 <rect x="944" y="236" width="232" height="108" rx="12" fill="#ffffff" stroke="#0f9d8a" stroke-width="1.8" filter="url(#sh)"/>
 <text x="960" y="262" font-size="12" font-weight="600" fill="#0f9d8a" letter-spacing="1">ICEBERG LAKEHOUSE</text>
 <text x="960" y="288" font-size="15" font-weight="700" fill="#0b2545">Source of truth</text>
@@ -100,7 +101,7 @@
 <path d="M230 247 C 262 247, 262 206, 290 206" fill="none" stroke="#0f9d8a" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
 <path d="M230 355 C 262 355, 262 386, 314 386" fill="none" stroke="#a7ded5" stroke-width="2" stroke-linecap="round"  marker-end="url(#dot)"/>
 <path d="M846 386 C 900 386, 900 150, 944 150" fill="none" stroke="#0f9d8a" stroke-width="2.4" stroke-linecap="round"  marker-end="url(#dot)"/>
-<path d="M1060 204 V 236" fill="none" stroke="#0f9d8a" stroke-width="3" stroke-linecap="round"  marker-end="url(#dot)"/>
+<path d="M1060 218 V 236" fill="none" stroke="#0f9d8a" stroke-width="3" stroke-linecap="round"  marker-end="url(#dot)"/>
 <path d="M1060 344 V 372" fill="none" stroke="#9db2c9" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 6" />
 <path d="M1176 152 H1186 Q1196 152 1196 162 V412 Q1196 422 1186 422 H1176" fill="none" stroke="#9db2c9" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 6" />
 <rect x="868" y="254" width="74" height="24" rx="12" fill="#ffffff" stroke="#0f9d8a"/>
@@ -108,9 +109,9 @@
 <rect x="280" y="518" width="150" height="28" rx="14" fill="#ffffff" stroke="#cfdbe8"/>
 <text x="355.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Rust · one binary</text>
 <rect x="442" y="518" width="200" height="28" rx="14" fill="#ffffff" stroke="#cfdbe8"/>
-<text x="542.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Docker demo in one command</text>
+<text x="542.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Docker demo, one command</text>
 <rect x="664" y="518" width="160" height="28" rx="14" fill="#ffffff" stroke="#cfdbe8"/>
-<text x="744.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Kubernetes + Helm</text>
+<text x="744.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Docker or Kubernetes</text>
 <rect x="850" y="518" width="110" height="28" rx="14" fill="#ffffff" stroke="#cfdbe8"/>
 <text x="905.0" y="537" text-anchor="middle" font-size="12" fill="#5b6b7d">Apache-2.0</text>
 </g></svg>
