@@ -92,6 +92,8 @@ anyhow = "1"
 # `runtime-tokio-rustls` feature into `runtime-tokio` + `tls-rustls`.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "uuid", "chrono"] }
 figment = { version = "0.10", features = ["toml", "env"] }
+# Reports the config keys serde skips, for the start-time unknown-key warning (KI-140).
+serde_ignored = "0.1.14"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

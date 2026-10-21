@@ -173,8 +173,13 @@ pub struct CatalogSettings {
     pub warehouse: String,
     pub auth_token: String,
     /// Externally-reachable base origin of this server (WITHOUT the `/catalog`
-    /// suffix), advertised in `/v1/config`'s `s3.signer.uri`. Defaults to
-    /// `http://localhost:8080`; set this to a client-reachable URL in production.
+    /// suffix), advertised in `/v1/config`'s `s3.signer.uri`, and the fallback
+    /// of the machine-IdP `issuer` (and so of its token endpoint).
+    ///
+    /// When unset (or blank), [`Config::load`] derives it from `server.port`:
+    /// `http://localhost:<server.port>`, so moving the port moves this URL and
+    /// the issuer with it. When set, it is kept as given whatever the port.
+    /// Set it to a client-reachable URL in production.
     pub public_url: Option<String>,
     /// Stable identity of the in-process "system" principal that egret uses to
     /// bootstrap lakekeeper's default project at startup. lakekeeper's
@@ -1821,7 +1826,8 @@ impl Default for Config {
                 enabled: false,
                 warehouse: "s3://warehouse".into(),
                 auth_token: String::new(),
-                public_url: Some("http://localhost:8080".into()),
+                // Derived from `server.port` in `Config::load` (KI-141).
+                public_url: None,
                 system_user: default_system_user(),
             },
             storage: StorageSettings {
@@ -1881,7 +1887,23 @@ impl Config {
     /// Load and validate configuration from all layers.
     #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
-        Self::figment().extract()
+        let mut cfg: Self = Self::figment().extract()?;
+        cfg.derive_unset_urls();
+        Ok(cfg)
+    }
+
+    /// Fill the URLs whose default depends on another key. Today one:
+    /// `catalog.public_url`, unset or blank, becomes this server on
+    /// `localhost` at `server.port` (see [`CatalogSettings::public_url`]).
+    fn derive_unset_urls(&mut self) {
+        let unset = self
+            .catalog
+            .public_url
+            .as_deref()
+            .is_none_or(|u| u.trim().is_empty());
+        if unset {
+            self.catalog.public_url = Some(format!("http://localhost:{}", self.server.port));
+        }
     }
 
     /// Validate cross-field invariants after loading. Call at boot.
@@ -2052,12 +2074,528 @@ impl Config {
         self.engines.validate()?;
         Ok(())
     }
+
+    /// Every `EGRET_*` environment variable and every `egret.toml` key that no
+    /// configuration field consumes (KI-140), each with a did-you-mean hint
+    /// when a real key is close. Loading ignores these silently (only a few
+    /// sub-tables use `deny_unknown_fields`), so a misspelled
+    /// `EGRET_SERVER__PORTT` would otherwise leave the default in force with
+    /// no sign. `main.rs` logs them as WARNINGS, not errors: refusing to start
+    /// would break deployments that carry a stale key today.
+    ///
+    /// The variables egret reads with `std::env::var` instead of through this
+    /// struct ([`ENV_OUTSIDE_CONFIG`], [`ENV_OUTSIDE_CONFIG_PREFIXES`]) are not
+    /// reported.
+    pub fn unknown_keys() -> Vec<UnknownKey> {
+        unknown_keys_in(&Self::figment(), std::env::vars().map(|(k, _)| k))
+    }
+}
+
+/// `EGRET_*` variables egret reads directly with `std::env::var`, outside
+/// [`Config`]. The one place that knows them, so the unknown-key warning
+/// ([`Config::unknown_keys`]) does not flag them. Keep in step with the
+/// "Variables outside the configuration file" table of the configuration-keys
+/// reference page.
+pub const ENV_OUTSIDE_CONFIG: &[&str] = &[
+    // `egret init`, `egret workspace add-group` (egret-bin).
+    "EGRET_ADMIN_EMAIL",
+    "EGRET_ADMIN_PASSWORD",
+    // Query connectors and the engine monitor (egret-query).
+    "EGRET_ENGINE_TLS_INSECURE",
+    // Test-corpus generator switch (egret-workflow).
+    "EGRET_WRITE_PROPERTY_TREATMENT",
+];
+
+/// Prefixes of the test-harness variables (`EGRET_TEST_*`, `EGRET_E2E_*`,
+/// `EGRET_ALLOW_*_SKIP`). `just` loads `.env` into every recipe, `just serve`
+/// included, so a developer's `.env` carrying them must not warn either.
+pub const ENV_OUTSIDE_CONFIG_PREFIXES: &[&str] = &["EGRET_TEST_", "EGRET_E2E_", "EGRET_ALLOW_"];
+
+/// Where an [`UnknownKey`] came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnknownKeySource {
+    /// An `EGRET_*` environment variable.
+    Env,
+    /// A key in a configuration file; the file as figment found it.
+    File(String),
+}
+
+/// A configuration entry no field consumes. See [`Config::unknown_keys`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    /// The variable (`EGRET_SERVER__PORTT`) or the dotted file key
+    /// (`server.portt`), as the operator wrote it.
+    pub name: String,
+    pub source: UnknownKeySource,
+    /// The closest real key, in the same spelling as `name`.
+    pub suggestion: Option<String>,
+}
+
+impl std::fmt::Display for UnknownKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.source {
+            UnknownKeySource::Env => write!(f, "ignored environment variable {}", self.name)?,
+            UnknownKeySource::File(file) => write!(f, "ignored key {} in {file}", self.name)?,
+        }
+        f.write_str(": no configuration key has this name")?;
+        if let Some(s) = &self.suggestion {
+            write!(f, " (did you mean {s}?)")?;
+        }
+        Ok(())
+    }
+}
+
+const ENV_PREFIX: &str = "EGRET_";
+const ENV_SPLIT: &str = "__";
+
+/// The figment key path of an `EGRET_*` variable, the way `Env::prefixed`
+/// with `split("__")` derives it: prefix stripped, lowercased, split on `__`.
+fn env_var_path(var: &str) -> Option<Vec<String>> {
+    let rest = var.strip_prefix(ENV_PREFIX)?;
+    Some(
+        rest.split(ENV_SPLIT)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect(),
+    )
+}
+
+fn env_var_name(path: &[String]) -> String {
+    let upper: Vec<String> = path.iter().map(|s| s.to_ascii_uppercase()).collect();
+    format!("{ENV_PREFIX}{}", upper.join(ENV_SPLIT))
+}
+
+/// The key segments of a `serde_ignored` path (`Some`/newtype hops carry no
+/// key and are skipped).
+fn ignored_segments(path: &serde_ignored::Path<'_>, out: &mut Vec<String>) {
+    use serde_ignored::Path;
+    match path {
+        Path::Root => {}
+        Path::Seq { parent, index } => {
+            ignored_segments(parent, out);
+            out.push(index.to_string());
+        }
+        Path::Map { parent, key } => {
+            ignored_segments(parent, out);
+            out.push(key.clone());
+        }
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => ignored_segments(parent, out),
+    }
+}
+
+/// Every leaf path under `value` (an empty table counts as a leaf).
+fn leaf_paths(prefix: &[String], value: &figment::value::Value, out: &mut Vec<Vec<String>>) {
+    match value {
+        figment::value::Value::Dict(_, dict) if !dict.is_empty() => {
+            for (k, v) in dict {
+                let mut p = prefix.to_vec();
+                p.push(k.clone());
+                leaf_paths(&p, v, out);
+            }
+        }
+        _ => out.push(prefix.to_vec()),
+    }
+}
+
+/// Levenshtein distance, by chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                prev
+            } else {
+                1 + prev.min(cur).min(row[j])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// The closest of `known` to `name`, if it is within two edits. Two catches
+/// a dropped, doubled or swapped letter and the `_` for `__` slip, and is
+/// tight enough that an unrelated name gets no hint at all.
+fn closest<'a>(name: &str, known: impl Iterator<Item = &'a String>) -> Option<String> {
+    known
+        .map(|k| (edit_distance(name, k), k))
+        .filter(|(d, _)| *d <= 2)
+        .min_by(|(da, ka), (db, kb)| da.cmp(db).then(ka.cmp(kb)))
+        .map(|(_, k)| k.clone())
+}
+
+fn unknown_keys_in(figment: &Figment, env_vars: impl Iterator<Item = String>) -> Vec<UnknownKey> {
+    // The real `extract` reports a config that does not load; here a failure
+    // only means there is nothing more to say.
+    let Ok(root) = figment.extract::<figment::value::Value>() else {
+        return vec![];
+    };
+    let mut ignored: Vec<Vec<String>> = Vec::new();
+    let _: Result<Config, _> = serde_ignored::deserialize(&root, |p| {
+        let mut segs = Vec::new();
+        ignored_segments(&p, &mut segs);
+        ignored.push(segs);
+    });
+    if ignored.is_empty() {
+        return vec![];
+    }
+
+    let mut known: Vec<Vec<String>> = Vec::new();
+    if let Ok(defaults) = figment::value::Value::serialize(Config::default()) {
+        leaf_paths(&[], &defaults, &mut known);
+    }
+    let is_ignored = |path: &[String]| {
+        ignored
+            .iter()
+            .any(|i| path.len() >= i.len() && path[..i.len()] == i[..])
+    };
+
+    let known_env: Vec<String> = known.iter().map(|k| env_var_name(k)).collect();
+    let mut out = Vec::new();
+    // Environment variables: named exactly as set, which a leaf walk of the
+    // merged value could not recover (`EGRET_FOO` set to a table, say).
+    let mut env_paths = Vec::new();
+    for var in env_vars {
+        let Some(path) = env_var_path(&var) else {
+            continue;
+        };
+        if path.is_empty()
+            || ENV_OUTSIDE_CONFIG.contains(&var.as_str())
+            || ENV_OUTSIDE_CONFIG_PREFIXES
+                .iter()
+                .any(|p| var.starts_with(p))
+            || !is_ignored(&path)
+        {
+            continue;
+        }
+        out.push(UnknownKey {
+            suggestion: closest(&var, known_env.iter()),
+            name: var,
+            source: UnknownKeySource::Env,
+        });
+        env_paths.push(path);
+    }
+    // File keys: every ignored leaf that no environment variable supplied.
+    let known_dotted: Vec<String> = known.iter().map(|k| k.join(".")).collect();
+    for segs in &ignored {
+        let Some(value) = root.find_ref(&segs.join(".")) else {
+            continue;
+        };
+        let mut leaves = Vec::new();
+        leaf_paths(segs, value, &mut leaves);
+        for leaf in leaves {
+            let dotted = leaf.join(".");
+            let Some(md) = figment.find_metadata(&dotted) else {
+                continue;
+            };
+            if env_paths.contains(&leaf) || md.name.contains("environment") {
+                continue;
+            }
+            let file = md
+                .source
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| md.name.to_string());
+            out.push(UnknownKey {
+                suggestion: closest(&dotted, known_dotted.iter()),
+                name: dotted,
+                source: UnknownKeySource::File(file),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
+
+    /// The repository's `.env.example`, read at compile time so the test sees
+    /// exactly the file a new contributor copies (KI-136).
+    const ENV_EXAMPLE: &str = include_str!("../../../.env.example");
+
+    /// `KEY=value` pairs of a dotenv file: blank lines and `#` comments are
+    /// skipped, surrounding quotes are stripped. Enough for `.env.example`,
+    /// which `just` loads with `set dotenv-load`.
+    fn dotenv_pairs(text: &str) -> Vec<(String, String)> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let (k, v) = l
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("not KEY=value: {l}"));
+                let v = v.trim();
+                let v = v
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(v);
+                (k.trim().to_string(), v.to_string())
+            })
+            .collect()
+    }
+
+    /// KI-136: `cp .env.example .env; just up; just serve` must get past
+    /// config validation. Loads the file through the real loader (`Env`
+    /// provider, `__` split, value parsing) in a jail whose environment holds
+    /// ONLY the file's variables, then runs the boot check `main.rs` runs.
+    #[test]
+    fn env_example_loads_and_validates() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            for (k, v) in dotenv_pairs(ENV_EXAMPLE) {
+                jail.set_env(k, v);
+            }
+            let cfg = Config::load()?;
+            cfg.validate()
+                .map_err(|e| format!(".env.example does not pass Config::validate: {e}"))?;
+            Ok(())
+        });
+    }
+
+    /// KI-136 guard: the storage credentials in `.env.example` are the ones
+    /// the dev compose's RustFS really starts with, so a copied file can
+    /// reach the bucket and not only pass validation.
+    #[test]
+    fn env_example_storage_matches_the_dev_compose() {
+        const COMPOSE: &str = include_str!("../../../deploy/docker-compose.dev.yml");
+        let env = dotenv_pairs(ENV_EXAMPLE);
+        let get = |k: &str| {
+            env.iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("{k} missing from .env.example"))
+        };
+        assert!(
+            COMPOSE.contains(&format!(
+                "RUSTFS_ACCESS_KEY: {}",
+                get("EGRET_STORAGE__ACCESS_KEY")
+            )),
+            "EGRET_STORAGE__ACCESS_KEY must equal the compose RUSTFS_ACCESS_KEY"
+        );
+        assert!(
+            COMPOSE.contains(&format!(
+                "RUSTFS_SECRET_KEY: {}",
+                get("EGRET_STORAGE__SECRET_KEY")
+            )),
+            "EGRET_STORAGE__SECRET_KEY must equal the compose RUSTFS_SECRET_KEY"
+        );
+        assert!(
+            COMPOSE.contains("\"9000:9000\""),
+            "the compose RustFS must publish 9000, the port EGRET_STORAGE__ENDPOINT names"
+        );
+        assert_eq!(get("EGRET_STORAGE__ENDPOINT"), "http://localhost:9000");
+    }
+
+    /// KI-141: with `catalog.public_url` unset, it follows `server.port`, and
+    /// with it the machine-IdP issuer that falls back to it.
+    #[test]
+    fn catalog_public_url_follows_server_port_when_unset() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("EGRET_SERVER__PORT", "9090");
+            let cfg = Config::load()?;
+            assert_eq!(
+                cfg.catalog.public_url.as_deref(),
+                Some("http://localhost:9090")
+            );
+            assert_eq!(
+                cfg.idp
+                    .issuer_url(cfg.catalog.public_url.as_deref().unwrap_or_default()),
+                "http://localhost:9090"
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-141: the default port still gives today's value.
+    #[test]
+    fn catalog_public_url_defaults_to_port_8080() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let cfg = Config::load()?;
+            assert_eq!(
+                cfg.catalog.public_url.as_deref(),
+                Some("http://localhost:8080")
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-141: an explicit `catalog.public_url` is kept whatever the port.
+    #[test]
+    fn explicit_catalog_public_url_is_kept() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("EGRET_SERVER__PORT", "9090");
+            jail.set_env("EGRET_CATALOG__PUBLIC_URL", "https://egret.example.com");
+            let cfg = Config::load()?;
+            assert_eq!(
+                cfg.catalog.public_url.as_deref(),
+                Some("https://egret.example.com")
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-140: a misspelled variable is reported, with a hint.
+    #[test]
+    fn a_misspelled_env_var_is_reported_with_a_hint() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("EGRET_SERVER__PORTT", "9090");
+            let unknown = Config::unknown_keys();
+            assert_eq!(
+                unknown,
+                vec![UnknownKey {
+                    name: "EGRET_SERVER__PORTT".into(),
+                    source: UnknownKeySource::Env,
+                    suggestion: Some("EGRET_SERVER__PORT".into()),
+                }]
+            );
+            assert_eq!(
+                unknown[0].to_string(),
+                "ignored environment variable EGRET_SERVER__PORTT: no configuration key \
+                 has this name (did you mean EGRET_SERVER__PORT?)"
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-140: the single-underscore slip (`EGRET_DATABASE_URL`) lands at the
+    /// top level, where it was ignored silently too.
+    #[test]
+    fn a_single_underscore_env_var_is_reported() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("EGRET_DATABASE_URL", "postgres://x@db/x");
+            let unknown = Config::unknown_keys();
+            assert_eq!(unknown.len(), 1, "{unknown:?}");
+            assert_eq!(unknown[0].name, "EGRET_DATABASE_URL");
+            assert_eq!(
+                unknown[0].suggestion.as_deref(),
+                Some("EGRET_DATABASE__URL")
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-140: an unknown key in `egret.toml`, a whole unknown section, and a
+    /// name too far from any key (no hint).
+    #[test]
+    fn unknown_file_keys_are_reported() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.create_file("egret.toml", "[server]\nportt = 1\n\n[nonsense]\nx = 1\n")?;
+            let mut unknown = Config::unknown_keys();
+            unknown.sort_by(|a, b| a.name.cmp(&b.name));
+            let got: Vec<_> = unknown
+                .iter()
+                .map(|k| (k.name.as_str(), k.suggestion.as_deref()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![("nonsense.x", None), ("server.portt", Some("server.port"))]
+            );
+            for k in &unknown {
+                assert!(
+                    matches!(&k.source, UnknownKeySource::File(p) if p.ends_with("egret.toml")),
+                    "{k:?}"
+                );
+            }
+            assert!(
+                unknown[1].to_string().starts_with("ignored key server.portt in ")
+                    && unknown[1].to_string().ends_with(
+                        "egret.toml: no configuration key has this name (did you mean server.port?)"
+                    ),
+                "{}",
+                unknown[1]
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-140: a correct set stays silent — `.env.example` itself, plus the
+    /// variables egret reads outside the config struct.
+    #[test]
+    fn a_correct_set_and_the_outside_variables_stay_silent() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            for (k, v) in dotenv_pairs(ENV_EXAMPLE) {
+                jail.set_env(k, v);
+            }
+            for k in ENV_OUTSIDE_CONFIG {
+                jail.set_env(k, "1");
+            }
+            for p in ENV_OUTSIDE_CONFIG_PREFIXES {
+                jail.set_env(format!("{p}SOMETHING"), "1");
+            }
+            jail.set_env("EGRET_IDP__ISSUER", "https://idp.example.com");
+            assert_eq!(Config::unknown_keys(), vec![]);
+            Ok(())
+        });
+    }
+
+    /// KI-140 guard: every `EGRET_*` variable production code reads with
+    /// `std::env::var`/`var_os` by literal name is allow-listed in
+    /// [`ENV_OUTSIDE_CONFIG`] (or under a harness prefix), so a new direct
+    /// read cannot start warning on every boot unnoticed.
+    #[test]
+    fn every_direct_env_read_is_allow_listed() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rs_files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for c in std::fs::read_dir(&crates).unwrap().flatten() {
+            let src = c.path().join("src");
+            if src.is_dir() {
+                rs_files(&src, &mut files);
+            }
+        }
+        let mut found = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            for needle in ["env::var(\"EGRET_", "env::var_os(\"EGRET_"] {
+                for (i, _) in text.match_indices(needle) {
+                    let rest = &text[i + needle.len() - "EGRET_".len()..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                        .collect();
+                    found.push((name, f.display().to_string()));
+                }
+            }
+        }
+        assert!(
+            found.iter().any(|(n, _)| n == "EGRET_ADMIN_EMAIL"),
+            "the scan must see the known reads: {found:?}"
+        );
+        for (name, file) in found {
+            assert!(
+                ENV_OUTSIDE_CONFIG.contains(&name.as_str())
+                    || ENV_OUTSIDE_CONFIG_PREFIXES
+                        .iter()
+                        .any(|p| name.starts_with(p)),
+                "{name} (read in {file}) is not in ENV_OUTSIDE_CONFIG: the unknown-key \
+                 warning would flag it on every start"
+            );
+        }
+    }
 
     #[test]
     fn apps_config_defaults() {

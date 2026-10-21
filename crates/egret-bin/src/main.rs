@@ -45,6 +45,11 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().context("loading configuration")?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     init_tracing(&config);
+    // After tracing, so the warnings reach the log. Warnings, not errors: a
+    // stale key in a running deployment must not stop it starting (KI-140).
+    for unknown in Config::unknown_keys() {
+        tracing::warn!("{unknown}");
+    }
     // Beside tracing, and for the same reason: both are process-wide sinks that
     // have to exist before anything that writes to them runs. Every
     // `metrics::counter!` in the tree records into a no-op recorder until this
