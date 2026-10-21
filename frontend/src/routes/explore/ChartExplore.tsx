@@ -37,7 +37,7 @@ import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
 import { reconcileTableState } from "@/components/chart/table-state";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
-import { authoredOrderby, honoursOrderby, sortableFields } from "@/components/chart/viz/orderby";
+import { authoredOrderby, honoursOrderby, honoursRowLimit, sortableFields } from "@/components/chart/viz/orderby";
 import { SortRows } from "@/components/chart/SortRows";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
@@ -479,6 +479,15 @@ export default function ChartExplore() {
   function changeViz(v: VizType) {
     setViz(v);
     resetRun();
+    // ONE NAMESPACE, ONE CONFIG. Bar, line, area, combo, row and scatter are all
+    // `cartesianDescriptor`s writing `cartesian.*`, so between them the config already has the
+    // new type's shape and there is nothing to translate — dropping it cleared the X-axis and the
+    // Y-axis on a bar → line switch (KI-047), which is not what Metabase does either. The sort
+    // stays with it for the same reason: it names fields of a spec built from the same config.
+    if (getDescriptor(v)?.prefix === descriptor?.prefix) {
+      if (!id) setSearchParams({ type: v });
+      return;
+    }
     // A different viz means a different config shape; its descriptor's default applies.
     setDescState(null);
     // And the sort goes with it. Unlike a filter, which names a DATASET column and stays valid
@@ -761,7 +770,11 @@ export default function ChartExplore() {
                 NOT CLAMPED, deliberately. Rewriting 99999 to 10000 under the cursor would change a
                 value the author typed, and this pass is presentation only; the number stays theirs
                 and the panel now says what will happen to it. The clamp is worth its own change,
-                and is written up as such. */}
+                and is written up as such.
+
+                Not offered where the query ignores it (`honoursRowLimit`): Big number, Progress and
+                Gauge always ask for one row. */}
+            {(!descriptor || honoursRowLimit(descriptor, descConfig)) && (
             <div className="space-y-1">
               <Label htmlFor="row-limit" className={FIELD_LABEL}>Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={MAX_CHART_ROWS} value={rowLimit}
@@ -775,6 +788,7 @@ export default function ChartExplore() {
                   : `Up to ${MAX_CHART_ROWS.toLocaleString()} rows.`}
               </p>
             </div>
+            )}
           </TabsContent>
 
           {/* ── DISPLAY TAB ── */}

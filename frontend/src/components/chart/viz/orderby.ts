@@ -54,6 +54,18 @@ export function honoursOrderby(descriptor: VizDescriptor<never>, config: never):
 }
 
 /**
+ * Whether this descriptor's query reads the shared Row limit at all — asked of the descriptor the
+ * same way `honoursOrderby` is, by building a spec with a limit no default could produce and
+ * looking for it. Big number, Progress and Gauge answer no: their query is one aggregate row
+ * (`row_limit: 1`, `fieldDescriptor`'s `oneRow`) whatever the box says, so the editor does not
+ * offer a box with nothing to act on (KI-051).
+ */
+export function honoursRowLimit(descriptor: VizDescriptor<never>, config: never): boolean {
+  const probe = 7_919;
+  return descriptor.buildSpec(config, { ...NO_SHARED, rowLimit: probe }).row_limit === probe;
+}
+
+/**
  * Recovers the sort the chart's AUTHOR asked for from a stored spec, which is not the same thing as
  * the spec's `orderby`.
  *

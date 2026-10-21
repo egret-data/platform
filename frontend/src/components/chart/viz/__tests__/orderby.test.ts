@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import type { ChartParamsV2, VizType } from "@/api/charts";
 import { getDescriptor } from "../registry";
-import { authoredOrderby, honoursOrderby, sortableFields } from "../orderby";
+import { authoredOrderby, honoursOrderby, honoursRowLimit, sortableFields } from "../orderby";
 import { cartesianDescriptor } from "../cartesian";
 import { pivotDescriptor } from "../pivot";
 import { tableDescriptor, objectDescriptor } from "../table";
@@ -218,5 +218,23 @@ describe("honoursOrderby", () => {
     expect(honoursOrderby(getDescriptor("smartscalar")!, { dimension: "day", metric: "revenue" } as never)).toBe(false);
     // Also with nothing configured yet — the control must not flicker into existence.
     expect(honoursOrderby(getDescriptor("smartscalar")!, {} as never)).toBe(false);
+  });
+});
+
+// KI-051: the editor showed Row limit on charts whose query is one aggregate row regardless.
+describe("honoursRowLimit", () => {
+  const ask = (key: VizType) => {
+    const d = getDescriptor(key)!;
+    return honoursRowLimit(d, d.defaultConfig as never);
+  };
+  it("is false for the one-row charts: Big number, Progress and Gauge", () => {
+    expect(ask("scalar")).toBe(false);
+    expect(ask("progress")).toBe(false);
+    expect(ask("gauge")).toBe(false);
+  });
+  it("is true for a chart whose rows the limit decides", () => {
+    for (const key of ["bar", "row", "table", "pie", "map", "boxplot", "funnel"] as VizType[]) {
+      expect(ask(key), key).toBe(true);
+    }
   });
 });
