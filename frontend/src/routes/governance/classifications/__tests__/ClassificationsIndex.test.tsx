@@ -220,6 +220,27 @@ describe("the Classification index", () => {
     expect(screen.getAllByRole("button", { name: "New classification" })).toHaveLength(2);
   });
 
+  it("explains the three steps when there is no classification yet", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, STEWARD);
+    const steps = await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(within(steps).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "Create a classification.",
+      "Attach it to tables or columns in Data.",
+      "Add a rule (mask or row filter) or set clearance on the classification's page.",
+    ]);
+    expect(within(steps).getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
+    expect(screen.queryByText("Creating needs the tag:manage permission.")).not.toBeInTheDocument();
+  });
+
+  it("without tag:manage, the steps say what creating needs", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, TAG_READER);
+    await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(screen.getByText("Creating needs the tag:manage permission.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New classification" })).not.toBeInTheDocument();
+  });
+
   it("says when the search matches nothing, and clears it", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok(TAGS) });

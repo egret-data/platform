@@ -72,9 +72,11 @@ describe("Where used: Data", () => {
     expect(await screen.findByText("2 assignments are in a warehouse no catalog names.", {}, T)).toBeInTheDocument();
   });
 
-  it("says so when no table or column carries it", async () => {
+  it("says so when no table or column carries it, and where to attach it", async () => {
     open(usage());
     expect(await screen.findByText("No table or column carries this classification.", {}, T)).toBeInTheDocument();
+    expect(within(data()).getByRole("link", { name: "Attach in Data" })).toHaveAttribute("href", "/governance/data");
+    expect(within(data()).getByText("Open a table or a column and use Add classification.")).toBeInTheDocument();
   });
 });
 
@@ -146,11 +148,12 @@ describe("Where used: states", () => {
   it("shows a failure with Retry and neither empty sentence", async () => {
     const user = userEvent.setup();
     const served = open("error");
-    expect(await screen.findByText(/The classification's usage could not be loaded/, {}, T)).toBeInTheDocument();
-    expect(screen.getByText(/database unavailable/)).toBeInTheDocument();
+    const panel = await screen.findByRole("tabpanel", {}, T);
+    expect(await within(panel).findByText(/The classification's usage could not be loaded/, {}, T)).toBeInTheDocument();
+    expect(within(panel).getByText(/database unavailable/)).toBeInTheDocument();
     expect(screen.queryByText("No table or column carries this classification.")).not.toBeInTheDocument();
     expect(screen.queryByText("No BI object carries this classification.")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(within(panel).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`)).toHaveLength(2));
   });
 });

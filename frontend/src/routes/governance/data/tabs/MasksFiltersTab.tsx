@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -317,6 +318,11 @@ function deleteDescription(r: RuleView | null): string {
   return `This rule selects ${reach}, not one object. ${removed}`;
 }
 
+/** A rule's page, opened from this Data page, so its way back returns here (`?from=data:`, spec C1). */
+function ruleHref(ruleId: string, back: string): string {
+  return `/governance/rules/${encodeURIComponent(ruleId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
+}
+
 function RuleTable({
   label,
   rows,
@@ -334,6 +340,8 @@ function RuleTable({
   onEdit: (r: RuleView) => void;
   onDelete: (r: RuleView) => void;
 }) {
+  const location = useLocation();
+  const back = location.pathname + location.search;
   return (
     <Table aria-label={label}>
       <TableHeader>
@@ -354,7 +362,11 @@ function RuleTable({
           <TableRow key={rule.id}>
             <TableCell className="whitespace-normal">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium break-words">{rule.name}</p>
+                <p className="text-sm font-medium break-words">
+                  <Link to={ruleHref(rule.id, back)} className="text-primary hover:underline">
+                    {rule.name}
+                  </Link>
+                </p>
                 <p className="text-xs break-words text-muted-foreground">{formatSelector(rule)}</p>
               </div>
             </TableCell>

@@ -1,11 +1,15 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { EyeOff } from "lucide-react";
+import { EyeOff, Plus } from "lucide-react";
 import type { RuleView } from "@/api/generated/model";
 import { usePermListRules } from "@/api/generated/perm/perm";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { TERM } from "@/routes/governance/glossary";
 import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
@@ -32,11 +36,21 @@ function ruleHref(ruleId: string, tagId: string): string {
  * and says which one it was written on. Each rule links to its own page with
  * `?from=classification:<tagId>`, so the page's way back names this one. Read
  * from `GET /perm/rules`, so the page renders this only for a `policy:read`
- * holder.
+ * holder. **Add rule** (toolbar and empty state, `policy:update`) opens the
+ * rule dialog on this classification (spec C2, entry `classification`);
+ * without the permission the section says so (FE-ACTION-4).
  */
 export default function TagRulesSection({ tag, tagId }: { tag: { key: string; name: string }; tagId: string }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames();
+  const canAdd = usePolicyPermissions()("policy:update");
+  const [adding, setAdding] = useState(false);
+  const addButton = (
+    <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
+      <Plus className="mr-1 h-4 w-4" aria-hidden />
+      {TERM.addRule}
+    </Button>
+  );
 
   let body;
   if (rulesQ.isError) body = <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
@@ -45,7 +59,7 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
     const rules = rulesOnTag(rulesQ.data.data, tag).sort((a, b) => a.name.localeCompare(b.name));
     body =
       rules.length === 0 ? (
-        <EmptyState icon={EyeOff} title="No rule uses this classification yet." />
+        <EmptyState icon={EyeOff} title="No rule uses this classification yet." action={canAdd ? addButton : undefined} />
       ) : (
         <Table aria-label="Rules on this classification">
           <TableHeader>
@@ -90,7 +104,17 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
         Rules that mask or filter data carrying this classification. Engines match a rule by the classification&apos;s
         name, so a rule written on another classification with the same name applies here too.
       </p>
+      <div className="flex justify-end">
+        {canAdd ? addButton : <p className="text-xs text-muted-foreground">Adding a rule needs the policy:update permission.</p>}
+      </div>
       {body}
+      {canAdd ? (
+        <RuleDialog
+          open={adding}
+          onOpenChange={setAdding}
+          entry={{ kind: "classification", tagKey: tag.key, tagName: tag.name }}
+        />
+      ) : null}
     </Section>
   );
 }

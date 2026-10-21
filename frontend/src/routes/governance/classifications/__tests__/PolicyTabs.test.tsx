@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ItemSummary, TagHandWritten, TagPolicyRow } from "@/api/generated/model";
-import { fail, ok, openArea, serve, STEWARD, tag, TAG_POLICY_READER, TAG_READER, type Answer } from "./harness";
+import { ADMIN, fail, ok, openArea, serve, STEWARD, tag, TAG_POLICY_READER, TAG_READER, type Answer } from "./harness";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -21,9 +21,24 @@ describe("Rules tab", () => {
   it("lists the rules on this classification for a policy:read holder", async () => {
     open("rules", TAG_POLICY_READER, { "/perm/rules": ok([]) });
     expect(await screen.findByRole("heading", { name: "Rules" }, T)).toBeInTheDocument();
-    expect(await screen.findByText("No rule uses this classification yet.", {}, T)).toBeInTheDocument();
+    const rules = screen.getByRole("region", { name: "Rules" });
+    expect(await within(rules).findByText("No rule uses this classification yet.", {}, T)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Mask and filter rules" })).not.toBeInTheDocument();
+    expect(within(rules).getAllByText("Adding a rule needs the policy:update permission.")).toHaveLength(1);
+    expect(within(rules).queryByRole("button", { name: "Add rule" })).not.toBeInTheDocument();
     expect(screen.queryByText(/egret rule/)).not.toBeInTheDocument();
+  });
+
+  it("offers Add rule in the toolbar and in the empty state with policy:update, on this classification", async () => {
+    const user = userEvent.setup();
+    open("rules", ADMIN, { "/perm/rules": ok([]), "/governance/catalogs": ok([]) });
+    const rules = await screen.findByRole("region", { name: "Rules" }, T);
+    await within(rules).findByText("No rule uses this classification yet.", {}, T);
+    const adds = within(rules).getAllByRole("button", { name: "Add rule" });
+    expect(adds).toHaveLength(2);
+    await user.click(adds[1]);
+    const dialog = await screen.findByRole("dialog", { name: "New rule" });
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
   });
 
   it("explains, and asks for no rules, without policy:read", async () => {
@@ -244,7 +259,7 @@ describe("Manual policies tab (route D)", () => {
       await screen.findByText(/The manual tag policies could not be loaded/, {}, T),
     ).toBeInTheDocument();
     expect(screen.queryByText("No manual tag policy names this classification.")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${HW}`)).toHaveLength(2));
   });
 });

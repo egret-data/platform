@@ -192,7 +192,14 @@ export default function ClassificationsIndex() {
   } else if (!rows || !shown) {
     body = <ListSkeleton rows={6} cols={6} />;
   } else if (rows.length === 0) {
-    body = <EmptyState icon={Tags} variant="dashed" title={NO_CLASSIFICATION_YET} action={newButton} />;
+    body = (
+      <EmptyState
+        icon={Tags}
+        variant="dashed"
+        title={NO_CLASSIFICATION_YET}
+        action={<HowClassificationWorks newButton={newButton} />}
+      />
+    );
   } else {
     body = (
       <FilterableTable
@@ -266,6 +273,35 @@ export default function ClassificationsIndex() {
         />
       ) : null}
     </ListPageShell>
+  );
+}
+
+export const CREATING_NEEDS_TAG_MANAGE = "Creating needs the tag:manage permission.";
+
+/**
+ * The first-run steps (spec C3): create, attach in Data, then add a rule or
+ * set clearance on the classification's page. Step 1 carries New
+ * classification for a `tag:manage` holder; anyone else is told what
+ * creating needs (FE-ACTION-4).
+ */
+function HowClassificationWorks({ newButton }: { newButton: ReactNode }) {
+  return (
+    <div className="space-y-3 text-left">
+      <ol aria-label="How classification works" className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+        <li>Create a classification.</li>
+        <li>
+          {"Attach it to tables or columns in "}
+          <Link to="/governance/data" className="font-medium text-primary hover:underline">
+            Data
+          </Link>
+          .
+        </li>
+        <li>Add a rule (mask or row filter) or set clearance on the classification&apos;s page.</li>
+      </ol>
+      <div className="flex justify-center">
+        {newButton ?? <p className="text-xs text-muted-foreground">{CREATING_NEEDS_TAG_MANAGE}</p>}
+      </div>
+    </div>
   );
 }
 

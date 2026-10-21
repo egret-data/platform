@@ -1093,6 +1093,17 @@ describe("MasksFiltersTab", () => {
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules"]);
   });
 
+  it("links each rule to its page, with the way back to this Data page", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    const link = within(here).getByRole("link", { name: "us_only" });
+    const href = link.getAttribute("href") ?? "";
+    expect(href.startsWith("/governance/rules/")).toBe(true);
+    const from = new URLSearchParams(href.split("?")[1]).get("from");
+    expect(from).toBe(`data:${encodeURIComponent("/governance/data/ice/sales/orders?tab=masks")}`);
+  });
+
   it("lists a rule on another tag that shares the tag's name, since the engine matches names", async () => {
     // The rule selects key `pii_eu`, also named PII; `email` carries key `pii`, named PII.
     serveData(fixture({ rules: ok([tagRule("redact_pii_eu", "pii_eu", REDACT, "PII")]) }));
@@ -1153,7 +1164,8 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks");
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "Row filter · region = 'us'", "members of workspace Finance"]]);
-    expect(within(within(panel()).getByRole("table", { name: "Here" })).queryByRole("link")).not.toBeInTheDocument();
+    // The workspace is named, not linked; the only link is the rule's own page.
+    expect(within(within(panel()).getByRole("table", { name: "Here" })).getAllByRole("link").map((a) => a.textContent)).toEqual(["us_only"]);
     // A table page lists its tag rules itself, so it does not point elsewhere.
     expect(within(panel()).queryByText("Rules on classifications are listed on each table's page.")).not.toBeInTheDocument();
   });

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
+import { EffectStrip } from "@/routes/governance/classifications/EffectStrip";
 import { TagHeader } from "@/routes/governance/classifications/TagHeader";
 import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { ClearanceTab } from "@/routes/governance/classifications/tabs/ClearanceTab";
@@ -78,7 +79,8 @@ function TabBody({ tab, tag }: { tab: TagTab; tag: Tag }) {
  * A classification's page (spec §5): `/governance/classifications/:id`,
  * `tag:read`. The tag comes from `GET /tags` (`useTags`, the one key for the
  * list, CL16). A failing list is an error with Retry, never "not found"; an
- * id the list does not hold is "No classification with this id." Each tab
+ * id the list does not hold is "No classification with this id." The Effect
+ * strip (spec C2) sits between the header and the tabs. Each tab
  * owns its states (FE-STATE-1); `?tab=` selects one (FE-PAGE-2, CL17).
  */
 export default function TagPage() {
@@ -122,6 +124,7 @@ export default function TagPage() {
       content = (
         <>
           <TagHeader tag={tag} actions={<DeleteControl tag={tag} />} />
+          <EffectStrip tag={tag} />
           <Tabs value={value} onValueChange={select} className="min-w-0">
             {/* Wraps, so every tab is in view at 390 px. */}
             <TabsList className="h-auto max-w-full flex-wrap justify-start">
