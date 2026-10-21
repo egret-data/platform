@@ -35,7 +35,7 @@ function progressMessage(hasValue: boolean, hasGoal: boolean, value: number, goa
  * so the overshoot is visible. A pointer marks the value position.
  */
 export function ProgressChart({
-  columns, rows, metric, goal = 0, goalColumn, color, format = {}, onValueClick,
+  columns, rows, metric, goal, goalColumn, color, format = {}, onValueClick,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -64,8 +64,10 @@ export function ProgressChart({
   // A goal read from a column comes from the same single row the value does.
   const gi = goalColumn != null ? columns.findIndex((c) => c.name === goalColumn) : -1;
   const goalRaw = gi >= 0 && rows.length > 0 ? rows[0][gi] : undefined;
-  const goalFromColumn = gi >= 0 ? Number(goalRaw) : NaN;
-  const effectiveGoal = Number.isFinite(goalFromColumn) ? goalFromColumn : goal;
+  // `Number(null)` is 0, so an empty goal cell is ruled out before converting — as the typed goal
+  // is: an empty Goal box stores nothing, and nothing is "no goal set", never a goal of 0 (KI-044).
+  const goalFromColumn = gi >= 0 && goalRaw != null && goalRaw !== "" ? Number(goalRaw) : NaN;
+  const effectiveGoal = Number.isFinite(goalFromColumn) ? goalFromColumn : (goal ?? NaN);
 
   const hasGoal = Number.isFinite(effectiveGoal) && effectiveGoal >= 0;
   const exceeded = hasValue && hasGoal && value > effectiveGoal;
