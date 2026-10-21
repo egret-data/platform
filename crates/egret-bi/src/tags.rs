@@ -69,16 +69,43 @@ fn validate_key(key: &str) -> Result<(), BiError> {
 
 /// The refusal of deleting a classification some rules still select.
 fn tag_in_use(rules: &[(Uuid, String)]) -> BiError {
-    let names: Vec<&str> = rules.iter().map(|(_, n)| n.as_str()).collect();
     BiError::coded(
         StatusCode::CONFLICT,
         "tag_in_use",
-        format!(
-            "Rules still use this classification: {}. Delete them or change what they apply to first.",
-            names.join(", ")
-        ),
+        tag_in_use_message(rules),
         json!({"rules": rules.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>()}),
     )
+}
+
+/// The sentence of `tag_in_use`. The empty list is the foreign-key race (a rule
+/// appeared after the read), where no rule can be named.
+fn tag_in_use_message(rules: &[(Uuid, String)]) -> String {
+    if rules.is_empty() {
+        return "A rule still uses this classification; reload and try again.".into();
+    }
+    let names: Vec<&str> = rules.iter().map(|(_, n)| n.as_str()).collect();
+    format!(
+        "Rules still use this classification: {}. Delete them or change what they apply to first.",
+        names.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_in_use_names_the_rules_or_says_to_reload() {
+        let r = vec![
+            (Uuid::nil(), "r1".to_string()),
+            (Uuid::nil(), "r2".to_string()),
+        ];
+        assert!(tag_in_use_message(&r).starts_with("Rules still use this classification: r1, r2."));
+        assert_eq!(
+            tag_in_use_message(&[]),
+            "A rule still uses this classification; reload and try again."
+        );
+    }
 }
 
 /// A classification already holding a name (C10): the name check's answer.
@@ -110,6 +137,13 @@ impl TagRepo {
 
     /// Another classification whose name equals `name` ignoring case and
     /// surrounding spaces; `except` is the classification being renamed.
+    ///
+    /// **Best-effort, not a guarantee.** There is deliberately no unique index
+    /// on `lower(tags.name)`: 50+ test fixtures reuse names, and existing
+    /// installs may already hold duplicates that must keep working. The check
+    /// runs in the HTTP handlers only, on create and real renames, and two
+    /// concurrent writes can both pass it (check-then-write). No lock is taken.
+    ///
     /// Engines match a classification rule by NAME, so two classifications
     /// with one name share every rule written on either (spec C10).
     pub async fn name_taken(

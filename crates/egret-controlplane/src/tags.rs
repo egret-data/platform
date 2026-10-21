@@ -170,6 +170,7 @@ async fn create_tag(
     Json(body): Json<CreateTag>,
 ) -> Result<(StatusCode, Json<TagDto>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    // Best-effort (see `TagRepo::name_taken`): racy by design, no lock.
     if let Some(existing) = st.tags.name_taken(&body.name, None).await? {
         return Err(egret_bi::BiError::tag_name_taken(&body.name, &existing).into());
     }
@@ -209,9 +210,16 @@ async fn update_tag(
     Json(body): Json<UpdateTag>,
 ) -> Result<Json<TagDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    // Best-effort (see `TagRepo::name_taken`): racy by design, no lock. Only a
+    // REAL rename is checked: re-sending the stored name byte for byte is not
+    // one, so a pre-existing duplicate pair can still change colour or
+    // description. A case-only change is a rename.
     if let Some(name) = body.name.as_deref() {
-        if let Some(existing) = st.tags.name_taken(name, Some(id)).await? {
-            return Err(egret_bi::BiError::tag_name_taken(name, &existing).into());
+        let unchanged = st.tags.get(id).await?.is_some_and(|t| t.name == name);
+        if !unchanged {
+            if let Some(existing) = st.tags.name_taken(name, Some(id)).await? {
+                return Err(egret_bi::BiError::tag_name_taken(name, &existing).into());
+            }
         }
     }
     let tag = st
