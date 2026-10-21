@@ -11,13 +11,13 @@ import { Button } from "@/components/ui/button";
  */
 
 /** `The <what> could not be loaded. Retry, or reload the page.` */
+export function failedText(what: string): string {
+  return `The ${what} could not be loaded. Retry, or reload the page.`;
+}
+
 /** "(required)" after a label's text (spec C8.1); the field itself carries `aria-required`. */
 export function RequiredMark() {
   return <span className="font-normal text-muted-foreground"> (required)</span>;
-}
-
-export function failedText(what: string): string {
-  return `The ${what} could not be loaded. Retry, or reload the page.`;
 }
 
 /** A tab's (or a section's) error: what failed, and a retry. Never an empty state. */

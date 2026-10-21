@@ -86,8 +86,11 @@ function DeleteRuleDialogWithTags(props: DeleteRuleProps) {
 /**
  * Delete this rule: type its name (spec C11). Done, the page leaves for where
  * it was opened from (`ruleDeletedTo`) and toasts, the page itself being gone
- * (FE-ACTION-2's exception). It leaves before the rules list refreshes, so
- * the list without this rule never renders here as "No rule has this id".
+ * (FE-ACTION-2's exception). The cached rules list drops the rule first, so
+ * the page it returns to never shows it, and the navigation replaces this
+ * page's history entry, so Back does not lead here. The list without this rule
+ * never renders here as "No rule has this id": the cache notifies after the
+ * navigation has unmounted this page.
  */
 function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & { tags?: { id: string; key: string }[] }) {
   const queryClient = useQueryClient();
@@ -102,7 +105,8 @@ function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & 
     <ConfirmDeleteDialog
       open={open}
       onOpenChange={onOpenChange}
-      title={`Delete "${rule.name}"?`}
+      title={`${TERM.delete} "${rule.name}"?`}
+      confirmLabel={TERM.delete}
       description="This rule is permanently removed and every profile it reaches recompiles."
       confirmText={rule.name}
       onConfirm={() => {
@@ -111,8 +115,18 @@ function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & 
           { id: rule.id },
           {
             onSuccess: () => {
-              navigate(to);
-              toast.success(`Rule ${rule.name} deleted.`);
+              // The cached list drops the rule before the page it returns to
+              // mounts, so that page never shows it while the list refetches;
+              // replace, so Back does not lead to the deleted rule's page.
+              queryClient.setQueriesData<{ status: number; data: unknown }>(
+                { queryKey: getPermListRulesQueryKey() },
+                (old) =>
+                  old?.status === 200 && Array.isArray(old.data)
+                    ? { ...old, data: (old.data as RuleView[]).filter((r) => r.id !== rule.id) }
+                    : old,
+              );
+              navigate(to, { replace: true });
+              toast.success(`${TERM.rule} ${rule.name} deleted.`);
               void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
             },
           },
@@ -148,7 +162,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
       </Button>
       <Button variant="outline" size="sm" className="text-destructive" onClick={onDelete}>
         <Trash2 aria-hidden />
-        Delete
+        {TERM.delete}
       </Button>
     </>
   ) : (

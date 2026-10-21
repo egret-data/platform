@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { tagInUse } from "@/routes/governance/apiErrors";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
  * A refused classification delete, in a toast (FE-ACTION-3, spec C11). The
@@ -14,10 +15,11 @@ export function toastTagDeleteFailure(e: unknown, { tagName, showRules }: { tagN
   const inUse = tagInUse(e);
   if (inUse) {
     const n = inUse.rules.length;
-    const count = n === 0 ? "rules" : `${n} ${n === 1 ? "rule" : "rules"}`;
+    const rules = TERM.rules.toLowerCase();
+    const count = n === 0 ? rules : `${n} ${n === 1 ? TERM.rule.toLowerCase() : rules}`;
     toast.error(`${tagName} is still used by ${count}.`, {
-      description: n > 0 ? `Delete or change these rules first: ${inUse.rules.map((r) => r.name).join(", ")}.` : undefined,
-      action: showRules ? { label: "Show rules", onClick: showRules } : undefined,
+      description: n > 0 ? `${TERM.delete} or change these ${rules} first: ${inUse.rules.map((r) => r.name).join(", ")}.` : undefined,
+      action: showRules ? { label: `Show ${rules}`, onClick: showRules } : undefined,
     });
     return;
   }

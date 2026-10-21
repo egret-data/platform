@@ -16,8 +16,16 @@ export const DEFAULT_COLOR = "#6366f1";
  */
 export const TAG_KEY_PATTERN = /^[a-z0-9:-]+$/;
 
-/** What the key field says while its value breaks `TAG_KEY_PATTERN`. */
-export const TAG_KEY_RULE_ERROR = "Use lowercase letters, digits, - and : only.";
+/**
+ * What the key field says while its value breaks `TAG_KEY_PATTERN`, or null:
+ * the characters it may not hold, each once (a space as "space"). What it may
+ * hold is the field's hint, read after this.
+ */
+export function tagKeyRuleError(key: string): string | null {
+  const bad = [...new Set([...key].filter((c) => !TAG_KEY_PATTERN.test(c)))];
+  if (bad.length === 0) return null;
+  return `Not allowed in a key: ${bad.map((c) => (c === " " ? "space" : c)).join(", ")}.`;
+}
 
 /** A valid tag key from a name: lowercase, every run outside `[a-z0-9:-]` (an `_` included) → `-`. */
 export function slugifyTagKey(s: string): string {
@@ -75,7 +83,11 @@ export function ClearanceCell({ tag }: { tag: Pick<Tag, "required_roles" | "requ
   );
 }
 
-/** A name as the server compares names for duplicates: `lower(btrim(name))`. */
+/**
+ * A name as the server compares names for duplicates: `lower(btrim(name))`.
+ * A hint only: JavaScript's case folding and trimming need not match
+ * Postgres's for every non-ASCII name, and the server's `tag_name_taken` decides.
+ */
 const foldName = (name: string) => name.trim().toLowerCase();
 
 /**

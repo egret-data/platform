@@ -52,7 +52,7 @@ function DeleteControl({ tag }: { tag: Tag }) {
         onClick={() => setOpen(true)}
       >
         <Trash2 className="mr-1 h-4 w-4" aria-hidden />
-        Delete
+        {TERM.delete}
       </Button>
       <DeleteTagDialog tag={tag} open={open} onOpenChange={setOpen} where="this page" opener={opener} />
     </>

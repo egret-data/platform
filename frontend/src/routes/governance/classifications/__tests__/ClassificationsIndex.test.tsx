@@ -280,10 +280,16 @@ describe("New classification: rules said inline (C10)", () => {
     await user.clear(screen.getByLabelText(/^Key/));
     await user.type(screen.getByLabelText(/^Key/), "a_b");
     expect(screen.getByLabelText(/^Key/)).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(/Use lowercase letters, digits, - and : only/);
+    // The error names what is wrong; the hint, read after it, says what is allowed. Neither repeats the other.
+    expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(
+      "Not allowed in a key: _. Fixed once created. Follows the name until you edit it. Lowercase letters, digits, - and :.",
+    );
     expect(screen.getByRole("button", { name: "Create classification" })).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText(/Lowercase letters, digits, - and :\./)).toBeInTheDocument();
-    expect(screen.queryByText(/_/, { selector: "code" })).not.toBeInTheDocument();
+    expect(screen.getByText("-", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText(":", { selector: "code" })).toBeInTheDocument();
+    expect(screen.queryByText("_", { selector: "code" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^Key/), " C");
+    expect(screen.getByText(/^Not allowed in a key/)).toHaveTextContent("Not allowed in a key: _, space, C.");
   });
 
   it("marks Name and Key required, and says why Create waits while they are empty", async () => {

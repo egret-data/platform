@@ -20,7 +20,19 @@ export const TERM = {
   key: "Key",
   /** Putting a classification on data / taking it off. */
   attach: "Attach",
+  /**
+   * Taking an assignment away (a classification off an object, a person off a
+   * clearance): confirmed in one step, nothing to type (spec C11).
+   */
   remove: "Remove",
+  /**
+   * Taking a definition away (a classification, a rule). One convention for
+   * both (spec C11): `ConfirmDeleteDialog`, where you type the NAME shown in
+   * the title (a classification's name, not its key), case-insensitively.
+   * While something still uses it (rules on a classification), Delete is
+   * withheld with links to those first.
+   */
+  delete: "Delete",
   /** A mask or row filter written in egret. */
   rule: "Rule",
   rules: "Rules",

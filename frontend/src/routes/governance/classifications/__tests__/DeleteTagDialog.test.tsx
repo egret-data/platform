@@ -107,6 +107,26 @@ describe("Delete a classification (CL14)", () => {
     expect(confirm).toBeEnabled();
   });
 
+  it("while the rules are being read, Delete waits with that reason and nothing to type", async () => {
+    const user = userEvent.setup();
+    const answers: Record<string, Answer> = { "/tags": ok([PII]), [USAGE]: ok(USED), "/perm/rules": "never" };
+    serve(answers);
+    openArea(PAGE, STEWARD);
+    const dialog = await openDialog(user);
+    const del = within(dialog).getByRole("button", { name: "Delete" });
+    expect(del).toHaveAttribute("aria-disabled", "true");
+    expect(del).toHaveAccessibleDescription("Checking rules…");
+    expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("when the rules cannot be read, the name is asked for and the server decides", async () => {
+    const user = userEvent.setup();
+    open({ "/perm/rules": fail(500, "down") });
+    const dialog = await openDialog(user);
+    expect(await within(dialog).findByRole("textbox", {}, T)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Delete" })).not.toHaveAttribute("aria-disabled");
+  });
+
   it("cannot delete while rules use it: Delete says why and links each rule", async () => {
     const user = userEvent.setup();
     open({ "/perm/rules": ok([HASH_RULE]) }, ADMIN);
@@ -211,8 +231,63 @@ describe("Delete a classification (CL14)", () => {
     expect(served.asked).toContain("DELETE /tags/t-pii");
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(where()).toBe("/governance/classifications");
-    // The row's Actions button goes with the row: focus lands on a control that stays.
-    await waitFor(() => expect(screen.getAllByRole("button", { name: "New classification" })[0]).toHaveFocus());
+  });
+
+  it("after a delete from the index, focus leaves the vanished row for New classification, and is never stolen", async () => {
+    const user = userEvent.setup();
+    const OTHER = tag({ id: "t-oth", key: "other", name: "Other" });
+    const answers: Record<string, Answer> = {
+      "/tags": ok([PII, OTHER]),
+      [USAGE]: ok(USED),
+      "/perm/rules": ok(FREE),
+      "DELETE /tags/t-pii": { status: 204, body: null },
+    };
+    serve(answers);
+    openArea("/governance/classifications", STEWARD);
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByRole("textbox"), "pii");
+    answers["/tags"] = ok([OTHER]);
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Actions for PII" })).not.toBeInTheDocument(), T);
+    // The header's New classification (the empty state has none: the list still holds Other).
+    await waitFor(() => expect(screen.getByRole("button", { name: "New classification" })).toHaveFocus(), T);
+  });
+
+  it("after a delete from the index, focus the user moved elsewhere stays there", async () => {
+    const user = userEvent.setup();
+    const OTHER = tag({ id: "t-oth", key: "other", name: "Other" });
+    const answers: Record<string, Answer> = {
+      "/tags": ok([PII, OTHER]),
+      [USAGE]: ok(USED),
+      "/perm/rules": ok(FREE),
+      "DELETE /tags/t-pii": { status: 204, body: null },
+    };
+    serve(answers);
+    // The delete answers only once the user has moved on.
+    const served = globalThis.fetch;
+    let answerDelete = () => {};
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "DELETE"
+        ? new Promise<Response>((resolve) => (answerDelete = () => resolve(served(input, init))))
+        : served(input, init),
+    );
+    openArea("/governance/classifications", STEWARD);
+    await user.click(await screen.findByRole("button", { name: "Actions for PII" }, T));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", {}, T);
+    await user.type(within(dialog).getByRole("textbox"), "pii");
+    answers["/tags"] = ok([OTHER]);
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(), T);
+    const search = screen.getByRole("searchbox", { name: "Search classifications" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Actions for PII" })).toHaveFocus(), T);
+    search.focus();
+    answerDelete();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Actions for PII" })).not.toBeInTheDocument(), T);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(search).toHaveFocus();
   });
 
   it("a 409 from the index is toasted too", async () => {

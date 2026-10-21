@@ -11,6 +11,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { toastTagDeleteFailure } from "@/routes/governance/tagDeleteFailure";
 import { tagInUse } from "@/routes/governance/apiErrors";
+import { TERM } from "@/routes/governance/glossary";
 import { CLASSIFICATIONS_BASE, classificationRuleUrl, tagUrl } from "@/routes/governance/classifications/tagUrl";
 
 const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
@@ -93,13 +94,14 @@ export function DeleteTagDialog({
     lines.push(`Rules could not be read: ${message}`);
   } else if (rulesQ.data?.status === 200) {
     if (blocking.length === 0) lines.push("No rule selects it.");
-  } else {
-    lines.push(<Skeleton key="rules" className="h-4 w-48" />);
   }
-  const blockedReason =
-    blocking.length > 0 ? (
+  // Until the rules are read, whether they block the delete is unknown: Delete waits, saying so.
+  const checkingRules = canReadRules && rulesQ.isPending;
+  const blockedReason = checkingRules ? (
+    <p>Checking rules…</p>
+  ) : blocking.length > 0 ? (
       <div className="space-y-1">
-        <p>Delete or change these rules first:</p>
+        <p>{`${TERM.delete} or change these ${TERM.rules.toLowerCase()} first:`}</p>
         <ul className="list-disc space-y-1 pl-5">
           {blocking.map((r) => (
             <li key={r.id}>
@@ -122,7 +124,7 @@ export function DeleteTagDialog({
           navigate(CLASSIFICATIONS_BASE);
         } else {
           // Opened from the index: the page stays, so a toast confirms it (FE-ACTION-2).
-          toast.success(`Classification ${tag.name} deleted.`);
+          toast.success(`${TERM.classification} ${tag.name} deleted.`);
           onDeleted?.();
         }
       },
@@ -142,7 +144,8 @@ export function DeleteTagDialog({
     <ConfirmDeleteDialog
       open={open}
       onOpenChange={onOpenChange}
-      title={`Delete ${tag.name}?`}
+      title={`${TERM.delete} ${tag.name}?`}
+      confirmLabel={TERM.delete}
       description={`Deleting ${tag.name} removes the classification and every assignment of it.`}
       confirmText={tag.name}
       confirmDisabledReason={blockedReason}

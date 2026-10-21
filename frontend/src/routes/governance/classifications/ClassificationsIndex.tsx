@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { MoreHorizontal, Plus, SearchX, Tags, Trash2 } from "lucide-react";
 import { type Tag, useCreateTag, useTags } from "@/api/tags";
@@ -39,8 +39,7 @@ import {
   NameTaken,
   nameHolder,
   slugifyTagKey,
-  TAG_KEY_PATTERN,
-  TAG_KEY_RULE_ERROR,
+  tagKeyRuleError,
   TagSwatch,
   useCanManageTags,
 } from "@/routes/governance/classifications/tagParts";
@@ -73,6 +72,7 @@ export default function ClassificationsIndex() {
   const createOpener = useRef<HTMLButtonElement | null>(null);
   // The header's New classification: where focus goes once a deleted row (and its Actions button) is gone.
   const headerNew = useRef<HTMLButtonElement | null>(null);
+  const [refocusAfterDelete, setRefocusAfterDelete] = useState(false);
   const searchId = useId();
 
   const setQ = (next: string) =>
@@ -87,6 +87,17 @@ export default function ClassificationsIndex() {
     );
 
   const rows = tagsQ.data ?? null;
+
+  // After a delete from here, the refreshed list drops the row whose Actions
+  // button had focus back from the dialog. Once that button is gone, focus
+  // that fell to the page goes to New classification; focus the user put
+  // somewhere else stays there.
+  useEffect(() => {
+    if (!refocusAfterDelete || menuOpener.current?.isConnected) return;
+    setRefocusAfterDelete(false);
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected) headerNew.current?.focus();
+  }, [rows, refocusAfterDelete]);
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return rows && needle ? rows.filter((t) => haystack(t).includes(needle)) : rows;
@@ -187,7 +198,7 @@ export default function ClassificationsIndex() {
                     onSelect={() => setDeleting(t)}
                   >
                     <Trash2 className="mr-2 h-4 w-4" aria-hidden />
-                    Delete
+                    {TERM.delete}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -281,8 +292,7 @@ export default function ClassificationsIndex() {
           }}
           where="the classification's page"
           opener={menuOpener}
-          // After the closed dialog's own focus return (Radix defers it a task), which a fast answer can precede.
-          onDeleted={() => window.setTimeout(() => headerNew.current?.focus(), 0)}
+          onDeleted={() => setRefocusAfterDelete(true)}
         />
       ) : null}
     </ListPageShell>
@@ -387,7 +397,7 @@ function NewClassificationDialog({
   const trimmedKey = key.trim();
   const holder = nameHolder(tags.data, name);
   const keyError: FieldError =
-    serverKeyError ?? (trimmedKey && !TAG_KEY_PATTERN.test(trimmedKey) ? TAG_KEY_RULE_ERROR : null);
+    serverKeyError ?? (trimmedKey ? tagKeyRuleError(trimmedKey) : null);
   const nameError: FieldError = serverNameError ?? (holder ? <NameTaken holder={holder} /> : null);
   const empty = !name.trim() || !trimmedKey;
   const waiting = empty || !!keyError || !!nameError || create.isPending;
@@ -503,7 +513,8 @@ function NewClassificationDialog({
               </p>
             ) : null}
             <p id={ids.keyHelp} className="text-xs text-muted-foreground">
-              Fixed once created. Follows the name until you edit it. Lowercase letters, digits, - and :.
+              Fixed once created. Follows the name until you edit it. Lowercase letters, digits, <code>-</code> and{" "}
+              <code>:</code>.
             </p>
           </div>
           <ColourField id={ids.color} color={color} onChange={setColor} />

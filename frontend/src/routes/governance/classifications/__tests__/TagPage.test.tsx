@@ -84,12 +84,12 @@ describe("a classification's page: the header", () => {
     const served = serve({ "/tags": ok([PII]) });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Renamed");
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "Renamed");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByRole("heading", { level: 1, name: "PII" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByLabelText("Name")).toHaveValue("PII");
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("PII");
     expect(served.asked.some((a) => a.startsWith("PATCH"))).toBe(false);
   });
 
@@ -125,7 +125,7 @@ describe("a classification's page: the header", () => {
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
     expect(beforeUnloadPrevented()).toBe(false);
-    await user.type(screen.getByLabelText("Name"), "!");
+    await user.type(screen.getByLabelText(/^Name/), "!");
     expect(beforeUnloadPrevented()).toBe(true);
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(beforeUnloadPrevented()).toBe(false);
@@ -140,13 +140,27 @@ describe("a classification's page: rename checks (C10)", () => {
     const served = serve({ "/tags": ok([PII, PUBLIC]) });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "PUBLIC");
-    expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByLabelText("Name")).toHaveAccessibleDescription("A classification named Public already exists.");
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "PUBLIC");
+    expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Name/)).toHaveAccessibleDescription("A classification named Public already exists.");
     expect(screen.getByRole("link", { name: "Public" })).toHaveAttribute("href", "/governance/classifications/t-pub");
     const save = screen.getByRole("button", { name: "Save" });
     expect(save).toHaveAttribute("aria-disabled", "true");
+    await user.click(save);
+    expect(served.asked.some((a) => a.startsWith("PATCH"))).toBe(false);
+  });
+
+  it("marks Name required, and an empty name makes Save wait with the reason tied", async () => {
+    const user = userEvent.setup();
+    const served = serve({ "/tags": ok([PII]) });
+    openArea(URL_PII, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "Edit" }, T));
+    expect(screen.getByText("(required)")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText(/^Name/));
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("Enter a name.");
     await user.click(save);
     expect(served.asked.some((a) => a.startsWith("PATCH"))).toBe(false);
   });
@@ -156,9 +170,9 @@ describe("a classification's page: rename checks (C10)", () => {
     serve({ "/tags": ok([PII, PUBLIC]) });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "pii");
-    expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid");
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "pii");
+    expect(screen.getByLabelText(/^Name/)).not.toHaveAttribute("aria-invalid");
     expect(screen.getByRole("button", { name: "Save" })).not.toHaveAttribute("aria-disabled");
   });
 
@@ -168,7 +182,7 @@ describe("a classification's page: rename checks (C10)", () => {
     const served = serve({ "/tags": ok([PII, twin]), "PATCH /tags/t-pii": ok({ ...PII, description: "x" }) });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid");
+    expect(screen.getByLabelText(/^Name/)).not.toHaveAttribute("aria-invalid");
     await user.clear(screen.getByLabelText("Description"));
     await user.type(screen.getByLabelText("Description"), "x");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -191,12 +205,12 @@ describe("a classification's page: rename checks (C10)", () => {
     });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Public");
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "Public");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByRole("link", { name: "Public" }, T)).toHaveAttribute("href", "/governance/classifications/t-pub");
-    expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByLabelText("Name")).toHaveValue("Public");
+    expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Public");
     expect(within(screen.getByRole("form", { name: "Edit classification" })).queryByRole("alert")).not.toBeInTheDocument();
     expect(toast.success).not.toHaveBeenCalled();
   });
@@ -223,11 +237,11 @@ describe("a classification's page: rename checks (C10)", () => {
     });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Card");
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "Card");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"), T);
-    expect(screen.getByLabelText("Name")).toHaveAccessibleDescription(
+    await waitFor(() => expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-invalid", "true"), T);
+    expect(screen.getByLabelText(/^Name/)).toHaveAccessibleDescription(
       "Card is masked by Hash card while it sits on the whole table sales.orders; attach it to columns first.",
     );
   });

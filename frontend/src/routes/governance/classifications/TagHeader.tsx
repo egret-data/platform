@@ -18,6 +18,7 @@ import {
   useCanManageTags,
 } from "@/routes/governance/classifications/tagParts";
 import { tableTagMaskConflict, tagNameTaken } from "@/routes/governance/apiErrors";
+import { RequiredMark } from "@/routes/governance/tabParts";
 import { TERM } from "@/routes/governance/glossary";
 
 /**
@@ -105,7 +106,7 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
   const [description, setDescription] = useState(tag.description);
   const [serverNameError, setServerNameError] = useState<ReactNode>(null);
   const [error, setError] = useState<string | null>(null);
-  const ids = { name: useId(), nameError: useId(), color: useId(), description: useId() };
+  const ids = { name: useId(), nameError: useId(), color: useId(), description: useId(), waits: useId() };
 
   const changes: { name?: string; color?: string; description?: string } = {};
   if (name.trim() !== tag.name) changes.name = name.trim();
@@ -116,7 +117,8 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
 
   const holder = changes.name !== undefined ? nameHolder(tags.data, changes.name, tag.id) : null;
   const nameError: ReactNode = serverNameError ?? (holder ? <NameTaken holder={holder} /> : null);
-  const waiting = !name.trim() || !!nameError || update.isPending;
+  const empty = !name.trim();
+  const waiting = empty || !!nameError || update.isPending;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -156,7 +158,10 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
         </Alert>
       ) : null}
       <div className="space-y-1.5">
-        <Label htmlFor={ids.name}>Name</Label>
+        <Label htmlFor={ids.name}>
+          Name
+          <RequiredMark />
+        </Label>
         <Input
           id={ids.name}
           value={name}
@@ -183,18 +188,23 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
       <p className="text-xs text-muted-foreground">
         {TERM.key} <span className="font-mono">{tag.key}</span> is fixed once created.
       </p>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button
           type="submit"
           size="sm"
           aria-disabled={waiting ? true : undefined}
-          aria-describedby={nameError ? ids.nameError : undefined}
+          aria-describedby={empty ? ids.waits : nameError ? ids.nameError : undefined}
         >
           Save
         </Button>
         <Button type="button" size="sm" variant="outline" onClick={onDone}>
           Cancel
         </Button>
+        {empty ? (
+          <p id={ids.waits} className="text-xs text-muted-foreground">
+            Enter a name.
+          </p>
+        ) : null}
       </div>
     </form>
   );
