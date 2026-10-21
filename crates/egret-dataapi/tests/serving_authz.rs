@@ -165,6 +165,10 @@ struct Fixture {
     other_account: Uuid,
     /// A service account belonging to [`Self::other_ws_id`].
     foreign_account: Uuid,
+    /// A service account that is a MEMBER of [`Self::ws_id`] through a
+    /// workspace role carrying `data_api_endpoint:invoke`, so it reaches invoke
+    /// on every endpoint with or without a grant (KI-180).
+    member_account: Uuid,
     admin: Uuid,
     database_id: Uuid,
 }
@@ -284,6 +288,8 @@ async fn fixture() -> Option<Fixture> {
     let service_account = insert_service_account(&db, ws_id, admin, "primary").await;
     let other_account = insert_service_account(&db, ws_id, admin, "secondary").await;
     let foreign_account = insert_service_account(&db, other_ws_id, admin, "foreign").await;
+    let member_account = insert_service_account(&db, ws_id, admin, "member").await;
+    grant(&db, member_account, ws_id, &["data_api_endpoint:invoke"]).await;
 
     let manager_user = insert_user(&db, "t6_manager").await;
     grant(
@@ -373,6 +379,7 @@ async fn fixture() -> Option<Fixture> {
         service_account,
         other_account,
         foreign_account,
+        member_account,
         admin,
         database_id,
     })
@@ -994,4 +1001,50 @@ async fn a_grant_survives_a_republish() {
         "a grant is on the endpoint, not on the version it happened to be \
          written against"
     );
+}
+
+/// KI-180: the Access tab's "Revoking will not remove access" note was shown on
+/// every granted account, because the only question it could ask was "can this
+/// account invoke this endpoint?", which the grant itself answers yes. The grant
+/// list now says, per grant, whether the account ALSO reaches invoke through the
+/// workspace — and the answer must be what the serving path does after a
+/// revoke, for both kinds of account.
+#[tokio::test]
+async fn the_grant_list_says_which_accounts_keep_invoke_after_a_revoke() {
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    f.grant_invoke(f.service_account, ep).await;
+    f.grant_invoke(f.member_account, ep).await;
+
+    let listed = f.list_grants(&f.manager, ep).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let inherits = |sa: Uuid| {
+        listed
+            .body
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|g| g["service_account_id"] == sa.to_string())
+            .unwrap_or_else(|| panic!("no grant for {sa}: {}", listed.body))["inherits_invoke"]
+            .clone()
+    };
+    assert_eq!(
+        inherits(f.service_account),
+        serde_json::json!(false),
+        "an account with no workspace role does not keep invoke after a revoke"
+    );
+    assert_eq!(
+        inherits(f.member_account),
+        serde_json::json!(true),
+        "a member whose workspace role carries invoke does"
+    );
+
+    // And the serving path agrees with both answers.
+    f.revoke_invoke(f.service_account, ep).await;
+    f.revoke_invoke(f.member_account, ep).await;
+    let gone = f.call_as(f.service_account, "x").await;
+    assert_eq!(gone.status, StatusCode::FORBIDDEN, "{}", gone.body);
+    assert_eq!(gone.code(), "not_granted");
+    let kept = f.call_as(f.member_account, "x").await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
 }
