@@ -546,3 +546,27 @@ export function EndpointRowStateBadge({
     </StateBadge>
   );
 }
+
+/**
+ * The URL a saved or typed method/path will move the endpoint to, when that is
+ * NOT the URL callers use today — or `null`.
+ *
+ * Serving matches the LIVE route (`live_method` / `live_path`), which only
+ * publish and rollback write; a new path on the draft is saved but not served
+ * until the next publish (KI-023). `null` for an endpoint never published (it
+ * has no URL to keep) and when the two agree. Paths are compared in the
+ * spelling the server stores (`normalize_path`: one leading slash, a trailing
+ * one absorbed), so typing `reports/daily` against a live `/reports/daily` is
+ * not a pending move.
+ */
+export function pendingRoute(
+  e: Pick<DataApiEndpointDto, "live_method" | "live_path">,
+  method: string,
+  path: string,
+): { method: boolean; path: boolean; liveUrl: string } | null {
+  if (!e.live_path || !e.live_method) return null;
+  const canonical = `/${path.trim().replace(/^\//, "").replace(/\/$/, "")}`;
+  const moved = { method: method !== e.live_method, path: canonical !== e.live_path };
+  if (!moved.method && !moved.path) return null;
+  return { ...moved, liveUrl: `${e.live_method} ${e.live_path}` };
+}

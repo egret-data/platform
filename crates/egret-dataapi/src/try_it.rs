@@ -431,9 +431,15 @@ pub async fn try_endpoint(
         }
         qs.finish()
     };
+    // A trial calls the LIVE version, so it calls the URL the live version is
+    // served at — not the draft's path, which may be a move not yet published
+    // (KI-023). An endpoint never published has no live route; its draft URL
+    // then reaches the same 404 any consumer would get.
+    let method = endpoint.live_method.as_deref().unwrap_or(&endpoint.method);
+    let served_path = endpoint.live_path.as_deref().unwrap_or(&endpoint.path);
     // The stored path is canonical (`/probe`); the wildcard capture must not
     // start with a second slash or the route matches an empty segment.
-    let path = endpoint.path.trim_start_matches('/');
+    let path = served_path.trim_start_matches('/');
     let uri = if query.is_empty() {
         format!("/data-api/v1/{slug}/{path}")
     } else {
@@ -450,7 +456,7 @@ pub async fn try_endpoint(
         .nest("/data-api/v1", trial_serving_router())
         .with_state(st.clone());
     let req = Request::builder()
-        .method(endpoint.method.as_str())
+        .method(method)
         .uri(&uri)
         .header("authorization", format!("Bearer {token}"))
         .extension(TrialActor(ctx.principal.user_id))
@@ -490,8 +496,8 @@ pub async fn try_endpoint(
         serde_json::json!({
             "service_account_id": account,
             "status": status.as_u16(),
-            "path": endpoint.path,
-            "method": endpoint.method,
+            "path": served_path,
+            "method": method,
         }),
     ));
 
@@ -521,7 +527,7 @@ pub async fn try_endpoint(
         status: status.as_u16(),
         body: parsed,
         request: TryRequestEcho {
-            method: endpoint.method.clone(),
+            method: method.to_owned(),
             url: format!("{origin}{uri}"),
             // Never the token. Not truncated, not prefixed — absent.
             authorization: "Bearer ••••".into(),

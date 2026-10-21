@@ -2288,3 +2288,47 @@ describe("Endpoints — the summary strip agrees with itself about number", () =
     expect(screen.queryByText("endpoint total")).not.toBeInTheDocument();
   });
 });
+
+// KI-023. Serving matches the LIVE route, so a path saved on a live endpoint's
+// draft has not moved what callers call. The list shows the URL callers use,
+// with the draft's new one labelled as waiting for a publish.
+describe("Endpoints — a draft path that has not gone live yet", () => {
+  it("shows the live URL and labels the draft's new one as pending", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({
+            state: "live",
+            live_version_id: "v-1",
+            path: "/orders/lookup",
+            live_path: "/x/probe",
+            live_method: "GET",
+          }),
+        ],
+      },
+    });
+    renderEndpoints();
+
+    const row = (await screen.findByText("Daily report")).closest("tr")!;
+    expect(within(row).getByText("/x/probe")).toBeInTheDocument();
+    const pending = within(row).getByTestId("endpoint-pending-route-ep-1");
+    expect(pending).toHaveTextContent("Pending publish: GET /orders/lookup");
+  });
+
+  it("says nothing is pending when the draft is at the live URL", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ state: "live", live_version_id: "v-1", path: "/reports/daily", live_path: "/reports/daily", live_method: "GET" }),
+        ],
+      },
+    });
+    renderEndpoints();
+
+    const row = (await screen.findByText("Daily report")).closest("tr")!;
+    expect(within(row).getByText("/reports/daily")).toBeInTheDocument();
+    expect(within(row).queryByText(/pending publish/i)).not.toBeInTheDocument();
+  });
+});

@@ -21,4 +21,11 @@ export interface DataApiEndpointGrantDto {
      */
   service_account_name?: string | null;
   created_at: string;
+  /**
+     * Whether the account ALSO reaches invoke through the workspace (a
+     * workspace role carrying `data_api_endpoint:invoke`), so that revoking
+     * this grant would not remove its access. Asked of the PDP at workspace
+     * scope, where this grant cannot count — see `invoke::inherits_invoke`.
+     */
+  inherits_invoke: boolean;
 }

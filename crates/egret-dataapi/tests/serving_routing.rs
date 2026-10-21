@@ -689,6 +689,189 @@ async fn a_draft_edit_does_not_change_what_is_served() {
     );
 }
 
+/// Publish the saved draft of `ep` again, acknowledging whatever breaking
+/// changes `validate` reports (a path move is one), through the real routes.
+impl Fixture {
+    async fn republish(&self, ep: Uuid) -> (StatusCode, serde_json::Value) {
+        let (status, v) = self
+            .mgmt_send(
+                "POST",
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/validate", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "validate failed: {v}");
+        let mut body = serde_json::json!({});
+        if let Some(ack) = v["acknowledge_breaking"].as_str() {
+            body["acknowledge_breaking"] = serde_json::json!(ack);
+        }
+        self.mgmt_send(
+            "POST",
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+            Some(body),
+        )
+        .await
+    }
+
+    async fn endpoint_json(&self, ep: Uuid) -> serde_json::Value {
+        let (status, body) = self
+            .mgmt_send(
+                "GET",
+                &format!("/api/ws/{}/data-api/endpoints/{ep}", self.ws_slug),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "get failed: {body}");
+        body
+    }
+}
+
+#[tokio::test]
+async fn a_new_path_on_a_draft_goes_live_only_at_publish() {
+    // KI-023. Saving a new path on a live endpoint's draft used to move the
+    // served URL at once: the router matched the DRAFT's `path`, so the old URL
+    // answered 404 and the new one served the live version's old SQL.
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x/probe", "SELECT 1 AS n").await;
+    assert_eq!(f.call("x/probe").await.ns(), vec![1]);
+
+    f.patch_draft(
+        ep,
+        serde_json::json!({
+            "path": "orders/lookup",
+            "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }],
+        }),
+    )
+    .await;
+
+    let old = f.call("x/probe").await;
+    assert_eq!(
+        old.status,
+        StatusCode::OK,
+        "the published URL must keep serving: {}",
+        old.body
+    );
+    assert_eq!(old.ns(), vec![1], "and serve the live version");
+    let new = f.call("orders/lookup").await;
+    assert_eq!(
+        new.status,
+        StatusCode::NOT_FOUND,
+        "the draft path must not serve: {}",
+        new.body
+    );
+
+    // The draft moved, and the management API says so: `path` is the draft's,
+    // `live_path` is the URL callers still use.
+    let dto = f.endpoint_json(ep).await;
+    assert_eq!(
+        dto["path"], "/orders/lookup",
+        "the draft edit did not land: {dto}"
+    );
+    assert_eq!(dto["live_path"], "/x/probe", "{dto}");
+    assert_eq!(dto["live_method"], "GET", "{dto}");
+
+    // Publish: the move is the breaking change it always was, and now it is the
+    // moment the URL changes.
+    let (status, body) = f.republish(ep).await;
+    assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+    let new = f.call("orders/lookup").await;
+    assert_eq!(new.status, StatusCode::OK, "{}", new.body);
+    assert_eq!(new.ns(), vec![2]);
+    assert_eq!(new.body["meta"]["version"], 2);
+    assert_eq!(f.call("x/probe").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(f.endpoint_json(ep).await["live_path"], "/orders/lookup");
+}
+
+#[tokio::test]
+async fn a_new_method_on_a_draft_goes_live_only_at_publish() {
+    // The method is the other half of the route and moved the same way.
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    f.patch_draft(ep, serde_json::json!({ "method": "POST" }))
+        .await;
+
+    let token = mint(f.ws_id, f.sa_user);
+    assert_eq!(
+        f.request("GET", &f.ws_slug, "x", Some(&token)).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.request("POST", &f.ws_slug, "x", Some(&token))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, body) = f.republish(ep).await;
+    assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+    assert_eq!(
+        f.request("POST", &f.ws_slug, "x", Some(&token))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.request("GET", &f.ws_slug, "x", Some(&token)).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_rollback_serves_the_older_version_at_its_own_url() {
+    // Rollback is the other writer of `live_version_id`, so it moves the route
+    // too: version 1 was published at /x and answers there again.
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    f.patch_draft(ep, serde_json::json!({ "path": "/y" })).await;
+    let (status, body) = f.republish(ep).await;
+    assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+    assert_eq!(f.call("y").await.status, StatusCode::OK);
+
+    let (status, body) = f
+        .mgmt_send(
+            "POST",
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/rollback", f.ws_slug),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "rollback failed: {body}");
+    assert_eq!(f.call("x").await.status, StatusCode::OK);
+    assert_eq!(f.call("y").await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_second_endpoint_cannot_go_live_at_a_url_another_still_serves() {
+    // The tie the live route's unique index exists to refuse. Endpoint A is
+    // live at /x and its draft moved to /y, which frees /x for a DRAFT row —
+    // but A still serves /x until it is published, so publishing a second
+    // endpoint at /x is a 409 naming the URL, not two live answers to one URL.
+    let f = skip_without_db!();
+    let a = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    f.patch_draft(a, serde_json::json!({ "path": "/y" })).await;
+
+    let b: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'b', '/x', 'GET', $2, \
+                 jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 3 AS n')), $3) \
+         RETURNING id",
+    )
+    .bind(f.ws_id)
+    .bind(f.database_id)
+    .bind(f.admin)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("a draft at /x is allowed: no other DRAFT sits there");
+
+    let (status, body) = f.republish(b).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.to_string().contains("GET /x"),
+        "the refusal names the URL: {body}"
+    );
+    assert_eq!(f.call("x").await.ns(), vec![1], "A still serves /x");
+}
+
 #[tokio::test]
 async fn a_disabled_endpoint_is_404_not_403() {
     // Disable keeps the row and its `live_version_id` (an enable must restore

@@ -16,22 +16,23 @@
 //! a draft change the behaviour of every client already calling the published
 //! URL, which is exactly what versioning exists to prevent.
 //!
-//! **Routing is the one thing that comes from the endpoint row**, and
-//! deliberately so. P4 must match an inbound request against
-//! `dataapi.endpoints (method, path)` restricted to `state = 'live'`, and then
-//! serve entirely from the snapshot reached through `live_version_id`. That pair
-//! of columns is the one carrying `UNIQUE (workspace_id, method, path)`, so it is
-//! the only place where "two endpoints claiming one URL" is impossible. The
-//! snapshot's own `method`/`path` are the record of where that version was
-//! published, not a routing key: routing on them would lose the constraint, and
-//! an author who moved a live endpoint and then created a second one at the old
-//! URL would have two live snapshots answering to the same path with nothing to
-//! break the tie.
+//! **Routing comes from the endpoint row's LIVE route** —
+//! `dataapi.endpoints (live_method, live_path)`, restricted to `state = 'live'`
+//! — and the request is then served entirely from the snapshot reached through
+//! `live_version_id`. The live route is the snapshot's own `method`/`path`,
+//! copied onto the row by the only two writers of `live_version_id` (publish and
+//! rollback) so that a `UNIQUE` index can hold it: routing through the snapshot
+//! alone would lose the constraint, and an author who moved a live endpoint and
+//! then published a second one at the old URL would have two live snapshots
+//! answering to the same path with nothing to break the tie. With the index that
+//! second publish is a 409.
 //!
-//! That answers the question `endpoints.rs` left open for this task. A draft edit
-//! CAN still move a live endpoint's URL, and that is the decision, not an
-//! oversight: a URL is a property of the endpoint object (uniquely constrained,
-//! renameable), whereas behaviour is a property of the version (frozen).
+//! **A draft edit does not move a live endpoint's URL.** It used to: routing
+//! matched the draft's `method`/`path`, so saving a new path changed the served
+//! URL before publish (KI-023) — the old URL went 404 and the new one served the
+//! old version. A URL is part of the published contract (`contract.rs` already
+//! classifies a change of it as breaking), so the draft's new path takes effect
+//! at the next publish, like every other draft edit.
 //!
 //! **The snapshot-external input P4 must re-check is a PAIR:**
 //! `EndpointSnapshot::delegated` and `EndpointSnapshot::impersonate` record the
@@ -5814,6 +5815,24 @@ fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
+/// The one unique constraint a publish or rollback can now meet: migration
+/// 0204's `dataapi_endpoints_live_route_key`. Another endpoint is live at the
+/// URL this version would take — typically one whose draft moved away from it
+/// and has not been published since, so it still serves there. A 409 naming
+/// the URL, not a 500 naming the index; any other error is still `db_err`'s.
+fn live_route_err(e: sqlx::Error, method: &str, path: &str) -> Error {
+    match &e {
+        sqlx::Error::Database(d) if d.constraint() == Some("dataapi_endpoints_live_route_key") => {
+            Error::Conflict(format!(
+                "another endpoint in this workspace is served at {method} {path}; an endpoint \
+                 keeps its published URL until it is published again, so choose another path \
+                 or publish the move of the endpoint that holds it first"
+            ))
+        }
+        _ => db_err(e),
+    }
+}
+
 impl EndpointStore {
     /// The [`ConnectionSafety`] of `database` (which must belong to
     /// `workspace`) — the three columns that decide what may be published onto
@@ -6284,8 +6303,15 @@ impl EndpointStore {
         // still holds `FOR UPDATE` on the row: the ONLY predicate that can have
         // stopped it matching is the one added here. The version row inserted just
         // above goes away with the transaction, which is why nothing has to undo it.
+        //
+        // `live_method` / `live_path` move HERE, with the pointer, and nowhere
+        // else (KI-023, migration 0204): the URL is part of the contract this
+        // version froze, so a draft's new path takes effect at publish and not
+        // when it is saved. Written from the snapshot, which is the locked row's
+        // own `method` / `path`.
         let state: Option<String> = sqlx::query_scalar(
             "UPDATE dataapi.endpoints SET live_version_id = $1, \
+               live_method = $4, live_path = $5, \
                state = CASE WHEN state = 'disabled' THEN 'disabled' ELSE 'live' END, \
                updated_at = now() \
              WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL RETURNING state",
@@ -6293,9 +6319,11 @@ impl EndpointStore {
         .bind(version_id)
         .bind(id)
         .bind(workspace)
+        .bind(&snapshot.method)
+        .bind(&snapshot.path)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(db_err)?;
+        .map_err(|e| live_route_err(e, &snapshot.method, &snapshot.path))?;
         let Some(state) = state else {
             return Err(Error::Conflict(
                 "endpoint is in the trash; restore it before publishing a new version".into(),
@@ -6512,11 +6540,31 @@ impl EndpointStore {
                 },
                 _ => None,
             };
+        // The URL the target version would take, for the conflict message
+        // below; read before the snapshot is handed on.
+        let target_route = |k: &str| {
+            target_snapshot
+                .as_ref()
+                .and_then(|s| s.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_owned()
+        };
+        let (target_method, target_path) = (target_route("method"), target_route("path"));
         if let Some(raw) = target_snapshot {
             self.check_version_still_publishable(workspace, raw).await?;
         }
+        // The route moves with the pointer, as it does in `publish` (KI-023): a
+        // rollback serves the older version on the URL that version was
+        // published at. `COALESCE` only for a snapshot missing the keys, which
+        // publish never writes; such a version cannot serve anyway (see this
+        // function's doc on unreadable snapshots), so it keeps the draft's URL
+        // rather than failing the rollback.
         let row: Option<(Uuid, i32, String)> = sqlx::query_as(
-            "UPDATE dataapi.endpoints e SET live_version_id = v.id, updated_at = now() \
+            "UPDATE dataapi.endpoints e SET live_version_id = v.id, \
+                    live_method = COALESCE(v.snapshot->>'method', e.method), \
+                    live_path = COALESCE(v.snapshot->>'path', e.path), \
+                    updated_at = now() \
                FROM dataapi.endpoint_versions v \
               WHERE e.id = $1 AND e.workspace_id = $2 \
                 AND e.deleted_at IS NULL \
@@ -6530,7 +6578,7 @@ impl EndpointStore {
         .bind(version_id)
         .fetch_optional(&self.db.pool)
         .await
-        .map_err(db_err)?;
+        .map_err(|e| live_route_err(e, &target_method, &target_path))?;
         // Three reasons for no row and only two answers: an absent endpoint, an
         // absent-or-foreign VERSION and a trashed endpoint. The first two stay the
         // 404 they were — a version of somebody else's endpoint must not be
@@ -11574,6 +11622,8 @@ mod tests {
             source_kind: "manual".into(),
             source_ref: None,
             live_version_id: None,
+            live_method: None,
+            live_path: None,
             state: "draft".into(),
             created_by: None,
             created_at: chrono::Utc::now(),

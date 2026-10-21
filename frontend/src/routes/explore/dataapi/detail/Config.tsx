@@ -9,6 +9,7 @@ import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/conf
 import { useDataApiValidateEndpoint } from "@/api/generated/data-api/data-api";
 import { CacheScope, type StatementSnapshot } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
+import { pendingRoute } from "../endpointState";
 
 /**
  * What `POST /validate` came back with.
@@ -120,7 +121,10 @@ export function worstCaseWarning(statementCount: number, timeoutSeconds?: number
  * both were wrong.
  */
 export default function Config() {
-  const { ws, id, form, setForm, dirty } = useEndpointDetail();
+  const { ws, id, endpoint, form, setForm, dirty } = useEndpointDetail();
+  // A new method or path is saved on the draft but served only from the next
+  // publish (KI-023); the rows say so, with the URL callers still use.
+  const pending = pendingRoute(endpoint, form.method, form.path);
   const validateMutation = useDataApiValidateEndpoint();
   const [validation, setValidation] = useState<Validation | null>(null);
 
@@ -235,7 +239,12 @@ export default function Config() {
         </ConfigTableRow>
         <ConfigTableRow label="Method" htmlFor="cfg-method" details="The HTTP verb callers use.">
           <Select value={form.method} onValueChange={(v) => setForm((f) => ({ ...f, method: v }))}>
-            <SelectTrigger id="cfg-method" className="w-full" aria-label="Method">
+            <SelectTrigger
+              id="cfg-method"
+              className="w-full"
+              aria-label="Method"
+              aria-describedby={pending?.method ? "cfg-method-pending" : undefined}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -243,6 +252,12 @@ export default function Config() {
               <SelectItem value="POST">POST</SelectItem>
             </SelectContent>
           </Select>
+          {pending?.method && (
+            <p id="cfg-method-pending" className="mt-1.5 text-xs text-muted-foreground">
+              The new method goes live when you publish. Callers still use{" "}
+              <code className="font-mono">{pending.liveUrl}</code>.
+            </p>
+          )}
         </ConfigTableRow>
         <ConfigTableRow
           label="Path"
@@ -253,8 +268,15 @@ export default function Config() {
             id="cfg-path"
             className="w-full"
             value={form.path}
+            aria-describedby={pending?.path ? "cfg-path-pending" : undefined}
             onChange={(e) => setForm((f) => ({ ...f, path: e.target.value }))}
           />
+          {pending?.path && (
+            <p id="cfg-path-pending" className="mt-1.5 text-xs text-muted-foreground">
+              The new path goes live when you publish. Callers still use{" "}
+              <code className="font-mono">{pending.liveUrl}</code>.
+            </p>
+          )}
         </ConfigTableRow>
 
         <ConfigTableGroup label="Cache" />

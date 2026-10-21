@@ -21562,7 +21562,7 @@
             }
           },
           "409": {
-            "description": "Another endpoint already serves that method and path",
+            "description": "Another endpoint's draft already sits at that method and path",
             "content": {
               "application/json": {
                 "schema": {
@@ -21855,7 +21855,7 @@
             }
           },
           "409": {
-            "description": "Another endpoint already serves that method and path, or the endpoint is in the trash — restore it before editing it",
+            "description": "Another endpoint's draft already sits at that method and path, or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish",
             "content": {
               "application/json": {
                 "schema": {
@@ -22746,7 +22746,7 @@
             }
           },
           "409": {
-            "description": "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change",
+            "description": "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change; or another endpoint is still served at this draft's method and path (it keeps its published URL until it is published again)",
             "content": {
               "application/json": {
                 "schema": {
@@ -22966,7 +22966,7 @@
             }
           },
           "409": {
-            "description": "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request",
+            "description": "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request; or another endpoint is now served at the URL that version was published at",
             "content": {
               "application/json": {
                 "schema": {
@@ -41505,6 +41505,20 @@
             "format": "uuid",
             "description": "The version currently served. Never written by this module — publishing\nis a separate lifecycle."
           },
+          "live_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The method and path the LIVE version is served at, or `null` for an\nendpoint never published. Written only by publish and rollback, from the\nsnapshot they make live; the serving router matches these, never\n`method`/`path`. When they differ from `method`/`path` the draft has a\nnew URL that goes live at the next publish (KI-023)."
+          },
+          "live_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`Self::live_method`]."
+          },
           "state": {
             "type": "string"
           },
@@ -41539,7 +41553,8 @@
         "required": [
           "id",
           "service_account_id",
-          "created_at"
+          "created_at",
+          "inherits_invoke"
         ],
         "properties": {
           "id": {
@@ -41562,6 +41577,10 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "inherits_invoke": {
+            "type": "boolean",
+            "description": "Whether the account ALSO reaches invoke through the workspace (a\nworkspace role carrying `data_api_endpoint:invoke`), so that revoking\nthis grant would not remove its access. Asked of the PDP at workspace\nscope, where this grant cannot count — see `invoke::inherits_invoke`."
           }
         }
       },

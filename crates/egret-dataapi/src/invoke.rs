@@ -72,3 +72,38 @@ pub(crate) async fn can_invoke(
         .await?
         .allow)
 }
+
+/// Whether `user_id` reaches invoke on EVERY endpoint of `ws` through the
+/// workspace — a membership whose role carries `data_api_endpoint:invoke`
+/// (`ws_admin` after migration 0124, `data_api_invoker` as a membership, a
+/// custom role), or anything above it — independently of any object-scoped
+/// grant on one endpoint.
+///
+/// The Access tab's "Revoking will not remove access" note asks exactly this
+/// (KI-180). It used to answer it from [`can_invoke`] on the endpoint, which a
+/// grant on that endpoint makes `true` by itself: every granted account carried
+/// the note, including ones with no workspace role, for which it was false.
+///
+/// Asked of the PDP against the WORKSPACE resource, for the same reason
+/// [`can_invoke`] is asked of the PDP and not of `access_grants`: an
+/// object-scoped grant links `resource in Object::"…"`, which the workspace is
+/// not in, so it cannot satisfy this; a workspace or platform grant can, and it
+/// is precisely the one that cascades to every endpoint.
+pub(crate) async fn inherits_invoke(
+    st: &DataApiState,
+    user_id: UserId,
+    ws: WorkspaceId,
+) -> Result<bool, egret_core::Error> {
+    Ok(st
+        .pdp
+        .authorize(
+            &egret_core::authz::Subject {
+                user_id,
+                group_ids: Vec::new(),
+            },
+            crate::routes::EP_INVOKE,
+            &egret_core::authz::Resource::Workspace(ws),
+        )
+        .await?
+        .allow)
+}

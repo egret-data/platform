@@ -150,6 +150,65 @@ async fn the_documented_url_is_the_url_try_it_calls() {
     );
 }
 
+/// KI-023: a draft whose path moved has not moved what is served, so neither
+/// the document a consumer is handed nor the URL Try it calls may follow it.
+/// Both must name the LIVE route until the move is published.
+#[tokio::test]
+async fn a_pending_draft_path_is_not_documented_or_tried() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("pending-path-sa").await;
+    let (granted, gbody) = f
+        .mgmt_post(
+            &format!(
+                "/api/ws/{}/data-api/endpoints/{}/grants",
+                f.ws_slug, f.endpoint_id
+            ),
+            Some(serde_json::json!({ "service_account_id": sa })),
+        )
+        .await;
+    assert_eq!(granted, 200, "grant failed: {gbody}");
+    // What `PATCH …/endpoints/{id}` writes for a new path.
+    sqlx::query("UPDATE dataapi.endpoints SET path = '/moved' WHERE id = $1")
+        .bind(f.endpoint_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("move the draft");
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}&endpoint_id={}",
+            f.ws_slug, f.endpoint_id
+        ))
+        .await;
+    assert_eq!(status, 200, "doc: {doc}");
+    let paths: Vec<&String> = doc["paths"].as_object().expect("paths").keys().collect();
+    assert_eq!(
+        paths,
+        vec!["/probe"],
+        "the document names the live path: {doc}"
+    );
+
+    let (try_status, try_body) = f
+        .mgmt_post(
+            &format!(
+                "/api/ws/{}/data-api/endpoints/{}/try",
+                f.ws_slug, f.endpoint_id
+            ),
+            Some(serde_json::json!({ "service_account_id": sa, "params": {} })),
+        )
+        .await;
+    assert_eq!(try_status, 200, "trial failed: {try_body}");
+    assert_eq!(
+        try_body["status"], 200,
+        "the trial reaches the live version: {try_body}"
+    );
+    let called = try_body["request"]["url"].as_str().expect("try-it url");
+    assert!(
+        called.ends_with("/probe"),
+        "Try it calls the live URL: {called}"
+    );
+}
+
 /// **The two audiences, told apart.**
 ///
 /// `data_api.public_url` set: every URL a CONSUMER is handed carries it, while
@@ -301,7 +360,9 @@ async fn more_live_endpoints_than_the_bound_is_refused_not_truncated() {
     .await
     .expect("pad versions");
     sqlx::query(
-        "UPDATE dataapi.endpoints e SET live_version_id = ev.id \
+        // The live route is set with the pointer, as publish sets it.
+        "UPDATE dataapi.endpoints e SET live_version_id = ev.id, \
+                live_method = e.method, live_path = e.path \
          FROM dataapi.endpoint_versions ev \
          WHERE ev.endpoint_id = e.id AND e.workspace_id = $1 AND e.live_version_id IS NULL",
     )

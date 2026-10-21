@@ -33,7 +33,7 @@ import { useBookmarkEndpoint, useDeleteEndpoint, useTrashEndpoint, useUnbookmark
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
-import { EndpointRowStateBadge } from "./endpointState";
+import { EndpointRowStateBadge, pendingRoute } from "./endpointState";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -447,58 +447,72 @@ export default function Endpoints() {
     }
   }
 
-  const renderRow = (e: DataApiEndpointListItemDto) => (
-    <tr key={e.id} className="border-t hover:bg-accent">
-      {bulk.bulkMode && !showTrash && (
-        <td className="py-1">
-          <Checkbox
-            checked={bulk.selected.has(e.id)}
-            onCheckedChange={() => bulk.toggle(e.id)}
-            aria-label={`Select ${e.name}`}
+  const renderRow = (e: DataApiEndpointListItemDto) => {
+    const pending = pendingRoute(e, e.method, e.path);
+    return (
+      <tr key={e.id} className="border-t hover:bg-accent">
+        {bulk.bulkMode && !showTrash && (
+          <td className="py-1">
+            <Checkbox
+              checked={bulk.selected.has(e.id)}
+              onCheckedChange={() => bulk.toggle(e.id)}
+              aria-label={`Select ${e.name}`}
+            />
+          </td>
+        )}
+        <td className="py-1 pl-6">
+          <span className="inline-flex items-center gap-1">
+            {/* No star in the trash: `bookmarked` is a shortcut back to a row the
+                author works with, and a trashed endpoint is not one. The POST
+                would also 404 against a filtered-out row. */}
+            {!showTrash && (
+              <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
+            )}
+            <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
+              {e.name}
+            </Link>
+          </span>
+        </td>
+        {/* The URL callers use — the LIVE route, which a draft edit does not
+            move (KI-023) — and, under it, the draft's new one while that move
+            waits for a publish. An endpoint never published shows its draft URL,
+            the only one it has. */}
+        <td className="text-muted-foreground">
+          <span className="font-mono text-xs uppercase">{e.live_method ?? e.method}</span>{" "}
+          <span className="font-mono text-xs">/{(e.live_path ?? e.path).replace(/^\//, "")}</span>
+          {pending && (
+            <span className="block text-xs" data-testid={`endpoint-pending-route-${e.id}`}>
+              Pending publish:{" "}
+              <span className="font-mono uppercase">{e.method}</span>{" "}
+              <span className="font-mono">/{e.path.replace(/^\//, "")}</span>
+            </span>
+          )}
+        </td>
+        <td>
+          <EndpointRowStateBadge endpoint={e} />
+        </td>
+        <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
+        {/* The trash ages by when it was TRASHED, not when it was last edited —
+            that is the column a Trash screen is read down, and it is why
+            `deleted_at` is a timestamp on the DTO rather than a bare boolean. */}
+        <td className="text-muted-foreground">
+          {showTrash
+            ? (e.deleted_at ? <RelativeTime iso={e.deleted_at} className="block" /> : "—")
+            : <RelativeTime iso={e.updated_at} className="block" />}
+        </td>
+        <td>
+          <EndpointActionsMenu
+            ws={ws}
+            endpoint={e}
+            trashed={showTrash}
+            folders={folders}
+            onNewFolder={() => setFolderDialog({ mode: "move", endpoint: e })}
+            onDelete={() => setPendingDelete(e)}
           />
         </td>
-      )}
-      <td className="py-1 pl-6">
-        <span className="inline-flex items-center gap-1">
-          {/* No star in the trash: `bookmarked` is a shortcut back to a row the
-              author works with, and a trashed endpoint is not one. The POST
-              would also 404 against a filtered-out row. */}
-          {!showTrash && (
-            <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
-          )}
-          <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
-            {e.name}
-          </Link>
-        </span>
-      </td>
-      <td className="text-muted-foreground">
-        <span className="font-mono text-xs uppercase">{e.method}</span>{" "}
-        <span className="font-mono text-xs">/{e.path.replace(/^\//, "")}</span>
-      </td>
-      <td>
-        <EndpointRowStateBadge endpoint={e} />
-      </td>
-      <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
-      {/* The trash ages by when it was TRASHED, not when it was last edited —
-          that is the column a Trash screen is read down, and it is why
-          `deleted_at` is a timestamp on the DTO rather than a bare boolean. */}
-      <td className="text-muted-foreground">
-        {showTrash
-          ? (e.deleted_at ? <RelativeTime iso={e.deleted_at} className="block" /> : "—")
-          : <RelativeTime iso={e.updated_at} className="block" />}
-      </td>
-      <td>
-        <EndpointActionsMenu
-          ws={ws}
-          endpoint={e}
-          trashed={showTrash}
-          folders={folders}
-          onNewFolder={() => setFolderDialog({ mode: "move", endpoint: e })}
-          onDelete={() => setPendingDelete(e)}
-        />
-      </td>
-    </tr>
-  );
+      </tr>
+    );
+  };
 
   // The canonical Explore list-page scaffold — `p-4` + a single `h1` — now
   // comes from `ListPageShell` rather than being hand-written here. Endpoints
