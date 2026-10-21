@@ -43,6 +43,18 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
         name: &str,
     ) -> anyhow::Result<()>;
+    /// [`delete`](Self::delete) with a `resourceVersion` precondition: the
+    /// object is deleted only if it is still the version the caller read
+    /// (`None`: no precondition). A missing object is `Ok`; a changed one is an
+    /// `Err` (HTTP 409) and nothing is deleted.
+    async fn delete_if_unchanged(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()>;
     /// Pods labeled `app.kubernetes.io/instance=<instance>` in the namespace.
     /// Returns `(name, phase, ready)` per pod.
     async fn list_pods(
@@ -59,6 +71,46 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
         label_selector: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>>;
+
+    /// Read one whole object (metadata, spec and status) as JSON; `Ok(None)`
+    /// when it does not exist (HTTP 404). Used to observe a rollout from a
+    /// Deployment's or StatefulSet's status.
+    async fn get_object(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>>;
+
+    /// Read only an object's metadata, as `{"metadata": {...}}`; `Ok(None)`
+    /// when it does not exist. For a Secret this never transfers its data.
+    async fn get_object_metadata(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>>;
+
+    /// The names of the objects of one kind matching a label selector in the
+    /// namespace (metadata only: listing Secrets never transfers their data).
+    async fn list_object_names(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>>;
+
+    /// The whole Pod objects matching a label selector in the namespace — the
+    /// pod-level half of a rollout observation (annotations, deletion
+    /// timestamp, phase and conditions).
+    async fn list_pod_objects(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<Value>>;
 
     /// Issue a raw HTTP request to a Trino coordinator `Service` (port 8080) and
     /// return `(status, body)`. In-cluster this hits the Service DNS directly; in
@@ -160,6 +212,15 @@ pub struct FakeKube {
     /// When `Some(kind)`, `apply` of an object of that `kind` fails (and is not
     /// recorded) — stands in for the API server rejecting a manifest.
     pub fail_apply_kind: Mutex<Option<String>>,
+    /// The cluster's LIVE objects as `get_object` reads them, keyed
+    /// `"kind/name"` (status included). Separate from `applied`: what egret
+    /// sent is not what the controllers have made of it. Set with
+    /// [`FakeKube::set_live`].
+    pub live: Mutex<BTreeMap<String, Value>>,
+    /// The Pod objects `list_pod_objects` filters by label selector.
+    pub live_pods: Mutex<Vec<Value>>,
+    /// When `Some`, every `get_object*` / `list_pod_objects` read fails with it.
+    pub fail_reads: Mutex<Option<String>>,
 }
 
 impl Default for FakeKube {
@@ -173,6 +234,9 @@ impl Default for FakeKube {
             patched: Mutex::new(Vec::new()),
             delete_failures: Mutex::new(BTreeMap::new()),
             fail_apply_kind: Mutex::new(None),
+            live: Mutex::new(BTreeMap::new()),
+            live_pods: Mutex::new(Vec::new()),
+            fail_reads: Mutex::new(None),
         }
     }
 }
@@ -181,6 +245,23 @@ impl FakeKube {
     /// Set the canned response returned by `coordinator_request`.
     pub fn set_coordinator_response(&self, status: u16, body: Vec<u8>) {
         *self.coordinator_response.lock().unwrap() = (status, body);
+    }
+
+    /// Put `obj` into the live cluster state `get_object` reads.
+    pub fn set_live(&self, obj: Value) {
+        let key = format!(
+            "{}/{}",
+            obj["kind"].as_str().unwrap_or(""),
+            obj["metadata"]["name"].as_str().unwrap_or("")
+        );
+        self.live.lock().unwrap().insert(key, obj);
+    }
+
+    fn read_failure(&self) -> anyhow::Result<()> {
+        match self.fail_reads.lock().unwrap().as_deref() {
+            Some(message) => anyhow::bail!("{message}"),
+            None => Ok(()),
+        }
     }
 
     /// Make every later `delete` of `kind/name` fail with `message`.
@@ -230,6 +311,31 @@ impl KubeClient for FakeKube {
         self.deleted.lock().unwrap().push(key);
         Ok(())
     }
+    async fn delete_if_unchanged(
+        &self,
+        av: &str,
+        kind: &str,
+        ns: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let live_version = self
+            .live
+            .lock()
+            .unwrap()
+            .get(&format!("{kind}/{name}"))
+            .and_then(|o| {
+                o["metadata"]["resourceVersion"]
+                    .as_str()
+                    .map(str::to_string)
+            });
+        if let (Some(want), Some(have)) = (resource_version, live_version) {
+            if want != have {
+                anyhow::bail!("precondition failed: {kind}/{name} changed");
+            }
+        }
+        self.delete(av, kind, ns, name).await
+    }
     async fn list_pods(
         &self,
         _ns: &str,
@@ -243,6 +349,76 @@ impl KubeClient for FakeKube {
         _label_selector: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>> {
         Ok(vec![("demo-fe-0".into(), "Running".into(), true)])
+    }
+
+    async fn get_object(
+        &self,
+        _api_version: &str,
+        kind: &str,
+        _namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        self.read_failure()?;
+        Ok(self
+            .live
+            .lock()
+            .unwrap()
+            .get(&format!("{kind}/{name}"))
+            .cloned())
+    }
+
+    async fn get_object_metadata(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        Ok(self
+            .get_object(api_version, kind, namespace, name)
+            .await?
+            .map(|o| serde_json::json!({ "metadata": o["metadata"] })))
+    }
+
+    async fn list_object_names(
+        &self,
+        _api_version: &str,
+        kind: &str,
+        _namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        self.read_failure()?;
+        let wanted = parse_selector(label_selector);
+        let deleted = self.deleted.lock().unwrap().clone();
+        Ok(self
+            .applied
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, o)| {
+                o["kind"].as_str() == Some(kind)
+                    && !deleted.contains(key)
+                    && matches_selector(o, &wanted)
+            })
+            .map(|(_, o)| o["metadata"]["name"].as_str().unwrap_or("").to_string())
+            .collect())
+    }
+
+    async fn list_pod_objects(
+        &self,
+        _namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<Value>> {
+        self.read_failure()?;
+        let wanted = parse_selector(label_selector);
+        Ok(self
+            .live_pods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| matches_selector(p, &wanted))
+            .cloned()
+            .collect())
     }
 
     async fn coordinator_request(
@@ -299,6 +475,20 @@ impl KubeClient for FakeKube {
     ) -> anyhow::Result<kube::api::AttachedProcess> {
         anyhow::bail!("exec not supported in fake kube")
     }
+}
+
+/// Equality selectors only (`k=v[,k=v]`), which is all egret uses.
+fn parse_selector(selector: &str) -> Vec<(&str, &str)> {
+    selector
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .collect()
+}
+
+fn matches_selector(obj: &Value, wanted: &[(&str, &str)]) -> bool {
+    wanted
+        .iter()
+        .all(|(k, v)| obj["metadata"]["labels"][*k].as_str() == Some(*v))
 }
 
 /// True for the API server's "not found" answer. A missing object and a resource
@@ -448,6 +638,29 @@ impl KubeClient for LiveKube {
         tolerate_not_found(api.delete(name, &DeleteParams::default()).await.map(|_| ()))
     }
 
+    async fn delete_if_unchanged(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        resource_version: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use kube::api::{Api, DeleteParams, Preconditions};
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let dp = DeleteParams {
+            preconditions: resource_version.map(|rv| Preconditions {
+                resource_version: Some(rv.to_string()),
+                uid: None,
+            }),
+            ..DeleteParams::default()
+        };
+        tolerate_not_found(api.delete(name, &dp).await.map(|_| ()))
+    }
+
     async fn list_pods(
         &self,
         namespace: &str,
@@ -491,6 +704,81 @@ impl KubeClient for LiveKube {
             })
             .collect();
         Ok(out)
+    }
+
+    async fn get_object(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        use kube::api::Api;
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        match api.get_opt(name).await? {
+            Some(obj) => Ok(Some(serde_json::to_value(obj)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_object_metadata(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        use kube::api::Api;
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        match api.get_metadata_opt(name).await? {
+            Some(meta) => Ok(Some(serde_json::json!({ "metadata": meta.metadata }))),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_object_names(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        use kube::api::{Api, ListParams};
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let list = api
+            .list_metadata(&ListParams::default().labels(label_selector))
+            .await?;
+        Ok(list
+            .items
+            .into_iter()
+            .filter_map(|o| o.metadata.name)
+            .collect())
+    }
+
+    async fn list_pod_objects(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<Value>> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, ListParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let pods = api
+            .list(&ListParams::default().labels(label_selector))
+            .await?;
+        pods.into_iter()
+            .map(|p| serde_json::to_value(p).map_err(anyhow::Error::from))
+            .collect()
     }
 
     async fn coordinator_request(

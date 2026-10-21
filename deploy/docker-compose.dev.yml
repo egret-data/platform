@@ -85,6 +85,15 @@ services:
       # against a real `starrocks/allin1-ubuntu:latest` container (`find / -name
       # fe.conf` -> /data/deploy/starrocks/fe/conf/fe.conf, which is on the FE's
       # CLASSPATH per fe/bin/start_fe.sh) — see deploy/starrocks/README.md.
+      #
+      # egret's /ranger surface requires an engine credential by default
+      # (`ranger.auth_mode = required`), and this hand-written XML carries none,
+      # so this FE's policy download is refused (401) as is. Either register
+      # this StarRocks as an external engine bound to the `sr1` profile
+      # (POST /api/control-plane/engines/external returns its credential once)
+      # and add `ranger.plugin.starrocks.policy.rest.client.username` /
+      # `.password` properties with it to the XML, or run the host egret with
+      # EGRET_RANGER__AUTH_MODE=anonymous for local development only.
       - ./starrocks/ranger/ranger-starrocks-security.xml:/data/deploy/starrocks/fe/conf/ranger-starrocks-security.xml:ro
       - ./starrocks/ranger/ranger-starrocks-audit.xml:/data/deploy/starrocks/fe/conf/ranger-starrocks-audit.xml:ro
 

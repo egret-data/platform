@@ -8,7 +8,7 @@
 use crate::spec::{EngineKind, EngineSpec};
 use crate::trino::{
     trino_catalogs_config_map, trino_config_map, trino_deployment, trino_env_secret,
-    trino_tls_secret, Role,
+    trino_ranger_secret, trino_tls_secret, Role,
 };
 use std::collections::BTreeMap;
 
@@ -18,14 +18,27 @@ pub enum PlanRole {
     Worker(u32),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PlanFile {
     pub path: String,
     pub content: Vec<u8>,
     pub mode: u32,
 }
 
-#[derive(Clone, Debug)]
+/// Never the content: a file can carry a secret (the password database, the
+/// TLS keystore, the Ranger security XML with the engine's `/ranger`
+/// credential).
+impl std::fmt::Debug for PlanFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlanFile")
+            .field("path", &self.path)
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("mode", &format_args!("{:o}", self.mode))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct ContainerPlan {
     pub name: String,
     pub role: PlanRole,
@@ -36,6 +49,24 @@ pub struct ContainerPlan {
     pub files: Vec<PlanFile>,
     pub nano_cpus: Option<i64>,
     pub memory_bytes: Option<i64>,
+}
+
+/// Never the env values (catalog and engine secrets) nor file contents.
+impl std::fmt::Debug for ContainerPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("ContainerPlan")
+            .field("name", &self.name)
+            .field("role", &self.role)
+            .field("image", &self.image)
+            .field("env_keys", &env_keys)
+            .field("labels", &self.labels)
+            .field("aliases", &self.aliases)
+            .field("files", &self.files)
+            .field("nano_cpus", &self.nano_cpus)
+            .field("memory_bytes", &self.memory_bytes)
+            .finish()
+    }
 }
 
 pub struct PlanOptions<'a> {
@@ -165,12 +196,18 @@ pub fn parse_memory(q: &str) -> Result<i64, String> {
 }
 
 fn file_mode(path: &str) -> u32 {
-    if path.ends_with("/password.db") || path.ends_with("/keystore.pem") {
+    if path.ends_with("/password.db")
+        || path.ends_with("/keystore.pem")
+        || path.ends_with(RANGER_SECURITY_XML_SUFFIX)
+    {
         0o600
     } else {
         0o644
     }
 }
+
+/// The Ranger security XML carries the engine's `/ranger` credential.
+const RANGER_SECURITY_XML_SUFFIX: &str = "/ranger-trino-security.xml";
 
 /// The files of one role: every `volumeMounts` entry of the Kubernetes
 /// Deployment, resolved to the ConfigMap/Secret data behind it.
@@ -181,11 +218,13 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
         .cloned()
         .unwrap_or_default();
     let tls = trino_tls_secret(spec);
+    let ranger = trino_ranger_secret(spec);
     resolve_mounts(
         &mounts,
         &trino_config_map(spec),
         &trino_catalogs_config_map(spec),
         tls.as_ref(),
+        ranger.as_ref(),
     )
 }
 
@@ -195,6 +234,7 @@ fn resolve_mounts(
     config: &serde_json::Value,
     catalogs: &serde_json::Value,
     tls: Option<&serde_json::Value>,
+    ranger: Option<&serde_json::Value>,
 ) -> Result<Vec<PlanFile>, String> {
     let mut files = Vec::new();
     for m in mounts {
@@ -226,6 +266,18 @@ fn resolve_mounts(
                 files.push(PlanFile {
                     path: path.into(),
                     content: pem.as_bytes().to_vec(),
+                    mode: 0o600,
+                });
+            }
+            // The Ranger plugin's security XML, from the credential's own
+            // Secret (`trino_ranger_secret`): written private, like the keystore.
+            ("ranger-secret", Some(s)) => {
+                let xml = ranger
+                    .and_then(|r| r["stringData"][s].as_str())
+                    .ok_or_else(unsupported)?;
+                files.push(PlanFile {
+                    path: path.into(),
+                    content: xml.as_bytes().to_vec(),
                     mode: 0o600,
                 });
             }
@@ -281,7 +333,7 @@ pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<Container
                 "image {image} has no tag or digest; name one (pulling it as is would fetch every tag)"
             ));
         }
-        let labels = [
+        let mut labels: BTreeMap<String, String> = [
             ("egret.managed", "true"),
             ("egret.project", opts.project),
             ("egret.engine", spec.name.as_str()),
@@ -291,6 +343,15 @@ pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<Container
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
+        // Which Ranger credential this container's files were rendered with
+        // (its non-secret id, never the password), so the rollout of THAT
+        // credential can be observed (`DockerEngineProvisioner::ranger_rollout`).
+        if let Some(id) = crate::rollout::ranger_credential_id(spec) {
+            labels.insert(
+                crate::rollout::RANGER_CREDENTIAL_ANNOTATION.to_string(),
+                id.to_string(),
+            );
+        }
         let aliases = match role {
             PlanRole::Coordinator => {
                 let host = format!("{}-trino", spec.name);
@@ -427,6 +488,8 @@ mod tests {
         }
     }
 
+    const TEST_CREDENTIAL_ID: &str = "0b5ad7e2-0000-4000-8000-00000000c0de";
+
     fn allowed() -> Vec<String> {
         vec!["trinodb/trino".to_string()]
     }
@@ -536,6 +599,14 @@ mod tests {
             service_name: "demo".into(),
             egret_url: "http://egret:8080".into(),
             poll_interval_ms: 30_000,
+            credential: Some(
+                crate::ranger_config::RenderableCredential::new(
+                    TEST_CREDENTIAL_ID,
+                    "egret-engine-demo",
+                    "s3cr3t-ranger-pass",
+                )
+                .expect("renderable"),
+            ),
         });
         s.config.auth = Some(Auth {
             password_users: vec![PasswordEntry {
@@ -585,6 +656,18 @@ mod tests {
         assert!(got.contains("/etc/trino/auth/password/password.db"));
         assert!(got.contains("/etc/trino/ranger-trino-security.xml"));
         assert_eq!(file(p, "/etc/trino/auth/password/password.db").mode, 0o600);
+        // The Ranger XML is the credential's Secret, verbatim, and private.
+        let xml = file(p, "/etc/trino/ranger-trino-security.xml");
+        let secret = trino_ranger_secret(&s).unwrap();
+        assert_eq!(
+            xml.content,
+            secret["stringData"]["ranger-trino-security.xml"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+        );
+        assert!(String::from_utf8_lossy(&xml.content).contains("s3cr3t-ranger-pass"));
+        assert_eq!(xml.mode, 0o600);
         let sorted: Vec<&String> = p.files.iter().map(|f| &f.path).collect();
         let mut again = sorted.clone();
         again.sort();
@@ -901,12 +984,22 @@ mod tests {
             m("data", "/somewhere/else", None),
             m("config", "/etc/trino/x", Some("not-a-key")),
             m("tls", "/etc/trino/tls/keystore.pem", Some("keystore.pem")),
+            m(
+                "ranger-secret",
+                "/etc/trino/ranger-trino-security.xml",
+                Some("ranger-trino-security.xml"),
+            ),
+            m(
+                "ranger-secret",
+                "/etc/trino/ranger-trino-security.xml",
+                None,
+            ),
         ] {
-            let e = resolve_mounts(&[bad], &none, &none, None).unwrap_err();
+            let e = resolve_mounts(&[bad], &none, &none, None, None).unwrap_err();
             assert!(e.contains("unsupported volume mount"), "{e}");
         }
         assert!(
-            resolve_mounts(&[m("data", "/data/trino", None)], &none, &none, None)
+            resolve_mounts(&[m("data", "/data/trino", None)], &none, &none, None, None)
                 .unwrap()
                 .is_empty()
         );
@@ -929,6 +1022,42 @@ mod tests {
         want.insert("/etc/trino/catalog/egret.properties".into());
         let got: BTreeSet<String> = plans[1].files.iter().map(|f| f.path.clone()).collect();
         assert_eq!(got, want);
+    }
+
+    /// Every container of a bound engine names the credential its files carry
+    /// (the id, never the password); an engine with no credential names none.
+    #[test]
+    fn every_container_names_its_ranger_credential_by_id() {
+        let mut s = rich_spec();
+        s.config.worker.base.replicas = 1;
+        let plans = plan(&s).unwrap();
+        assert_eq!(plans.len(), 2);
+        for p in &plans {
+            assert_eq!(
+                p.labels.get(crate::rollout::RANGER_CREDENTIAL_ANNOTATION),
+                Some(&TEST_CREDENTIAL_ID.to_string()),
+                "{}",
+                p.name
+            );
+            assert!(p.labels.values().all(|v| !v.contains("s3cr3t")));
+            assert_eq!(file(p, "/etc/trino/ranger-trino-security.xml").mode, 0o600);
+        }
+        let unbound = &plan(&sample_spec()).unwrap()[0];
+        assert!(!unbound
+            .labels
+            .contains_key(crate::rollout::RANGER_CREDENTIAL_ANNOTATION));
+    }
+
+    /// A plan is logged on failure paths: its Debug must carry no secret.
+    #[test]
+    fn a_plans_debug_carries_no_file_content_or_env_value() {
+        let p = &plan(&rich_spec()).unwrap()[0];
+        let d = format!("{p:?}");
+        assert!(d.contains("/etc/trino/ranger-trino-security.xml"), "{d}");
+        for secret in ["s3cr3t-ranger-pass", "s3secret", "id:secret", "$2b$10$abc"] {
+            assert!(!d.contains(secret), "{secret} in {d}");
+        }
+        assert!(d.contains("S3_SECRET_KEY"), "{d}");
     }
 
     #[test]

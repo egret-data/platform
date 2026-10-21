@@ -64,6 +64,11 @@ export type rangerListDefsResponse401 = {
   status: 401
 }
 
+export type rangerListDefsResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerListDefsResponse500 = {
   data: RangerErrorBody
   status: 500
@@ -72,7 +77,7 @@ export type rangerListDefsResponse500 = {
 export type rangerListDefsResponseSuccess = (rangerListDefsResponse200) & {
   headers: Headers;
 };
-export type rangerListDefsResponseError = (rangerListDefsResponse401 | rangerListDefsResponse500) & {
+export type rangerListDefsResponseError = (rangerListDefsResponse401 | rangerListDefsResponse403 | rangerListDefsResponse500) & {
   headers: Headers;
 };
 
@@ -83,7 +88,7 @@ export const getRangerListDefsUrl = () => {
 
 
 
-  return `/service/plugins/definitions`
+  return `/ranger/service/plugins/definitions`
 }
 
 export const rangerListDefs = async ( options?: Parameters<typeof customInstance>[1]): Promise<rangerListDefsResponse> => {
@@ -103,7 +108,7 @@ export const rangerListDefs = async ( options?: Parameters<typeof customInstance
 
 export const getRangerListDefsQueryKey = () => {
     return [
-    `/service/plugins/definitions`
+    `/ranger/service/plugins/definitions`
     ] as const;
     }
 
@@ -182,6 +187,11 @@ export type rangerGetDefResponse401 = {
   status: 401
 }
 
+export type rangerGetDefResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerGetDefResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -195,7 +205,7 @@ export type rangerGetDefResponse500 = {
 export type rangerGetDefResponseSuccess = (rangerGetDefResponse200) & {
   headers: Headers;
 };
-export type rangerGetDefResponseError = (rangerGetDefResponse401 | rangerGetDefResponse404 | rangerGetDefResponse500) & {
+export type rangerGetDefResponseError = (rangerGetDefResponse401 | rangerGetDefResponse403 | rangerGetDefResponse404 | rangerGetDefResponse500) & {
   headers: Headers;
 };
 
@@ -206,7 +216,7 @@ export const getRangerGetDefUrl = (name: string,) => {
 
 
 
-  return `/service/plugins/definitions/name/${encodeURIComponent(name)}`
+  return `/ranger/service/plugins/definitions/name/${encodeURIComponent(name)}`
 }
 
 export const rangerGetDef = async (name: string, options?: Parameters<typeof customInstance>[1]): Promise<rangerGetDefResponse> => {
@@ -226,7 +236,7 @@ export const rangerGetDef = async (name: string, options?: Parameters<typeof cus
 
 export const getRangerGetDefQueryKey = (name: string,) => {
     return [
-    `/service/plugins/definitions/name/${encodeURIComponent(name)}`
+    `/ranger/service/plugins/definitions/name/${encodeURIComponent(name)}`
     ] as const;
     }
 
@@ -310,6 +320,11 @@ export type rangerDownloadPoliciesResponse401 = {
   status: 401
 }
 
+export type rangerDownloadPoliciesResponse403 = {
+  data: RangerErrorBody
+  status: 403
+}
+
 export type rangerDownloadPoliciesResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -323,7 +338,7 @@ export type rangerDownloadPoliciesResponse500 = {
 export type rangerDownloadPoliciesResponseSuccess = (rangerDownloadPoliciesResponse200) & {
   headers: Headers;
 };
-export type rangerDownloadPoliciesResponseError = (rangerDownloadPoliciesResponse304 | rangerDownloadPoliciesResponse401 | rangerDownloadPoliciesResponse404 | rangerDownloadPoliciesResponse500) & {
+export type rangerDownloadPoliciesResponseError = (rangerDownloadPoliciesResponse304 | rangerDownloadPoliciesResponse401 | rangerDownloadPoliciesResponse403 | rangerDownloadPoliciesResponse404 | rangerDownloadPoliciesResponse500) & {
   headers: Headers;
 };
 
@@ -342,7 +357,7 @@ export const getRangerDownloadPoliciesUrl = (service: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/service/plugins/policies/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/service/plugins/policies/download/${encodeURIComponent(service)}`
+  return stringifiedParams.length > 0 ? `/ranger/service/plugins/policies/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/ranger/service/plugins/policies/download/${encodeURIComponent(service)}`
 }
 
 /**
@@ -368,7 +383,7 @@ export const rangerDownloadPolicies = async (service: string,
 export const getRangerDownloadPoliciesQueryKey = (service: string,
     params?: RangerDownloadPoliciesParams,) => {
     return [
-    `/service/plugins/policies/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
+    `/ranger/service/plugins/policies/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -455,6 +470,11 @@ export type rangerGetPolicyResponse401 = {
   status: 401
 }
 
+export type rangerGetPolicyResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerGetPolicyResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -468,7 +488,7 @@ export type rangerGetPolicyResponse500 = {
 export type rangerGetPolicyResponseSuccess = (rangerGetPolicyResponse200) & {
   headers: Headers;
 };
-export type rangerGetPolicyResponseError = (rangerGetPolicyResponse401 | rangerGetPolicyResponse404 | rangerGetPolicyResponse500) & {
+export type rangerGetPolicyResponseError = (rangerGetPolicyResponse401 | rangerGetPolicyResponse403 | rangerGetPolicyResponse404 | rangerGetPolicyResponse500) & {
   headers: Headers;
 };
 
@@ -479,7 +499,7 @@ export const getRangerGetPolicyUrl = (id: number,) => {
 
 
 
-  return `/service/plugins/policies/${encodeURIComponent(id)}`
+  return `/ranger/service/plugins/policies/${encodeURIComponent(id)}`
 }
 
 export const rangerGetPolicy = async (id: number, options?: Parameters<typeof customInstance>[1]): Promise<rangerGetPolicyResponse> => {
@@ -499,7 +519,7 @@ export const rangerGetPolicy = async (id: number, options?: Parameters<typeof cu
 
 export const getRangerGetPolicyQueryKey = (id: number,) => {
     return [
-    `/service/plugins/policies/${encodeURIComponent(id)}`
+    `/ranger/service/plugins/policies/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -578,6 +598,11 @@ export type rangerListServicesResponse401 = {
   status: 401
 }
 
+export type rangerListServicesResponse403 = {
+  data: void
+  status: 403
+}
+
 export type rangerListServicesResponse500 = {
   data: RangerErrorBody
   status: 500
@@ -586,7 +611,7 @@ export type rangerListServicesResponse500 = {
 export type rangerListServicesResponseSuccess = (rangerListServicesResponse200) & {
   headers: Headers;
 };
-export type rangerListServicesResponseError = (rangerListServicesResponse401 | rangerListServicesResponse500) & {
+export type rangerListServicesResponseError = (rangerListServicesResponse401 | rangerListServicesResponse403 | rangerListServicesResponse500) & {
   headers: Headers;
 };
 
@@ -597,7 +622,7 @@ export const getRangerListServicesUrl = () => {
 
 
 
-  return `/service/plugins/services`
+  return `/ranger/service/plugins/services`
 }
 
 export const rangerListServices = async ( options?: Parameters<typeof customInstance>[1]): Promise<rangerListServicesResponse> => {
@@ -617,7 +642,7 @@ export const rangerListServices = async ( options?: Parameters<typeof customInst
 
 export const getRangerListServicesQueryKey = () => {
     return [
-    `/service/plugins/services`
+    `/ranger/service/plugins/services`
     ] as const;
     }
 
@@ -701,6 +726,11 @@ export type rangerDownloadTagsResponse401 = {
   status: 401
 }
 
+export type rangerDownloadTagsResponse403 = {
+  data: RangerErrorBody
+  status: 403
+}
+
 export type rangerDownloadTagsResponse404 = {
   data: RangerErrorBody
   status: 404
@@ -714,7 +744,7 @@ export type rangerDownloadTagsResponse500 = {
 export type rangerDownloadTagsResponseSuccess = (rangerDownloadTagsResponse200) & {
   headers: Headers;
 };
-export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse304 | rangerDownloadTagsResponse401 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
+export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse304 | rangerDownloadTagsResponse401 | rangerDownloadTagsResponse403 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
   headers: Headers;
 };
 
@@ -733,7 +763,7 @@ export const getRangerDownloadTagsUrl = (service: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/service/tags/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/service/tags/download/${encodeURIComponent(service)}`
+  return stringifiedParams.length > 0 ? `/ranger/service/tags/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/ranger/service/tags/download/${encodeURIComponent(service)}`
 }
 
 /**
@@ -761,7 +791,7 @@ export const rangerDownloadTags = async (service: string,
 export const getRangerDownloadTagsQueryKey = (service: string,
     params?: RangerDownloadTagsParams,) => {
     return [
-    `/service/tags/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
+    `/ranger/service/tags/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
     ] as const;
     }
 

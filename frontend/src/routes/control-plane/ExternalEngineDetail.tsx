@@ -68,7 +68,8 @@ import {
   ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
-import { catalogKey, catalogsQueryKey } from "./queryKeys";
+import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
+import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -77,8 +78,6 @@ const TABS = new Set(["overview", "catalogs", "plugin-config", "settings"]);
 /** The external engine row; `status` is the placeholder egret does not read, so it is left out. */
 type ExternalEngine = Omit<Engine, "status">;
 
-const engineKey = (id: string) => ["cp", "engine", id] as const;
-
 /**
  * The engine detail page for an `origin: external` engine.
  *
@@ -86,7 +85,8 @@ const engineKey = (id: string) => ["cp", "engine", id] as const;
  * cluster is offered here: no pods, logs, terminal, monitor, autoscaling, config
  * editors, restart or secret rotation (the server refuses all of them with 409).
  * What is left is the record (address, plugin version), the profile bound to it,
- * the catalogs declared attached, and the Ranger plugin configuration to install.
+ * the catalogs declared attached, the Ranger plugin configuration to install, and
+ * the Ranger credential the plugin presents (rotated and retired on Overview).
  */
 export default function ExternalEngineDetail({ engine }: { engine: ExternalEngine }) {
   const [sp, setSp] = useSearchParams();
@@ -108,6 +108,9 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
     retry: false,
   });
   const bound = profilesQ.data?.find((p) => p.engines.some((e) => e.id === engine.id));
+  // Held here, above the tabs: the Overview panel unmounts while the operator
+  // installs the new credential from the Plugin config tab.
+  const rotation = useRotationToken(engine.id);
 
   return (
     <div className="space-y-5">
@@ -144,6 +147,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
 
         <TabsContent value="overview" className="space-y-4">
           <Overview engine={engine} bound={bound} profilesQ={profilesQ} />
+          <RangerCredentialSection engine={engine} rotation={rotation} />
         </TabsContent>
         <TabsContent value="catalogs">
           <DeclaredCatalogs engine={engine} />
@@ -515,7 +519,7 @@ function SettingsForm({
   const invalid: string[] = [];
   if (!host.trim()) invalid.push("a host");
   if (!portOk) invalid.push("a port from 1 to 65535");
-  if (!versionOk) invalid.push("a plugin version like 2.5.0");
+  if (!versionOk) invalid.push("a plugin version like 2.8.0");
   const blockedReason = invalid.length
     ? `Enter ${invalid.join(", ")}.`
     : !changed
@@ -527,7 +531,7 @@ function SettingsForm({
   const save = useControlPlaneEnginesUpdateExternalEngine<ApiError>({
     mutation: {
       onSuccess: () => {
-        void queryClient.invalidateQueries({ queryKey: engineKey(engine.id) });
+        void queryClient.invalidateQueries({ queryKey: engineDetailKey(engine.id) });
         void queryClient.invalidateQueries({ queryKey: enginesQueryKey });
         void queryClient.invalidateQueries({ queryKey: profilesQueryKey });
         void queryClient.invalidateQueries({

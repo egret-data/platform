@@ -26,6 +26,8 @@ async fn download(store: &PolicyStore, uri: &str) -> (StatusCode, Value) {
     let resp = ranger_router(RangerState {
         store: store.clone(),
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     })
     .oneshot(
         Request::builder()

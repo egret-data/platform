@@ -27,6 +27,8 @@ fn app(store: PolicyStore) -> axum::Router {
     ranger_router(RangerState {
         store,
         auth_token: Arc::from(TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     })
 }
 
@@ -668,4 +670,71 @@ async fn the_tag_download_and_the_explain_resolver_cover_the_same_set() {
             "{held_out} is not reachable by this profile and must appear on neither side"
         );
     }
+}
+
+/// A 2.8.0/2.9.0 plugin configured with a username and password fetches tags
+/// from `/tags/secure/download/<svc>`, not `/tags/download/<svc>` (measured:
+/// `docs/en/plans/2026-10-20-ranger-surface-auth-measurements.md`, Q4). The
+/// secure path is the same handler: same body for a seeded assignment, and the
+/// same 304 on a matching `tagVersion`. Without the route the plugin's tag
+/// enricher gets a 404 and every tag-addressed policy stops applying.
+#[tokio::test]
+async fn the_secure_tags_path_serves_the_same_body_as_the_plain_path() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_row = store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
+    let (wh_id, _catalog_name) = seed_bound_warehouse(&pool, svc_row.id).await;
+    let (tag_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("pii-{}", Uuid::new_v4().simple()))
+            .bind("PII")
+            .fetch_one(&pool)
+            .await
+            .expect("insert tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'sales','orders','email')",
+    )
+    .bind(tag_id)
+    .bind(wh_id)
+    .execute(&pool)
+    .await
+    .expect("insert assignment");
+
+    let app = app(store);
+    let body = |uri: String| {
+        let app = app.clone();
+        async move {
+            let r = app.oneshot(get(&uri)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "{uri}");
+            let b = r.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<Value>(&b).unwrap()
+        }
+    };
+    let plain = body(format!("/tags/download/{svc}")).await;
+    let secure = body(format!("/tags/secure/download/{svc}")).await;
+    // Not an empty envelope on both sides: the seeded resource is there.
+    assert_eq!(
+        secure["serviceResources"].as_array().map(Vec::len),
+        Some(1),
+        "{secure}"
+    );
+    assert_eq!(plain, secure);
+
+    let r = app
+        .oneshot(get(&format!(
+            "/tags/secure/download/{svc}?lastKnownVersion=1"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
 }

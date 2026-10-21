@@ -812,6 +812,32 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
             .map_err(|e| e.to_string())
     }
 
+    async fn ranger_rollout(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<egret_engine_mgmt_api::RangerRollout, String> {
+        self.for_kind(kind)
+            .ranger_rollout(namespace, name, credential_id)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    async fn delete_ranger_secret(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        credential_id: &str,
+    ) -> Result<(), String> {
+        self.for_kind(kind)
+            .delete_ranger_secret(namespace, name, credential_id)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
         if kind == "starrocks" {
             // StarRocks pods are owned by the kube-starrocks operator (not plain
@@ -1453,9 +1479,32 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_policy::seed_starrocks(&store)
             .await
             .map_err(anyhow::Error::from)?;
+        let mode = match config.ranger.auth_mode {
+            egret_config::RangerAuthMode::Required => egret_policy::ranger::AuthMode::Required,
+            egret_config::RangerAuthMode::Anonymous => {
+                tracing::warn!(
+                    "ranger.auth_mode = anonymous: the /ranger plugin surface serves every \
+                     caller without a credential, so any engine can read any profile's policies"
+                );
+                egret_policy::ranger::AuthMode::Anonymous
+            }
+        };
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
+            mode,
+            // Engine plugins authenticate with their per-engine credential
+            // (current or previous, `egret_engine_mgmt::ranger_credential`),
+            // read from the same engine rows and secret store the engine-mgmt
+            // seam writes them to.
+            verifier: Some(std::sync::Arc::new(
+                egret_engine_mgmt::ranger_credential::DbVerifier::new(
+                    egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+                        egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+                        workspace_secrets.clone(),
+                    ),
+                ),
+            )),
         })
     } else {
         None
@@ -2359,9 +2408,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // queries work; an admin who explicitly picks an `authz_service_id` still
         // binds regardless.
         ranger_enabled: config.ranger.enabled,
-        // The FACT only: the page for an external engine states the auth mode and
-        // must have no path to the token.
-        ranger_bearer_configured: !config.ranger.auth_token.is_empty(),
+        // The mode the `/ranger` surface runs in; the page for an external
+        // engine states it.
+        ranger_surface_mode: match config.ranger.auth_mode {
+            egret_config::RangerAuthMode::Required => {
+                egret_engine_mgmt::state::RangerSurfaceMode::Required
+            }
+            egret_config::RangerAuthMode::Anonymous => {
+                egret_engine_mgmt::state::RangerSurfaceMode::Anonymous
+            }
+        },
         // The compiled-in pinned JDBC driver table with this deployment's
         // `[starrocks.jdbc_drivers]` overrides applied (design D5).
         sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default()
@@ -2397,6 +2453,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let (seeded, failed) =
             egret_engine_mgmt::seed_user_baselines_for_existing_engines(st).await;
         tracing::info!(seeded, failed, "per-user Ranger baseline pass");
+    }
+
+    // Spec 2026-10-20-ranger-surface-auth A10 (Task 6b): a provisioned engine's
+    // previous Ranger credential is retired only once the rollout of the
+    // current one is OBSERVED complete. This sweep is what observes it (a read
+    // of the engine does too). On every replica: the retire is a
+    // compare-and-set, so two replicas retire a credential once. Stops with
+    // the other background loops.
+    {
+        let st = engine_mgmt
+            .as_ref()
+            .expect("engine-mgmt state is built just above")
+            .clone();
+        egret_engine_mgmt::ranger_credential::spawn_ranger_retire_sweeper(
+            st,
+            egret_engine_mgmt::ranger_credential::RANGER_RETIRE_SWEEP_INTERVAL,
+            reaper_cancel.clone().cancelled_owned(),
+        );
     }
 
     // Control plane: global platform-admin Storage + Secrets + Access console.

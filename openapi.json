@@ -4033,7 +4033,7 @@
             }
           },
           "400": {
-            "description": "Unknown/unprovisioned warehouse, invalid input, or provisioning failed",
+            "description": "Unknown/unprovisioned warehouse, invalid input (including a StarRocks engine name longer than 48 characters: the operator derives 63-character pod volume names from it), or provisioning failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -4103,11 +4103,11 @@
         },
         "responses": {
           "201": {
-            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version",
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EngineDto"
+                  "$ref": "#/components/schemas/RegisteredExternalEngineDto"
                 }
               }
             }
@@ -4238,7 +4238,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The engine row flattened with live Kubernetes status",
+            "description": "The engine row flattened with live Kubernetes status. Side effect: when a provisioned engine's previous Ranger credential is pending and the rollout of the current one is observed complete, this read retires the previous one",
             "content": {
               "application/json": {
                 "schema": {
@@ -5655,7 +5655,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. No credential is included or minted",
+            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The security XML carries the engine's username and a placeholder in place of its password: the password was shown once (registration or rotation) and is never returned here. Nothing is minted",
             "content": {
               "application/json": {
                 "schema": {
@@ -5792,6 +5792,210 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/retire-previous-ranger-credential": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/retire-previous-ranger-credential` — the operator's\nconfirmation that an EXTERNAL engine's plugin now runs with the credential\nnamed `installed` (the `credentialId` registration or the last rotation\nreturned): the previous one is deleted by its exact id and stops\nauthenticating. Standing rule: egret never deletes a credential the cluster\nmay still hold, and for an external engine only its operator can say it no\nlonger does — about a SPECIFIC credential, so a stale or duplicated\nconfirmation sent before a later rotation retires nothing (409).",
+        "description": "The check is one compare-and-set on both columns (current = `installed`,\nprevious = the id read from the row). Idempotent: with nothing pending and\na matching `installed` it answers 204 and deletes nothing. A provisioned\nengine's previous credential is retired by egret once the rollout of the\ncurrent one is observed complete, so it is refused (409).",
+        "operationId": "retire_previous_ranger_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetirePreviousRangerCredential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "`installed` is the current credential: the previous Ranger plugin credential is retired (it no longer authenticates), or none was pending. The current one is untouched, and a further rotation is allowed again"
+          },
+          "400": {
+            "description": "The body is missing or malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was retired: the engine is provisioned (egret retires its previous credential itself once the rollout of the current one is observed complete), or `installed` is not the engine's current credential (a confirmation sent before a later rotation, or a concurrent change): install the current credential and confirm it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/rotate-ranger-credential": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin\ncredential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential\nis committed and the old one demoted to previous; both authenticate until\nthe previous one is retired. A rotation is refused (409) while a previous\none is still pending, so a rotation never deletes a credential.",
+        "description": "**Provisioned engine** (Trino or StarRocks): the new credential is applied\nand the route answers 204 once Kubernetes ACCEPTS the apply; the pods then\nroll. The previous credential stays valid until that rollout is OBSERVED\ncomplete — every pod that runs the plugin (Trino: coordinator and workers;\nStarRocks: the FE) runs the new credential and none of an older template is\nleft — and is then deleted by its exact id, by a periodic sweep or the next\nread of the engine\n([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).\nA stalled rollout keeps it valid for as long as it stalls. A failed apply\ndeletes nothing; the previous one is retired once a later apply has rolled\nout the current one.\n\n**External engine**: nothing is applied (egret never touches its cluster).\nThe answer is 200 with the new credential — **shown once** — for the\noperator to install. No apply can prove they did, so the previous one stays\nvalid until the operator confirms with\n`POST /engines/{id}/retire-previous-ranger-credential`.",
+        "operationId": "rotate_ranger_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "External engine: the new Ranger plugin credential, shown only here (`Cache-Control: no-store`). The previous credential still authenticates until the operator, once the new one is installed, sends its `credentialId` as `installed` to `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`; until then a further rotation is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerCredentialDto"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential remains valid until the rollout is observed complete (every pod that runs the Ranger plugin runs the new credential and none of an older template is left); egret then retires it. Until then a further rotation is refused"
+          },
+          "400": {
+            "description": "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: the rollout of the current credential has not been observed complete yet, so the previous one is still valid; retry once the rollout has completed; external: confirm the current credential is installed with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`); or the engine changed concurrently (a delete in progress, or another rotation won: re-read the engine and retry)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later apply of the new one has been observed to roll out",
             "content": {
               "application/json": {
                 "schema": {
@@ -36535,7 +36739,7 @@
         }
       }
     },
-    "/service/plugins/definitions": {
+    "/ranger/service/plugins/definitions": {
       "get": {
         "tags": [
           "ranger"
@@ -36553,7 +36757,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "500": {
             "description": "Internal error",
@@ -36568,7 +36775,7 @@
         }
       }
     },
-    "/service/plugins/definitions/name/{name}": {
+    "/ranger/service/plugins/definitions/name/{name}": {
       "get": {
         "tags": [
           "ranger"
@@ -36597,7 +36804,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "404": {
             "description": "No such service-definition",
@@ -36622,7 +36832,7 @@
         }
       }
     },
-    "/service/plugins/policies/download/{service}": {
+    "/ranger/service/plugins/policies/download/{service}": {
       "get": {
         "tags": [
           "ranger"
@@ -36666,7 +36876,17 @@
             "description": "Not modified — the plugin's lastKnownVersion matches the current policy version"
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential asked for a profile its engine is not bound to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such policy profile",
@@ -36691,7 +36911,7 @@
         }
       }
     },
-    "/service/plugins/policies/{id}": {
+    "/ranger/service/plugins/policies/{id}": {
       "get": {
         "tags": [
           "ranger"
@@ -36721,7 +36941,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "404": {
             "description": "No such policy",
@@ -36746,7 +36969,7 @@
         }
       }
     },
-    "/service/plugins/services": {
+    "/ranger/service/plugins/services": {
       "get": {
         "tags": [
           "ranger"
@@ -36767,7 +36990,10 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential: these routes are for the operator bearer only"
           },
           "500": {
             "description": "Internal error",
@@ -36782,7 +37008,7 @@
         }
       }
     },
-    "/service/tags/download/{service}": {
+    "/ranger/service/tags/download/{service}": {
       "get": {
         "tags": [
           "ranger"
@@ -36826,7 +37052,17 @@
             "description": "Not modified — the plugin's lastKnownVersion matches the current tag version"
           },
           "401": {
-            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+            "description": "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"
+          },
+          "403": {
+            "description": "An engine credential asked for a profile its engine is not bound to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such policy profile",
@@ -42735,7 +42971,8 @@
           "namespace",
           "status",
           "spec",
-          "origin"
+          "origin",
+          "rangerCredentialPending"
         ],
         "properties": {
           "id": {
@@ -42804,6 +43041,18 @@
               "null"
             ],
             "description": "Why the engine is not modelled, and how to fix it (for a provisioned\nengine: pin its image). Absent when modelled."
+          },
+          "rangerCredentialPending": {
+            "type": "boolean",
+            "description": "Whether a PREVIOUS Ranger plugin credential is still valid beside the\ncurrent one (spec 2026-10-20-ranger-surface-auth A10/A11): a rotation\nis pending. Provisioned: until the rollout of the current credential\nis observed complete, when egret retires the previous one itself.\nExternal: until the operator confirms the current one is installed\n(`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`).\nWhile it is `true` a further rotation is refused (409)."
+          },
+          "rangerCredentialId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id of the engine's CURRENT Ranger plugin credential: the\n`credentialId` registration or the last rotation returned with it.\nAn opaque id that grants nothing (never the password); an external\nengine's operator sends it as `installed` to confirm which credential\nthe engine runs with. Absent when the engine has no credential yet."
           }
         }
       },
@@ -49261,6 +49510,30 @@
           }
         }
       },
+      "RangerCredentialDto": {
+        "type": "object",
+        "description": "An engine's Ranger plugin credential, shown ONCE: in the registration\nresponse and in the answer to an external engine's rotation. No other\nresponse, log line or `Debug` carries the password.",
+        "required": [
+          "username",
+          "password",
+          "credentialId"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "`engine-<engine id>`."
+          },
+          "password": {
+            "type": "string",
+            "description": "The password. egret does not show it again."
+          },
+          "credentialId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Names THIS credential. Send it as `installed` to\n`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`\nonce the engine runs with it; a confirmation naming any other\ncredential retires nothing. An opaque id: it grants nothing."
+          }
+        }
+      },
       "RangerErrorBody": {
         "type": "object",
         "description": "Doc-only mirror of the Ranger error envelope (`{ msg, statusCode }`), which\ndiffers from the control-plane `ErrorBody` shape.",
@@ -49299,11 +49572,12 @@
           },
           "downloadUrl": {
             "type": "string",
-            "description": "`{public_url}/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
+            "description": "`{public_url}/ranger/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
           },
           "authMode": {
             "type": "string",
-            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/service`; the token is never shown here)."
+            "description": "`engine-credential` (egret's `/ranger` surface requires the engine's own\nRanger credential, shown once at registration or rotation; the files\ncarry a placeholder in place of its password) or `anonymous` (egret\nserves the surface to anyone who can reach it).",
+            "example": "engine-credential"
           },
           "rangerPluginVersion": {
             "type": [
@@ -49335,7 +49609,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What the admin must supply themselves. egret renders no credential and\ninvents none."
+            "description": "What the admin must supply themselves, the credential's password among\nthem: egret shows it only once and renders a placeholder here."
           },
           "files": {
             "type": "array",
@@ -49942,6 +50216,26 @@
           }
         }
       },
+      "RegisteredExternalEngineDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EngineDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "rangerCredential"
+            ],
+            "properties": {
+              "rangerCredential": {
+                "$ref": "#/components/schemas/RangerCredentialDto",
+                "description": "The credential the engine's Ranger plugin presents to egret's `/ranger`\nsurface (HTTP Basic). **Shown once**: egret never returns this password\nagain; a lost one is replaced with\n`POST /api/control-plane/engines/{id}/rotate-ranger-credential`."
+              }
+            }
+          }
+        ],
+        "description": "`POST /api/control-plane/engines/external`'s 201 body: the engine,\nflattened, plus its Ranger credential. Its own type, NOT a field on\n[`EngineDto`]: GET, the list and PATCH return `EngineDto`, so no other\nanswer can ever carry the password."
+      },
       "RegistryCatalogDto": {
         "type": "object",
         "description": "A registry catalog. `config` is the typed per-kind configuration (snake_case\nfields, spec §4.2); it never holds a plaintext secret.",
@@ -50295,6 +50589,21 @@
             "type": "boolean"
           }
         }
+      },
+      "RetirePreviousRangerCredential": {
+        "type": "object",
+        "description": "`POST /engines/{id}/retire-previous-ranger-credential` body: the operator's\nstatement of WHICH credential the engine now runs with.",
+        "required": [
+          "installed"
+        ],
+        "properties": {
+          "installed": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The `credentialId` that registration or the last rotation returned\nwith the credential now installed on the engine."
+          }
+        },
+        "additionalProperties": false
       },
       "RoleAssigneeDto": {
         "type": "object",

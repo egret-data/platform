@@ -110,6 +110,14 @@ pub fn router() -> Router<CpState> {
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
         .route("/engines/{id}/rotate-secrets", post(rotate_engine_secrets))
+        .route(
+            "/engines/{id}/rotate-ranger-credential",
+            post(rotate_ranger_credential),
+        )
+        .route(
+            "/engines/{id}/retire-previous-ranger-credential",
+            post(retire_previous_ranger_credential),
+        )
         // Engine↔workspace assignment (P1): list + set-full-assignment-set.
         .route(
             "/engines/{id}/workspaces",
@@ -329,6 +337,21 @@ pub(crate) struct EngineDto {
     /// engine: pin its image). Absent when modelled.
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_plugin_version_note: Option<String>,
+    /// Whether a PREVIOUS Ranger plugin credential is still valid beside the
+    /// current one (spec 2026-10-20-ranger-surface-auth A10/A11): a rotation
+    /// is pending. Provisioned: until the rollout of the current credential
+    /// is observed complete, when egret retires the previous one itself.
+    /// External: until the operator confirms the current one is installed
+    /// (`POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`).
+    /// While it is `true` a further rotation is refused (409).
+    ranger_credential_pending: bool,
+    /// The id of the engine's CURRENT Ranger plugin credential: the
+    /// `credentialId` registration or the last rotation returned with it.
+    /// An opaque id that grants nothing (never the password); an external
+    /// engine's operator sends it as `installed` to confirm which credential
+    /// the engine runs with. Absent when the engine has no credential yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_credential_id: Option<Uuid>,
 }
 
 impl From<Engine> for EngineDto {
@@ -364,6 +387,8 @@ impl From<Engine> for EngineDto {
             ranger_plugin_version: version,
             ranger_plugin_version_modelled: Some(modelled),
             ranger_plugin_version_note: note,
+            ranger_credential_pending: e.ranger_secret_prev_id.is_some(),
+            ranger_credential_id: e.ranger_secret_id,
         }
     }
 }
@@ -472,6 +497,10 @@ pub(crate) struct BuildOpts {
     pub(crate) pending_attachment: Option<PendingAttachment>,
     /// Mint new internal secrets even when the engine already has some.
     pub(crate) rotate_internal_secrets: bool,
+    /// Rotate the engine's Ranger plugin credential (A10) instead of reusing
+    /// it. Refused with 409 while the previous one is still pending, before
+    /// anything is applied.
+    pub(crate) rotate_ranger_credential: bool,
 }
 
 /// An attachment rendered before it is written (see [`BuildOpts`]).
@@ -553,7 +582,9 @@ pub(crate) async fn build_provision_req_with(
     // the delegation bootstrap a later task will consume.)
     if engine.r#type == "starrocks" {
         let wh = primary_warehouse(st, engine).await?;
-        let (req, _bootstrap) = build_starrocks_provision_req(st, engine, &wh).await?;
+        let (req, _bootstrap) =
+            build_starrocks_provision_req_with(st, engine, &wh, opts.rotate_ranger_credential)
+                .await?;
         return Ok(BuiltReq {
             req,
             internal: None,
@@ -728,6 +759,20 @@ pub(crate) async fn build_provision_req_with(
             seed_user_baseline(st, service_name).await?;
         }
     }
+    // When the engine is bound to a Ranger profile — named by
+    // `resolve_ranger_service_name` from the BOUND profile row, not assumed to
+    // match the engine — template the apache-ranger access-control config so
+    // the bundled plugin polls egret's Ranger-Admin download API (Access P3.2),
+    // authenticating with the engine's own credential (A9). Settled here, after
+    // every other fallible step and before the internal secrets are minted, so
+    // a refused rotation (409) leaves nothing to discard.
+    let ranger = ranger_binding(
+        st,
+        engine,
+        ranger_service_name.clone(),
+        opts.rotate_ranger_credential,
+    )
+    .await?;
     // Internal secrets come LAST: minting writes new secret rows, so every
     // fallible step above has already passed, and a failure below cleans up
     // after itself. `apply_built` records or discards them.
@@ -748,18 +793,6 @@ pub(crate) async fn build_provision_req_with(
             .env
             .insert("TRINO_INTERNAL_SECRET".into(), internal.internal.clone());
     }
-    // When the engine is bound to a Ranger profile — named by
-    // `resolve_ranger_service_name` from the BOUND profile row, not assumed to
-    // match the engine — template the apache-ranger access-control config so
-    // the bundled plugin polls egret's Ranger-Admin download API (Access P3.2).
-    let ranger =
-        ranger_service_name
-            .clone()
-            .map(|service_name| egret_engine_mgmt_api::RangerBinding {
-                service_name,
-                egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
-            });
     Ok(BuiltReq {
         req: EngineProvisionReq {
             name: engine.name.clone(),
@@ -834,6 +867,11 @@ pub(crate) enum ApplyBuiltError {
     /// it to check failed outright. Either way `apply_built` cannot confirm
     /// it is still safe to call the provisioner, so it never does.
     Conflict,
+    /// The Ranger credential this request renders is no longer the row's
+    /// CURRENT one (a rotation landed while it was built): applying it would
+    /// roll the cluster back to the previous credential, or put a retired one
+    /// on it. Nothing was applied.
+    CredentialChanged,
     Failed(String),
 }
 
@@ -865,7 +903,14 @@ pub(crate) async fn apply_built(
     op: ApplyOp,
 ) -> Result<(), ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
-        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {}
+        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {
+            if !renders_the_current_ranger_credential(&built.req, &current) {
+                if let Some(secrets) = &built.internal {
+                    discard_internal_secrets(st, secrets).await;
+                }
+                return Err(ApplyBuiltError::CredentialChanged);
+            }
+        }
         _ => {
             // N2 (round-2 review): nothing has been applied at this point —
             // this guard runs BEFORE the provisioner is ever touched — so a
@@ -918,6 +963,127 @@ pub(crate) async fn apply_built(
         }
     }
     res.map_err(ApplyBuiltError::Failed)
+}
+
+/// The Ranger binding of an engine bound to `service_name` (`None`: unbound,
+/// no binding and no credential), carrying the engine's plugin credential:
+/// the committed one ([`crate::ranger_credential::ensure`]), or a new one when
+/// `rotate` ([`crate::ranger_credential::rotate`], 409 while a previous one is
+/// still pending). Either way the row names the credential BEFORE the apply that
+/// renders it. The binding carries the credential's id too: the provisioners
+/// stamp it on the pods, and the previous credential is retired only once the
+/// pods are observed to run it
+/// ([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).
+/// Nothing is retired after the apply itself.
+async fn ranger_binding(
+    st: &CpState,
+    engine: &Engine,
+    service_name: Option<String>,
+    rotate: bool,
+) -> Result<Option<egret_engine_mgmt_api::RangerBinding>, CpError> {
+    let Some(service_name) = service_name else {
+        return Ok(None);
+    };
+    let credential = if rotate {
+        crate::ranger_credential::rotate(st, engine).await?
+    } else {
+        crate::ranger_credential::ensure(st, engine).await?
+    };
+    // Checked in every build: a credential the renderer would have to escape
+    // (only a pre-Task-6 one can be: `mint_password` re-draws a `--`) fails
+    // the apply loudly instead of rendering. Rotating mints a renderable one.
+    let credential =
+        egret_engine_mgmt_api::ranger_config::RenderableCredential::new(
+            credential.id.to_string(),
+            credential.username,
+            credential.password,
+        )
+        .map_err(|e| {
+            tracing::error!(engine = %engine.name, error = %e,
+                "the engine's ranger credential cannot be rendered; rotate it");
+            CpError::Conflict(format!(
+                "engine {}: {e}. Rotate it with POST /api/control-plane/engines/{}/rotate-ranger-credential",
+                engine.name, engine.id
+            ))
+        })?;
+    Ok(Some(egret_engine_mgmt_api::RangerBinding {
+        service_name,
+        egret_url: st.engine_egret_url.clone(),
+        poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
+        credential: Some(credential),
+    }))
+}
+
+/// The 409 of an apply whose rendered Ranger credential is no longer the
+/// engine's current one.
+pub(crate) const RANGER_CREDENTIAL_CHANGED: &str =
+    "the engine's ranger credential changed while the request was being built; retry";
+
+/// Whether the Ranger credential `req` renders (if any) is still the row's
+/// CURRENT one. A build only ever renders the current credential, so this
+/// refuses nothing legitimate; a stale build — one that would render the
+/// previous (rolling back a rotation) or a retired credential — is refused
+/// right before the provisioner call. This narrows, but does not close, the
+/// race between concurrent applies (there is no per-engine lock): a rotation
+/// can still land between this re-read and the apply.
+pub(crate) fn renders_the_current_ranger_credential(
+    req: &EngineProvisionReq,
+    row: &Engine,
+) -> bool {
+    let Some(id) = req
+        .ranger
+        .as_ref()
+        .and_then(|r| r.credential.as_ref())
+        .map(|c| c.id())
+    else {
+        return true;
+    };
+    row.ranger_secret_id
+        .is_some_and(|current| current.to_string() == id)
+}
+
+/// The SR paths call the provisioner directly: the same re-read and check.
+async fn refuse_a_stale_ranger_credential(
+    st: &CpState,
+    engine_id: Uuid,
+    req: &EngineProvisionReq,
+) -> Result<(), CpError> {
+    let row = st
+        .engine_mgmt
+        .get_engine(engine_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if renders_the_current_ranger_credential(req, &row) {
+        Ok(())
+    } else {
+        Err(CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into()))
+    }
+}
+
+/// 400 for a StarRocks engine name longer than
+/// [`egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN`]: the operator
+/// derives 63-character pod volume names from it.
+pub(crate) fn check_starrocks_engine_name(name: &str) -> Result<(), CpError> {
+    if name.len() > egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN {
+        return Err(CpError::BadRequest(format!(
+            "a StarRocks engine name must be at most {} characters (the operator derives \
+             63-character pod volume names from it)",
+            egret_engine_mgmt_api::MAX_STARROCKS_ENGINE_NAME_LEN
+        )));
+    }
+    Ok(())
+}
+
+/// The StarRocks update's provisioner call, behind the same stale-credential
+/// re-read `apply_built` does (the StarRocks paths do not go through it).
+pub(crate) async fn update_starrocks_cluster(
+    st: &CpState,
+    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+    engine_id: Uuid,
+    req: &EngineProvisionReq,
+) -> Result<(), CpError> {
+    refuse_a_stale_ranger_credential(st, engine_id, req).await?;
+    prov.update(req).await.map_err(CpError::ClusterApplyFailed)
 }
 
 /// `CpError::Conflict` with the wording every apply route uses when
@@ -1940,7 +2106,7 @@ impl std::fmt::Debug for EngineInternalSecrets {
 
 /// 32 random bytes, URL-safe base64 without padding — no `:`, so it is also
 /// safe as a Basic-auth password.
-fn random_internal_secret() -> String {
+pub(crate) fn random_internal_secret() -> String {
     use base64::Engine as _;
     use rand::RngCore;
     let mut b = [0u8; 32];
@@ -2583,6 +2749,19 @@ fn engine_owned_secret_ids(engine: &Engine) -> Vec<Uuid> {
     .collect()
 }
 
+/// The engine's Ranger plugin credentials (current and previous, see
+/// [`crate::ranger_credential`]). Kept OUT of [`engine_owned_secret_ids`] on
+/// purpose: that list doubles as `delete_external_engine`'s "an external row
+/// holds no secret" guard, and an external engine may carry this credential
+/// (spec 2026-10-20-ranger-surface-auth §4.3). The provisioned delete path and
+/// create compensation delete these too.
+fn engine_ranger_secret_ids(engine: &Engine) -> Vec<Uuid> {
+    [engine.ranger_secret_id, engine.ranger_secret_prev_id]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// Undo a failed engine create. Every step logs its own failure and continues,
 /// with ONE exception: if the cluster delete itself fails, this stops right
 /// there (mirroring the real `DELETE /engines/{id}` handler, which returns
@@ -2646,7 +2825,8 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     if let Some(engine_id) = undo.engine_id {
         match st.engine_mgmt.get_engine(engine_id).await {
             Ok(Some(engine)) => {
-                let owned = engine_owned_secret_ids(&engine);
+                let mut owned = engine_owned_secret_ids(&engine);
+                owned.extend(engine_ranger_secret_ids(&engine));
                 match st.engine_mgmt.delete_engine(engine_id).await {
                     Ok(()) => {
                         for secret_id in owned {
@@ -3059,7 +3239,7 @@ fn refuse_dropped_trino_image(b: &CreateEngineBody) -> Result<(), CpError> {
     request_body = CreateEngineBody,
     responses(
         (status = 201, description = "Engine created and provisioned; the primary catalog is attached, and `catalogAttachErrors` lists any of the request's other `catalogs` the engine came up without", body = CreateEngineResponse),
-        (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
+        (status = 400, description = "Unknown/unprovisioned warehouse, invalid input (including a StarRocks engine name longer than 48 characters: the operator derives 63-character pod volume names from it), or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 409, description = "An engine with this name already exists, or its same-name policy profile is bound to another engine", body = ErrorBody),
@@ -3355,6 +3535,9 @@ async fn create_engine(
         compensate_failed_create(&st, undo).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => {
                 CpError::BadRequest(format!("engine provisioning failed: {msg}"))
             }
@@ -3407,6 +3590,17 @@ async fn build_starrocks_provision_req(
     st: &CpState,
     engine: &Engine,
     wh: &egret_catalog_api::Warehouse,
+) -> Result<(EngineProvisionReq, Option<StarRocksDelegationBootstrap>), CpError> {
+    build_starrocks_provision_req_with(st, engine, wh, false).await
+}
+
+/// [`build_starrocks_provision_req`], rotating the Ranger plugin credential
+/// when `rotate_ranger_credential` (see [`BuildOpts::rotate_ranger_credential`]).
+async fn build_starrocks_provision_req_with(
+    st: &CpState,
+    engine: &Engine,
+    wh: &egret_catalog_api::Warehouse,
+    rotate_ranger_credential: bool,
 ) -> Result<(EngineProvisionReq, Option<StarRocksDelegationBootstrap>), CpError> {
     // Storage backing for the FE/CN builtin storage volume — re-resolved from
     // the warehouse's storage connection so update (which has no create body)
@@ -3523,15 +3717,9 @@ async fn build_starrocks_provision_req(
     // Ranger resolution — the SAME helper `build_provision_req` uses for Trino:
     // resolve the ACTUAL bound profile's name from `policy.authz_services`,
     // never assume it matches the engine's; unbound → None.
+    // The binding itself (and its credential) is settled last, just before the
+    // request is assembled.
     let ranger_service_name = resolve_ranger_service_name(st, engine.authz_service_id).await?;
-    let ranger =
-        ranger_service_name
-            .clone()
-            .map(|service_name| egret_engine_mgmt_api::RangerBinding {
-                service_name,
-                egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
-            });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
     // secret the runtime `StarRocksDelegation` + post-Ready bootstrap need,
@@ -3640,6 +3828,20 @@ async fn build_starrocks_provision_req(
         }
     }
 
+    // A bound engine mounts `{name}-ranger-cm` and `{name}-rc-{tag}`, whose
+    // operator-hashed FE volume names fit a DNS label only up to this bound.
+    // Checked before the binding, so nothing is minted for a refused apply.
+    if ranger_service_name.is_some() {
+        check_starrocks_engine_name(&engine.name)?;
+    }
+    // Last fallible step: a refused rotation (409) leaves nothing half-done.
+    let ranger = ranger_binding(
+        st,
+        engine,
+        ranger_service_name.clone(),
+        rotate_ranger_credential,
+    )
+    .await?;
     let req = EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -4176,6 +4378,9 @@ async fn create_starrocks_engine(
     // path — carry a secret, else a hard 400. The actual S3 coords + secret are
     // re-resolved from the warehouse inside `build_starrocks_provision_req` at
     // provision-req assembly time (below), so no bindings are threaded through.
+    // The operator names each FE pod volume `<object>-<4 chars>`, a DNS label:
+    // `{name}-ranger-cm` and `{name}-rc-{tag}` fit only up to this bound.
+    check_starrocks_engine_name(&b.name)?;
     let sc = st
         .storage_registry
         .get_storage_conn(wh.storage_conn_id)
@@ -5044,7 +5249,7 @@ fn spawn_starrocks_catalog_wire(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "The engine row flattened with live Kubernetes status", body = EngineDetailDto),
+        (status = 200, description = "The engine row flattened with live Kubernetes status. Side effect: when a provisioned engine's previous Ranger credential is pending and the rollout of the current one is observed complete, this read retires the previous one", body = EngineDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -5134,6 +5339,13 @@ async fn get_engine(
             },
         }
     };
+    // Opportunistic: a read of an engine whose previous Ranger credential is
+    // pending checks the rollout too, so it is retired soon after anyone looks,
+    // not only at the next sweep. In the background, so the read never waits
+    // on the provisioner; this response may still show it pending (the next
+    // read will not). It skips external and deleting engines, fails closed and
+    // is a compare-and-set, so a concurrent sweep is harmless.
+    crate::ranger_credential::spawn_retire_if_rolled_out(&st, engine.clone());
     Ok(Json(EngineDetailDto {
         engine: engine.into(),
         status,
@@ -5728,6 +5940,9 @@ async fn update_trino_engine(
         restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         });
     }
@@ -5869,9 +6084,9 @@ async fn update_starrocks_engine(
             return Err(e);
         }
     };
-    if let Err(msg) = prov.update(&req).await {
+    if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), engine_id, &req).await {
         restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
-        return Err(CpError::ClusterApplyFailed(msg));
+        return Err(e);
     }
 
     // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
@@ -6057,12 +6272,18 @@ async fn delete_engine(
 /// declared attachments and its profile binding (the profile itself stays, as
 /// for a provisioned engine). **Never calls the provisioner.**
 ///
-/// An external engine owns no secret (`engines_external_shape` keeps every
-/// secret column NULL) and a declared attachment minted no client
-/// (`attachments_declared_holds_nothing`), so there is nothing for
-/// [`cleanup_deleted_engine`] to remove, and a secret the cluster might still
-/// hold must never be deleted. That is asserted here rather than assumed: a row
-/// that somehow carries one is refused untouched.
+/// An external engine owns no secret egret connects WITH
+/// (`engines_external_shape` keeps every such column NULL) and a declared
+/// attachment minted no client (`attachments_declared_holds_nothing`), so there
+/// is nothing for [`cleanup_deleted_engine`] to remove, and a secret the
+/// cluster might still hold must never be deleted. That is asserted here rather
+/// than assumed: a row that somehow carries one is refused untouched.
+///
+/// The one exception is the engine's Ranger plugin credential (spec
+/// 2026-10-20-ranger-surface-auth A11), which only authenticates THIS engine
+/// to egret: once the row is gone it verifies for nobody, so it is deleted
+/// with the row ([`delete_ranger_credentials`]). It is deliberately not in
+/// the guard above.
 async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusCode, CpError> {
     let attachments = st
         .engine_mgmt
@@ -6091,6 +6312,7 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
         DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
         DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
     }
+    delete_ranger_credentials(st, engine).await;
     // The profile this engine was bound to loses its engine with the row. Its
     // catalog grants stay the profile's own; its ENGINE grants cascaded with
     // the row, so a profile another engine still binds is recompiled (spec E10).
@@ -6098,6 +6320,59 @@ async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusC
     tracing::info!(engine = %engine.name,
         "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// After an engine's row is deleted: its Ranger plugin credentials, by the
+/// exact ids the row named (current and previous) and then by the engine's
+/// own name prefix `engine-ranger-{id}-` (generations a lost compare-and-set
+/// or a failed delete left behind). The prefix ends in the full engine id and
+/// a hyphen, so it cannot match another engine's credential. Failures are
+/// logged: the row is already gone, so none of these verifies any more.
+async fn delete_ranger_credentials(st: &CpState, engine: &Engine) {
+    delete_secret_ids(st, engine, engine_ranger_secret_ids(engine)).await;
+    sweep_secret_prefixes(
+        st,
+        engine,
+        &[crate::ranger_credential::secret_name_prefix(engine.id)],
+    )
+    .await;
+}
+
+/// Delete each of `ids` from the global secret scope; a missing one is fine.
+async fn delete_secret_ids(st: &CpState, engine: &Engine, ids: impl IntoIterator<Item = Uuid>) {
+    for sid in ids {
+        match st.secrets.delete(None, sid).await {
+            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
+            }
+        }
+    }
+}
+
+/// Delete every global secret whose name starts with one of `prefixes`
+/// (plain `starts_with`, never SQL `LIKE`). Engine delete only: see
+/// [`cleanup_deleted_engine`] for why a sweep is safe there and nowhere else.
+async fn sweep_secret_prefixes(st: &CpState, engine: &Engine, prefixes: &[String]) {
+    match st.secrets.list(None).await {
+        Ok(all) => {
+            for meta in all {
+                if !prefixes.iter().any(|p| meta.name.starts_with(p.as_str())) {
+                    continue;
+                }
+                match st.secrets.delete(None, meta.id).await {
+                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
+                            "delete orphaned engine secret generation failed")
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
+        }
+    }
 }
 
 /// What an engine leaves outside its own tables. Each seam owns its own pool, so
@@ -6116,14 +6391,15 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // covers `internal_secret_id`/`monitor_secret_id` (Task 6). Never
     // `tls_cert_secret_ref`: admin-provided and possibly shared with other
     // engines.
-    for sid in engine_owned_secret_ids(engine) {
-        match st.secrets.delete(None, sid).await {
-            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
-            Err(e) => {
-                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
-            }
-        }
-    }
+    // The Ranger plugin credential (current and previous) goes with them.
+    delete_secret_ids(
+        st,
+        engine,
+        engine_owned_secret_ids(engine)
+            .into_iter()
+            .chain(engine_ranger_secret_ids(engine)),
+    )
+    .await;
     // Orphan generations a failed rotation leaves behind. `commit_internal_secrets`
     // mints a fresh `engine-internal-{id}-{generation}` / `engine-monitor-{id}-
     // {generation}` pair on every rotation; when the apply that carried it never
@@ -6135,29 +6411,21 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     // HERE and ONLY here: the engine row is already gone and its delete already
     // went through `deleting`, so no apply for this engine id can still be in
     // flight to race this sweep.
-    let internal_prefix = format!("engine-internal-{}-", engine.id);
-    let monitor_prefix = format!("engine-monitor-{}-", engine.id);
-    match st.secrets.list(None).await {
-        Ok(all) => {
-            for meta in all {
-                if !meta.name.starts_with(&internal_prefix)
-                    && !meta.name.starts_with(&monitor_prefix)
-                {
-                    continue;
-                }
-                match st.secrets.delete(None, meta.id).await {
-                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
-                    Err(e) => {
-                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
-                            "delete orphaned engine secret generation failed")
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
-        }
-    }
+    //
+    // The same holds for `engine-ranger-{id}-*`: a credential a lost
+    // compare-and-set or a failed delete left behind (see
+    // `crate::ranger_credential`); after the row is gone no plugin can
+    // authenticate with any of them anyway.
+    sweep_secret_prefixes(
+        st,
+        engine,
+        &[
+            format!("engine-internal-{}-", engine.id),
+            format!("engine-monitor-{}-", engine.id),
+            crate::ranger_credential::secret_name_prefix(engine.id),
+        ],
+    )
+    .await;
 }
 
 /// `POST /engines/{id}/restart` — roll the engine's pods without changing config
@@ -6282,8 +6550,190 @@ async fn rotate_engine_secrets(
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
+/// credential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential
+/// is committed and the old one demoted to previous; both authenticate until
+/// the previous one is retired. A rotation is refused (409) while a previous
+/// one is still pending, so a rotation never deletes a credential.
+///
+/// **Provisioned engine** (Trino or StarRocks): the new credential is applied
+/// and the route answers 204 once Kubernetes ACCEPTS the apply; the pods then
+/// roll. The previous credential stays valid until that rollout is OBSERVED
+/// complete — every pod that runs the plugin (Trino: coordinator and workers;
+/// StarRocks: the FE) runs the new credential and none of an older template is
+/// left — and is then deleted by its exact id, by a periodic sweep or the next
+/// read of the engine
+/// ([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).
+/// A stalled rollout keeps it valid for as long as it stalls. A failed apply
+/// deletes nothing; the previous one is retired once a later apply has rolled
+/// out the current one.
+///
+/// **External engine**: nothing is applied (egret never touches its cluster).
+/// The answer is 200 with the new credential — **shown once** — for the
+/// operator to install. No apply can prove they did, so the previous one stays
+/// valid until the operator confirms with
+/// `POST /engines/{id}/retire-previous-ranger-credential`.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/rotate-ranger-credential",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "External engine: the new Ranger plugin credential, shown only here (`Cache-Control: no-store`). The previous credential still authenticates until the operator, once the new one is installed, sends its `credentialId` as `installed` to `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`; until then a further rotation is refused", body = crate::external::RangerCredentialDto),
+        (status = 204, description = "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential remains valid until the rollout is observed complete (every pod that runs the Ranger plugin runs the new credential and none of an older template is left); egret then retires it. Until then a further rotation is refused"),
+        (status = 400, description = "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "Nothing was rotated, for one of two reasons: a previous rotation is still pending (provisioned: the rollout of the current credential has not been observed complete yet, so the previous one is still valid; retry once the rollout has completed; external: confirm the current credential is installed with `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`); or the engine changed concurrently (a delete in progress, or another rotation won: re-read the engine and retry)", body = ErrorBody),
+        (status = 502, description = "Provisioned engine: Kubernetes rejected the apply; the engine row now names the new credential and keeps the previous one — both still authenticate — until a later apply of the new one has been observed to roll out", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rotate_ranger_credential(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Response, CpError> {
+    use axum::response::IntoResponse as _;
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if crate::external::is_external(&engine) {
+        // The row alone: an external engine's cluster is never touched. An
+        // engine registered before credentials existed has no current one, so
+        // this mints its first.
+        let (credential_id, credential) =
+            crate::ranger_credential::RangerCredentialStore::from_state(&st)
+                .rotate_external(&engine)
+                .await?;
+        tracing::info!(engine = %engine.name,
+            "external engine's ranger credential rotated; the previous one stays valid until \
+             the operator retires it");
+        return Ok((
+            // The body carries a password: no browser or intermediary may keep it.
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(crate::external::RangerCredentialDto {
+                username: credential.username.clone(),
+                password: credential.password.clone(),
+                credential_id,
+            }),
+        )
+            .into_response());
+    }
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
+    // An unbound engine renders no Ranger binding, so there is no credential to
+    // rotate. A Trino engine late-binds a profile on any apply once Ranger is
+    // on (`build_provision_req_with`), so it counts as bound then.
+    let bound =
+        engine.authz_service_id.is_some() || (st.ranger_enabled && engine.r#type == "trino");
+    if !bound {
+        return Err(CpError::BadRequest(format!(
+            "engine {} is bound to no policy profile: it has no ranger credential",
+            engine.name
+        )));
+    }
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = build_provision_req_with(
+        &st,
+        &engine,
+        BuildOpts {
+            rotate_ranger_credential: true,
+            ..BuildOpts::default()
+        },
+    )
+    .await?;
+    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+        .await
+        .map_err(|e| match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `POST /engines/{id}/retire-previous-ranger-credential` body: the operator's
+/// statement of WHICH credential the engine now runs with.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RetirePreviousRangerCredential {
+    /// The `credentialId` that registration or the last rotation returned
+    /// with the credential now installed on the engine.
+    installed: Uuid,
+}
+
+/// `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
+/// confirmation that an EXTERNAL engine's plugin now runs with the credential
+/// named `installed` (the `credentialId` registration or the last rotation
+/// returned): the previous one is deleted by its exact id and stops
+/// authenticating. Standing rule: egret never deletes a credential the cluster
+/// may still hold, and for an external engine only its operator can say it no
+/// longer does — about a SPECIFIC credential, so a stale or duplicated
+/// confirmation sent before a later rotation retires nothing (409).
+///
+/// The check is one compare-and-set on both columns (current = `installed`,
+/// previous = the id read from the row). Idempotent: with nothing pending and
+/// a matching `installed` it answers 204 and deletes nothing. A provisioned
+/// engine's previous credential is retired by egret once the rollout of the
+/// current one is observed complete, so it is refused (409).
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/retire-previous-ranger-credential",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = RetirePreviousRangerCredential,
+    responses(
+        (status = 204, description = "`installed` is the current credential: the previous Ranger plugin credential is retired (it no longer authenticates), or none was pending. The current one is untouched, and a further rotation is allowed again"),
+        (status = 400, description = "The body is missing or malformed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "Nothing was retired: the engine is provisioned (egret retires its previous credential itself once the rollout of the current one is observed complete), or `installed` is not the engine's current credential (a confirmation sent before a later rotation, or a concurrent change): install the current credential and confirm it", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn retire_previous_ranger_credential(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<RetirePreviousRangerCredential>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !crate::external::is_external(&engine) {
+        return Err(CpError::Conflict(format!(
+            "engine {} is provisioned: egret retires its previous ranger credential itself once \
+             the rollout of the current one is observed complete",
+            engine.name
+        )));
+    }
+    crate::ranger_credential::RangerCredentialStore::from_state(&st)
+        .retire_previous_confirmed(&engine, b.installed)
+        .await?;
+    tracing::info!(engine = %engine.name,
+        "external engine's previous ranger credential retired on the operator's confirmation");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6839,6 +7289,9 @@ async fn pod_logs(
         )
         .await
         .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
+    // `engine:read` is enough to get here: a credential an engine prints (the
+    // Trino Ranger plugin's `…rest.client.password=` line) is masked.
+    let logs = crate::log_redaction::redact_log_text(&logs);
     Ok(Json(PodLogsDto { logs }))
 }
 
@@ -6940,7 +7393,8 @@ async fn bridge_log_follow(
     mut socket: WebSocket,
 ) {
     let mut stream = match kube.pod_logs_stream(namespace, pod, tail_lines).await {
-        Ok(s) => s,
+        // Masked line by line, as `pod_logs` masks the whole text.
+        Ok(s) => crate::log_redaction::redact_log_stream(s),
         Err(e) => {
             let _ = socket
                 .send(Message::Text(format!("log stream failed: {e}").into()))
@@ -7177,6 +7631,8 @@ async fn bridge_exec(
         delete_engine,
         restart_engine,
         rotate_engine_secrets,
+        rotate_ranger_credential,
+        retire_previous_ranger_credential,
         list_engine_workspaces,
         set_engine_workspaces,
         list_workspace_engines,
@@ -7189,6 +7645,7 @@ async fn bridge_exec(
     ),
     components(schemas(
         ModelledRangerPluginDto,
+        RetirePreviousRangerCredential,
         CreateEngineBody,
         NewEngineCatalog,
         EngineSpecDto,
@@ -7266,11 +7723,20 @@ mod tests {
         declared: Option<&str>,
     ) -> EngineDto {
         Engine {
+            spec,
+            ranger_plugin_version: declared.map(str::to_string),
+            ..dto_engine(kind, origin)
+        }
+        .into()
+    }
+
+    fn dto_engine(kind: &str, origin: &str) -> Engine {
+        Engine {
             id: Uuid::new_v4(),
             name: "e".into(),
             r#type: kind.into(),
             namespace: "ns".into(),
-            spec,
+            spec: serde_json::json!({}),
             status: "running".into(),
             authz_service_id: None,
             delegator_secret_id: None,
@@ -7280,13 +7746,39 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: origin.into(),
             external_host: None,
             external_port: None,
-            ranger_plugin_version: declared.map(str::to_string),
+            ranger_plugin_version: None,
         }
-        .into()
+    }
+
+    #[test]
+    fn the_dto_names_the_current_ranger_credential_and_whether_a_previous_one_is_pending() {
+        let (current, prev) = (Uuid::new_v4(), Uuid::new_v4());
+        // Through `From<Engine>`, the only constructor: the slots drive both fields.
+        let mut e = Engine {
+            ranger_secret_id: Some(current),
+            ranger_secret_prev_id: Some(prev),
+            ..dto_engine("trino", "external")
+        };
+        let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
+        assert_eq!(j["rangerCredentialPending"], true, "{j}");
+        assert_eq!(j["rangerCredentialId"], current.to_string(), "{j}");
+        assert!(
+            !j.to_string().contains(&prev.to_string()),
+            "the previous credential's id is not shown: {j}"
+        );
+        e.ranger_secret_prev_id = None;
+        let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
+        assert_eq!(j["rangerCredentialPending"], false, "{j}");
+        e.ranger_secret_id = None;
+        let j = serde_json::to_value(EngineDto::from(e)).unwrap();
+        assert!(j.get("rangerCredentialId").is_none(), "{j}");
+        assert_eq!(j["rangerCredentialPending"], false, "{j}");
     }
 
     #[test]
@@ -8140,6 +8632,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -8190,7 +8684,7 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
-            ranger_bearer_configured: false,
+            ranger_surface_mode: crate::state::RangerSurfaceMode::Required,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,
@@ -12081,6 +12575,106 @@ mod tests {
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "the provisioner must never be called once the row is deleting"
+        );
+    }
+
+    /// Task 6b review rounds 2-3: a request built with a Ranger credential that
+    /// is not the row's CURRENT one (a rotation landed while it was built: the
+    /// previous credential would roll the cluster back; a retired one would
+    /// lock it out) is refused right before the provisioner call, applying
+    /// nothing. The current credential is applied. The same holds for the
+    /// StarRocks update's own provisioner call (`update_starrocks_cluster`).
+    #[tokio::test]
+    async fn apply_built_refuses_a_ranger_credential_the_row_no_longer_names() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                &serde_json::json!({ "imageVersion": "483", "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let creds = crate::ranger_credential::RangerCredentialStore::from_state(&st);
+        let c1 = creds.ensure(&engine).await.expect("ensure").id;
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let c2 = creds.rotate(&row).await.expect("rotate").id;
+        let mut built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+        let render = |built: &mut BuiltReq, id: String| {
+            built.req.ranger = Some(egret_engine_mgmt_api::RangerBinding {
+                service_name: "p".into(),
+                egret_url: "http://egret:8080".into(),
+                poll_interval_ms: 30_000,
+                credential: Some(
+                    egret_engine_mgmt_api::ranger_config::RenderableCredential::new(
+                        id, "engine-x", "pw",
+                    )
+                    .unwrap(),
+                ),
+            });
+        };
+
+        render(&mut built, Uuid::new_v4().to_string());
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("a credential the row does not name is refused");
+        assert!(matches!(err, ApplyBuiltError::CredentialChanged));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing applied"
+        );
+
+        render(&mut built, c1.to_string());
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("the PREVIOUS credential would roll the cluster back");
+        assert!(matches!(err, ApplyBuiltError::CredentialChanged));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        render(&mut built, c2.to_string());
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .unwrap_or_else(|_| panic!("the current credential applies"));
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // The StarRocks update path's own call: the same refusal.
+        for stale in [c1.to_string(), Uuid::new_v4().to_string()] {
+            render(&mut built, stale);
+            let err = update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
+                .await
+                .expect_err("a stale credential is refused on the StarRocks path too");
+            assert!(
+                matches!(&err, CpError::Conflict(m) if m == RANGER_CREDENTIAL_CHANGED),
+                "{err:?}"
+            );
+        }
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        render(&mut built, c2.to_string());
+        update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
+            .await
+            .expect("the current credential is applied");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
     }
 

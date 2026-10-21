@@ -78,7 +78,16 @@ mysql_async.workspace = true
 # EGRET_TEST_STARROCKS_URL in the engine-gated DDL-runner live suite.
 url.workspace = true
 
+[features]
+# Exposes the store's UNCONDITIONAL previous-credential retire
+# (`RangerCredentialStore::retire_previous{,_if}`) to this crate's own tests
+# only: no production path may delete a credential the cluster may still hold.
+test-util = []
+
 [dev-dependencies]
+# Activates `test-util` for every test target of this crate (the pattern
+# `egret-apps` uses).
+egret-engine-mgmt = { path = ".", features = ["test-util"] }
 # One private, already-migrated database per test process, cloned from a
 # shared template. Replaces the shared `DATABASE_URL` database, which
 # nothing cleaned and every fixture paid for.

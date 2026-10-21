@@ -20,11 +20,15 @@ A tag with a digest matches only if the digest is the measured one. A tag withou
 
 ## Ranger plugin 2.8.0 is the floor (Trino 470 is dropped)
 
-egret supports Ranger plugin 2.8.0 and later. Plugin 2.5.0, which `trinodb/trino:470` ships, cannot send the per-engine credential egret's Ranger surface requires, so it is no longer supported:
+egret supports Ranger plugin 2.8.0 and later. Plugin 2.5.0, which `trinodb/trino:470` ships, cannot send the per-engine credential egret's Ranger surface requires, so it is no longer supported. Measured with the real jars: with `policy.rest.client.username` and `.password` set, 2.8.0 and 2.9.0 send `Authorization: Basic …` to the secure download path, while 2.5.0 ignores both properties and sends no header ([measurements](../plans/2026-10-20-ranger-surface-auth-measurements.md), "Floor"). The credential and the surface are described in [ranger-surface.md](ranger-surface.md).
 
 - Creating an engine on `trinodb/trino:470`, or updating one onto it, is refused with a 400.
-- Registering an external engine that declares a plugin older than 2.8.0 is refused with a 400.
-- An engine that already runs Trino 470 stays readable but is reported as not modelled and unsupported; it is not migrated. Upgrade it with `PUT /api/control-plane/engines/{id}` and `imageVersion: "483"`, or delete it.
+- Registering an external engine that declares a plugin older than 2.8.0 is refused with a 400 ("Ranger plugin 2.5.0 is not supported: egret requires 2.8.0 or later").
+- An engine that already runs Trino 470 stays readable but is reported as not modelled and unsupported; it is not migrated. Its plugin cannot authenticate, so it gets 401 on every poll: it keeps enforcing the policies it has cached, receives no changes, and denies everything after a restart without a cache. Upgrade it with `PUT /api/control-plane/engines/{id}` and `imageVersion: "483"`, or delete it.
+
+The supported (engine, plugin) pairs are therefore Trino 2.8.0, StarRocks 2.8.0 and StarRocks 2.9.0, and the Ranger gates (`just test-ranger-gates`) run the real 2.8.0 and 2.9.0 jars only.
+
+A StarRocks engine name is limited to 48 characters (400 at create and on every apply of a bound StarRocks engine), because the operator names each FE volume after the Secret or ConfigMap it mounts plus a 4-character hash, and a volume name is at most 63 characters.
 
 ## What StarRocks 4.1.6 changes
 

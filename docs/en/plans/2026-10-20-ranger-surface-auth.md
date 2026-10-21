@@ -528,13 +528,15 @@ pub struct PluginCredential { pub username: String, pub password: String }   // 
 pub(crate) async fn ensure(st: &CpState, engine: &Engine) -> Result<PluginCredential, CpError>;
 /// Mint a new current credential, demote the old to "previous", return the new one.
 pub(crate) async fn rotate(st: &CpState, engine: &Engine) -> Result<PluginCredential, CpError>;
-/// After a successful apply: delete the previous credential's secret and clear the column.
-pub(crate) async fn retire_previous(st: &CpState, engine_id: Uuid);
+/// (Superseded by Task 6b.) Retire the previous credential only once the rollout of
+/// the current one is OBSERVED complete: exact id, compare-and-set on both columns;
+/// the unconditional `retire_previous` exists only behind the `test-util` feature.
+pub async fn retire_previous_if_rolled_out(&self, engine: &Engine, port: &dyn EngineProvisioningPort) -> RolloutRetire;
 pub struct DbVerifier { /* engine store + secrets */ }
 impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant time */ }
 ```
 
-**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; pods still on the old password keep authenticating during the roll; `retire_previous` deletes only that exact id after a successful apply — never a prefix sweep (standing rule).
+**Design (why two columns):** the verifier accepts `ranger_secret_id` (current) **and** `ranger_secret_prev_id` (previous). A rotation commits the new current and demotes the old to previous *before* the apply; both authenticate while the pods roll; the previous one is deleted (by exact id, compare-and-set on both columns) only once the rollout of the current one is OBSERVED complete (Task 6b: pod-template/Secret annotation `egret/ranger-credential` = the current credential's id, workload status fully rolled, no pod of an older template left; each credential rendered into its own Secret `{name}-rc-{tag}`, deleted by exact name after its retire), never when Kubernetes merely accepts the apply — never a prefix sweep (standing rule).
 
 - [ ] **Step 1: Migration**
 
@@ -542,7 +544,7 @@ impl EngineCredentialVerifier for DbVerifier { /* current and previous, constant
 -- Per-engine Ranger plugin credential (spec 2026-10-20-ranger-surface-auth).
 -- `ranger_secret_id` is the password the engine's plugin presents now;
 -- `ranger_secret_prev_id` is the one it presented before the last rotation, kept
--- valid until a successful apply proves the pods rolled (never delete a secret
+-- valid until the rollout is observed complete (never delete a secret
 -- the cluster may still hold). Both name rows in the secret store; neither is
 -- a foreign key because the secret store is a separate seam.
 ALTER TABLE engine_mgmt.engines
@@ -725,7 +727,7 @@ add a pod volume `{ "name": "ranger-secret", "secret": { "secretName": "{name}-r
 
 Pods must roll when the Secret changes: add the Secret's content hash to the pod template annotation the way the ConfigMap's hash is added (find it with `grep -n "checksum\|config-hash" crates/egret-provisioner/src/*.rs`; if the ConfigMap has no such annotation, add `egret/ranger-secret-hash: <sha256 hex of the XML>` to both pod templates — without it a rotation would not restart the pods).
 
-Engine build/apply (`engines.rs`): in `build_provision_req_with`, for an engine bound to a profile, `let cred = ranger_credential::ensure(st, engine).await?` (or `rotate` when `BuildOpts.rotate_ranger_credential`), and put it in the spec. After a **successful** `apply_built`, call `ranger_credential::retire_previous(st, engine.id).await`. Add `rotate_ranger_credential: bool` to `BuildOpts` (default false).
+Engine build/apply (`engines.rs`): in `build_provision_req_with`, for an engine bound to a profile, `let cred = ranger_credential::ensure(st, engine).await?` (or `rotate` when `BuildOpts.rotate_ranger_credential`), and put it in the spec. ~~After a **successful** `apply_built`, call `ranger_credential::retire_previous(st, engine.id).await`.~~ Superseded by Task 6b (user decision 2026-10-20): nothing is retired after the apply; `ranger_credential::retire_previous_if_rolled_out` retires the previous credential once the provisioner observes the rollout of the current one complete (periodic sweep + engine reads). Add `rotate_ranger_credential: bool` to `BuildOpts` (default false).
 
 Rotation route (all provisioned engines, both types): `POST /engines/{id}/rotate-ranger-credential`, `engine:update`, 409 for external (Task 7 adds the external variant), 204 on success; mirrors `rotate_engine_secrets` (including the `deleting` guard and the `apply_conflict()` mapping). Register it in the router and the OpenAPI `paths(...)` list; then `npm run gen:api`.
 
@@ -752,7 +754,7 @@ git commit -m "feat(provisioner): give each engine its Ranger credential through
 
 **Interfaces:**
 - Consumes: `ranger_credential::{ensure, rotate}`, `PASSWORD_PLACEHOLDER`.
-- Produces: registration response gains `rangerCredential: { username, password }` **exactly once**; `POST /engines/{id}/rotate-ranger-credential` on an external engine returns `200 { username, password }` (and demotes the old one; it stays valid until the next rotation, since no apply can prove the operator re-installed it); `GET …/ranger-plugin-config` renders the files with `PASSWORD_PLACEHOLDER` and a warning that the real password was shown once.
+- Produces: registration response gains `rangerCredential: { username, password }` **exactly once**; `POST /engines/{id}/rotate-ranger-credential` on an external engine returns `200 { username, password }` (and demotes the old one; it stays valid until the operator confirms with `POST /engines/{id}/retire-previous-ranger-credential` `{ "installed": "<credentialId>" }` (the opaque id returned with the credential; a confirmation naming anything but the current credential is a 409 and retires nothing), since no apply can prove the operator re-installed it; a further rotation is refused with 409 while it is pending — the standing rule, see spec A10); `GET …/ranger-plugin-config` renders the files with `PASSWORD_PLACEHOLDER` and a warning that the real password was shown once.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -768,7 +770,7 @@ git commit -m "feat(provisioner): give each engine its Ranger credential through
 
 - [ ] **Step 3: Implement**
 
-Registration: after the row is inserted, `let cred = ranger_credential::ensure(&st, &engine).await?;` and add `ranger_credential: Option<PluginCredentialDto>` (`#[serde(skip_serializing_if = "Option::is_none")]`, `ToSchema`) to the registration response DTO only — **not** to `EngineDto`, so no list/get ever carries it. Rotation: extend the Task 6 handler: for an external engine call `ranger_credential::rotate` and return `Json(PluginCredentialDto)` with 200 (no apply, no `retire_previous`).
+Registration: after the row is inserted, `let cred = ranger_credential::ensure(&st, &engine).await?;` and add `ranger_credential: Option<PluginCredentialDto>` (`#[serde(skip_serializing_if = "Option::is_none")]`, `ToSchema`) to the registration response DTO only — **not** to `EngineDto`, so no list/get ever carries it. Rotation: extend the Task 6 handler: for an external engine call `ranger_credential::rotate` and return `Json(PluginCredentialDto)` with 200 (no apply, no `retire_previous`). Retirement of an external engine's previous credential is a separate, operator-confirmed route, `POST /engines/{id}/retire-previous-ranger-credential` (`engine:update`, external only, body `{ "installed": "<credentialId>" }`, idempotent 204; provisioned engines 409), which retires by the exact previous id read from the row with one compare-and-set on both columns (current = `installed`, previous = that id); a mismatch is a 409 and deletes nothing. Both password-carrying responses send `Cache-Control: no-store`.
 
 `plugin_config_judgements`: rewrite the `auth_mode` block — the surface is now always authenticated unless egret runs `anonymous`:
 
@@ -879,9 +881,9 @@ git commit -m "docs(ranger): the authenticated surface, its lifecycle and the li
 
 ## Self-review
 
-**Spec coverage:** A1 prefix → T3; A2 `/service` removed → T3 (test `the_old_root_service_prefix_is_gone`); A3 Basic per engine → T4/T5; A4 both paths → T3; A5 binding + tag service + crud 403 → T4; A6 Bearer kept → T4; A7 `required` default, `anonymous` opt-out → T4; A8 2.5.0 dropped → T2; A9 Secret not ConfigMap → T6; A10 rotation window → T5/T6; A11 external credential → T7; A12 failures logged/counted/Overview → T8 (the ledger-row half of A12 — recording a failed poll in `ranger_plugin_downloads` — is **not** implemented: that table's key is `(service_id, plugin_id, kind)` and a rejected request has no verified service, so a separate counter table is used instead; amend spec A12 accordingly when merging); A13 out of scope → nothing built. §5 verification → T1, T9; measurements → T1.
+**Spec coverage:** A1 prefix → T3; A2 `/service` removed → T3 (test `the_old_root_service_prefix_is_gone`); A3 Basic per engine → T4/T5; A4 both paths → T3; A5 binding + tag service + crud 403 → T4; A6 Bearer kept → T4; A7 `required` default, `anonymous` opt-out → T4; A8 2.5.0 dropped → T2; A9 Secret not ConfigMap → T6; A10 rotation window → T5/T6; A11 external credential → T7; A12 failures logged/counted/Overview → T8 (the ledger-row half of A12 — recording a failed poll in `ranger_plugin_downloads` — is **not** implemented: that table's key is `(service_id, plugin_id, kind)` and a rejected request has no verified service, so a separate counter table is used instead; amend spec A12 accordingly when merging. **Done in Task 9:** spec A12 now describes `policy.ranger_auth_failures` with a per-engine `ok_at` instead of any join against the downloads ledger (which is keyed by profile, so a healthy engine on the same profile would hide a failing one), the per-engine coalescing (10 s failures, 60 s successes, lower-bound counts) and the 24 h window; spec §8 lists the known limits); A13 out of scope → nothing built. §5 verification → T1, T9; measurements → T1.
 
-**Spec amendments this plan forces (already applied to the spec):** (1) the engine credential uses its own two columns because the existing internal-secret pair is Trino-only; (2) rotation keeps exactly one previous credential (not "old and new until the engine reports"); (3) A12 as above.
+**Spec amendments this plan forces (already applied to the spec):** (1) the engine credential uses its own two columns because the existing internal-secret pair is Trino-only; (2) rotation keeps exactly one previous credential (not "old and new until the engine reports"); (3) A12 as above (applied in Task 9, with the implementation's per-engine `ok_at`, coalescing and 24 h window).
 
 **Type consistency:** `EngineIdentity`, `EngineCredentialVerifier`, `plugin_username`, `engine_id_from_username` (T4) are the names used in T5/T7; `PluginCredential` (T5) vs `PluginCredentialRef` (T6, borrowed view) vs `PluginCredentialDto` (T7, wire); `ensure`/`rotate`/`retire_previous` (T5) are the names called in T6/T7; `ranger_surface`, `RANGER_SURFACE_PREFIX`, `plugin_base_url` (T3) used in T4/T6/T7.
 

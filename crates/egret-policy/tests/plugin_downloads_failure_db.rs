@@ -37,6 +37,8 @@ async fn a_ledger_write_error_does_not_change_the_download() {
         ranger_router(RangerState {
             store: store.clone(),
             auth_token: Arc::from("devtoken"),
+            mode: egret_policy::ranger::AuthMode::Required,
+            verifier: None,
         })
     };
     let before = |uri: String| async { app().oneshot(req(uri)).await.unwrap().status() };

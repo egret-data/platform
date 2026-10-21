@@ -293,6 +293,8 @@ async fn setup() -> Option<Fixture> {
     let ranger = egret_policy::ranger_router(RangerState {
         store,
         auth_token: Arc::from(RANGER_TOKEN),
+        mode: egret_policy::ranger::AuthMode::Required,
+        verifier: None,
     });
 
     Some(Fixture {

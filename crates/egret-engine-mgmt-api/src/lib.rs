@@ -3,7 +3,12 @@
 //! `egret-provisioner` (k8s rendering) depend on these — neither owns the model.
 //! Kube-free by construction: this crate has no dependencies.
 
+pub mod credential;
 pub mod ranger_config;
+
+pub use credential::{
+    engine_id_from_username, plugin_username, EngineCredentialVerifier, EngineIdentity,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -395,15 +400,34 @@ pub struct CatalogSpec {
 /// Ranger tag/policy enforcement wiring (Access P3.2). `Some` when the engine is
 /// bound to a policy profile; the provisioner then templates
 /// `access-control.properties` + `ranger-trino-security.xml` so the bundled
-/// `apache-ranger` plugin polls egret's Ranger-Admin `/service` download API.
+/// `apache-ranger` plugin polls egret's Ranger-Admin `/ranger` download API.
+///
+/// Its `Debug` never prints the credential's password.
 #[derive(Clone, Debug)]
 pub struct RangerBinding {
     /// `ranger.service.name` — the bound trino profile's name.
     pub service_name: String,
-    /// Base URL the plugin polls; egret appends `/service/...`. Reuse `engine_egret_url`.
+    /// egret's own URL; the plugin is configured with
+    /// [`ranger_config::plugin_base_url`] of it. Reuse `engine_egret_url`.
     pub egret_url: String,
     /// Policy/tag poll interval in ms (default 30_000).
     pub poll_interval_ms: u32,
+    /// The credential the plugin presents to egret's `/ranger` surface (spec
+    /// 2026-10-20-ranger-surface-auth A9), checked renderable when it was made.
+    /// The Kubernetes provisioners render it into that credential's own
+    /// `{name}-rc-{tag}` Secret, never a ConfigMap; the Docker provisioner
+    /// writes it into each container's security XML. `None` renders no
+    /// credential.
+    pub credential: Option<ranger_config::RenderableCredential>,
+}
+
+impl RangerBinding {
+    /// The credential as the renderer takes it.
+    pub fn credential_ref(&self) -> Option<ranger_config::PluginCredentialRef<'_>> {
+        self.credential
+            .as_ref()
+            .map(ranger_config::RenderableCredential::borrowed)
+    }
 }
 
 /// Which query engine an `EngineSpec` describes. Selects the provisioner.
@@ -645,6 +669,14 @@ impl std::fmt::Debug for StarRocksConfig {
     }
 }
 
+/// The longest StarRocks engine name egret accepts. The kube-starrocks
+/// operator (run with `--volume-name-with-hash=true`) names each FE pod volume
+/// it mounts from a Secret or ConfigMap `<object name>-<4 chars>`, untruncated,
+/// and a pod volume name is a DNS-1123 label (63 characters). The longest such
+/// objects egret mounts, `{name}-ranger-cm` and `{name}-rc-{6-char tag}`, are
+/// `name + 10` characters, so `name + 15 <= 63`.
+pub const MAX_STARROCKS_ENGINE_NAME_LEN: usize = 48;
+
 /// Desired state of a query engine (`kind` selects Trino vs StarRocks).
 #[derive(Clone, Debug)]
 pub struct EngineSpec {
@@ -676,6 +708,20 @@ pub struct EngineStatus {
     pub pods: Vec<PodStatus>,
 }
 
+/// What a rollout probe saw of an engine's Ranger credential (spec
+/// 2026-10-20-ranger-surface-auth A10): whether every pod that runs the Ranger
+/// plugin now runs with ONE credential, named by its non-secret id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RangerRollout {
+    /// The rollout of that credential is observed complete: the workloads that
+    /// run the plugin have rolled their pod template to it, and no pod of an
+    /// older template is still running.
+    Complete,
+    /// Not (or not yet) complete, with a reason for the log. Every absent,
+    /// unknown or partial observation lands here.
+    Pending(String),
+}
+
 use async_trait::async_trait;
 
 /// Provisions/updates/deletes a query engine on Kubernetes. Kube-free by
@@ -689,6 +735,34 @@ pub trait EngineProvisioningPort: Send + Sync {
     async fn update(&self, req: &EngineSpec) -> Result<(), String>;
     async fn delete(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
+    /// Whether the engine's pods have rolled out with the Ranger credential
+    /// whose id is `credential_id` ([`RangerRollout`]). The previous credential
+    /// is retired only on `Ok(Complete)`.
+    ///
+    /// The default cannot observe anything, so it never says complete: a
+    /// provisioner that does not implement it keeps every previous credential.
+    async fn ranger_rollout(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        _credential_id: &str,
+    ) -> Result<RangerRollout, String> {
+        Err("this provisioner cannot observe a rollout".into())
+    }
+    /// Delete the Kubernetes Secret of the RETIRED Ranger credential
+    /// `credential_id` (the credentials are rendered one Secret each), called
+    /// only after that credential was retired. Best-effort for the caller: an
+    /// orphan is removed at engine delete.
+    async fn delete_ranger_secret(
+        &self,
+        _kind: &str,
+        _namespace: &str,
+        _name: &str,
+        _credential_id: &str,
+    ) -> Result<(), String> {
+        Err("this provisioner cannot delete a ranger Secret".into())
+    }
 }
 
 /// Sends one HTTP request to an engine's coordinator without Kubernetes (the

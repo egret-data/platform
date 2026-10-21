@@ -63,3 +63,11 @@ export const catalogsQueryKey = ["/api/control-plane/catalogs"] as const;
  */
 export const catalogKey = (id: string) =>
   getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey(id);
+
+/**
+ * One engine's detail query (`getEngine`, read by `EngineDetail.tsx`), for the
+ * writers outside that page that change the row. The value is the hand-rolled
+ * `["cp", "engine", id]` triple the page has always used; it is named here so a
+ * new writer cannot misspell it.
+ */
+export const engineDetailKey = (id: string) => ["cp", "engine", id] as const;

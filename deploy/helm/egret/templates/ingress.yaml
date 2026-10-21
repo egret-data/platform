@@ -65,6 +65,17 @@ spec:
               service:
                 name: egret
                 port: { number: 8080 }
+          # The Ranger plugin surface: an engine outside the cluster is
+          # configured with `policy.rest.url = https://<host>/ranger` and polls
+          # /ranger/service/... with its Basic engine credential. Without this
+          # rule the `/` catch-all answered it with the SPA (200 text/html).
+          # In-cluster engines use the Service URL and never come through here.
+          - path: /ranger
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
           # /catalog is routed by the `egret-catalog` Ingress below, which
           # reads for longer than a view-governance hold.
           # The machine-IdP's two discovery documents. EXACT paths, not the

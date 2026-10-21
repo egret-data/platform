@@ -3405,6 +3405,7 @@ dependencies = [
  "egret-catalog-engine",
  "egret-catalog-registry",
  "egret-core",
+ "egret-engine-mgmt",
  "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
@@ -3562,6 +3563,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "egret-audit",
  "egret-auth",

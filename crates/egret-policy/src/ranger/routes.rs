@@ -1,15 +1,24 @@
 //! HTTP state + the Ranger Admin `ranger_router()` (axum 0.8).
 
 use super::api;
+use super::auth::AuthMode;
 use crate::PolicyStore;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{any, get};
 use axum::Router;
+use egret_engine_mgmt_api::credential::EngineCredentialVerifier;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RangerState {
     pub store: PolicyStore,
+    /// The operator bearer token; empty means no operator bearer is accepted.
     pub auth_token: Arc<str>,
+    /// Whether a request without a valid credential is refused (default) or served.
+    pub mode: AuthMode,
+    /// Checks engine plugin Basic credentials; `None` means no engine credential
+    /// ever authenticates.
+    pub verifier: Option<Arc<dyn EngineCredentialVerifier>>,
 }
 
 pub fn ranger_router(state: RangerState) -> Router {
@@ -19,15 +28,51 @@ pub fn ranger_router(state: RangerState) -> Router {
             get(api::download::download_policies),
         )
         .route(
+            "/plugins/secure/policies/download/{service}",
+            get(api::download::download_policies),
+        )
+        .route(
             "/tags/download/{service}",
             get(api::download::download_tags),
         )
-        .merge(api::crud_routes())
+        // A 2.8.0/2.9.0 plugin configured with a username and password fetches
+        // tags HERE, not from the plain path (measured: measurements doc, Q4).
+        // Without it the tag enricher gets a 404 and every tag-addressed mask,
+        // deny and row filter stops applying. Same handler, so the same
+        // `authorize_service` binding; like the secure policies route it has no
+        // OpenAPI entry of its own (the plain path documents the handler).
+        .route(
+            "/tags/secure/download/{service}",
+            get(api::download::download_tags),
+        )
+        // The CRUD routes are operator-only: an engine credential reads only
+        // its own profile's downloads. Layered BEFORE the merge so it wraps
+        // these routes alone.
+        .merge(api::crud_routes().layer(axum::middleware::from_fn(super::auth::require_operator)))
+        // Every unserved path sits INSIDE the auth layer: a stock 2.8.0 plugin
+        // also polls `/service/roles/secure/download/<svc>`, which egret does
+        // not serve. Without credentials that must be a 401 like every other
+        // path here, and only an authenticated caller learns it is a 404.
+        //
+        // A catch-all ROUTE, not `.fallback(..)`: with a `.fallback(..)` here,
+        // the router nested by `ranger_surface` answered an unserved path 404
+        // WITHOUT running the layer (measured by
+        // `an_unserved_route_under_the_surface_is_401_not_404_without_credentials`). A route is matched like any other, after
+        // every static route above, and the layer below wraps it.
+        .route("/{*unserved}", any(|| async { StatusCode::NOT_FOUND }))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            super::auth::require_bearer,
+            super::auth::require_surface_auth,
         ))
         .with_state(state)
+}
+
+/// The whole Ranger surface as the server mounts it: `/ranger/service/...`.
+pub fn ranger_surface(state: RangerState) -> Router {
+    Router::new().nest(
+        egret_engine_mgmt_api::ranger_config::RANGER_SURFACE_PREFIX,
+        Router::new().nest("/service", ranger_router(state)),
+    )
 }
 
 // ---------- OpenAPI doc-only mirrors (E0·P4b-5) ----------

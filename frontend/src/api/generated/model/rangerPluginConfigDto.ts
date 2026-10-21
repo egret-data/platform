@@ -14,14 +14,16 @@ export interface RangerPluginConfigDto {
   /** The bound policy profile: the Ranger service name the plugin asks for. */
   serviceName: string;
   /**
-     * `{public_url}/service/plugins/policies/download/{serviceName}`: where the
+     * `{public_url}/ranger/service/plugins/policies/download/{serviceName}`: where the
      * plugin's download lands. The files below carry `public_url` itself (the
      * plugin appends the path).
      */
   downloadUrl: string;
   /**
-     * `anonymous`, or `bearer-configured` (egret requires a bearer token on
-     * `/service`; the token is never shown here).
+     * `engine-credential` (egret's `/ranger` surface requires the engine's own
+     * Ranger credential, shown once at registration or rotation; the files
+     * carry a placeholder in place of its password) or `anonymous` (egret
+     * serves the surface to anyone who can reach it).
      */
   authMode: string;
   /**
@@ -42,8 +44,8 @@ export interface RangerPluginConfigDto {
      */
   assumptions: string[];
   /**
-     * What the admin must supply themselves. egret renders no credential and
-     * invents none.
+     * What the admin must supply themselves, the credential's password among
+     * them: egret shows it only once and renders a placeholder here.
      */
   adminMustSupply: string[];
   files: RangerPluginFileDto[];

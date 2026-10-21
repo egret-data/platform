@@ -563,6 +563,14 @@ export interface Engine {
   rangerPluginVersionModelled?: boolean | null;
   /** Why the engine is not modelled, and how to fix it (pin the image). */
   rangerPluginVersionNote?: string | null;
+  /**
+   * A previous Ranger plugin credential is still valid beside the current one:
+   * a rotation is pending (provisioned: until the rollout completes; external:
+   * until the operator confirms the new one is installed). Absent on older payloads.
+   */
+  rangerCredentialPending?: boolean;
+  /** The current Ranger credential's id (not a secret); absent when there is none. */
+  rangerCredentialId?: string | null;
 }
 
 /** Live status read back from the operator + pods. */

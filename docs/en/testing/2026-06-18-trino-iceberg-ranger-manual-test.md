@@ -46,7 +46,7 @@ docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=egret -e AWS_SECRET_ACCESS
 
 ## 2. Run Egret with catalog + ranger enabled
 
-`ranger.auth_token = ""` selects **anonymous `/service`** — the stock Trino Ranger plugin authenticates out-of-band (not via bearer), so it cannot use a token-protected endpoint.
+`ranger.auth_mode = "anonymous"` lets the hand-written plugin XML below poll `/ranger` without a credential. Use it only on this throwaway stack: in anonymous mode anyone who can reach egret can download every profile's policies. The default, `required`, makes every plugin present its engine's own credential ([`docs/en/guides/ranger-surface.md`](../guides/ranger-surface.md)); `auth_token = ""` accepts no operator bearer.
 
 ```bash
 mkdir -p /tmp/egret-itest
@@ -71,6 +71,7 @@ path_style = true
 [ranger]
 enabled = true
 auth_token = ""
+auth_mode = "anonymous"
 EOF
 
 BIN=$(pwd)/../target/debug/egret
@@ -78,9 +79,9 @@ BIN=$(pwd)/../target/debug/egret
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
 curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
-curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/service/plugins/definitions
+curl -s -o /dev/null -w "anon /ranger: %{http_code}\n" http://$HOST_IP:8080/ranger/service/plugins/definitions
 ```
-Expect: `healthz 200`, a `/v1/config` JSON whose `overrides` include `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (omitting `?warehouse` returns signer keys only, no prefix), `anon /service: 200`.
+Expect: `healthz 200`, a `/v1/config` JSON whose `overrides` include `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (omitting `?warehouse` returns signer keys only, no prefix), `anon /ranger: 200` (`401` means egret is not in anonymous mode).
 
 ## 3. Configure + start Trino
 
@@ -124,7 +125,7 @@ cat > /tmp/ranger-trino-security.xml <<EOF
 <configuration>
   <property><name>ranger.plugin.trino.service.name</name><value>trino_prod</value></property>
   <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
-  <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://$HOST_IP:8080</value></property>
+  <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://$HOST_IP:8080/ranger</value></property>
   <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>5000</value></property>
   <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger-trino-cache</value></property>
   <property><name>ranger.plugin.trino.policy.rest.client.connection.timeoutMs</name><value>10000</value></property>
@@ -132,7 +133,7 @@ cat > /tmp/ranger-trino-security.xml <<EOF
 </configuration>
 EOF
 ```
-The Ranger `RangerAdminRESTClient` downloads from `<policy.rest.url>/service/plugins/policies/download/<service.name>` — i.e. Egret's `/service`. Trino 481 config keys: `ranger.service.name`, `ranger.plugin.config.resource`.
+The Ranger `RangerAdminRESTClient` downloads from `<policy.rest.url>/service/plugins/policies/download/<service.name>` — i.e. Egret's `/ranger/service`. Trino 481 config keys: `ranger.service.name`, `ranger.plugin.config.resource`.
 
 ### 3c. Start Trino, inject the ranger config, restart
 
@@ -162,9 +163,9 @@ Expect: `CREATE SCHEMA`, `CREATE TABLE`, `INSERT: 4 rows`, and `US 2 29.5 / VN 2
 The Trino catalog name is `iceberg`, so Ranger resources use `catalog=iceberg`. Default-deny means a user needs `execute` on `queryid` and `impersonate` on `trinouser` to run any query, plus `select` on the table.
 
 ```bash
-P() { curl -s -o /dev/null -w "  %{http_code}\n" -X POST "http://$HOST_IP:8080/service/plugins/policies" -H "Content-Type: application/json" -d "$1"; }
+P() { curl -s -o /dev/null -w "  %{http_code}\n" -X POST "http://$HOST_IP:8080/ranger/service/plugins/policies" -H "Content-Type: application/json" -d "$1"; }
 # the service the plugin polls
-curl -s -X POST "http://$HOST_IP:8080/service/plugins/services" -H "Content-Type: application/json" -d '{"name":"trino_prod","type":"trino","configs":{}}' >/dev/null
+curl -s -X POST "http://$HOST_IP:8080/ranger/service/plugins/services" -H "Content-Type: application/json" -d '{"name":"trino_prod","type":"trino","configs":{}}' >/dev/null
 # global: everyone may run queries + set their own session user
 P '{"service":"trino_prod","name":"g-execquery","policyType":0,"isEnabled":true,"resources":{"queryid":{"values":["*"]}},"policyItems":[{"accesses":[{"type":"execute","isAllowed":true}],"groups":["public"]}]}'
 P '{"service":"trino_prod","name":"g-impersonate","policyType":0,"isEnabled":true,"resources":{"trinouser":{"values":["*"]}},"policyItems":[{"accesses":[{"type":"impersonate","isAllowed":true}],"groups":["public"]}]}'
@@ -206,12 +207,14 @@ rm -f trino/catalog/iceberg.properties   # host-specific; never commit
 1. **Reserved table properties** — Trino sends `format-version` in `CREATE TABLE`; Egret must strip `iceberg`'s `RESERVED_PROPERTIES` before building metadata, or it 400s.
 2. **Empty-location guard** — Egret must NOT pre-write `metadata.json` on create; Trino verifies the table location is empty. The DB jsonb is the source of truth; the artifact is written on first commit.
 3. **Policy `id` in download** — the real Ranger engine NPEs on `RangerPolicy.getId()==null`; the download must inject the DB-assigned `id`/`version`/`isEnabled`.
-4. **Anonymous `/service`** — stock Ranger plugins authenticate out-of-band; an empty `ranger.auth_token` opens `/service` for them. Set a token to require bearer.
+4. **Anonymous `/ranger`, for this test only** — the hand-written plugin XML carries no credential, so this test runs `ranger.auth_mode = "anonymous"`. With the default `required`, a plugin must present its engine's credential (`ranger.plugin.trino.policy.rest.client.username` / `.password`, plugin 2.8.0 or later) or it gets 401.
 5. **Networking** — one shared host IP keeps Egret's SSRF host-check, Trino's S3 endpoint, and the signed URLs consistent.
 
 ---
 
 ## 7. The evaluator check (SP4d-1) — predict first, then query
+
+> **Since the Ranger surface requires credentials (2026-10-20):** the egret on kind runs `ranger.authMode=required` by default, and the hand-made pods below carry no credential, so their plugins (and the in-pod `curl` of the download) get 401. For this check either deploy egret with `--set ranger.authMode=anonymous` (a throwaway cluster only), or register each hand-made engine as an external engine bound to its profile and add `ranger.plugin.<trino|starrocks>.policy.rest.client.username` / `.password` with the credential egret shows once (then `curl -u 'engine-<id>:<password>'` the `/ranger/service/plugins/secure/policies/download/<profile>` path). See [`docs/en/guides/ranger-surface.md`](../guides/ranger-surface.md).
 
 Added 2026-09-28. Sections 1-6 prove that **Egret's policies reach a real Trino and are
 enforced**. This section proves something else: that `egret-ranger-eval`, the Rust evaluator
@@ -288,7 +291,7 @@ data:
     <?xml version="1.0" encoding="UTF-8"?>
     <configuration>
     <property><name>ranger.plugin.trino.service.name</name><value>sp4d1-gate</value></property>
-    <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://egret.egret-system.svc.cluster.local:8080</value></property>
+    <property><name>ranger.plugin.trino.policy.rest.url</name><value>http://egret.egret-system.svc.cluster.local:8080/ranger</value></property>
     <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
     <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger/sp4d1-gate/policycache</value></property>
     <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>10000</value></property>
@@ -334,7 +337,7 @@ POD=sp4d1-gate-trino
 
 # 1. capture the download the plugin polls, and PREDICT from it
 kubectl --context kind-egret exec -n egret-engines $POD -- \
-  curl -s http://egret.egret-system.svc.cluster.local:8080/service/plugins/policies/download/sp4d1-gate \
+  curl -s http://egret.egret-system.svc.cluster.local:8080/ranger/service/plugins/policies/download/sp4d1-gate \
   > /tmp/dl.json
 cargo run -p egret-ranger-eval --example live_gate -- /tmp/dl.json trino admin sp4a10_wh | tee /tmp/prediction.txt
 
@@ -431,7 +434,7 @@ then:
   ranger-starrocks-security.xml: |
     <configuration>
     <property><name>ranger.plugin.starrocks.service.name</name><value>sp4d1-sr-gate</value></property>
-    <property><name>ranger.plugin.starrocks.policy.rest.url</name><value>http://egret.egret-system.svc.cluster.local:8080</value></property>
+    <property><name>ranger.plugin.starrocks.policy.rest.url</name><value>http://egret.egret-system.svc.cluster.local:8080/ranger</value></property>
     <property><name>ranger.plugin.starrocks.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
     <property><name>ranger.plugin.starrocks.policy.cache.dir</name><value>/tmp/ranger/sp4d1-sr-gate/policycache</value></property>
     <property><name>ranger.plugin.starrocks.policy.pollIntervalMs</name><value>30000</value></property>

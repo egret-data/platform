@@ -240,6 +240,12 @@ pub const SOURCES: &[Source] = &[
         run: |c| Box::pin(drift(c, Drift::Quiet)),
     },
     Source {
+        kind: "engine_auth_failing",
+        what: "engine Ranger credentials",
+        requires: Requires::All(&[ENGINE_READ]),
+        run: |c| Box::pin(engine_auth_failing(c)),
+    },
+    Source {
         kind: "compile_failed",
         what: "profile compiles",
         requires: POLICY,
@@ -753,6 +759,86 @@ async fn drift(c: &mut PgConnection, which: Drift) -> Result<Option<Finding>, So
         Some(Ref::Profiles)
     };
     Ok(finding(kind, severity, n, sentence, sample, r#ref))
+}
+
+/// A rejection older than this is not reported: the engine stopped presenting
+/// the credential (stopped, deleted outside egret, or reconfigured).
+const AUTH_FAILURE_RECENT_SECS: i64 = 24 * 3600;
+
+/// Engines whose Ranger credential is being rejected (spec
+/// `2026-10-20-ranger-surface-auth` A12): the latest rejection is newer than
+/// the engine's latest successful download, and within 24 h. Per engine, not
+/// per profile: a healthy engine sharing the profile does not hide a failing
+/// one. The count is a lower bound (rejections are coalesced per engine).
+async fn engine_auth_failing(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
+    let failures = egret_policy::auth_failures_via(&mut *c).await?;
+    let names: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM engine_mgmt.engines ORDER BY name")
+            .fetch_all(&mut *c)
+            .await?;
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&mut *c)
+        .await?;
+    let at = |t: DateTime<Utc>| t.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let mut rows: Vec<(String, Uuid, String)> = Vec::new();
+    for (id, name) in names {
+        let Some(f) = failures.iter().find(|f| f.engine_id == id) else {
+            continue;
+        };
+        if !f.is_outstanding() || (now - f.last_at).num_seconds() >= AUTH_FAILURE_RECENT_SECS {
+            continue;
+        }
+        let since = match f.ok_at {
+            None => "no successful download since.".to_string(),
+            Some(ok) => format!("the last successful download at {}.", at(ok)),
+        };
+        let detail = format!(
+            "{}, the last at {}; {since}",
+            plural(
+                f.count as usize,
+                "rejected credential",
+                "rejected credentials"
+            ),
+            at(f.last_at)
+        );
+        rows.push((name, id, detail));
+    }
+    let n = rows.len();
+    let (sentence, r#ref) = match rows.as_slice() {
+        [(name, id, detail)] => (
+            format!(
+                "The Ranger credential of engine {name} is being rejected: {detail} Its plugin \
+                 cannot download policies and runs on its last cached copy, if any."
+            ),
+            Some(Ref::Engine {
+                id: *id,
+                name: name.clone(),
+            }),
+        ),
+        _ => (
+            format!(
+                "The Ranger credential of {n} engines is being rejected, so their plugins cannot \
+                 download policies and run on their last cached copy, if any."
+            ),
+            Some(Ref::Engines),
+        ),
+    };
+    let sample = rows
+        .into_iter()
+        .map(|(name, id, detail)| Sample {
+            label: name.clone(),
+            detail: (n > 1).then_some(detail),
+            r#ref: Some(Ref::Engine { id, name }),
+        })
+        .collect();
+    Ok(finding(
+        "engine_auth_failing",
+        Severity::Critical,
+        n,
+        sentence,
+        sample,
+        r#ref,
+    ))
 }
 
 async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {

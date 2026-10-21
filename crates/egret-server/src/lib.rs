@@ -318,11 +318,7 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     if let Some(ranger) = state.ranger.clone() {
-        router = router.merge(
-            Router::new()
-                .nest("/service", egret_policy::ranger_router(ranger))
-                .with_state(()),
-        );
+        router = router.merge(egret_policy::ranger_surface(ranger).with_state(()));
     }
 
     if let Some(database) = state.database.clone() {

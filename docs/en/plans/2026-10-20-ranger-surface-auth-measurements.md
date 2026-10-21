@@ -126,3 +126,42 @@ A new call does appear: `GET /service/roles/secure/download/<svc>`, every poll i
 tolerates the 404 and still enforces). The only required change is that the auth middleware layer covers the whole
 `/ranger` surface including unmatched routes, so a request with bad or missing credentials to
 `/ranger/service/roles/secure/download/<svc>` gets 401 (not 404) in `required` mode.
+
+## Q4: tag and userstore download paths
+
+Measured 2026-10-21, committed test `EgretPluginAuthTest` (`withCredentialsTagsAreFetchedFromTheSecureTagsPath`,
+`withoutCredentialsTagsAreFetchedFromThePlainTagsPath`, `rolesAndUserstorePathsAreRecorded`). Method: a real
+`RangerAdminRESTClient` (`init("svc", ...)`, appType `trino`) against a recording stub `HttpServer` that answers 200 with
+a minimal body of the right type (`tagVersion` / `roleVersion` / `userStoreVersion` 5), calling
+`getServiceTagsIfUpdated(-1, 0)`, `getRolesIfUpdated(-1, 0)` and `getUserStoreIfUpdated(-1, 0)` directly, with
+`policy.rest.client.username=engine-1`, password `s3cret` (`Basic ZW5naW5lLTE6czNjcmV0`) and with no credentials.
+Command, run once per version, Maven offline: `mvn -o -q test -Dranger.version=<v> -Dtest=EgretPluginAuthTest`
+(`Tests run: 6, Failures: 0, Errors: 0, Skipped: 0` for each). Exact output, 2.8.0:
+
+```text
+Q4 tags no-creds [GET /ranger/service/tags/download/svc auth=null, RESULT v5]
+Q4 roles creds [GET /ranger/service/roles/secure/download/svc auth=Basic ZW5naW5lLTE6czNjcmV0, RESULT v5]
+Q4 userstore creds [GET /ranger/service/xusers/secure/download/svc auth=Basic ZW5naW5lLTE6czNjcmV0, RESULT v5]
+Q4 roles no-creds [GET /ranger/service/roles/download/svc auth=null, RESULT v5]
+Q4 userstore no-creds [GET /ranger/service/xusers/download/svc auth=null, RESULT v5]
+Q4 tags creds [GET /ranger/service/tags/secure/download/svc auth=Basic ZW5naW5lLTE6czNjcmV0, RESULT v5]
+```
+
+2.9.0: identical, line for line.
+
+| call | with credentials | without credentials |
+|---|---|---|
+| tags | `GET /service/tags/secure/download/<svc>`, Basic | `GET /service/tags/download/<svc>`, no header |
+| roles | `GET /service/roles/secure/download/<svc>`, Basic | `GET /service/roles/download/<svc>`, no header |
+| userstore | `GET /service/xusers/secure/download/<svc>`, Basic | `GET /service/xusers/download/<svc>`, no header |
+
+**DISAGREES with Q3's "no tags call".** Q3 saw none because its fixture's service-def has no `contextEnrichers` (and
+the download no `tagPolicies`), so no tag enricher was built. egret's `trino.json` declares `RangerTagEnricher` with
+`RangerAdminTagRetriever`, which polls through the same admin client, so a Trino engine with credentials fetches its tags
+from the **secure** tag path. egret served only `/tags/download/{service}`: under the authenticated surface every such
+engine got 404 on its tag download, and every tag-addressed mask, deny and row filter would silently stop applying.
+**Fix:** `/ranger/service/tags/secure/download/{service}`, same handler (`download_tags`) and same profile binding
+(`authorize_service`) as the plain path.
+
+Userstore: egret serves neither `/xusers/download` nor `/xusers/secure/download`, and no service-def egret ships
+declares a user-store enricher (Q3 saw no call). Left unserved, like roles (404 to an authenticated caller, 401 otherwise).

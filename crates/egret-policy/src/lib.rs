@@ -4,6 +4,7 @@
 //! contract (egret-policy-api) that cross-seam callers depend on.
 pub mod admin;
 pub mod ambiguous_arbitration;
+mod auth_failures;
 pub mod default_policies;
 pub mod error;
 // View governance R5 (Task 7 fix round 1): the `egret-lineage` download transform.
@@ -25,13 +26,14 @@ pub use ambiguous_arbitration::{
 };
 // Declared in the leaf contract crate so `egret-engine-mgmt` can reach it in
 // production; re-exported so the canonical path stays `egret_policy::infra_names`.
+pub use auth_failures::{auth_failures_via, AuthFailure, DOWNLOAD_WINDOW, FAILURE_WINDOW};
 pub use egret_policy_api::infra_names;
 pub use error::PolicyStoreError;
 pub use plugin_downloads::{
     plugins_hold_tag_version, wait_for_tag_version, DownloadKind, HoldState, WaitError,
     NO_PLUGIN_POLLED,
 };
-pub use ranger::{ranger_router, RangerState};
+pub use ranger::{ranger_router, ranger_surface, RangerState};
 pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,

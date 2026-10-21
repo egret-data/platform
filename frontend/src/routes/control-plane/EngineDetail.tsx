@@ -107,6 +107,7 @@ import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import { RotateSecretsSection } from "./RotateSecretsSection";
+import { RangerCredentialSection } from "./RangerCredential";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
@@ -556,6 +557,7 @@ function EngineTabs({
       <TabsContent value="overview" className="space-y-4">
         <EngineSummaryStrip engine={engine} />
         <StatusCard status={engine.status} engineId={engineId} />
+        <RangerCredentialSection engine={engine} />
       </TabsContent>
 
       <TabsContent value="catalogs">

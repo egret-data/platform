@@ -55,6 +55,16 @@ pub struct Engine {
     /// installed. The one source of an external engine's plugin version for the
     /// equivalence gate and explain (`egret_perm_compile::engine_plugin_version`).
     pub ranger_plugin_version: Option<String>,
+    /// Named secret holding the password this engine's Ranger plugin presents
+    /// to egret's `/ranger` surface now (spec 2026-10-20-ranger-surface-auth
+    /// §4.3). `None`: no credential minted yet. See
+    /// [`crate::ranger_credential`].
+    pub ranger_secret_id: Option<Uuid>,
+    /// The credential the plugin presented before the last rotation, still
+    /// accepted until it is retired (A10): for a provisioned engine once the
+    /// rollout of the current one is observed complete, for an external one on
+    /// its operator's confirmation.
+    pub ranger_secret_prev_id: Option<Uuid>,
 }
 
 impl Engine {
@@ -227,7 +237,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version",
+             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id",
         )
         .bind(name)
         .bind(r#type)
@@ -246,8 +256,22 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
              FROM engine_mgmt.engines ORDER BY created_at",
+        )
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// The PROVISIONED engines whose previous Ranger credential is pending
+    /// retirement — all the rollout-retire sweep looks at.
+    pub async fn list_engines_with_pending_ranger_prev(
+        &self,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
+             FROM engine_mgmt.engines \
+             WHERE ranger_secret_prev_id IS NOT NULL AND origin = 'provisioned' ORDER BY created_at",
         )
         .fetch_all(self.pool())
         .await?)
@@ -255,7 +279,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -465,6 +489,77 @@ impl EngineMgmtStore {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Record a Ranger plugin credential pair, compare-and-set against BOTH
+    /// ids the caller read (`IS NOT DISTINCT FROM`, so two `NULL`s match).
+    /// Returns `false` and writes nothing when a concurrent writer moved either
+    /// column first — the same shape as [`Self::set_internal_secret_ids`].
+    /// Covering the previous column too means a writer holding a stale read
+    /// can never write back a previous id that has since been retired.
+    pub async fn set_ranger_secret_ids(
+        &self,
+        engine_id: Uuid,
+        expected_current: Option<Uuid>,
+        expected_previous: Option<Uuid>,
+        current: Uuid,
+        previous: Option<Uuid>,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET ranger_secret_id = $4, ranger_secret_prev_id = $5 \
+             WHERE id = $1 AND ranger_secret_id IS NOT DISTINCT FROM $2 \
+             AND ranger_secret_prev_id IS NOT DISTINCT FROM $3",
+        )
+        .bind(engine_id)
+        .bind(expected_current)
+        .bind(expected_previous)
+        .bind(current)
+        .bind(previous)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Clear the previous Ranger credential, but only while the row still
+    /// names `expected_previous` there. `false`: a rotation has moved the
+    /// column since the caller read it, and the caller must not delete the
+    /// secret it read.
+    pub async fn clear_ranger_prev(
+        &self,
+        engine_id: Uuid,
+        expected_previous: Uuid,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET ranger_secret_prev_id = NULL \
+             WHERE id = $1 AND ranger_secret_prev_id = $2",
+        )
+        .bind(engine_id)
+        .bind(expected_previous)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Clear the previous Ranger credential only while the row's current one
+    /// is `expected_current` AND its previous one is `expected_previous` (the
+    /// operator-confirmed retire of an external engine). `false`: either
+    /// column moved, nothing was written.
+    pub async fn clear_ranger_prev_if_current(
+        &self,
+        engine_id: Uuid,
+        expected_current: Uuid,
+        expected_previous: Uuid,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET ranger_secret_prev_id = NULL \
+             WHERE id = $1 AND ranger_secret_id = $2 AND ranger_secret_prev_id = $3",
+        )
+        .bind(engine_id)
+        .bind(expected_current)
+        .bind(expected_previous)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
         sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
             .bind(id)
@@ -561,7 +656,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -592,6 +687,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -620,6 +717,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -648,6 +747,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -678,6 +779,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -717,6 +820,8 @@ mod tests {
             tls_cert_secret_ref: None,
             internal_secret_id: None,
             monitor_secret_id: None,
+            ranger_secret_id: None,
+            ranger_secret_prev_id: None,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,

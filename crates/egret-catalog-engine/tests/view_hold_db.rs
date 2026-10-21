@@ -576,6 +576,8 @@ impl Env {
         let router = ranger_router(RangerState {
             store: self.policy.clone(),
             auth_token: Arc::from(RANGER_TOKEN),
+            mode: egret_policy::ranger::AuthMode::Required,
+            verifier: None,
         });
         let service = self.profile_name.clone();
         let log = polls.clone();

@@ -63,6 +63,15 @@ download REST for the StarRocks service's policies, the same way Trino does.
    must match `ranger.plugin.starrocks.service.name` in
    `ranger/ranger-starrocks-security.xml` below, because the FE requests
    `<policy.rest.url>/service/plugins/policies/download/sr1`.
+3. The FE can authenticate. egret's `/ranger` surface requires an engine
+   credential by default (`ranger.auth_mode = required`), and the hand-written
+   XML here carries none, so the download is refused with `401` as is. Either
+   register this StarRocks as an external engine bound to `sr1` and add
+   `ranger.plugin.starrocks.policy.rest.client.username` / `.password` with the
+   credential egret shows once (the FE then calls
+   `<policy.rest.url>/service/plugins/secure/policies/download/sr1`), or run
+   the host egret with `EGRET_RANGER__AUTH_MODE=anonymous`, for local
+   development only. See `docs/en/guides/ranger-surface.md`.
 
 ### Files
 
@@ -82,7 +91,7 @@ a guessed path.
 ### Base URL reasoning
 
 `ranger.plugin.starrocks.policy.rest.url` is set to
-`http://host.docker.internal:8080`. The egret backend is **not containerized**
+`http://host.docker.internal:8080/ranger`. The egret backend is **not containerized**
 in this compose (see the `frontend` service comment above: the dev path is
 `cargo run -p egret-bin serve` on the host), so the StarRocks container must
 reach it via the host gateway, exactly like the existing
@@ -167,12 +176,15 @@ RangerAdminRESTClient.getServicePoliciesIfUpdated():... service not found / 200 
 ```
 
 and egret's own server logs show the inbound
-`GET /service/plugins/policies/download/sr1` request. A `404` here just means
-no `sr1` profile exists yet in egret (create one via the Policies UI); once it
-does, the request returns the real policy payload. A benign
-`getRolesIfUpdated ... 404 ... Ignoring` warning is expected and harmless —
-egret's Ranger router only implements `/plugins/policies/download/{service}`
-and `/tags/download/{service}` (see `crates/egret-policy/src/ranger/routes.rs`),
+`GET /ranger/service/plugins/policies/download/sr1` request (the
+`.../plugins/secure/policies/download/sr1` form once the XML carries a
+credential). A `401` means the FE presented no valid credential (Prerequisite
+3). A `404` after authentication just means no `sr1` profile exists yet in
+egret (create one via the Policies UI); once it does, the request returns the
+real policy payload. A benign `getRolesIfUpdated ... 404 ... Ignoring` warning
+is expected and harmless — egret's Ranger router implements the plain and
+secure `/plugins/.../policies/download/{service}` routes and
+`/tags/download/{service}` (see `crates/egret-policy/src/ranger/routes.rs`),
 not a Ranger role-download endpoint; the StarRocks plugin degrades gracefully
 when that 404s.
 

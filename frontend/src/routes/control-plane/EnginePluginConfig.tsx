@@ -14,11 +14,11 @@ import { Button } from "@/components/ui/button";
 import { downloadTextFile } from "@/lib/downloadTextFile";
 import { UnmodelledVersionNote, WarningCallout } from "./externalEngine";
 
-/** The words for each `authMode` the server can report; the token itself is never sent. */
+/** The words for each `authMode` the server can report; the credential's password is never sent. */
 function authModeLine(authMode: string): string {
-  if (authMode === "bearer-configured")
-    return "A bearer token is configured on egret's policy download. egret does not show or issue it; see what you must supply below.";
-  if (authMode === "anonymous") return "The policy download is anonymous: no token is needed.";
+  if (authMode === "engine-credential")
+    return "The policy download needs this engine's Ranger credential. Its password was shown once, at registration or rotation; the files below carry a placeholder in its place.";
+  if (authMode === "anonymous") return "The policy download is anonymous: no credential is needed.";
   return authMode;
 }
 

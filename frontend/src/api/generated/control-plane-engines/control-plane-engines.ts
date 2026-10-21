@@ -41,8 +41,11 @@ import type {
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
+  RangerCredentialDto,
   RangerPluginConfigDto,
   RegisterExternalEngine,
+  RegisteredExternalEngineDto,
+  RetirePreviousRangerCredential,
   SetWorkspacesBody,
   UpdateExternalEngine,
   WorkspaceEngineDto
@@ -634,7 +637,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getControlPlaneEnginesCreateEngineMutationOptions(options), queryClient);
     }
     export type controlPlaneEnginesRegisterExternalEngineResponse201 = {
-  data: EngineDto
+  data: RegisteredExternalEngineDto
   status: 201
 }
 
@@ -2787,6 +2790,289 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getControlPlaneEnginesRestartEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesRetirePreviousRangerCredentialResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponseSuccess = (controlPlaneEnginesRetirePreviousRangerCredentialResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponseError = (controlPlaneEnginesRetirePreviousRangerCredentialResponse400 | controlPlaneEnginesRetirePreviousRangerCredentialResponse401 | controlPlaneEnginesRetirePreviousRangerCredentialResponse403 | controlPlaneEnginesRetirePreviousRangerCredentialResponse404 | controlPlaneEnginesRetirePreviousRangerCredentialResponse409 | controlPlaneEnginesRetirePreviousRangerCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRetirePreviousRangerCredentialResponse = (controlPlaneEnginesRetirePreviousRangerCredentialResponseSuccess | controlPlaneEnginesRetirePreviousRangerCredentialResponseError)
+
+export const getControlPlaneEnginesRetirePreviousRangerCredentialUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/retire-previous-ranger-credential`
+}
+
+/**
+ * The check is one compare-and-set on both columns (current = `installed`,
+ * previous = the id read from the row). Idempotent: with nothing pending and
+ * a matching `installed` it answers 204 and deletes nothing. A provisioned
+ * engine's previous credential is retired by egret once the rollout of the
+ * current one is observed complete, so it is refused (409).
+ * @summary `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
+confirmation that an EXTERNAL engine's plugin now runs with the credential
+named `installed` (the `credentialId` registration or the last rotation
+returned): the previous one is deleted by its exact id and stops
+authenticating. Standing rule: egret never deletes a credential the cluster
+may still hold, and for an external engine only its operator can say it no
+longer does — about a SPECIFIC credential, so a stale or duplicated
+confirmation sent before a later rotation retires nothing (409).
+ */
+export const controlPlaneEnginesRetirePreviousRangerCredential = async (id: string,
+    retirePreviousRangerCredential: RetirePreviousRangerCredential, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRetirePreviousRangerCredentialResponse> => {
+
+  return customInstance<controlPlaneEnginesRetirePreviousRangerCredentialResponse>(getControlPlaneEnginesRetirePreviousRangerCredentialUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(retirePreviousRangerCredential)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRetirePreviousRangerCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRetirePreviousRangerCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, {id: string;data: RetirePreviousRangerCredential}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneEnginesRetirePreviousRangerCredential(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>>
+    export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationBody = RetirePreviousRangerCredential
+    export type ControlPlaneEnginesRetirePreviousRangerCredentialMutationError = ErrorBody
+
+    /**
+ * @summary `POST /engines/{id}/retire-previous-ranger-credential` — the operator's
+confirmation that an EXTERNAL engine's plugin now runs with the credential
+named `installed` (the `credentialId` registration or the last rotation
+returned): the previous one is deleted by its exact id and stops
+authenticating. Standing rule: egret never deletes a credential the cluster
+may still hold, and for an external engine only its operator can say it no
+longer does — about a SPECIFIC credential, so a stale or duplicated
+confirmation sent before a later rotation retires nothing (409).
+ */
+export const useControlPlaneEnginesRetirePreviousRangerCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>, TError,{id: string;data: RetirePreviousRangerCredential}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRetirePreviousRangerCredential>>,
+        TError,
+        {id: string;data: RetirePreviousRangerCredential},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRetirePreviousRangerCredentialMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesRotateRangerCredentialResponse200 = {
+  data: RangerCredentialDto
+  status: 200
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesRotateRangerCredentialResponseSuccess = (controlPlaneEnginesRotateRangerCredentialResponse200 | controlPlaneEnginesRotateRangerCredentialResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRotateRangerCredentialResponseError = (controlPlaneEnginesRotateRangerCredentialResponse400 | controlPlaneEnginesRotateRangerCredentialResponse401 | controlPlaneEnginesRotateRangerCredentialResponse403 | controlPlaneEnginesRotateRangerCredentialResponse404 | controlPlaneEnginesRotateRangerCredentialResponse409 | controlPlaneEnginesRotateRangerCredentialResponse500 | controlPlaneEnginesRotateRangerCredentialResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRotateRangerCredentialResponse = (controlPlaneEnginesRotateRangerCredentialResponseSuccess | controlPlaneEnginesRotateRangerCredentialResponseError)
+
+export const getControlPlaneEnginesRotateRangerCredentialUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/rotate-ranger-credential`
+}
+
+/**
+ * **Provisioned engine** (Trino or StarRocks): the new credential is applied
+ * and the route answers 204 once Kubernetes ACCEPTS the apply; the pods then
+ * roll. The previous credential stays valid until that rollout is OBSERVED
+ * complete — every pod that runs the plugin (Trino: coordinator and workers;
+ * StarRocks: the FE) runs the new credential and none of an older template is
+ * left — and is then deleted by its exact id, by a periodic sweep or the next
+ * read of the engine
+ * ([`crate::ranger_credential::RangerCredentialStore::retire_previous_if_rolled_out`]).
+ * A stalled rollout keeps it valid for as long as it stalls. A failed apply
+ * deletes nothing; the previous one is retired once a later apply has rolled
+ * out the current one.
+ *
+ * **External engine**: nothing is applied (egret never touches its cluster).
+ * The answer is 200 with the new credential — **shown once** — for the
+ * operator to install. No apply can prove they did, so the previous one stays
+ * valid until the operator confirms with
+ * `POST /engines/{id}/retire-previous-ranger-credential`.
+ * @summary `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
+credential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential
+is committed and the old one demoted to previous; both authenticate until
+the previous one is retired. A rotation is refused (409) while a previous
+one is still pending, so a rotation never deletes a credential.
+ */
+export const controlPlaneEnginesRotateRangerCredential = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateRangerCredentialResponse> => {
+
+  return customInstance<controlPlaneEnginesRotateRangerCredentialResponse>(getControlPlaneEnginesRotateRangerCredentialUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRotateRangerCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRotateRangerCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesRotateRangerCredential(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRotateRangerCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>>
+
+    export type ControlPlaneEnginesRotateRangerCredentialMutationError = ErrorBody
+
+    /**
+ * @summary `POST /engines/{id}/rotate-ranger-credential` — mint a new Ranger plugin
+credential. Spec 2026-10-20-ranger-surface-auth A10/A11: the new credential
+is committed and the old one demoted to previous; both authenticate until
+the previous one is retired. A rotation is refused (409) while a previous
+one is still pending, so a rotation never deletes a credential.
+ */
+export const useControlPlaneEnginesRotateRangerCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRotateRangerCredential>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRotateRangerCredentialMutationOptions(options), queryClient);
     }
     export type controlPlaneEnginesRotateEngineSecretsResponse204 = {
   data: void

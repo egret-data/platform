@@ -45,13 +45,13 @@ const DECLARED_CATALOGS = CATALOGS.map((c) =>
 
 const PLUGIN_CONFIG = {
   serviceName: "trino-main",
-  downloadUrl: "https://egret.example.com/service/plugins/policies/download/trino-main",
-  authMode: "bearer-configured",
+  downloadUrl: "https://egret.example.com/ranger/service/plugins/policies/download/trino-main",
+  authMode: "engine-credential",
   rangerPluginVersion: "2.5.0",
   rangerPluginVersionModelled: true,
   warnings: ["egret answers on an in-cluster address; set [catalog] public_url."],
   assumptions: ["The plugin polls every 30 seconds."],
-  adminMustSupply: ["A path that adds the bearer token to the policy download."],
+  adminMustSupply: ["The engine's Ranger credential (shown once, at registration or rotation)."],
   files: [
     { name: "access-control.properties", content: "access-control.name=ranger\n" },
     { name: "ranger-trino-security.xml", content: "<configuration/>\n" },
@@ -101,9 +101,11 @@ describe("EngineDetail for an external engine", () => {
       "/governance/engines/profiles/trino-main",
     );
     // Lifecycle routes refuse an external engine with 409, so none is offered.
-    for (const name of [/restart/i, /rotate/i, /logs/i, /terminal/i]) {
+    for (const name of [/restart/i, /rotate secrets/i, /logs/i, /terminal/i]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+    // The one rotation that applies: its Ranger credential (egret's row only).
+    expect(screen.getByRole("button", { name: "Rotate credential" })).toBeInTheDocument();
     // A provisioned engine polls its cluster; an external one has nothing to poll.
     expect(screen.queryByText(/pods/i)).not.toBeInTheDocument();
   });
@@ -202,8 +204,10 @@ describe("EngineDetail for an external engine", () => {
     const warning = screen.getByText(/set \[catalog\] public_url/);
     expect(warning.closest('[role="note"]')).toHaveTextContent(/^Warning:/);
     expect(screen.getByText("The plugin polls every 30 seconds.")).toBeInTheDocument();
-    expect(screen.getByText("A path that adds the bearer token to the policy download.")).toBeInTheDocument();
-    expect(screen.getByText(/bearer token is configured/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("The engine's Ranger credential (shown once, at registration or rotation)."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/needs this engine's Ranger credential/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("tok-must-never-render");
   });
 
