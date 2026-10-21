@@ -478,16 +478,18 @@ export default function ChartExplore() {
 
   function changeViz(v: VizType) {
     setViz(v);
-    resetRun();
     // ONE NAMESPACE, ONE CONFIG. Bar, line, area, combo, row and scatter are all
     // `cartesianDescriptor`s writing `cartesian.*`, so between them the config already has the
     // new type's shape and there is nothing to translate — dropping it cleared the X-axis and the
     // Y-axis on a bar → line switch (KI-047), which is not what Metabase does either. The sort
     // stays with it for the same reason: it names fields of a spec built from the same config.
+    // And so does the result: the same rows draw as the new type at once, and a type whose spec
+    // differs (a row chart's default sort) goes stale and re-runs like any other edit.
     if (getDescriptor(v)?.prefix === descriptor?.prefix) {
       if (!id) setSearchParams({ type: v });
       return;
     }
+    resetRun();
     // A different viz means a different config shape; its descriptor's default applies.
     setDescState(null);
     // And the sort goes with it. Unlike a filter, which names a DATASET column and stays valid
