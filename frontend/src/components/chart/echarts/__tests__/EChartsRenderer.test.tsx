@@ -30,6 +30,7 @@ beforeEach(() => {
 });
 
 import { EChartsRenderer } from "../EChartsRenderer";
+import { chartImageSvg } from "../../export-chart";
 
 const opt = { series: [] } as EChartsCoreOption;
 
@@ -38,6 +39,14 @@ describe("EChartsRenderer", () => {
     render(<EChartsRenderer option={opt} />);
     expect(init).toHaveBeenCalledTimes(1);
     expect(instance.setOption).toHaveBeenCalledWith(opt, true);
+  });
+  // KI-043: `.png` exports the <svg> inside the surface this marks, and only that one.
+  it("marks its container as the chart image the PNG export reads", () => {
+    const { container } = render(<EChartsRenderer option={opt} />);
+    // ECharts is mocked, so stand in for the <svg> it would draw into the container.
+    const el = container.firstElementChild as HTMLElement;
+    el.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+    expect(chartImageSvg(container)).toBe(el.querySelector("svg"));
   });
   it("disposes on unmount", () => {
     const { unmount } = render(<EChartsRenderer option={opt} />);

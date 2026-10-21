@@ -15,7 +15,7 @@ function renderCard(ui: React.ReactElement) {
 // Download icon <svg> that would otherwise make every card — even tables — offer PNG).
 vi.mock("@/components/chart/ChartRenderer", () => ({
   ChartRenderer: ({ vizType }: { vizType: string }) =>
-    vizType === "table" ? <table data-testid="cr-table" /> : <svg data-testid="chart-svg" />,
+    vizType === "table" ? <table data-testid="cr-table" /> : <div data-chart-image=""><svg data-testid="chart-svg" /></div>,
 }));
 // One mock fn drives both the edit-mode (useChartData) and view-mode (useDashboardCardData) paths,
 // so each test's mockReturnValue applies whichever mode it renders.
