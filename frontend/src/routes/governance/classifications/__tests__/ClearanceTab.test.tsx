@@ -73,6 +73,18 @@ describe("Clearance tab: the editor (ported from TagDetail)", () => {
     expect(toast.success).toHaveBeenCalledWith("Clearance updated");
   });
 
+  it("Add clearance before a pick stays focusable, says why, and does nothing (N22)", async () => {
+    const user = userEvent.setup();
+    const served = open(pii({}), STEWARD, { [`PUT ${POLICY}`]: ok({ ok: true, skipped: [] }) });
+    await table();
+    const add = screen.getByRole("button", { name: "Add clearance" });
+    expect(add).not.toBeDisabled();
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    expect(add).toHaveAccessibleDescription("Pick a role to add.");
+    await user.click(add);
+    expect(served.bodies[`PUT ${POLICY}`]).toBeUndefined();
+  });
+
   it("adding a group writes the whole set", async () => {
     const user = userEvent.setup();
     const served = open(pii({ required_roles: ["auditor"] }), STEWARD, { [`PUT ${POLICY}`]: ok({ ok: true, skipped: [] }) });

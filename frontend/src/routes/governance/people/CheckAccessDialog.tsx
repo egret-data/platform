@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 
 /** What the dialog answers. Also this module's bundle marker (`scripts/assert-governance-people-lazy.mjs`). */
 export const CHECK_ACCESS_INTRO =
-  "Whether a user, or each member of a group or role, can reach a target, per policy profile, as each engine would decide it.";
+  "Whether a user, or each member of a group or role, can reach a target, as each engine that serves it would decide it.";
 
 /**
  * The People index's Check access (spec §2): subject kind, subject, action

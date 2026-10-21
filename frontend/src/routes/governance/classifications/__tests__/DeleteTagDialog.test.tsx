@@ -72,7 +72,7 @@ describe("Delete a classification (CL14)", () => {
     const user = userEvent.setup();
     open();
     const dialog = await openDialog(user);
-    await waitFor(() => expect(dialog).toHaveTextContent("No rule selects it."));
+    await waitFor(() => expect(dialog).toHaveTextContent("No rule uses it."));
     expect(dialog).not.toHaveTextContent(/these rules first/);
   });
 
@@ -196,6 +196,11 @@ describe("Delete a classification (CL14)", () => {
     await waitFor(() => expect(where()).toBe("/governance/classifications"));
     expect(served.asked).toContain("DELETE /tags/t-pii");
     expect(toast.success).not.toHaveBeenCalled();
+    // Focus lands on the index's heading, never on <body>.
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Classifications" })).toHaveFocus(), T);
+    // The deleted classification's own reads are dropped, not refetched into a 404.
+    const afterDelete = served.asked.slice(served.asked.indexOf("DELETE /tags/t-pii") + 1);
+    expect(afterDelete.filter((k) => k.includes("t-pii"))).toEqual([]);
   });
 
   it("an uncoded failure toasts the server's message, closes the dialog and returns focus to Delete", async () => {

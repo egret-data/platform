@@ -471,6 +471,7 @@ function ClearanceTable({
   const [type, setType] = useState<ClearanceType>("role");
   const [open, setOpen] = useState(false);
   const listId = useId();
+  const addReasonId = useId();
   const [q, setQ] = useState("");
   const [pending, setPending] = useState<Option | null>(null);
 
@@ -556,7 +557,9 @@ function ClearanceTable({
               </Popover>
               <Button
                 aria-label="Add clearance"
-                disabled={!pending}
+                // Focusable while blocked, with its reason tied (N22, FE-ACTION-4); a click then does nothing.
+                aria-disabled={!pending ? true : undefined}
+                aria-describedby={!pending ? addReasonId : undefined}
                 onClick={() => {
                   if (pending) {
                     onAdd(type, pending.value);
@@ -567,7 +570,11 @@ function ClearanceTable({
                 <Plus className="mr-1 h-4 w-4" aria-hidden />
                 Add
               </Button>
-              {!pending ? <span className="text-xs text-muted-foreground">Pick a {type} to add.</span> : null}
+              {!pending ? (
+                <span id={addReasonId} className="text-xs text-muted-foreground">
+                  Pick a {type} to add.
+                </span>
+              ) : null}
             </>
           )}
         </div>

@@ -87,6 +87,8 @@ describe("RulePage: deleting with the real cache", () => {
     expect(await screen.findByRole("link", { name: "Keep me" }, T)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Hash email" })).not.toBeInTheDocument();
     expect(screen.queryByText(/No rule has this id/)).not.toBeInTheDocument();
+    // The page that held focus is gone: focus lands on the new page's heading, never on <body>.
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "PII" })).toHaveFocus(), T);
 
     await user.click(screen.getByRole("button", { name: "history back" }));
     expect(screen.getByTestId("where")).not.toHaveTextContent("/governance/rules/r1");

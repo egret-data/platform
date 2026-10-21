@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -251,6 +251,22 @@ export function RuleDialog({
   const closeRequestRef = useRef<(() => void) | null>(null);
   // Start over remounts the form, so every field reseeds from the entry point.
   const [round, setRound] = useState(0);
+  // What held focus when the dialog opened (Add rule, Edit), read before the
+  // dialog's focus scope takes it. Callers open it from state, not a Radix
+  // trigger, and after the nested "Discard this rule?" Radix had nowhere to
+  // return focus and left it on <body> (live result §6).
+  const opener = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }, [open]);
+  const returnFocus = (e: Event) => {
+    e.preventDefault();
+    const target = opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>("h1");
+    opener.current = null;
+    target?.focus();
+  };
   return (
     <Dialog
       open={open}
@@ -261,7 +277,7 @@ export function RuleDialog({
       }}
     >
       {/* `scroll-pb-32`: a field focused near the end scrolls clear of the sticky footer. */}
-      <DialogContent className="max-h-[85vh] max-w-2xl" bodyClassName="scroll-pb-32">
+      <DialogContent className="max-h-[85vh] max-w-2xl" bodyClassName="scroll-pb-32" onCloseAutoFocus={returnFocus}>
         {open && (
           <RuleForm
             key={round}
@@ -475,6 +491,8 @@ function RuleForm({
       }
       setPreview(data ?? null);
       setPreviewedFor(bodySnapshot);
+      // The result renders under the fold, behind the sticky footer: take the reader to it.
+      if (data) focusResultRef.current = true;
     } catch (e) {
       setPreviewError((e as ApiError).message || "Preview failed.");
       setPreviewFailure(e);
@@ -577,7 +595,11 @@ function RuleForm({
   useEffect(() => {
     // A refused re-preview takes focus to its error instead (`errorSeq`).
     if (!focusResultRef.current || (!preview && !previewError)) return;
-    if (preview) resultRef.current?.focus();
+    if (preview) {
+      // Centred, so the sticky footer cannot cover the "Not enforced yet" warning; then focus without a second scroll.
+      resultRef.current?.scrollIntoView?.({ block: "center" });
+      resultRef.current?.focus({ preventScroll: true });
+    }
     focusResultRef.current = false;
   }, [preview, previewError]);
   useEffect(() => {
@@ -792,8 +814,9 @@ function RuleForm({
 
           {!preview && !previewError && (
             <p className="text-xs text-muted-foreground">
-              A rule on a classification is catalog-unscoped, so this can recompile every Trino profile in the
-              installation — see which, here, before committing.
+              {selectorType === "tag"
+                ? "A rule on a classification applies in every catalog where the classification is attached. Preview shows what it reaches and who enforces it, before you create it."
+                : "Preview shows what this rule reaches and who enforces it, before you create it."}
             </p>
           )}
           {previewStale && (preview || previewError) && (
@@ -826,7 +849,8 @@ function RuleForm({
         )}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Always rendered: a live region must exist before its text changes. */}
-          <p id={reasonId} aria-live="polite" className="mr-auto text-xs text-muted-foreground">
+          {/* Its own row on a narrow screen, so Cancel and Create stay side by side (live result §5, 390 px). */}
+          <p id={reasonId} aria-live="polite" className="mr-auto basis-full text-xs text-muted-foreground sm:basis-auto">
             {createReason}
           </p>
           <Button type="button" variant="outline" onClick={requestClose}>

@@ -656,7 +656,11 @@ describe("Add classification", () => {
     renderPage("/governance/data/pg/s/t?column=email", TAGGER);
     const panel = await screen.findByRole("dialog", { name: "email" });
     const inPanel = await within(panel).findByRole("button", { name: "Add classification" });
-    expect(inPanel).toBeDisabled();
+    // Focusable, with its reason (N22): aria-disabled, never the native attribute.
+    expect(inPanel).not.toBeDisabled();
+    expect(inPanel).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(inPanel);
+    expect(screen.queryByRole("dialog", { name: "Add classification" })).not.toBeInTheDocument();
     expect(inPanel).toHaveAccessibleDescription("Classifications can be attached to egret-managed catalogs only");
     expect(within(panel).queryByRole("list", { name: "Classifications of email" })).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
@@ -666,7 +670,8 @@ describe("Add classification", () => {
     serveData(fixture());
     renderPage("/governance/data/pg/s/t", TAGGER);
     const button = await screen.findByRole("button", { name: "Add classification" });
-    expect(button).toBeDisabled();
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
     expect(button).toHaveAccessibleDescription("Classifications can be attached to egret-managed catalogs only");
   });
 

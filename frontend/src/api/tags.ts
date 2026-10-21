@@ -175,8 +175,14 @@ export function useDeleteTag() {
       await apiFetch(`/control-plane/tags/${id}`, { method: "DELETE" });
     },
     onSuccess: (_data, id) => {
-      invalidateTag(queryClient, id);
-      invalidateTagName(queryClient, id);
+      // The list changes; the deleted tag's own reads (its usage, its Manual
+      // policies) are dropped, never refetched: they would only 404 (live result §7).
+      void queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+      for (const queryKey of [getControlPlaneGovernanceTagUsageQueryKey(id), getControlPlaneGovernanceTagHandwrittenQueryKey(id)]) {
+        void queryClient.cancelQueries({ queryKey });
+        queryClient.removeQueries({ queryKey });
+      }
+      invalidateObjectHandwritten(queryClient);
     },
   });
 }

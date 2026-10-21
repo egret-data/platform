@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react";
+import { useRef, type ReactNode, type RefObject } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -13,6 +13,7 @@ import { toastTagDeleteFailure } from "@/routes/governance/tagDeleteFailure";
 import { tagInUse } from "@/routes/governance/apiErrors";
 import { TERM } from "@/routes/governance/glossary";
 import { CLASSIFICATIONS_BASE, classificationRuleUrl, tagUrl } from "@/routes/governance/classifications/tagUrl";
+import { focusHeadingOnArrival } from "@/lib/focusArrival";
 
 const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
@@ -93,7 +94,7 @@ export function DeleteTagDialog({
     const message = (rulesQ.error as unknown as ApiError | null)?.message ?? "unknown error";
     lines.push(`Rules could not be read: ${message}`);
   } else if (rulesQ.data?.status === 200) {
-    if (blocking.length === 0) lines.push("No rule selects it.");
+    if (blocking.length === 0) lines.push(`No ${TERM.rule.toLowerCase()} uses it.`);
   }
   // Until the rules are read, whether they block the delete is unknown: Delete waits, saying so.
   const checkingRules = canReadRules && rulesQ.isPending;
@@ -117,10 +118,15 @@ export function DeleteTagDialog({
   // `mutateAsync`, not `mutate`'s per-call callbacks: the dialog closes on
   // confirm, and from the index that unmounts it, which drops those callbacks
   // (no toast either way).
+  // Set once a delete from this page succeeds: the page is leaving.
+  const leaving = useRef(false);
   const confirm = () => {
     del.mutateAsync(tag.id).then(
       () => {
         if (where === "this page") {
+          // The page leaves: focus goes to the index's heading, not back to this page's Delete.
+          leaving.current = true;
+          focusHeadingOnArrival();
           navigate(CLASSIFICATIONS_BASE);
         } else {
           // Opened from the index: the page stays, so a toast confirms it (FE-ACTION-2).
@@ -146,11 +152,15 @@ export function DeleteTagDialog({
       onOpenChange={onOpenChange}
       title={`${TERM.delete} ${tag.name}?`}
       confirmLabel={TERM.delete}
-      description={`Deleting ${tag.name} removes the classification and every assignment of it.`}
+      description={`Deleting ${tag.name} removes the classification and takes it off every table and column it is attached to.`}
       confirmText={tag.name}
       confirmDisabledReason={blockedReason}
       onConfirm={confirm}
       onCloseAutoFocus={(event) => {
+        if (leaving.current) {
+          event.preventDefault();
+          return;
+        }
         const element = opener?.current?.isConnected ? opener.current : null;
         if (element) {
           event.preventDefault();

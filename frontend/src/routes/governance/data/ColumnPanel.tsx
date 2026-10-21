@@ -218,7 +218,8 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
               ref={addTagButton}
               variant="outline"
               size="sm"
-              disabled={!egret}
+              // Focusable while blocked, with its reason tied (N22); the click below does nothing then.
+              aria-disabled={!egret ? true : undefined}
               aria-describedby={egret ? undefined : "column-add-tag-reason"}
               onClick={() =>
                 egret &&

@@ -126,10 +126,10 @@ export default function TagPage() {
           <TagHeader tag={tag} actions={<DeleteControl tag={tag} />} />
           <EffectStrip tag={tag} />
           <Tabs value={value} onValueChange={select} className="min-w-0">
-            {/* Wraps, so every tab is in view at 390 px. */}
+            {/* Wraps, so every tab is in view at 390 px; narrower padding there keeps it to two rows (live result §5). */}
             <TabsList className="h-auto max-w-full flex-wrap justify-start">
               {TAG_TABS.map((t) => (
-                <TabsTrigger key={t} value={t}>
+                <TabsTrigger key={t} value={t} className="px-2 sm:px-3">
                   {TAG_TAB_LABEL[t]}
                 </TabsTrigger>
               ))}

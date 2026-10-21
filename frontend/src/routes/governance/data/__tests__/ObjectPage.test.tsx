@@ -1409,14 +1409,25 @@ describe("Remove a classification in place", () => {
     expect(within(columns).queryByRole("button", { name: /^Remove CONFIDENTIAL/ })).not.toBeInTheDocument();
   });
 
+  it("a remove with no rule on the classification says so once, without promising rules stop applying", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), rules: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    expect(await within(dialog).findByText("No rule uses CONFIDENTIAL, so no mask or filter changes here.")).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/stop applying|selects it/);
+  });
+
   it("removes the table's classification from the header, naming the rules that stop applying and the columns", async () => {
     const user = userEvent.setup();
     const { tagWrites } = serveData(fixture({ tagCatalogue: ok([]), rules: ok(ALL_RULES) }));
     renderPage("/governance/data/ice/sales/orders", EDITOR);
     await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
-    expect(within(dialog).getByText("Rules that apply to CONFIDENTIAL stop applying here.")).toBeInTheDocument();
+    expect(await within(dialog).findByText("These rules on CONFIDENTIAL stop applying here:")).toBeInTheDocument();
     expect(await within(dialog).findByText("redact_confidential")).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/No rule/);
     expect(within(dialog).getByText("Its columns stop inheriting it.")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Remove" }));
     await waitFor(() =>

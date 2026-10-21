@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { focusHeadingOnArrival } from "@/lib/focusArrival";
 import type { RuleView } from "@/api/generated/model";
 import { getPermListRulesQueryKey, usePermDeleteRule, usePermListRules, usePermRuleEffect } from "@/api/generated/perm/perm";
 import { useTags } from "@/api/tags";
@@ -127,6 +128,7 @@ function DeleteRuleDialog({ rule, open, onOpenChange, tags }: DeleteRuleProps & 
                     ? { ...old, data: (old.data as RuleView[]).filter((r) => r.id !== rule.id) }
                     : old,
               );
+              focusHeadingOnArrival();
               navigate(to, { replace: true });
               toast.success(`${TERM.rule} ${rule.name} deleted.`);
               void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });

@@ -114,6 +114,8 @@ export function RemoveClassificationDialog({
   };
 
   let rules = null;
+  // What the dialog leads with: what happens to rules, once that is known.
+  let lead = `${TERM.rules} that apply to ${tag.name} stop applying here.`;
   if (canReadRules) {
     if (rulesQ.isError) {
       rules = <p>{`The ${TERM.rules.toLowerCase()} could not be read.`}</p>;
@@ -121,8 +123,9 @@ export function RemoveClassificationDialog({
       const named = rulesOnTag(rulesQ.data.data, tag)
         .map((r) => r.name)
         .sort((a, b) => a.localeCompare(b));
-      rules =
-        named.length > 0 ? (
+      if (named.length > 0) {
+        lead = `These ${TERM.rules.toLowerCase()} on ${tag.name} stop applying here:`;
+        rules = (
           <ul aria-label={`${TERM.rules} on ${tag.name}`} className="list-disc pl-5">
             {named.map((n) => (
               <li key={n} className="break-words">
@@ -130,9 +133,10 @@ export function RemoveClassificationDialog({
               </li>
             ))}
           </ul>
-        ) : (
-          <p>No rule selects it.</p>
         );
+      } else {
+        lead = `No ${TERM.rule.toLowerCase()} uses ${tag.name}, so no mask or filter changes here.`;
+      }
     } else {
       rules = <Skeleton className="h-4 w-48" />;
     }
@@ -151,7 +155,7 @@ export function RemoveClassificationDialog({
       >
         <AlertDialogHeader>
           <AlertDialogTitle className="break-words">{`Remove ${tag.name} from ${target.label}?`}</AlertDialogTitle>
-          <AlertDialogDescription>{`Rules that apply to ${tag.name} stop applying here.`}</AlertDialogDescription>
+          <AlertDialogDescription>{lead}</AlertDialogDescription>
         </AlertDialogHeader>
         <div className="space-y-2 text-sm text-muted-foreground">
           {rules}

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 /**
  * `ScopePicker` is mocked to a dumb stand-in that reports the `rowFilterMode`
@@ -1198,5 +1198,62 @@ describe("RuleDialog — the table-level classification conflict, said short (C5
     await user.click(screen.getByRole("button", { name: "Preview" }));
     expect(await screen.findByText(/is on the whole table analytics\.orders/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
+  });
+});
+
+describe("RuleDialog — live walkthrough fixes (Task 13)", () => {
+  test("after Preview, focus goes to the result, which is scrolled into view", async () => {
+    const user = userEvent.setup();
+    const scrolled = vi.fn();
+    const saved = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrolled;
+    onTestFinished(() => {
+      HTMLElement.prototype.scrollIntoView = saved;
+    });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(document.activeElement).toHaveTextContent("What egret will recompile"));
+    expect(scrolled).toHaveBeenCalled();
+  });
+
+  test("the classification-wide sentence shows only for a rule on a classification", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    expect(screen.getByText(/applies in every catalog where the classification is attached/)).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
+    await user.click(await screen.findByRole("option", { name: "Path" }));
+    expect(screen.queryByText(/every catalog where the classification|catalog-unscoped/)).not.toBeInTheDocument();
+    expect(screen.getByText("Preview shows what this rule reaches and who enforces it, before you create it.")).toBeInTheDocument();
+  });
+
+  test("after Discard, focus returns to the control that opened the dialog", async () => {
+    const user = userEvent.setup();
+    function Opener() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            open rule
+          </button>
+          <RuleDialog open={open} onOpenChange={setOpen} entry={TABLE_ENTRY} />
+        </>
+      );
+    }
+    const qc = new QueryClient();
+    render(
+      <AuthContext.Provider value={{ me: ME, isLoading: false }}>
+        <QueryClientProvider client={qc}>
+          <MemoryRouter>
+            <Opener />
+          </MemoryRouter>
+        </QueryClientProvider>
+      </AuthContext.Provider>,
+    );
+    await user.click(screen.getByRole("button", { name: "open rule" }));
+    await user.type(await screen.findByLabelText(/^Name/), "x");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "open rule" })).toHaveFocus());
   });
 });

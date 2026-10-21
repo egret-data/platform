@@ -133,8 +133,9 @@ export function ObjectHeader({
                     data-object-action={a.key}
                     variant="outline"
                     size="sm"
-                    onClick={handlers[a.key]}
-                    disabled={reason !== undefined}
+                    // Focusable while blocked, with its reason tied (N22); a click then does nothing.
+                    onClick={reason !== undefined ? undefined : handlers[a.key]}
+                    aria-disabled={reason !== undefined ? true : undefined}
                     aria-describedby={reason !== undefined ? `object-action-${a.key}-reason` : undefined}
                   >
                     <a.icon aria-hidden />
