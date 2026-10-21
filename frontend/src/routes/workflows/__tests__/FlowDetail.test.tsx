@@ -66,6 +66,33 @@ function liveFlow(live: string, draft = live) {
   server.flow = { ...server.flow!, source: draft };
 }
 
+describe("FlowDetail: the worker-off notice (KI-013)", () => {
+  it("says the worker is off and what to set, above the tabs and in the Run form", async () => {
+    server = new FakeWorkflowServer({ worker_enabled: false });
+    renderAt("executions");
+    const notice = await screen.findByTestId("worker-off-notice");
+    expect(notice).toHaveTextContent("The workflow worker is off on this server, so executions are created but do not run.");
+    expect(notice).toHaveTextContent("EGRET_WORKFLOW__WORKER_ENABLED=true");
+    // Once on the flow page: its own Executions tab does not repeat it.
+    expect(await screen.findByText("This flow has not run yet")).toBeInTheDocument();
+    expect(screen.getAllByTestId("worker-off-notice")).toHaveLength(1);
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
+    await userEvent.click(button("Run"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByTestId("worker-off-notice")).toBeInTheDocument();
+  });
+
+  it("says nothing while the worker runs", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Run")).toBeEnabled(), LONG);
+    await userEvent.click(button("Run"));
+    await screen.findByRole("alertdialog");
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+  });
+});
+
 describe("FlowDetail: the Executions tab", () => {
   it("lists this flow's executions, pinned to the flow, with the tab in the URL", async () => {
     server = new FakeWorkflowServer();

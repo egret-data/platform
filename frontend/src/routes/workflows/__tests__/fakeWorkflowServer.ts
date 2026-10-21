@@ -102,6 +102,7 @@ export class FakeWorkflowServer {
       updated_at: "2026-10-10T09:47:08.618779Z",
       validation: { errors: [], warnings: [] },
       can_manage: true,
+      worker_enabled: true,
       ...flow,
     };
   }
@@ -237,7 +238,7 @@ export class FakeWorkflowServer {
     if (method === "GET" && path === `${base}/schema`) return { status: 200, body: {}, headers: { etag: '"s1"' } };
     if (method === "GET" && path === `${base}/flows`) return { status: 200, body: this.flow ? [this.flow] : [] };
     if (method === "GET" && path === `${base}/executions`) {
-      return { status: 200, body: { rows: this.executions, total: this.executions.length, limit: 50, offset: 0 } };
+      return { status: 200, body: { rows: this.executions, total: this.executions.length, limit: 50, offset: 0, worker_enabled: this.flow?.worker_enabled ?? true } };
     }
     if (method === "POST" && (path === `${base}/flows/validate` || path === `${flowPath}/validate`)) return this.validation;
     if (method === "POST" && path === `${base}/flows`) {

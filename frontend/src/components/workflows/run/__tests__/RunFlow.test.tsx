@@ -52,7 +52,7 @@ function Where() {
   return <output data-testid="path">{useLocation().pathname}</output>;
 }
 
-function renderRun(source: string) {
+function renderRun(source: string, workerEnabled = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const onOpenChange = vi.fn();
   render(
@@ -67,6 +67,7 @@ function renderRun(source: string) {
                 flowId={FLOW}
                 flowName="company.team.hello"
                 source={source}
+                workerEnabled={workerEnabled}
                 open
                 onOpenChange={onOpenChange}
               />
@@ -85,6 +86,24 @@ const starts = (calls: Call[]) => calls.filter((c) => c.method === "POST" && c.p
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("RunFlow: the worker-off notice (KI-013)", () => {
+  it("says before Run that the execution will not run, and what to set", async () => {
+    serve();
+    renderRun(flowWith(""), false);
+    const confirm = await screen.findByRole("alertdialog", { name: "Run company.team.hello?" });
+    const notice = within(confirm).getByTestId("worker-off-notice");
+    expect(notice).toHaveTextContent("executions are created but do not run");
+    expect(notice).toHaveTextContent("EGRET_WORKFLOW__WORKER_ENABLED=true");
+  });
+
+  it("says nothing while the worker runs", async () => {
+    serve();
+    renderRun(flowWith(""));
+    await screen.findByRole("alertdialog", { name: "Run company.team.hello?" });
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+  });
 });
 
 describe("RunFlow: the container", () => {

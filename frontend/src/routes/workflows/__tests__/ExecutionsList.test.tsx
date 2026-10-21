@@ -63,9 +63,9 @@ const FLOWS: FlowListItemDto[] = [
 ];
 
 type Reply = { status: number; body: unknown };
-const page = (rows: ExecutionListItemDto[], total = rows.length, offset = 0): Reply => ({
+const page = (rows: ExecutionListItemDto[], total = rows.length, offset = 0, worker_enabled = true): Reply => ({
   status: 200,
-  body: { rows, total, limit: 50, offset },
+  body: { rows, total, limit: 50, offset, worker_enabled },
 });
 
 /** The server's page of a `total`-row match at `offset`: as many rows as it really returns. */
@@ -480,5 +480,29 @@ describe("ExecutionsList: polling and refresh", () => {
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(lists).toHaveLength(2));
     await waitFor(() => expect(screen.getByTestId("executions-updated")).toHaveTextContent(/^Updated [0-1] s ago$/));
+  });
+});
+
+describe("ExecutionsList: the worker-off notice (KI-013)", () => {
+  it("says the worker is off and what to set when the server says so", async () => {
+    serve(() => page([exec("aaaaaaaa-0000-4000-8000-000000000001", { state: "RUNNING" })], 1, 0, false));
+    renderList();
+    const notice = await screen.findByTestId("worker-off-notice");
+    expect(notice).toHaveTextContent("executions are created but do not run");
+    expect(notice).toHaveTextContent("EGRET_WORKFLOW__WORKER_ENABLED=true");
+  });
+
+  it("says nothing while the worker runs", async () => {
+    serve(() => page([exec("aaaaaaaa-0000-4000-8000-000000000001")]));
+    renderList();
+    await screen.findByTestId("executions-table");
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+  });
+
+  it("leaves it to the flow page on the flow's own tab", async () => {
+    serve(() => page([exec("aaaaaaaa-0000-4000-8000-000000000001")], 1, 0, false));
+    renderList(`/explore/${WS}/workflows/flows/${FLOW}/executions`, FLOW);
+    await screen.findByTestId("executions-table");
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
   });
 });

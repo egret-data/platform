@@ -41,6 +41,7 @@ import {
   type RunInput,
 } from "@/components/workflows/run/inputModel";
 import { DisabledReasons } from "@/components/workflows/ReasonButton";
+import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 export interface RunFlowProps {
@@ -54,6 +55,8 @@ export interface RunFlowProps {
    * inputs come from here. The header offers Run only with no unsaved edits.
    */
   source: string;
+  /** `FlowDto.worker_enabled`: false, the run is created and nothing runs it (KI-013). */
+  workerEnabled: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -78,6 +81,7 @@ function RunForm({
   ws,
   flowId,
   flowName,
+  workerEnabled,
   open,
   onOpenChange,
   inputs,
@@ -166,6 +170,7 @@ function RunForm({
 
   const notices = (
     <>
+      {workerEnabled ? null : <WorkerOffNotice />}
       {sourceError ? (
         <Alert variant="destructive">
           <AlertDescription>
