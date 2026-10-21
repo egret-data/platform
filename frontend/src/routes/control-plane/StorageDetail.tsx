@@ -14,6 +14,7 @@ import {
 } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { secretsQueryKey, storageQueryKey } from "@/routes/control-plane/ControlPlaneStorage";
 import { StorageObjectBrowser } from "@/routes/control-plane/StorageBrowser";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -291,7 +292,7 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
   if (loading) return <ListSkeleton rows={6} cols={2} />;
   if (!conn) return null;
 
-  const secrets = secretsQ.data ?? [];
+  const secrets = pickableSecrets(secretsQ.data ?? []);
   const ro = "text-muted-foreground";
   const roMono = "font-mono text-xs text-muted-foreground";
   // Uniform width for every edit control so the Value column reads evenly.

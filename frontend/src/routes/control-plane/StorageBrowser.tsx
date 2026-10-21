@@ -50,12 +50,15 @@ export function StorageObjectBrowser({ storageId }: { storageId: string }) {
   const folders = listing.data?.folders ?? [];
   const objects = listing.data?.objects ?? [];
   const bucket = conn.data?.bucket ?? "bucket";
+  // The connection's Key prefix is its root: keys below are relative to it.
+  const root = (listing.data?.root ?? "").replace(/\/$/, "");
+  const hidden = listing.data?.hiddenSystemFolders ?? [];
 
   return (
     <div className="overflow-hidden rounded-md border">
       <div className="flex flex-wrap items-center gap-1 border-b bg-muted/30 px-4 py-2.5 text-sm">
         <button type="button" className="font-mono text-primary hover:underline" onClick={() => setPrefix("")}>
-          {bucket}
+          {root ? `${bucket}/${root}` : bucket}
         </button>
         {parts.map((part, i) => (
           <span key={i} className="flex items-center gap-1">
@@ -79,7 +82,7 @@ export function StorageObjectBrowser({ storageId }: { storageId: string }) {
         <p className="py-14 text-center text-sm text-destructive">
           {(listing.error as ApiError).message}
         </p>
-      ) : folders.length === 0 && objects.length === 0 ? (
+      ) : folders.length === 0 && objects.length === 0 && hidden.length === 0 ? (
         <p className="py-14 text-center text-sm text-muted-foreground">This folder is empty.</p>
       ) : (
         <div>
@@ -116,6 +119,14 @@ export function StorageObjectBrowser({ storageId }: { storageId: string }) {
               </a>
             </div>
           ))}
+          {hidden.length > 0 && (
+            <p className="px-4 py-2.5 text-xs text-muted-foreground" data-testid="storage-hidden-system">
+              {hidden.map((h) => h.slice(prefix.length).replace(/\/$/, "")).join(", ")}{" "}
+              {hidden.length === 1 ? "is" : "are"} not shown: egret stores its users&apos; SQL Lab
+              results, Data App sources and workflow files there. Only a platform admin can open{" "}
+              {hidden.length === 1 ? "it" : "them"}.
+            </p>
+          )}
         </div>
       )}
     </div>

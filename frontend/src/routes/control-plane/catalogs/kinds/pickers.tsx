@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { listSecrets, listStorage } from "@/api/controlPlane";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { CATALOG_KIND_LABELS } from "@/lib/catalogKinds";
 import {
   Select,
@@ -152,7 +153,7 @@ export function SecretSelect({
     queryFn: listSecrets,
     retry: false,
   });
-  const items = q.data ?? [];
+  const items = pickableSecrets(q.data ?? []);
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger id={id} className="w-full">

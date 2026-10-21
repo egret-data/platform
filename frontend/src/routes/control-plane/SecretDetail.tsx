@@ -12,6 +12,7 @@ import {
   updateSecret,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { SYSTEM_SECRET_REASON } from "@/lib/systemSecrets";
 import { secretsQueryKey } from "@/routes/control-plane/ControlPlaneSecrets";
 import { SecretDataFields, type SecretDataHandle } from "@/routes/control-plane/SecretDataFields";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -110,6 +111,7 @@ export default function SecretDetail() {
   }
 
   const inUse = secret.used_by > 0;
+  const system = secret.system_managed;
 
   return (
     <div className="space-y-5">
@@ -123,11 +125,19 @@ export default function SecretDetail() {
             </div>
             <div className="min-w-0">
               <h1 className="truncate text-2xl font-semibold leading-tight">{secret.name}</h1>
-              <Badge variant="outline" className="mt-1 font-mono text-xs">
-                {secret.type}
-              </Badge>
+              <div className="mt-1 flex items-center gap-2">
+                <Badge variant="outline" className="font-mono text-xs">
+                  {secret.type}
+                </Badge>
+                {system && (
+                  <Badge variant="secondary" className="text-xs">
+                    System
+                  </Badge>
+                )}
+              </div>
             </div>
           </div>
+          {system && <p className="text-sm text-muted-foreground">{SYSTEM_SECRET_REASON}</p>}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
             <span>
               <span className="text-xs uppercase tracking-wide">Used by</span>{" "}
@@ -144,15 +154,27 @@ export default function SecretDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setRotateOpen(true)}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={system}
+            title={system ? SYSTEM_SECRET_REASON : undefined}
+            onClick={() => setRotateOpen(true)}
+          >
             <RotateCw className="mr-1 h-4 w-4" /> Rotate value
           </Button>
           <Button
             size="sm"
             variant="outline"
             className="text-destructive hover:text-destructive"
-            disabled={inUse}
-            title={inUse ? `In use by ${secret.used_by} connection${secret.used_by === 1 ? "" : "s"}` : undefined}
+            disabled={system || inUse}
+            title={
+              system
+                ? SYSTEM_SECRET_REASON
+                : inUse
+                  ? `In use by ${secret.used_by} connection${secret.used_by === 1 ? "" : "s"}`
+                  : undefined
+            }
             onClick={() => setDeleteOpen(true)}
           >
             <Trash2 className="mr-1 h-4 w-4" /> Delete
@@ -239,7 +261,14 @@ function OverviewTab({ secret }: { secret: Secret }) {
             </Button>
           </div>
         ) : (
-          <Button size="sm" variant="outline" className="shrink-0" onClick={startEdit}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            disabled={secret.system_managed}
+            title={secret.system_managed ? SYSTEM_SECRET_REASON : undefined}
+            onClick={startEdit}
+          >
             Edit
           </Button>
         )}

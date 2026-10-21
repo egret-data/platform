@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { useSecrets } from "@/api/secrets";
+import { pickableSecrets } from "@/lib/systemSecrets";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -40,7 +41,7 @@ const NEW = "__new__";
  */
 export function SecretPicker({ ws, value, hasExisting, onChange }: SecretPickerProps) {
   const secrets = useSecrets(ws);
-  const items = secrets.data ?? [];
+  const items = pickableSecrets(secrets.data ?? []);
 
   // Local fields for the inline "new secret" form.
   const [newName, setNewName] = useState(value.new_secret?.name ?? "");
