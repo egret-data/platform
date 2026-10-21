@@ -281,40 +281,291 @@ async fn workspace_admin_crud_and_idor_isolation() {
     assert_eq!(json["ok"], serde_json::json!(true));
 }
 
+/// The router over a FRESH `CedarPdp`. The PDP compiles role templates when it
+/// is built, so a custom role seeded after `setup()` is invisible to `f.app`.
+async fn fresh_app(f: &Fixture) -> axum::Router {
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    workspace_database_router().with_state(DatabaseState {
+        repo: f.repo.clone(),
+        authz: Authorizer::new(f.db.clone()),
+        pdp,
+        sessions: f.sessions.clone(),
+        workspaces: WorkspaceRepo::new(f.db.clone()),
+        workspace_secrets: f.workspace_secrets.clone(),
+    })
+}
+
+/// A workspace role holding exactly `perms`.
+async fn custom_role(f: &Fixture, perms: &[&str]) -> Uuid {
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('workspace', $1, 'test') RETURNING id",
+    )
+    .bind(format!("test_dbrt_{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("role");
+    for p in perms {
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role)
+            .bind(p)
+            .execute(&f.db.pool)
+            .await
+            .expect("perm");
+    }
+    role
+}
+
+async fn new_user(f: &Fixture, tag: &str) -> (UserId, String) {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    let token = f
+        .sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    (uid, token)
+}
+
+/// `principal_type` is `user` or `group`; `role` is a role id.
+async fn grant(f: &Fixture, principal_type: &str, principal: Uuid, role: Uuid, ws: WorkspaceId) {
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ($1, $2, $3, 'workspace', $4)",
+    )
+    .bind(principal_type)
+    .bind(principal)
+    .bind(role)
+    .bind(ws.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("grant");
+}
+
+async fn builtin_role(f: &Fixture, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("builtin role")
+}
+
+/// The keys a non-admin listing may carry (D9: no host, port, options/TLS,
+/// secret reference, status or catalog config).
+const SUMMARY_KEYS: [&str; 4] = ["delegated", "engine", "id", "name"];
+
+/// KI-159 / D9. A member holding `query:run` or `dataset:read` lists the
+/// connections granted to THEIR workspace, redacted to id/name/engine; a
+/// principal with neither, a non-member and a member of another workspace get
+/// 403; the admin listing keeps the full shape.
 #[tokio::test]
-async fn non_admin_member_is_403() {
+async fn connection_list_is_redacted_for_query_and_dataset_readers() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let token = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
+    // Arrange: one connection in each workspace, A's with a secret and TLS options.
+    let admin_a = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let admin_b = add_member(&f, f.ws_b, "adminb", "ws_admin").await;
+    let body_a = serde_json::json!({
+        "name": "conn-visible",
+        "engine": "trino",
+        "host": "secret-host.internal",
+        "port": 8443,
+        "options": { "user": "svc_reader", "http_scheme": "https", "catalog": "hidden_catalog" },
+        "new_secret": { "name": "conn-visible-creds", "value": "p4ssw0rd-value" },
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/databases", f.slug_a),
+            &admin_a,
+            Some(body_a),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create in A; body={json}");
+    let id_a = json["id"].as_str().unwrap().to_string();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/databases", f.slug_b),
+            &admin_b,
+            Some(db_body("conn-other-ws")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "create in B");
+
+    let viewer = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
+    let editor_direct = add_member(&f, f.ws_a, "editor", "ws_editor").await;
+    // ws_editor through a group.
+    let (group_user, editor_via_group) = new_user(&f, "grpeditor").await;
+    let group: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("dbrt_{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(group_user.0)
+        .bind(group)
+        .execute(&f.db.pool)
+        .await
+        .expect("membership");
+    let ws_editor = builtin_role(&f, "ws_editor").await;
+    grant(&f, "group", group, ws_editor, f.ws_a).await;
+    // Custom roles: only query:run; only dataset:read; neither.
+    let (qr_user, query_only) = new_user(&f, "queryonly").await;
+    let qr_role = custom_role(&f, &["query:run"]).await;
+    grant(&f, "user", qr_user.0, qr_role, f.ws_a).await;
+    let (dr_user, dataset_only) = new_user(&f, "datasetonly").await;
+    let dr_role = custom_role(&f, &["dataset:read"]).await;
+    grant(&f, "user", dr_user.0, dr_role, f.ws_a).await;
+    let (cr_user, chart_only) = new_user(&f, "chartonly").await;
+    let cr_role = custom_role(&f, &["chart:read"]).await;
+    grant(&f, "user", cr_user.0, cr_role, f.ws_a).await;
+    let (_nobody, non_member) = new_user(&f, "nonmember").await;
+    let app = fresh_app(&f).await;
+    let list_a = format!("/ws/{}/databases", f.slug_a);
+
+    // Act + Assert: the readers get the redacted listing of A only.
+    for (who, token) in [
+        ("ws_viewer (dataset:read)", &viewer),
+        ("ws_editor direct", &editor_direct),
+        ("ws_editor through a group", &editor_via_group),
+        ("custom role with only query:run", &query_only),
+        ("custom role with only dataset:read", &dataset_only),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req("GET", &list_a, token, None))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let raw = String::from_utf8_lossy(&bytes).to_string();
+        assert_eq!(status, StatusCode::OK, "{who} may list; body={raw}");
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.len(), 1, "{who}: only A's connection; body={raw}");
+        assert_eq!(rows[0]["id"].as_str(), Some(id_a.as_str()));
+        assert_eq!(rows[0]["name"], "conn-visible");
+        assert_eq!(rows[0]["engine"], "trino");
+        let mut keys: Vec<&str> = rows[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, SUMMARY_KEYS, "{who}: redacted shape only; body={raw}");
+        for leak in [
+            "secret-host.internal",
+            "8443",
+            "svc_reader",
+            "hidden_catalog",
+            "conn-visible-creds",
+            "p4ssw0rd-value",
+            "conn-other-ws",
+        ] {
+            assert!(!raw.contains(leak), "{who}: body leaks {leak:?}: {raw}");
+        }
+    }
+
+    // A principal with none of the permissions, a non-member and a member of
+    // another workspace are refused.
+    for (who, token) in [
+        ("custom role with only chart:read", &chart_only),
+        ("non-member", &non_member),
+        ("ws_admin of another workspace", &admin_b),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req("GET", &list_a, token, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{who} must get 403");
+    }
+
+    // The admin listing is unchanged: the full connection detail.
+    let resp = app
+        .clone()
+        .oneshot(req("GET", &list_a, &admin_a, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "admin list; body={json}");
+    let row = &json.as_array().unwrap()[0];
+    assert_eq!(row["host"], "secret-host.internal", "body={json}");
+    assert_eq!(row["port"], 8443);
+    assert_eq!(row["options"]["user"], "svc_reader");
+    assert_eq!(row["has_secret"], true);
+    for key in ["status", "governed", "engine_id"] {
+        assert!(row.get(key).is_some(), "admin row keeps {key}; body={json}");
+    }
+}
+
+/// D9 keeps every write, test and per-connection detail admin-only: a member
+/// who may now LIST still gets 403 on everything else.
+#[tokio::test]
+async fn non_admin_member_cannot_manage_or_test_connections() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = add_member(&f, f.ws_a, "admin", "ws_admin").await;
     let base = format!("/ws/{}/databases", f.slug_a);
-
-    // POST → 403 (admin gate runs before body persistence).
     let resp = f
         .app
         .clone()
-        .oneshot(req("POST", &base, &token, Some(db_body("nope"))))
+        .oneshot(req("POST", &base, &admin, Some(db_body("conn-a"))))
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "a non-admin member must not create databases"
-    );
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create; body={json}");
+    let id = json["id"].as_str().unwrap().to_string();
 
-    // GET → 403.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req("GET", &base, &token, None))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "a non-admin member must not list databases"
-    );
+    for role in ["ws_viewer", "ws_editor"] {
+        let token = add_member(&f, f.ws_a, role, role).await;
+        let test_body = serde_json::json!({
+            "engine": "trino", "host": "127.0.0.1", "port": 1,
+        });
+        for (method, uri, body) in [
+            ("POST", base.clone(), Some(db_body("nope"))),
+            ("GET", format!("{base}/{id}"), None),
+            ("PUT", format!("{base}/{id}"), Some(db_body("renamed"))),
+            ("DELETE", format!("{base}/{id}"), None),
+            ("POST", format!("{base}/{id}/test"), None),
+            ("POST", format!("{base}/test"), Some(test_body)),
+        ] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, &uri, &token, body))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{role} must not {method} {uri}"
+            );
+        }
+    }
+    // Nothing changed.
+    let row = f.repo.get_in_workspace(f.ws_a.0, id.parse().unwrap()).await;
+    assert_eq!(row.expect("still there").name, "conn-a");
 }
 
 #[tokio::test]

@@ -8,18 +8,15 @@
 import type { Engine } from './engine';
 
 /**
- * Minimal listing for the Explorer DB picker (no connection internals).
- *
- * **Nothing constructs this today.** `GET /ws/{ws}/databases` answers
- * `Vec<DatabaseDetailDto>`; this type survives only as a published schema
- * component. Adding a field here therefore ships a documented field that no
- * response ever carries — Package 1 added `governed` to it and the field was
- * dead on arrival. If a caller needs a narrower listing, give `list` this
- * return type first; until then, leave it alone.
+ * A connection as `GET /ws/{ws}/databases` shows it to a member who is not a
+ * workspace admin but may run queries or read datasets (KI-159, decision D9):
+ * enough to pick it in SQL Lab, nothing about how to reach it. No host, port,
+ * options (user, catalog, scheme, TLS), secret reference, status or engine id.
  */
 export interface DatabaseListDto {
   id: string;
   name: string;
   engine: Engine;
+  /** Whether queries on this connection run as the signed-in user. */
   delegated: boolean;
 }

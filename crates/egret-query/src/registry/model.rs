@@ -119,20 +119,37 @@ impl From<Database> for DatabaseDetailDto {
     }
 }
 
-/// Minimal listing for the Explorer DB picker (no connection internals).
-///
-/// **Nothing constructs this today.** `GET /ws/{ws}/databases` answers
-/// `Vec<DatabaseDetailDto>`; this type survives only as a published schema
-/// component. Adding a field here therefore ships a documented field that no
-/// response ever carries — Package 1 added `governed` to it and the field was
-/// dead on arrival. If a caller needs a narrower listing, give `list` this
-/// return type first; until then, leave it alone.
+/// A connection as `GET /ws/{ws}/databases` shows it to a member who is not a
+/// workspace admin but may run queries or read datasets (KI-159, decision D9):
+/// enough to pick it in SQL Lab, nothing about how to reach it. No host, port,
+/// options (user, catalog, scheme, TLS), secret reference, status or engine id.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatabaseListDto {
     pub id: String,
     pub name: String,
     pub engine: Engine,
+    /// Whether queries on this connection run as the signed-in user.
     pub delegated: bool,
+}
+
+impl From<Database> for DatabaseListDto {
+    fn from(d: Database) -> Self {
+        DatabaseListDto {
+            id: d.id.to_string(),
+            name: d.name,
+            engine: d.engine,
+            delegated: d.delegated,
+        }
+    }
+}
+
+/// The body of `GET /ws/{ws}/databases`: the full detail for a workspace admin,
+/// the redacted summary for everyone else who may list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum DatabaseListing {
+    Full(Vec<DatabaseDetailDto>),
+    Summary(Vec<DatabaseListDto>),
 }
 
 // ── B2: ws-member read-only view of assigned engines ──────────────────────────

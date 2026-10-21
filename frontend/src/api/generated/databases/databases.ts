@@ -28,6 +28,7 @@ import type {
   Ack,
   DatabaseDetailDto,
   DatabaseInput,
+  DatabaseListing,
   ErrorBody,
   TestInput,
   TestOutcome,
@@ -58,7 +59,7 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
 };
 
 export type databasesListResponse200 = {
-  data: DatabaseDetailDto[]
+  data: DatabaseListing
   status: 200
 }
 

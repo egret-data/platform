@@ -23969,14 +23969,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Registered databases in the workspace",
+            "description": "Connections granted to the workspace: the full detail for a workspace admin, id/name/engine only for a member with query:run or dataset:read",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/DatabaseDetailDto"
-                  }
+                  "$ref": "#/components/schemas/DatabaseListing"
                 }
               }
             }
@@ -42057,7 +42054,7 @@
       },
       "DatabaseListDto": {
         "type": "object",
-        "description": "Minimal listing for the Explorer DB picker (no connection internals).\n\n**Nothing constructs this today.** `GET /ws/{ws}/databases` answers\n`Vec<DatabaseDetailDto>`; this type survives only as a published schema\ncomponent. Adding a field here therefore ships a documented field that no\nresponse ever carries — Package 1 added `governed` to it and the field was\ndead on arrival. If a caller needs a narrower listing, give `list` this\nreturn type first; until then, leave it alone.",
+        "description": "A connection as `GET /ws/{ws}/databases` shows it to a member who is not a\nworkspace admin but may run queries or read datasets (KI-159, decision D9):\nenough to pick it in SQL Lab, nothing about how to reach it. No host, port,\noptions (user, catalog, scheme, TLS), secret reference, status or engine id.",
         "required": [
           "id",
           "name",
@@ -42075,9 +42072,27 @@
             "$ref": "#/components/schemas/Engine"
           },
           "delegated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether queries on this connection run as the signed-in user."
           }
         }
+      },
+      "DatabaseListing": {
+        "oneOf": [
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseDetailDto"
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseListDto"
+            }
+          }
+        ],
+        "description": "The body of `GET /ws/{ws}/databases`: the full detail for a workspace admin,\nthe redacted summary for everyone else who may list."
       },
       "DatasetColumnDto": {
         "type": "object",

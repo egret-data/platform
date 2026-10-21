@@ -196,6 +196,7 @@ export * from './database';
 export * from './databaseDetailDto';
 export * from './databaseInput';
 export * from './databaseListDto';
+export * from './databaseListing';
 export * from './datasetColumnDto';
 export * from './datasetColumnDtoSemanticType';
 export * from './datasetDataBody';
