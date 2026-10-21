@@ -75,7 +75,16 @@ admin:
   email: admin@egret.local
   password: Admin12345!
 oidc:
+  # Bundles a Keycloak and points egret's SSO at it. It needs `devRealm: true`
+  # below: the only realm this chart ships is the DEVELOPMENT one.
   enabled: false
+  # !!! DEVELOPMENT ONLY !!! `true` imports files/egret-realm.json into the
+  # bundled Keycloak: `sslRequired: none`, a `*` redirect URI, the password
+  # grant on, users with published passwords (tester/pw, admin-sso,
+  # member-sso) and the client secret `egret-secret`. Anyone who can reach it
+  # can sign in as a platform admin. Never set it on a cluster other people can
+  # reach. With `oidc.enabled` and this left `false` the chart refuses to render.
+  devRealm: false
   realm: egret
   clientId: egret
   clientSecret: egret-secret

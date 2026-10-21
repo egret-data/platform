@@ -38,6 +38,12 @@ helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespac
   `30080`, mapped to the host in [`deploy/k8s/kind.yaml`](../../k8s/kind.yaml).
 - **Login:** local-admin `admin@egret.local` / `Admin12345!`.
   OIDC is **off** in this milestone, so the local-admin account is the only way in.
+- **SSO (development only):** `oidc.enabled=true` bundles a Keycloak whose only
+  realm is the development realm (`files/egret-realm.json`: no TLS requirement, a
+  `*` redirect URI, the password grant, published user passwords, client secret
+  `egret-secret`). The chart refuses to render it unless you also set
+  `oidc.devRealm=true`; `just deploy-kind-oidc` and `just deploy-kind-governance`
+  do. Never set it on a cluster other people can reach.
 
 ## What runs
 
