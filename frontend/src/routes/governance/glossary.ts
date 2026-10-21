@@ -53,8 +53,8 @@ export const TERM = {
   whereUsed: "Where used",
   /**
    * Policies written in an engine profile's own editor, not compiled from a
-   * rule or a grant. The spec's "Engine policies" was overridden by the
-   * controller: the tab reads "Manual policies".
+   * rule or a grant. "Manual policies" is the final name (spec §4, §12.3);
+   * the earlier proposal "Engine policies" was dropped.
    */
   manualPolicies: "Manual policies",
   /** Views that may expose classified columns. */

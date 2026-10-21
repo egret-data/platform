@@ -82,7 +82,7 @@ Mỗi quyết định nêu code đang làm gì hôm nay (đã kiểm, `file:line
 1. Module `FE/routes/governance/glossary.ts` xuất các thuật ngữ của §4 dưới dạng hằng, cùng `MASK_TYPE_LABEL` (chuyển từ `RuleDialog.tsx:41-50`).
 2. Mọi chuỗi trong khu vực Classification, các bề mặt classification và rule của khu vực Data, hộp thoại rule và trang rule đều dùng các hằng đó.
 3. `formatRuleKind` in ra `Mask · Hash` và `Row filter · region = 'us'`.
-4. Các tab thành **Where used · Clearance · Rules · Views · Engine policies**. Khoá URL giữ nguyên `where-used|clearance|rules|views|handwritten` (`FE/routes/governance/classifications/tagUrl.ts:14`), nên link và bookmark vẫn chạy.
+4. Các tab thành **Where used · Clearance · Rules · Views · Manual policies**. Khoá URL giữ nguyên `where-used|clearance|rules|views|handwritten` (`FE/routes/governance/classifications/tagUrl.ts:14`), nên link và bookmark vẫn chạy.
 5. Lối quay lại của trang rule nêu đúng nơi người dùng đến từ. `ItemHeader` nhận thêm `back: {to, label}` tuỳ chọn. Các nơi gọi `RuleDialog` và tab Rules link tới rule kèm `?from=classification:<id>` hoặc `?from=data:<encoded path>`. `RulePage` đọc `from` và hiện "← <tên classification>" hoặc "← <bảng>", mặc định "← People & groups".
 6. `OpenInDataLink` dùng `ArrowRight` thay cho `ExternalLink`, vì mọi chỗ dùng đều trong ứng dụng. Các file import: `openInData.tsx`, `people/RulePage.tsx`, `people/GrantPage.tsx`, `people/tabs/MasksFiltersTab.tsx`.
 
@@ -571,7 +571,7 @@ Một thuật ngữ cho một khái niệm. UI dùng cột **Thuật ngữ (UI)*
 | Rule được viết trên cái gì | **Applies to**: Classification hoặc Path | A rule applies to every column carrying a classification, or to one catalog path. | Selects by, Reaches this tag, Tagged: on column, by tag | Áp dụng cho |
 | Ai được mở dữ liệu đã phân loại | **Clearance** | The roles and groups allowed to open data with this classification. | Required roles and groups, gated, Not gated, opened by principals, gate | Quyền truy cập theo phân loại |
 | Nó được gắn ở đâu | **Where used** | The tables, columns and BI objects that carry it. | Carries it | Nơi dùng |
-| Policy viết trong trình sửa của chính engine | **Engine policy** (tab "Engine policies") | A policy written directly in an engine profile's editor (Governance > Engine & policy), not generated from a rule or a grant. | Hand-written, Hand-written policies | Chính sách trong engine |
+| Policy viết trong trình sửa của chính engine | **Manual policy** (tab "Manual policies") | A policy written directly in an engine profile's editor (Governance > Engine & policy), not generated from a rule or a grant. | Hand-written, Hand-written policies | Chính sách trong engine |
 | Kiểm ai đọc được | **Who can read?** | Asks each engine's policy whether a person can read this. | Explain (giữ làm tên API), per policy profile | Ai đọc được? |
 | Loại bỏ một định nghĩa | **Delete** (gõ tên để xác nhận) | — | "type delete", "type the key" | Xoá |
 | Gỡ một lần gán | **Remove** (xác nhận, không phải gõ) | — | unassign, x | Gỡ |
@@ -649,7 +649,7 @@ Sau B3, B4 và B5: sinh lại `openapi.json` (`cargo run -q -p egret-bin --bin e
 
 1. **"Bản dịch tiếng Việt" cho chuỗi UI không làm được như yêu cầu.** Frontend không có lớp i18n, và FE-COPY-1 quy định chữ UI là tiếng Anh. Spec này cho bảng thuật ngữ một cột tiếng Việt chỉ dành cho tài liệu. Thêm i18n cho UI sẽ là một gói riêng. Người dùng có muốn điều đó không?
 2. **Một unique index trên `lower(tags.name)`.** Nó sẽ khiến tên trùng không thể biểu diễn được (C10 chỉ kiểm trong handler). Cần quyết định với các bản cài đã có tên trùng: từ chối migration, hay đổi tên. Đổi tên âm thầm làm thay đổi rule nào chạm tới dữ liệu nào, vì engine khớp theo tên.
-3. **Tên tab "Engine policies".** Được chọn để thay "Hand-written". Mục sidebar của khu vực là "Engine & policy", khá gần. "Policies written in the engine" là phương án dài hơn.
+3. **Tên tab.** Đã chốt: **"Manual policies"** (quyết định của controller, Task 5), thay "Hand-written" và đề xuất trước đó "Engine policies", vốn quá gần mục sidebar "Engine & policy".
 
 ## 13. Ngoài mục tiêu
 
@@ -688,3 +688,72 @@ Quy tắc của repo (`CLAUDE.md`) yêu cầu mọi thay đổi người dùng n
 - một route API mới (B4) và các trường phản hồi mới (B3, B5).
 
 Mỗi mục trên sẽ cần thay đổi tài liệu và ảnh chụp mới khi người dùng quyết định. Spec này và bản tiếng Việt của nó là tài liệu duy nhất mà gói này viết.
+
+## 16. Phụ lục: các sửa từ buổi kiểm tra trực tiếp (Task 13)
+
+Buổi kiểm tra trực tiếp (`../../en/plans/2026-10-21-classification-ux-live-result.md`) tìm ra hai lỗ hổng mức Major và một loạt lỗi Minor. Mục này ghi lại những gì đã đổi và lý do.
+
+### 16.1 Rule đã lưu nói rõ khi chưa được thực thi
+
+Sau Create, chỉ bản preview tạm thời nói "Not enforced yet". Giờ mọi chỗ hiển thị một rule đã lưu đều nói điều đó, và tính bằng đúng phép tính mà preview dùng (`crates/egret-perm-compile/src/effect.rs`).
+
+**API.**
+
+- `GET /api/control-plane/perm/rules/{id}/effect` (`policy:read`) trả `RuleEffect` của rule đã lưu. DTO và hàm (`rule_effect`) là một với trường `effect` của `POST /perm/preview`. Hàm chạy với `editing = id`, nên rule không tự tính là "already masked" bởi chính nó. Id không tồn tại: 404. Mọi lần đọc nằm trong một snapshot `REPEATABLE READ, READ ONLY`.
+- `GET /api/control-plane/perm/rules/enforcement?ids=a,b,…` (`policy:read`) trả `[{ruleId, enforcedBy, notEnforced}]` (`RuleEnforcement`), mỗi id đã biết một mục, theo thứ tự đã hỏi. Id lặp lại chỉ được trả một lần; id không tồn tại bị bỏ qua. Tối đa **100** id khác nhau mỗi request (`RULE_ENFORCEMENT_CAP`); vượt quá, hoặc có id không phải UUID, thì trả 400.
+
+**Vì sao là endpoint riêng mà không phải một trường trong `GET /perm/rules`.** Mọi trang governance đều đọc danh sách đó, và nó không có giới hạn. Tính phạm vi cho từng rule ở đó sẽ bắt mỗi lần đọc trả giá cho một thông tin mà chỉ bốn chỗ hiển thị. Endpoint enforcement chỉ được hỏi cho những rule mà một trang đang liệt kê, và có giới hạn. Cả hai endpoint dùng chung `reached_catalogs`, `attached_engines` và `enforcement` với `rule_effect`, nên không thể nói khác nhau; một test kiểm effect của rule đã lưu bằng đúng `effect` trong preview của nó, từng trường một.
+
+**UI.** `NotEnforcedBadge` (`frontend/src/routes/governance/NotEnforced.tsx`) nói "Not enforced yet — <lý do>" bằng chữ kèm biểu tượng, không bao giờ chỉ bằng màu. Các lý do nằm ở `notEnforcedReason` trong `ruleEffect.ts`:
+
+- "no engine attached";
+- "its engines have no policy profile";
+- "this classification is not attached to any data a catalog serves";
+- "no catalog egret knows serves this path".
+
+Badge hiện ở:
+
+- dòng Rules của Effect strip (một dòng cho nhiều rule, ví dụ "1 of 2 rules: …");
+- từng hàng của tab Rules của một classification và của một bảng;
+- cạnh từng rule trong column panel;
+- trang rule, dưới dạng mục **Effect** với đầy đủ các câu của preview.
+
+Khi câu trả lời còn đang tải, bị lỗi hoặc không có quyền đọc thì không nói gì. Mỗi lần ghi rule hoặc gắn classification đều tải lại câu trả lời.
+
+### 16.2 Công việc của steward: từ 20 xuống 15 click
+
+- **Exempt** không còn bộ chọn loại: một ô tìm cả user lẫn group cùng lúc (`list_principals` không có `kind`), và mỗi kết quả ghi rõ loại của nó. Nhãn "Include" cũ không còn ở chế độ này.
+- **Add rule từ một cột**, hoặc từ một bảng có cột mang classification, bắt đầu trên classification của chính cột: Applies to = Classification, tên "Mask <classification>". Mỗi classification khác, và riêng cột hoặc riêng bảng, chỉ cách một click ("Or apply it to …"). Classification gắn trên cả bảng không bao giờ là mặc định, vì mask trên nó bị từ chối (`table_tag_mask_conflict`).
+- **Attach in Data** trên một classification ghi nhớ classification đó trong bộ nhớ. Hộp thoại Add classification kế tiếp có classification đó sẽ chọn sẵn nó một lần. Bộ nhớ bị xoá mỗi khi đổi danh tính.
+- `StewardJobClickBudget.test.tsx` chạy công việc từ column panel đến lúc tạo xong rule và chốt ở 7 click có tên. 8 click trước khi tới panel (Governance, Classifications, New classification, Create classification, Attach in Data, ô Go-to-path, Go, `email`) là số đếm trực tiếp trên các trang mà phụ lục này không đổi. Vậy cả công việc mất **15** click. Vẫn có thể bớt hai click:
+  - Enter trong ô Go-to-path thay cho click Go.
+  - Một deep link từ Attach in Data tới một bảng đã biết sẽ thay các bước trên cây.
+
+### 16.3 Các sửa nhỏ
+
+- **Who can read?**
+  - User gõ tay được tra theo username chính xác trước (`GET /perm/people?username=`). Nếu không có user đó, thẻ nói "No user named X." thay vì đưa ra kết luận.
+  - Câu "no group is named X" của server được đọc thành một câu bình thường.
+  - Danh sách gợi ý nằm trong luồng trang, nên không che nút Explain.
+  - Explain dùng `aria-disabled` kèm lý do.
+  - Chế độ group hiện dòng chung "nothing is enforcing".
+- **Rule dialog.**
+  - Sau Preview, kết quả được cuộn vào giữa và nhận focus.
+  - Câu áp dụng cho mọi nơi có classification chỉ hiện với rule trên classification.
+  - Sau Discard, focus quay về nút đã mở hộp thoại.
+  - Ở 390 px, dòng lý do nằm riêng một hàng, nên Cancel và Create đứng cạnh nhau.
+- **Focus sau một lần xoá làm mất trang.** Sau khi xoá rule hoặc classification, focus vào `h1` của trang mới (`frontend/src/lib/focusArrival.ts`). Focus không bao giờ nằm lại trên `<body>`, và không giành focus mà người dùng đã chuyển đi chỗ khác.
+- **Xoá classification.** Các truy vấn riêng của classification đã xoá (usage, Manual policies) bị bỏ khỏi cache thay vì tải lại, nên không còn 404 lạc.
+- **N22.** Add clearance và nút Add classification của khu vực Data trên catalog không phải egret dùng `aria-disabled` kèm lý do. Create classification và nút Add classification trong hộp thoại đã dùng `aria-disabled` từ commit của buổi kiểm tra.
+- **Từ ngữ.**
+  - Không còn "Include".
+  - "egret grant" thành "grant" ở số đếm của Overview và ở column panel. Dòng "egret grants are above; manual policies below" giữ chữ "egret", vì ở đó nó phân biệt grant với manual policy.
+  - "No rule selects it." thành "No rule uses it.", và hộp xác nhận gỡ bỏ mở đầu bằng điều sẽ xảy ra với các rule.
+  - "every assignment of it" thành "takes it off every table and column it is attached to".
+  - "per policy profile" và "every profile it reaches recompiles" được viết lại.
+  - Recent changes của Overview nói "attached classification X to <path>", không có dấu chấm thừa cuối đường dẫn, và gọi mask bằng nhãn trong glossary.
+- **Tên tab.** "Manual policies" là tên cuối cùng (§4, §12.3).
+- **Không làm ở đây.**
+  - N1 (Package 2) và N25 (U3).
+  - Cột hành động bị cắt của danh sách classification ở 390 px thuộc phần scroll-cue của U3.
+  - Recent changes của Overview hiện được viết lại phía client từ câu của server; chuyển việc đó vào `governance_changes.rs` là việc làm sau.

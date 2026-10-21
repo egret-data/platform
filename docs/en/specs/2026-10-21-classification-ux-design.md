@@ -80,7 +80,7 @@ Each decision states what the code does today (verified, `file:line` on `origin/
 1. A module `FE/routes/governance/glossary.ts` exports the terms of §4 as constants, plus `MASK_TYPE_LABEL` (moved from `RuleDialog.tsx:41-50`).
 2. Every string in the Classification area, the Data area's classification and rule surfaces, the rule dialog and the rule page uses those constants.
 3. `formatRuleKind` renders `Mask · Hash` and `Row filter · region = 'us'`.
-4. Tabs become **Where used · Clearance · Rules · Views · Engine policies**. The URL keys stay `where-used|clearance|rules|views|handwritten` (`FE/routes/governance/classifications/tagUrl.ts:14`), so links and bookmarks keep working.
+4. Tabs become **Where used · Clearance · Rules · Views · Manual policies**. The URL keys stay `where-used|clearance|rules|views|handwritten` (`FE/routes/governance/classifications/tagUrl.ts:14`), so links and bookmarks keep working.
 5. The rule page's way back names where it came from. `ItemHeader` takes an optional `back: {to, label}`. `RuleDialog`'s callers and the Rules tab link to the rule with `?from=classification:<id>` or `?from=data:<encoded path>`. `RulePage` reads `from` and renders "← <classification name>" or "← <table>", defaulting to "← People & groups".
 6. `OpenInDataLink` uses `ArrowRight` instead of `ExternalLink`, because every use is in-app. Importers: `openInData.tsx`, `people/RulePage.tsx`, `people/GrantPage.tsx`, `people/tabs/MasksFiltersTab.tsx`.
 
@@ -569,7 +569,7 @@ One term per concept. The UI uses the **Term** column. The Vietnamese column is 
 | What a rule is written on | **Applies to**: Classification or Path | A rule applies to every column carrying a classification, or to one catalog path. | Selects by, Reaches this tag, Tagged: on column, by tag | Áp dụng cho |
 | Who may open classified data | **Clearance** | The roles and groups allowed to open data with this classification. | Required roles and groups, gated, Not gated, opened by principals, gate | Quyền truy cập theo phân loại |
 | Where it is attached | **Where used** | The tables, columns and BI objects that carry it. | Carries it | Nơi dùng |
-| Policies written in the engine's own editor | **Engine policy** (tab "Engine policies") | A policy written directly in an engine profile's editor (Governance > Engine & policy), not generated from a rule or a grant. | Hand-written, Hand-written policies | Chính sách trong engine |
+| Policies written in the engine's own editor | **Manual policy** (tab "Manual policies") | A policy written directly in an engine profile's editor (Governance > Engine & policy), not generated from a rule or a grant. | Hand-written, Hand-written policies | Chính sách trong engine |
 | Checking who can read | **Who can read?** | Asks each engine's policy whether a person can read this. | Explain (kept as the API name), per policy profile | Ai đọc được? |
 | Taking a definition away | **Delete** (type the name to confirm) | — | "type delete", "type the key" | Xoá |
 | Taking an assignment away | **Remove** (confirm, no typing) | — | unassign, x | Gỡ |
@@ -647,7 +647,7 @@ After B3, B4 and B5: regenerate `openapi.json` (`cargo run -q -p egret-bin --bin
 
 1. **"vi translations" for UI strings cannot be done as written.** The frontend has no i18n layer, and FE-COPY-1 makes UI text English. This spec gives the glossary a Vietnamese column for docs only. Adding UI i18n would be its own package. Does the user want that?
 2. **A unique index on `lower(tags.name)`.** That would make duplicates unrepresentable (C10 checks only in handlers). It needs a decision on installs that already hold duplicates: refuse the migration, or rename. Renaming silently changes which rules reach which data, because engines match by name.
-3. **Name of the tab "Engine policies".** Chosen to replace "Hand-written". The area's sidebar entry is "Engine & policy", which is close. "Policies written in the engine" is the longer alternative.
+3. **Name of the tab.** Decided: **"Manual policies"** (controller decision, Task 5), replacing "Hand-written" and the earlier proposal "Engine policies", which sat too close to the sidebar entry "Engine & policy".
 
 ## 13. Non-goals
 
@@ -686,3 +686,53 @@ The repo rule (`CLAUDE.md`) requires a user-visible change to update `egret-data
 - one new API route (B4) and new response fields (B3, B5).
 
 Each of these would need a docs change and new screenshots once the user decides. This spec and its Vietnamese mirror are the only docs this package writes.
+
+## 16. Addendum: live walkthrough fixes (Task 13)
+
+The live walkthrough (`../plans/2026-10-21-classification-ux-live-result.md`) found two Major gaps and a list of Minor ones. This section records what changed and why.
+
+### 16.1 A stored rule says when it is not enforced
+
+After Create, only the transient preview said "Not enforced yet". Every surface that shows a stored rule now says it, from the same computation the preview uses (`crates/egret-perm-compile/src/effect.rs`).
+
+**API.**
+
+- `GET /api/control-plane/perm/rules/{id}/effect` (`policy:read`) returns the stored rule's `RuleEffect`, the same DTO and the same function (`rule_effect`) as `effect` on `POST /perm/preview`. It runs with `editing = id`, so the rule is not "already masked" by itself. Unknown id: 404. It reads one `REPEATABLE READ, READ ONLY` snapshot.
+- `GET /api/control-plane/perm/rules/enforcement?ids=a,b,…` (`policy:read`) returns `[{ruleId, enforcedBy, notEnforced}]` (`RuleEnforcement`), one entry per known id in the order asked; a repeated id is answered once, an unknown id is left out. At most **100** distinct ids per request (`RULE_ENFORCEMENT_CAP`); more, or an id that is not a UUID, is a 400.
+
+**Why a separate endpoint, not a field on `GET /perm/rules`.** The list is read by every governance page and is unbounded; computing reach for every rule there would make each of those reads pay for a fact only four surfaces show. The enforcement endpoint is asked only for the rules a surface lists, with a cap. Both endpoints share `reached_catalogs`, `attached_engines` and `enforcement` with `rule_effect`, so they cannot disagree; a test asserts that the stored rule's effect equals its preview's effect field for field.
+
+**UI.** `NotEnforcedBadge` (`frontend/src/routes/governance/NotEnforced.tsx`) says "Not enforced yet — <reason>" in words with an icon (never colour alone). The reasons are `notEnforcedReason` in `ruleEffect.ts`: "no engine attached", "its engines have no policy profile", "this classification is not attached to any data a catalog serves" or "no catalog egret knows serves this path". It is shown on the Effect strip's Rules fact (one line for several rules, for example "1 of 2 rules: …"), on each row of a classification's Rules tab and a table's Rules tab, beside each rule in the column panel, and on the rule page as an **Effect** detail with the preview's full sentences. Nothing is said while the answer is loading, failed or not permitted. Rule writes and classification attaches refetch it.
+
+### 16.2 The steward job: 20 clicks to 15
+
+- **Exempt** has no kind switch: one field searches users and groups at once (`list_principals` without `kind`), and each result names its kind. The old "Include" label is gone in this mode.
+- **Add rule from a column**, or from a table whose columns carry classifications, starts on the column's own classification (Applies to = Classification, name "Mask <classification>"). Each other classification, and the column or table alone, is one click away ("Or apply it to …"). A whole-table classification is never the default, because a mask on it is refused (`table_tag_mask_conflict`).
+- **Attach in Data** on a classification remembers it in memory, and the next Add classification dialog that offers it preselects it once. The memory is cleared on every identity switch.
+- `StewardJobClickBudget.test.tsx` drives the job from the column panel to a created rule and pins it at 7 named clicks. The 8 clicks before the panel (Governance, Classifications, New classification, Create classification, Attach in Data, the Go-to-path box, Go, `email`) are the live count on pages this addendum does not change, so the job takes **15** clicks. Two clicks could still go: Enter in the Go-to-path box replaces its Go click, and a deep link from Attach in Data to a known table would replace the tree steps.
+
+### 16.3 Smaller fixes
+
+- **Who can read?**
+  - A typed user is looked up by exact username first (`GET /perm/people?username=`). When no such user exists, the card says "No user named X." instead of a verdict.
+  - The server's "no group is named X" reads as a sentence.
+  - The suggestions sit in the flow, so they cannot cover Explain.
+  - Explain is `aria-disabled` with its reason.
+  - Group mode shows the shared "nothing is enforcing" line.
+- **Rule dialog.**
+  - After Preview, the result is scrolled to the centre and focused.
+  - The classification-wide sentence shows only for a rule on a classification.
+  - Focus returns to the opener after Discard.
+  - At 390 px the reason takes its own row, so Cancel and Create stay side by side.
+- **Focus after a page-removing delete.** After a rule or classification delete, focus lands on the new page's `h1` (`frontend/src/lib/focusArrival.ts`). It never stays on `<body>`, and focus the user has moved is never taken.
+- **Classification delete.** The deleted classification's own reads (usage, Manual policies) are dropped from the cache instead of refetched, so there is no stray 404.
+- **N22.** Add clearance and the Data area's Add classification on a non-egret catalog are `aria-disabled` with their reason. Create classification and the dialog's Add classification were already `aria-disabled` at the walkthrough's commit.
+- **Wording.**
+  - "Include" is gone.
+  - "egret grant" is now "grant" in the Overview count and the column panel. The line "egret grants are above; manual policies below" keeps "egret", where it distinguishes them from manual policies.
+  - "No rule selects it." is now "No rule uses it.", and the remove confirm leads with what happens to rules.
+  - "every assignment of it" is now "takes it off every table and column it is attached to".
+  - "per policy profile" and "every profile it reaches recompiles" are reworded.
+  - Overview Recent changes says "attached classification X to <path>" with no trailing dot, and names a mask by its glossary label.
+- **Tab name.** "Manual policies" is final (§4, §12.3).
+- **Not done here.** N1 (Package 2) and N25 (U3). The classifications list's clipped actions column at 390 px is U3's scroll-cue work. The Overview rewording is done client-side from the server's sentence; moving it into `governance_changes.rs` is a follow-up.
