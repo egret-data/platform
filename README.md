@@ -64,8 +64,8 @@ a data-API builder and a workflow engine.
 
 <table>
   <tr>
-    <td width="50%"><a href="https://egret-data.github.io/docs/platform/explore/dashboards"><img alt="A dashboard in an Egret workspace" src="https://egret-data.github.io/docs/img/platform/explore-dashboard-view.png"></a><br><sub>A dashboard in a workspace.</sub></td>
-    <td width="50%"><a href="https://egret-data.github.io/docs/platform/explore/charts"><img alt="The chart editor" src="https://egret-data.github.io/docs/img/platform/explore-chart-editor.png"></a><br><sub>The chart editor.</sub></td>
+    <td width="50%"><img alt="The E-commerce Insights dashboard: revenue and orders per quarter, a goal, a combined chart over time and a breakdown by product category" src=".github/assets/dashboard-overview.png"><br><sub>A dashboard in a workspace: the demo stack seeds this one, with 22 charts on three tabs.</sub></td>
+    <td width="50%"><img alt="The Portfolio Performance tab: a vendor donut, a box plot, best-selling products, revenue by state on a map and a scatter plot" src=".github/assets/dashboard-portfolio.png"><br><sub>Every chart type, on sample data: donut, box plot, bars, a US map, scatter, funnel, Sankey and more.</sub></td>
   </tr>
 </table>
 

@@ -64,8 +64,8 @@ và một workflow engine.
 
 <table>
   <tr>
-    <td width="50%"><a href="https://egret-data.github.io/docs/platform/explore/dashboards"><img alt="Một dashboard trong workspace Egret" src="https://egret-data.github.io/docs/img/platform/explore-dashboard-view.png"></a><br><sub>Một dashboard trong workspace.</sub></td>
-    <td width="50%"><a href="https://egret-data.github.io/docs/platform/explore/charts"><img alt="Trình chỉnh sửa chart" src="https://egret-data.github.io/docs/img/platform/explore-chart-editor.png"></a><br><sub>Trình chỉnh sửa chart.</sub></td>
+    <td width="50%"><img alt="Dashboard E-commerce Insights: doanh thu và đơn hàng theo quý, mục tiêu, biểu đồ kết hợp theo thời gian và phân tích theo danh mục sản phẩm" src=".github/assets/dashboard-overview.png"><br><sub>Một dashboard trong workspace: demo stack seed sẵn dashboard này, gồm 22 chart trên ba tab.</sub></td>
+    <td width="50%"><img alt="Tab Portfolio Performance: donut theo vendor, box plot, sản phẩm bán chạy, doanh thu theo bang trên bản đồ và scatter" src=".github/assets/dashboard-portfolio.png"><br><sub>Đủ mọi loại chart trên dữ liệu mẫu: donut, box plot, bar, bản đồ Mỹ, scatter, funnel, Sankey và hơn thế.</sub></td>
   </tr>
 </table>
 
