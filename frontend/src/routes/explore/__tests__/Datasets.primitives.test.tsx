@@ -22,6 +22,8 @@ let datasets: DatasetFixture[] = DEFAULT_DATASETS;
 let folders: { id: string; name: string }[] = [];
 let queryError: unknown = undefined;
 vi.mock("@/api/datasets", () => ({
+  useDatasetUsage: () => ({ data: [], isPending: false, isError: false }),
+  useDuplicateDataset: () => ({ mutate: vi.fn(), isPending: false }),
   useDatasets: () => ({
     data: datasets,
     isLoading: false,
