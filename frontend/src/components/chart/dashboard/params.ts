@@ -366,9 +366,23 @@ export function interpolateParams(
   const bySlug = new Map(parameters.map((p) => [p.slug, p]));
   return text.replace(/\{\{\s*([\w-]+)\s*\}\}/g, (m, slug: string) => {
     if (!bySlug.has(slug)) return m;
-    const v = values[slug];
-    return v == null ? "" : Array.isArray(v) ? v.join(", ") : String(v);
+    return formatParamValue(bySlug.get(slug)!, values[slug]);
   });
+}
+
+/** One filter value as text for a text or heading card. Dates read the way the filter chip reads
+ *  them (`summarize`): a range as "from – to", a relative or all-options pick in words. A plain
+ *  object has no text form and prints nothing; `String()` gave it `[object Object]` (KI-063). */
+function formatParamValue(param: DashboardParameter, v: unknown): string {
+  if (isBlank(v)) return "";
+  const isPlainObject = (x: unknown) => typeof x === "object" && x !== null && !Array.isArray(x);
+  if (param.type === "date" || (Array.isArray(v) && param.operator === "between")) {
+    return isPlainObject(v) && param.operator !== "all-options" ? "" : summarize(param, v);
+  }
+  if (Array.isArray(v)) {
+    return v.filter((x) => !isBlank(x) && !isPlainObject(x) && !Array.isArray(x)).map(String).join(", ");
+  }
+  return isPlainObject(v) ? "" : String(v);
 }
 
 /**

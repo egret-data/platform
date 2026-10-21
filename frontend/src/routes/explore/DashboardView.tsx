@@ -708,8 +708,8 @@ export default function DashboardView() {
               <DashboardViewActionRows
                 ws={ws}
                 dashboardId={dashboard.id}
-                canResetFilters={view.hasAnyParam(parameters.map((p) => p.slug))}
-                onResetFilters={() => view.resetParams(parameters.map((p) => p.slug))}
+                canResetFilters={paramsState.canReset}
+                onResetFilters={() => { filterDrafts.cancel(); paramsState.reset(); }}
               />
             </>
           )}
@@ -854,7 +854,10 @@ export default function DashboardView() {
                 role={editing && c.card_type !== "placeholder" ? "button" : undefined}
                 tabIndex={editing && c.card_type !== "placeholder" ? 0 : undefined}
                 onClick={editing && c.card_type !== "placeholder" ? () => openPanel({ kind: "card", cardId: c.id }) : undefined}
-                onKeyDown={editing && c.card_type !== "placeholder" ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel({ kind: "card", cardId: c.id }); } } : undefined}
+                /* Only a key pressed ON the card itself activates it (KI-059). The heading input, the text
+                   textarea and any inline filter inside the card bubble their keydown up here, and
+                   the preventDefault swallowed every space and newline typed into them. */
+                onKeyDown={editing && c.card_type !== "placeholder" ? (e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel({ kind: "card", cardId: c.id }); } } : undefined}
                 className={`relative h-full overflow-hidden ${editing && c.card_type !== "placeholder" ? "cursor-pointer" : ""} ${cardChromeClass(c)} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 {c.card_type === "placeholder" ? (
