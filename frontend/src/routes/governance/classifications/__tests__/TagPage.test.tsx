@@ -159,19 +159,22 @@ describe("a classification's page: not found, error, loading", () => {
 });
 
 describe("a classification's page: the tabs", () => {
-  it("lists the tabs in order, Where used first", async () => {
+  it("names the tabs with the glossary, in order, Where used first", async () => {
     serve({ "/tags": ok([PII]) });
     openArea(URL_PII, TAG_READER);
     await screen.findByRole("heading", { level: 1, name: "PII" }, T);
-    expect(tabNames()).toEqual(["Where used", "Clearance", "Mask & filter", "View exposure", "Hand-written"]);
+    expect(tabNames()).toEqual(["Where used", "Clearance", "Rules", "Views", "Manual policies"]);
+    for (const retired of ["Mask & filter", "View exposure", "Hand-written"]) {
+      expect(screen.queryByRole("tab", { name: retired })).not.toBeInTheDocument();
+    }
     expect(screen.getByRole("tab", { name: "Where used" })).toHaveAttribute("aria-selected", "true");
   });
 
   it.each([
     ["clearance", "Clearance"],
-    ["rules", "Mask & filter"],
-    ["views", "View exposure"],
-    ["handwritten", "Hand-written"],
+    ["rules", "Rules"],
+    ["views", "Views"],
+    ["handwritten", "Manual policies"],
   ])("?tab=%s selects %s", async (param, name) => {
     serve({ "/tags": ok([PII]) });
     openArea(`${URL_PII}?tab=${param}`, TAG_READER);

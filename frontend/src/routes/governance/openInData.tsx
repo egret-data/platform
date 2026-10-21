@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { ExternalLink } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 
 import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { Scope } from "@/api/generated/model";
@@ -72,7 +72,11 @@ export function useWorkspaceNames(first?: { workspaces: { id: string; name: stri
   }, [q.data, own]);
 }
 
-/** A quiet text link to a page; `title` says more when the link lands higher than the row's scope. */
+/**
+ * A quiet text link to an in-app page; `title` says more when the link lands
+ * higher than the row's scope. Its icon is an arrow: it navigates within
+ * egret, so it never wears the external-link icon.
+ */
 export function OpenInDataLink({ to, subject, stoppedAtPattern = false, label = "Open in Data" }: { to: string; subject: string; stoppedAtPattern?: boolean; label?: string }) {
   return (
     <Link
@@ -85,7 +89,7 @@ export function OpenInDataLink({ to, subject, stoppedAtPattern = false, label = 
       }
       title={stoppedAtPattern ? "The scope is a pattern, so this opens the nearest level above it." : undefined}
     >
-      <ExternalLink className="h-3 w-3" aria-hidden="true" />
+      <ArrowRight className="h-3 w-3" aria-hidden="true" />
       {label}
     </Link>
   );

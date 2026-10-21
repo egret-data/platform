@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -16,7 +16,9 @@ import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
-import { Detail, ItemHeader, ItemMissing } from "@/routes/governance/people/itemParts";
+import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governance/people/itemParts";
+import { DATA_BASE } from "@/routes/governance/data/objectPath";
+import { TERM } from "@/routes/governance/glossary";
 
 /** What a reader without `policy:update` reads instead of Edit and Delete. Also this module's bundle marker. */
 export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:update permission.";
@@ -28,7 +30,8 @@ export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:up
  * Data, or a tag with its classification page for a `tag:read` holder), its
  * exemptions linked to their People pages, and Edit and Delete with
  * `policy:update`. The rule comes from `GET /perm/rules`, the whole list
- * (there is no read by id).
+ * (there is no read by id). Its way back names where it was opened from
+ * (`?from=`, `RuleHeader`).
  */
 export default function RulePage() {
   const { id = "" } = useParams();
@@ -59,7 +62,7 @@ export default function RulePage() {
   if (!rule) {
     return (
       <div className="space-y-6 p-4">
-        <ItemHeader kind="Rule" title="Rule" />
+        <RuleHeader title={TERM.rule} />
         {body}
       </div>
     );
@@ -106,12 +109,12 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
 
   return (
     <div className="space-y-6 p-4">
-      <ItemHeader kind={r.kind.type === "mask" ? "Mask rule" : "Row-filter rule"} title={r.name} actions={actions} />
+      <RuleHeader title={r.name} actions={actions} />
       <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
         <Detail term="Kind">
           <span className="break-words font-mono">{formatRuleKind(r)}</span>
         </Detail>
-        <Detail term="Selects">
+        <Detail term={TERM.appliesTo}>
           <span className="break-all">{formatSelector(r)}</span>
           {r.selector.type === "tag" ? (
             r.tag_name ? (
@@ -119,7 +122,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
                 <TagLink tagKey={r.selector.key} subject={r.name} />
               ) : null
             ) : (
-              <span className="block text-xs text-muted-foreground">{`No tag has the key ${r.selector.key} now.`}</span>
+              <span className="block text-xs text-muted-foreground">{`No classification has the key ${r.selector.key} now.`}</span>
             )
           ) : link ? (
             <span className="block">
@@ -127,7 +130,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
             </span>
           ) : null}
         </Detail>
-        <Detail term="Exempt">
+        <Detail term={TERM.exempt}>
           <PrincipalNames list={r.exempt.include} workspaceName={workspaceName} />
           {r.exempt.exclude.length > 0 ? (
             <>
@@ -155,4 +158,66 @@ function TagLink({ tagKey, subject }: { tagKey: string; subject: string }) {
       <OpenInDataLink to={tagUrl(id, "rules")} subject={subject} label="Open classification" />
     </span>
   );
+}
+
+/**
+ * Where the rule page's way back goes, from `?from=` (spec C1): the page
+ * names where it was opened from.
+ * - `classification:<id>`: that classification's Rules tab, named by the
+ *   classification (`TagPage` lists rules with this, through `TagRulesSection`).
+ * - `data:<url-encoded path>`: that Data-area page, named by its last path
+ *   segment. Only a path inside the Data area is followed; anything else (an
+ *   absolute URL, `//host`) falls back, so `from` cannot send the reader off egret.
+ * - Anything else, or none: People & groups (`ItemHeader`'s default).
+ */
+type RuleFrom = { kind: "classification"; id: string } | { kind: "data"; back: ItemBack } | null;
+
+function parseRuleFrom(from: string | null): RuleFrom {
+  if (!from) return null;
+  if (from.startsWith("classification:")) {
+    const id = from.slice("classification:".length);
+    return id ? { kind: "classification", id } : null;
+  }
+  if (from.startsWith("data:")) {
+    let to: string;
+    try {
+      to = decodeURIComponent(from.slice("data:".length));
+    } catch {
+      return null;
+    }
+    if (!to.startsWith(`${DATA_BASE}/`)) return null;
+    const segment = to.slice(DATA_BASE.length + 1).split(/[?#]/)[0].split("/").filter(Boolean).at(-1);
+    if (!segment) return null;
+    let label = segment;
+    try {
+      label = decodeURIComponent(segment);
+    } catch {
+      // A segment that is not valid percent-encoding reads as written.
+    }
+    return { kind: "data", back: { to, label } };
+  }
+  return null;
+}
+
+/** The rule page's header: kind "Rule", and the way back `?from=` names. */
+function RuleHeader({ title, actions }: { title: string; actions?: ReactNode }) {
+  const [search] = useSearchParams();
+  const from = parseRuleFrom(search.get("from"));
+  const can = usePolicyPermissions();
+  if (from?.kind === "classification") {
+    // `GET /tags` needs `tag:read`, which `policy:read` does not imply: without it, ask nothing.
+    return can("tag:read") ? (
+      <ClassificationBackHeader tagId={from.id} title={title} actions={actions} />
+    ) : (
+      <ItemHeader kind={TERM.rule} title={title} actions={actions} back={{ to: tagUrl(from.id, "rules"), label: TERM.classification }} />
+    );
+  }
+  return <ItemHeader kind={TERM.rule} title={title} actions={actions} back={from?.kind === "data" ? from.back : undefined} />;
+}
+
+/** Back to classification `tagId`'s Rules tab, named by the classification once the list has it. */
+function ClassificationBackHeader({ tagId, title, actions }: { tagId: string; title: string; actions?: ReactNode }) {
+  const tags = useTags();
+  const name = tags.data?.find((t) => t.id === tagId)?.name ?? TERM.classification;
+  return <ItemHeader kind={TERM.rule} title={title} actions={actions} back={{ to: tagUrl(tagId, "rules"), label: name }} />;
 }

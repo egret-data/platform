@@ -28,6 +28,7 @@ import {
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { Section, TabError } from "@/routes/governance/tabParts";
+import { TERM } from "@/routes/governance/glossary";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
@@ -254,7 +255,7 @@ function ObjectList({
  * catalog cannot carry tags (`taggable` false: not an egret catalog, whose
  * tags the page never asks for), and says so when the tags could not be read.
  *
- * The Masking rules column (shown with `policy:read`, which `GET /perm/rules`
+ * The Rules column (shown with `policy:read`, which `GET /perm/rules`
  * needs) lists each column's mask rules by name and kind: those whose path
  * selects the column, and those whose tag the column carries itself or
  * through its table (`ruleSelects`, `tagNamesOn`), each with its exemptions
@@ -293,17 +294,17 @@ function Columns({
   const reach = tagReach(path, catalog, tags);
   return (
     <div className="space-y-2">
-      {showTags && tags.isError ? <TabError what="tags" onRetry={() => void tags.refetch()} /> : null}
+      {showTags && tags.isError ? <TabError what="classifications" onRetry={() => void tags.refetch()} /> : null}
       {canReadRules && rulesQ.isError ? (
-        <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />
+        <TabError what="rules" onRetry={() => void rulesQ.refetch()} />
       ) : null}
       <Table aria-label="Columns">
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Type</TableHead>
-            {showTags ? <TableHead>Tags</TableHead> : null}
-            {canReadRules ? <TableHead>Masking rules</TableHead> : null}
+            {showTags ? <TableHead>{TERM.classifications}</TableHead> : null}
+            {canReadRules ? <TableHead>{TERM.rules}</TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -325,7 +326,7 @@ function Columns({
                     tags.isError ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
-                      <span className="sr-only">Loading tags</span>
+                      <span className="sr-only">Loading classifications</span>
                     )
                   ) : (
                     <ColumnTags column={col.name} own={onColumn(col.name)} inherited={onTable} />
@@ -337,7 +338,7 @@ function Columns({
                   {rulesQ.isError ? (
                     <span className="text-muted-foreground">—</span>
                   ) : masks === undefined || reach.status === "loading" ? (
-                    <span className="sr-only">Loading masking rules</span>
+                    <span className="sr-only">Loading rules</span>
                   ) : (
                     <ColumnMasks
                       column={col.name}
@@ -359,7 +360,7 @@ function Columns({
 function ColumnTags({ column, own, inherited }: { column: string; own: ResourceTagDto[]; inherited: ResourceTagDto[] }) {
   if (own.length === 0 && inherited.length === 0) return <span className="text-muted-foreground">—</span>;
   return (
-    <ul aria-label={`Tags of ${column}`} className="flex flex-wrap gap-1">
+    <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
           <Badge variant="secondary" title={a.tag.key}>
@@ -396,12 +397,12 @@ function ColumnMasks({
   tagRulesUnknown: boolean;
   workspaceName: WorkspaceNames;
 }) {
-  const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Tag rules not checked</span> : null;
+  const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Rules on classifications not checked</span> : null;
   if (rules.length === 0) return unknown ?? <span className="text-muted-foreground">—</span>;
   const sorted = [...rules].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <div className="space-y-1">
-      <ul aria-label={`Masking rules of ${column}`} className="space-y-0.5">
+      <ul aria-label={`${TERM.rules} of ${column}`} className="space-y-0.5">
         {sorted.map((r) => (
           <li key={r.id} className="text-sm break-words">
             {r.name}

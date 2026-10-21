@@ -9,12 +9,30 @@ import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
  * title, the actions), a missing item's sentence, and one fact of the item.
  */
 
-/** The way back to People & groups, the item's kind above its title, and its actions. */
-export function ItemHeader({ kind, title, actions }: { kind: string; title: ReactNode; actions?: ReactNode }) {
+/** Where a single item's page goes back to; People & groups unless the page was opened from elsewhere. */
+export type ItemBack = { to: string; label: string };
+
+const PEOPLE_BACK: ItemBack = { to: PEOPLE_BASE, label: "People & groups" };
+
+/**
+ * The way back (`back`, else People & groups) as `← label`, the item's kind
+ * above its title, and its actions.
+ */
+export function ItemHeader({
+  kind,
+  title,
+  actions,
+  back = PEOPLE_BACK,
+}: {
+  kind: string;
+  title: ReactNode;
+  actions?: ReactNode;
+  back?: ItemBack;
+}) {
   return (
     <header className="space-y-2">
-      <Link to={PEOPLE_BASE} className="text-sm text-muted-foreground hover:underline">
-        People & groups
+      <Link to={back.to} className="text-sm text-muted-foreground hover:underline">
+        {`← ${back.label}`}
       </Link>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">

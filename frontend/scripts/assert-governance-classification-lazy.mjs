@@ -40,10 +40,10 @@ const MARKERS = [
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
   // The Clearance tab's compile line (spec §5.2).
   ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
-  // The Mask & filter tab without policy:read (spec §5.3).
+  // The Rules tab without policy:read (spec §5.3).
   ["src/routes/governance/classifications/tabs/RulesTab.tsx", "Rules are read with the policy:read permission"],
   // The Hand-written tab's empty state (spec §5.5).
-  ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No hand-written tag policy names this classification."],
+  ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No manual tag policy names this classification."],
 ];
 
 /**

@@ -16,16 +16,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { refusalMessage } from "@/routes/governance/policyWrites";
 import { fullPath } from "@/routes/governance/data/objectData";
 import { failedText } from "@/routes/governance/tabParts";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
- * Why Add tag is disabled on an object outside egret's catalogs (F9: the tag
+ * Why Add classification is disabled on an object outside egret's catalogs (F9: the tag
  * API is keyed by egret's warehouse, so only an egret catalog can carry a
  * tag). Also this module's bundle marker (`scripts/assert-governance-data-lazy.mjs`).
  */
-export const TAGS_EGRET_ONLY = "Tags can be added to egret-managed catalogs only";
+export const TAGS_EGRET_ONLY = "Classifications can be attached to egret-managed catalogs only";
 
 /** What the tag picker says when `GET /tags` is refused (it needs `tag:read`, which writing a tag does not imply). */
-const TAG_LIST_NEEDS_TAG_READ = "Reading the tag list needs the tag:read permission.";
+const TAG_LIST_NEEDS_TAG_READ = "Reading the classification list needs the tag:read permission.";
 
 /** The table or column a tag is added to. */
 export type TagTarget = {
@@ -87,7 +88,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
         invalidateTag(queryClient, vars.data.tag_id);
         // The Hand-written sections match tag policies through the object's tags (route A).
         invalidateObjectHandwritten(queryClient);
-        toast.success("Tag added.");
+        toast.success("Classification attached.");
         onDone();
       },
     },
@@ -106,7 +107,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
     const refused = tagsQ.error instanceof ApiError && tagsQ.error.status === 403;
     picker = (
       <Alert variant="destructive">
-        <AlertDescription>{refused ? TAG_LIST_NEEDS_TAG_READ : failedText("tag list")}</AlertDescription>
+        <AlertDescription>{refused ? TAG_LIST_NEEDS_TAG_READ : failedText("classification list")}</AlertDescription>
       </Alert>
     );
   } else if (offered === undefined) {
@@ -115,17 +116,17 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
     picker = (
       <p className="text-sm text-muted-foreground">
         {assigned.size > 0 && tagsQ.data?.status === 200 && tagsQ.data.data.length > 0
-          ? `Every tag is already on this ${noun}.`
-          : "No tags are defined yet."}
+          ? `Every classification is already on this ${noun}.`
+          : "No classifications are defined yet."}
       </p>
     );
   } else {
     picker = (
       <div className="space-y-1.5">
-        <Label htmlFor="add-tag-tag">Tag</Label>
+        <Label htmlFor="add-tag-tag">{TERM.classification}</Label>
         <Select value={tagId} onValueChange={setTagId}>
           <SelectTrigger id="add-tag-tag" className="w-full" aria-describedby={assign.isError ? "add-tag-error" : undefined}>
-            <SelectValue placeholder="Pick a tag" />
+            <SelectValue placeholder="Choose a classification" />
           </SelectTrigger>
           <SelectContent>
             {offered.map((t) => (
@@ -137,7 +138,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
         </Select>
         {assign.isError ? (
           <p id="add-tag-error" role="alert" className="text-sm text-destructive">
-            {refusalMessage(assign.error, "catalog_registry:update", "The tag could not be added. Try again.")}
+            {refusalMessage(assign.error, "catalog_registry:update", "The classification could not be attached. Try again.")}
           </p>
         ) : null}
       </div>
@@ -157,7 +158,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
       }}
     >
       <DialogHeader>
-        <DialogTitle>Add tag</DialogTitle>
+        <DialogTitle>{TERM.addClassification}</DialogTitle>
         <DialogDescription>
           <span className="font-mono text-xs break-all">{path}</span>
         </DialogDescription>
@@ -166,7 +167,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
       <DialogFooter className="items-center">
         {offered && offered.length > 0 && !tagId ? (
           <p id="add-tag-needs" className="text-xs text-muted-foreground">
-            Pick a tag to add.
+            Choose a classification to attach.
           </p>
         ) : null}
         <Button
@@ -175,7 +176,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
           aria-describedby={offered && offered.length > 0 && !tagId ? "add-tag-needs" : undefined}
         >
           {assign.isPending ? <Loader2 aria-hidden className="animate-spin" /> : <TagIcon aria-hidden />}
-          Add tag
+          {TERM.attach}
         </Button>
       </DialogFooter>
     </form>

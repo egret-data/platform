@@ -7,6 +7,7 @@ import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { dottedPath, KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { engineTypeLabel, type EngineInfo } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { TERM } from "@/routes/governance/glossary";
 
 /** What the header's tag section shows; `null` for an object that cannot carry tags (no section at all). */
 export type HeaderTags = null | { state: "loading" } | { state: "error" } | { state: "ok"; tags: TagDto[] };
@@ -15,7 +16,7 @@ export type HeaderTags = null | { state: "loading" } | { state: "error" } | { st
  * What the header says when the tags could not be read. Also this module's
  * bundle marker (`scripts/assert-governance-data-lazy.mjs`).
  */
-export const TAGS_FAILED = "Tags could not be loaded.";
+export const TAGS_FAILED = "Classifications could not be loaded.";
 
 /** The kind of an object its schema's listing could not tell. */
 export const KIND_UNKNOWN = "Kind unknown";
@@ -36,8 +37,8 @@ export type HeaderKind = NodeKind | "loading" | "unknown";
  */
 const ACTIONS = [
   { key: "onGrant", permission: "policy:update", label: "Grant access", icon: KeyRound },
-  { key: "onAddTag", permission: "catalog_registry:update", label: "Add tag", icon: TagIcon },
-  { key: "onWhoCanRead", permission: "policy:read", label: "Who can read?", icon: UserSearch },
+  { key: "onAddTag", permission: "catalog_registry:update", label: TERM.addClassification, icon: TagIcon },
+  { key: "onWhoCanRead", permission: "policy:read", label: TERM.whoCanRead, icon: UserSearch },
 ] as const;
 
 type ActionKey = (typeof ACTIONS)[number]["key"];
@@ -161,18 +162,18 @@ export function ObjectHeader({
 
       {tags ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-xs text-muted-foreground">Tags</span>
+          <span className="text-xs text-muted-foreground">{TERM.classifications}</span>
           {tags.state === "loading" ? (
             <>
               <Skeleton className="h-5 w-24" />
-              <span className="sr-only">Loading tags</span>
+              <span className="sr-only">Loading classifications</span>
             </>
           ) : tags.state === "error" ? (
             <span className="text-xs text-destructive">{TAGS_FAILED}</span>
           ) : tags.tags.length === 0 ? (
             <span className="text-xs text-muted-foreground">None on this object</span>
           ) : (
-            <ul aria-label="Tags" className="flex flex-wrap gap-1">
+            <ul aria-label={TERM.classifications} className="flex flex-wrap gap-1">
               {tags.tags.map((t) => (
                 <li key={t.id}>
                   <Badge variant="secondary" title={t.key}>

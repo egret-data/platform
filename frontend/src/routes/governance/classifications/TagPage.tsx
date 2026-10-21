@@ -16,17 +16,10 @@ import { RulesTab } from "@/routes/governance/classifications/tabs/RulesTab";
 import { ViewsTab } from "@/routes/governance/classifications/tabs/ViewsTab";
 import { WhereUsedTab } from "@/routes/governance/classifications/tabs/WhereUsedTab";
 import { CLASSIFICATIONS_BASE, type TagTab } from "@/routes/governance/classifications/tagUrl";
+import { TAG_TAB_LABEL, TERM } from "@/routes/governance/glossary";
 
-/** The tabs in order (spec §5); the first is the absence of `?tab=`. */
+/** The tabs in order (spec §5), labelled by the glossary's `TAG_TAB_LABEL`; the first is the absence of `?tab=`. */
 export const TAG_TABS: readonly TagTab[] = ["where-used", "clearance", "rules", "views", "handwritten"];
-
-export const TAG_TAB_LABEL: Record<TagTab, string> = {
-  "where-used": "Where used",
-  clearance: "Clearance",
-  rules: "Mask & filter",
-  views: "View exposure",
-  handwritten: "Hand-written",
-};
 
 export const NO_CLASSIFICATION_WITH_ID = "No classification with this id.";
 
@@ -37,7 +30,7 @@ function BackLink() {
       className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
     >
       <ArrowLeft className="h-4 w-4" aria-hidden />
-      Classifications
+      {TERM.classifications}
     </Link>
   );
 }

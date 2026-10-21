@@ -31,6 +31,7 @@ import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenS
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -39,7 +40,7 @@ import { tagUnresolved } from "@/routes/governance/ruleMatch";
 export const RULES_NEED_POLICY_READ = "Reading rules needs the policy:read permission, which this account does not have.";
 
 /** M1: what a schema or catalog page says, since it never lists a tag rule (see {@link MasksFiltersTab}). */
-export const TAG_RULES_ON_TABLES = "Tag-based rules are listed on each table's page.";
+export const TAG_RULES_ON_TABLES = "Rules on classifications are listed on each table's page.";
 
 const LEVEL_LABEL = { catalog: "Catalog", schema: "Schema", table: "Table" } as const;
 
@@ -53,12 +54,12 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
   { id: "inherited", title: "Inherited", head: "From" },
   // Titled for the page's level by `insideGroup`.
   { id: "inside", title: "On columns", head: "Column", mono: true },
-  { id: "tag", title: "By tag", head: "Tagged" },
+  { id: "tag", title: "By classification", head: TERM.classification },
   { id: "pattern", title: "Matching a pattern", head: "Pattern" },
 ];
 
 /**
- * An object's Masks & filters tab (spec §2.2): the mask and row-filter rules
+ * An object's Rules tab (spec §2.2; "Masks & filters" before the glossary): the mask and row-filter rules
  * that select the object, grouped by how they reach it: set here, inherited
  * from an ancestor (the level named), set on something inside it (a table's
  * columns; a schema's or a catalog's tables and columns, each named), by a
@@ -177,7 +178,7 @@ function Rules({
     const unresolved = assignments === null ? [] : rulesQ.data.data.filter(tagUnresolved).map((r) => r.name).sort();
     body = (
       <div className="space-y-6">
-        {reach.status === "error" ? <TabError what="tags" onRetry={reach.retry} /> : null}
+        {reach.status === "error" ? <TabError what="classifications" onRetry={reach.retry} /> : null}
         {target.object === undefined ? (
           <p className="text-xs text-muted-foreground">{TAG_RULES_ON_TABLES}</p>
         ) : null}
@@ -185,13 +186,13 @@ function Rules({
           <Alert>
             <AlertDescription>
               {unresolved.length === 1
-                ? `Rule ${unresolved[0]} selects a tag that no longer exists, so it selects nothing.`
-                : `Rules ${unresolved.join(", ")} select tags that no longer exist, so they select nothing.`}
+                ? `Rule ${unresolved[0]} uses a classification that no longer exists, so it applies to nothing.`
+                : `Rules ${unresolved.join(", ")} use classifications that no longer exist, so they apply to nothing.`}
             </AlertDescription>
           </Alert>
         ) : null}
         {rows.length === 0 ? (
-          reach.status === "error" ? null : <EmptyState icon={EyeOff} title={`No mask or row filter selects this ${noun}`} />
+          reach.status === "error" ? null : <EmptyState icon={EyeOff} title={`No rule applies to this ${noun}.`} />
         ) : (
           GROUPS.map((g) => {
             const inGroup = rows
@@ -309,7 +310,7 @@ function patternText(p: PatternLevel): string {
 function deleteDescription(r: RuleView | null): string {
   const removed = "It is permanently removed and every profile it reaches recompiles.";
   if (r?.selector.type === "tag") {
-    return `This rule selects everything tagged “${r.tag_name || r.selector.key}”, in every catalog, not one object. ${removed}`;
+    return `This rule applies to everything carrying the classification “${r.tag_name || r.selector.key}”, in every catalog, not one object. ${removed}`;
   }
   const patterns = r ? patternLevels(r.selector) : [];
   if (patterns.length === 0) return "This rule is permanently removed and every profile it reaches recompiles.";

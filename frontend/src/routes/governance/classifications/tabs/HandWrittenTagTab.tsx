@@ -15,9 +15,10 @@ import { HandWrittenItems } from "@/routes/governance/handwritten/HandWrittenIte
 import { DENY_ALL_ELSE, policyTypeWord } from "@/routes/governance/handwritten/handwrittenText";
 import { UnreadablePolicies } from "@/routes/governance/handwritten/UnreadablePolicies";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
+import { TERM } from "@/routes/governance/glossary";
 
 export const TAG_POLICIES_NEED_POLICY_READ =
-  "Hand-written tag policies are read with the policy:read permission, which this account does not have.";
+  "Manual tag policies are read with the policy:read permission, which this account does not have.";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
@@ -33,7 +34,8 @@ function editHref(p: TagPolicyRow): string | null {
 }
 
 /**
- * Hand-written (spec §5.5, Q4), from route D: every hand-written policy of a
+ * Manual policies (spec §5.5, Q4; the glossary's `TERM.manualPolicies`, the
+ * tab formerly "Hand-written"), from route D: every hand-written policy of a
  * usable tag service whose tag resource matches this classification's name
  * through the tag service-def's matcher. A row is a match on the tag name, not
  * a decision: disabled policies, deny-all-else and constructs egret does not
@@ -50,7 +52,7 @@ function Body({ tagId }: { tagId: string }) {
   const q = useControlPlaneGovernanceTagHandwritten(tagId, { query: { retry: false } });
   if (q.isError) {
     const message = (q.error as unknown as ApiError | null)?.message;
-    return <TabError what="hand-written tag policies" onRetry={() => void q.refetch()} detail={message} />;
+    return <TabError what="manual tag policies" onRetry={() => void q.refetch()} detail={message} />;
   }
   if (q.data?.status !== 200) return <ListSkeleton rows={3} cols={4} />;
   const d = q.data.data;
@@ -66,12 +68,13 @@ function Body({ tagId }: { tagId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Hand-written tag policies whose tag matches this classification&apos;s name. A listed policy names the tag; it
-        may still be disabled or outranked on the engine.
+        Manual tag policies, written in an engine profile&apos;s own editor, whose tag matches this
+        classification&apos;s name. A listed policy names the classification; it may still be disabled or outranked on
+        the engine.
       </p>
       {d.sameName.map((s) => (
         <p key={s.id} className="text-sm">
-          {"Tag "}
+          {`${TERM.classification} `}
           <Link to={tagUrl(s.id)} className="font-mono text-primary hover:underline">
             {s.key}
           </Link>
@@ -84,13 +87,13 @@ function Body({ tagId }: { tagId: string }) {
           icon={FileCode2}
           title={
             d.unreadable.length > 0
-              ? "No readable hand-written tag policy names this classification."
-              : "No hand-written tag policy names this classification."
+              ? "No readable manual tag policy names this classification."
+              : "No manual tag policy names this classification."
           }
         />
       ) : (
         <div className="overflow-x-auto rounded-md border">
-          <Table aria-label="Hand-written tag policies" className={STACKED_TABLE}>
+          <Table aria-label="Manual tag policies" className={STACKED_TABLE}>
             <TableHeader>
               <TableRow>
                 <TableHead>Policy</TableHead>
@@ -155,7 +158,7 @@ function Body({ tagId }: { tagId: string }) {
           </Table>
         </div>
       )}
-      <UnreadablePolicies policies={d.unreadable} what="tag policy" />
+      <UnreadablePolicies policies={d.unreadable} what="tag policy" adjective="manual" />
     </div>
   );
 }

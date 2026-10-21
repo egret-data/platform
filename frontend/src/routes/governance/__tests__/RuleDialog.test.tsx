@@ -142,9 +142,10 @@ describe("RuleDialog — the tag selector carries the key, not the name", () => 
     renderDialog();
 
     await user.type(screen.getByLabelText("Name"), "mask-pii");
-    await user.type(screen.getByPlaceholderText("Search tags by name…"), "PII");
+    await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     const option = await screen.findByRole("button", { name: /PII Data/ });
-    expect(option).toHaveTextContent("stored as pii_v2");
+    expect(option).toHaveTextContent("Key pii_v2");
+    expect(option).not.toHaveTextContent("stored as");
     await user.click(option);
 
     // The chosen tag now reads by name, with its stored key visible beside it —
@@ -184,7 +185,7 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
     await user.click(await screen.findByRole("option", { name: "Filter rows" }));
     await user.type(screen.getByLabelText("Filter expression"), "region = 'us'");
-    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
 
     expect(screen.getByTestId("scope-picker")).toHaveAttribute("data-row-filter-mode", "true");
@@ -212,7 +213,7 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     renderDialog();
 
     await user.type(screen.getByLabelText("Name"), "filter-region");
-    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
     await user.click(screen.getByRole("button", { name: "set-scope-with-column" }));
     expect(screen.getByTestId("scope-value")).toHaveTextContent('"column":"ssn"');
@@ -235,7 +236,7 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     const user = userEvent.setup();
     renderDialog();
 
-    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
     await user.click(screen.getByRole("button", { name: "set-scope-with-column" }));
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
@@ -254,7 +255,7 @@ describe("RuleDialog — the preview of a tag rule can fan out to every profile 
     renderDialog();
 
     await user.type(screen.getByLabelText("Name"), "mask-pii");
-    await user.type(screen.getByPlaceholderText("Search tags by name…"), "PII");
+    await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     await user.click(await screen.findByRole("button", { name: /PII Data/ }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
 
@@ -399,7 +400,7 @@ describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
     const user = userEvent.setup();
     renderDialog();
     await user.type(screen.getByLabelText("Name"), "mask-pii-columns");
-    await user.type(screen.getByPlaceholderText("Search tags by name…"), "PII");
+    await user.type(screen.getByPlaceholderText("Search classifications by name…"), "PII");
     await user.click(await screen.findByRole("button", { name: /PII Data/ }));
     await user.click(screen.getByRole("button", { name: "Preview" }));
 
@@ -423,12 +424,12 @@ describe("RuleDialog — it resolves the catalog's name itself (review M-6)", ()
     const user = userEvent.setup();
     renderDialog();
 
-    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
     await user.click(await screen.findByRole("option", { name: "Path" }));
     await user.click(screen.getByRole("button", { name: "set-scope-complete" }));
 
-    expect(screen.getByText(/Selects wh\.sales\.orders/)).toBeInTheDocument();
-    expect(screen.queryByText(/Selects cat-1/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Applies to wh\.sales\.orders/)).toBeInTheDocument();
+    expect(screen.queryByText(/Applies to cat-1/)).not.toBeInTheDocument();
   });
 });
 
@@ -437,13 +438,13 @@ describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
     const user = userEvent.setup();
     renderDialog({ initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" } });
 
-    expect(screen.getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Path");
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
     expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "")).toEqual({
       catalog_id: "cat-1",
       schema: "sales",
       table: "orders",
     });
-    expect(screen.getByText(/Selects wh\.sales\.orders/)).toBeInTheDocument();
+    expect(screen.getByText(/Applies to wh\.sales\.orders/)).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Name"), "mask-orders");
     await user.click(screen.getByRole("button", { name: "Preview" }));
@@ -468,7 +469,8 @@ describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
       initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales" },
     });
 
-    expect(screen.getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Tag");
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(screen.queryByRole("combobox", { name: "Selects by" })).not.toBeInTheDocument();
     expect(screen.getByText("PII Data")).toBeInTheDocument();
   });
 });

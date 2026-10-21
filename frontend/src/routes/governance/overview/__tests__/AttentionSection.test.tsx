@@ -30,7 +30,7 @@ describe("the counts strip", () => {
     const strip = await screen.findByTestId("overview-counts");
     expect(strip).toHaveTextContent("3catalogs");
     expect(strip).toHaveTextContent("1egret grant");
-    expect(strip).toHaveTextContent("2egret rules");
+    expect(strip).toHaveTextContent("2rules");
     expect(strip).toHaveTextContent("1classification");
     expect(strip).not.toHaveTextContent("classifications");
   });

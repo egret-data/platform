@@ -81,7 +81,7 @@ export function HandWrittenPointer({
 }: {
   explainLabel: string | null;
   explainTo?: string;
-  /** What is listed above: `egret grants` (the default) or `egret rules`. */
+  /** What is listed above: `egret grants` (the default) or `Rules`. */
   subject?: string;
   /** The sentence before the control's name. */
   lead?: string;

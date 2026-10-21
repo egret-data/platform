@@ -30,24 +30,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { formatScope } from "./permFormat";
+import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
 
-/**
+/*
  * D7: `mask_type` is a fixed list in the UI even though the API takes a free
- * string — Ranger's own vocabulary (measured against
- * `crates/egret-policy/src/service-defs/trino.json`'s `maskTypes`), with
- * `CUSTOM` revealing the expression field. Hand-maintained mirror: nothing
- * derives this from the API, because the API exposes no enumeration.
+ * string — Ranger's own vocabulary, with `CUSTOM` revealing the expression
+ * field. The list and its labels live in the glossary (`MASK_TYPES`).
  */
-const MASK_TYPES: { value: string; label: string }[] = [
-  { value: "MASK", label: "Redact" },
-  { value: "MASK_SHOW_LAST_4", label: "Partial mask: show last 4" },
-  { value: "MASK_SHOW_FIRST_4", label: "Partial mask: show first 4" },
-  { value: "MASK_HASH", label: "Hash" },
-  { value: "MASK_NULL", label: "Nullify" },
-  { value: "MASK_NONE", label: "Unmasked (retain original value)" },
-  { value: "MASK_DATE_SHOW_YEAR", label: "Date: show only year" },
-  { value: "CUSTOM", label: "Custom" },
-];
 
 const EMPTY_SCOPE: Scope = { catalog_id: "" };
 const EMPTY_EXEMPT: PrincipalSet = { include: [], exclude: [] };
@@ -80,11 +69,11 @@ function TagKeySelector({
 
   return (
     <div className="space-y-1.5">
-      <Label htmlFor="rule-tag-search">Tag</Label>
+      <Label htmlFor="rule-tag-search">{TERM.classification}</Label>
       {selected ? (
         <div className="flex items-center gap-2">
           <Badge variant="secondary">{selected.name}</Badge>
-          <span className="font-mono text-xs text-muted-foreground">stored as {selected.key}</span>
+          <span className="font-mono text-xs text-muted-foreground">{`${TERM.key} ${selected.key}`}</span>
           {!disabled && (
             <Button type="button" variant="ghost" size="sm" onClick={() => onChange("")}>
               Change
@@ -100,7 +89,7 @@ function TagKeySelector({
               onChange={(e) => setQ(e.target.value)}
               onFocus={() => setOpen(true)}
               onBlur={() => setTimeout(() => setOpen(false), 150)}
-              placeholder="Search tags by name…"
+              placeholder="Search classifications by name…"
             />
             {open && (
               <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
@@ -117,7 +106,7 @@ function TagKeySelector({
                     className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
                   >
                     <span>{t.name}</span>
-                    <span className="shrink-0 text-xs text-muted-foreground">stored as {t.key}</span>
+                    <span className="shrink-0 text-xs text-muted-foreground">{`${TERM.key} ${t.key}`}</span>
                   </button>
                 ))}
                 {filtered.length === 0 && (
@@ -266,7 +255,7 @@ function RuleForm({
       : kindType === "row_filter" && !filterExpr.trim()
         ? "A row filter needs an expression."
         : selectorType === "tag" && !tagKey
-          ? "Choose a tag."
+          ? "Choose a classification."
           : selectorType === "path" && !scope.catalog_id
             ? "Choose a catalog."
             : rowFilterPathIncomplete
@@ -413,14 +402,14 @@ function RuleForm({
           )}
 
           <div className="space-y-1.5">
-            <Label htmlFor="rule-selector-type">Selects by</Label>
+            <Label htmlFor="rule-selector-type">{TERM.appliesTo}</Label>
             <Select value={selectorType} onValueChange={(v) => setSelectorType(v as SelectorType)}>
               <SelectTrigger id="rule-selector-type">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="tag">Tag</SelectItem>
-                <SelectItem value="path">Path</SelectItem>
+                <SelectItem value="tag">{TERM.classification}</SelectItem>
+                <SelectItem value="path">{TERM.path}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -433,7 +422,7 @@ function RuleForm({
               <ScopePicker value={scope} onChange={setScope} rowFilterMode={kindType === "row_filter"} />
               {scope.catalog_id && (
                 <p className="text-xs text-muted-foreground">
-                  Selects {formatScope(scope, catalogName(scope.catalog_id))}
+                  {TERM.appliesTo} {formatScope(scope, catalogName(scope.catalog_id))}
                 </p>
               )}
             </div>
@@ -506,7 +495,7 @@ function RuleForm({
 
             {!preview && !previewError && (
               <p className="text-xs text-muted-foreground">
-                Run a preview before saving. A tag rule is catalog-unscoped, so this can recompile
+                Run a preview before saving. A rule on a classification is catalog-unscoped, so this can recompile
                 every Trino profile in the installation — see which, here, before committing.
               </p>
             )}

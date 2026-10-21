@@ -260,7 +260,7 @@ export default function ClassificationsIndex() {
           onOpenChange={(o) => {
             if (!o) setDeleting(null);
           }}
-          where="the tag's page"
+          where="the classification's page"
           opener={menuOpener}
         />
       ) : null}

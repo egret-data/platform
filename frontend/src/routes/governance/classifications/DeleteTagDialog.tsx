@@ -35,7 +35,7 @@ export function DeleteTagDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Where the delete was asked: names the rules section in the 409 toast (`tagDeleteFailure.ts`). */
-  where: "this page" | "the tag's page";
+  where: "this page" | "the classification's page";
   /** The control that opened the dialog; focus returns to it on close (#4a D3), the dialog being opened from state. */
   opener?: RefObject<HTMLElement | null>;
 }) {

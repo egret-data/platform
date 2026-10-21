@@ -45,6 +45,8 @@ describe("Where used: Data", () => {
     const groups = within(data()).getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
     expect(groups).toEqual(["ice.crm", "ice.sales", "zeta.s"]);
     const crm = within(data()).getByRole("table", { name: "ice.crm" });
+    expect(within(crm).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Table", "Attached to"]);
+    expect(within(data()).queryByRole("columnheader", { name: "Carries it" })).not.toBeInTheDocument();
     expect(within(crm).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
       "accounts",
       "people",

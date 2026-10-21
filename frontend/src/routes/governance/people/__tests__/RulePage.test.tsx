@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * rule: its kind, what it selects (a path, with Open in Data; a tag, with its
  * classification page when the viewer holds `tag:read`), its exemptions
  * linked to their People pages, and Edit and Delete with `policy:update`. The
- * Mask & filter rules list's tests of these facts live here now. `RuleDialog`
+ * old rules list's tests of these facts live here now. `RuleDialog`
  * is a stand-in that says which rule it was opened on (`RuleDialog.test.tsx`
  * covers the dialog).
  */
@@ -82,11 +82,15 @@ function serveRules(rows: RuleView[]) {
 let deleteMutate: ReturnType<typeof vi.fn>;
 
 function renderPage(id = "r1", me: Me | null = ADMIN) {
+  return renderAt(`/governance/rules/${id}`, me);
+}
+
+function renderAt(url: string, me: Me | null = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={[`/governance/rules/${id}`]}>
+        <MemoryRouter initialEntries={[url]}>
           <Routes>
             <Route path="/governance/rules/:id" element={<RulePage />} />
           </Routes>
@@ -122,8 +126,8 @@ describe("RulePage: what the rule is", () => {
     ]);
     renderPage();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("mask-ssn");
-    expect(detail("Kind")).toHaveTextContent("mask · MASK_HASH");
-    expect(detail("Selects")).toHaveTextContent("tag PII Data");
+    expect(detail("Kind")).toHaveTextContent("Mask · Hash");
+    expect(detail("Applies to")).toHaveTextContent("Classification PII Data");
     expect(detail("Exempt")).toHaveTextContent("user alice except group temps");
     expect(within(detail("Exempt")).getByRole("link", { name: "alice" })).toHaveAttribute(
       "href",
@@ -134,6 +138,8 @@ describe("RulePage: what the rule is", () => {
       "/governance/people/groups/temps",
     );
     expect(screen.queryByText("filter-region")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selects", { selector: "dt" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/MASK_HASH/)).not.toBeInTheDocument();
   });
 
   test("a workspace's members in an exemption read by the workspace's name", () => {
@@ -152,8 +158,8 @@ describe("RulePage: what the rule is", () => {
   test("a row-filter rule selecting by path shows its expression and the resolved scope", () => {
     serveRules([pathRule()]);
     renderPage("r2");
-    expect(detail("Kind")).toHaveTextContent("row filter · region = 'us'");
-    expect(detail("Selects")).toHaveTextContent("wh.sales.orders");
+    expect(detail("Kind")).toHaveTextContent("Row filter · region = 'us'");
+    expect(detail("Applies to")).toHaveTextContent("wh.sales.orders");
   });
 });
 
@@ -168,17 +174,17 @@ describe("RulePage: names that need no second permission", () => {
     } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
     serveRules([maskRule(), pathRule()]);
     const { unmount } = renderPage("r1", READER);
-    expect(detail("Selects")).toHaveTextContent("tag PII Data");
+    expect(detail("Applies to")).toHaveTextContent("Classification PII Data");
     expect(screen.queryByText(/pii_v2/)).not.toBeInTheDocument();
     unmount();
     renderPage("r2", READER);
-    expect(detail("Selects")).toHaveTextContent("wh.sales.orders");
+    expect(detail("Applies to")).toHaveTextContent("wh.sales.orders");
   });
 
   test("does not call the catalog registry at all", () => {
     serveRules([maskRule()]);
     renderPage();
-    expect(detail("Selects")).toHaveTextContent("tag PII Data");
+    expect(detail("Applies to")).toHaveTextContent("Classification PII Data");
     expect(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).not.toHaveBeenCalled();
   });
 });
@@ -203,19 +209,19 @@ describe("RulePage: Open in Data, or the tag", () => {
   test("a tag rule whose key the tag list does not hold gets no link, never a broken one", () => {
     serveRules([maskRule({ selector: { type: "tag", key: "gone" }, tag_name: "PII Data" })]);
     renderPage("r1", TAG_READER);
-    expect(detail("Selects")).toHaveTextContent("tag PII Data");
+    expect(detail("Applies to")).toHaveTextContent("Classification PII Data");
     expect(screen.queryByRole("link", { name: /Open classification/ })).not.toBeInTheDocument();
   });
 
   test("a tag rule whose tag no longer exists says so and links nowhere", () => {
     serveRules([maskRule({ selector: { type: "tag", key: "gone" }, tag_name: null })]);
     renderPage("r1", TAG_READER);
-    expect(detail("Selects")).toHaveTextContent("tag gone");
-    expect(screen.getByText("No tag has the key gone now.")).toBeInTheDocument();
+    expect(detail("Applies to")).toHaveTextContent("Classification gone");
+    expect(screen.getByText("No classification has the key gone now.")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Open classification/ })).not.toBeInTheDocument();
   });
 
-  test("a column path rule opens the table's Masks & filters tab", () => {
+  test("a column path rule opens the table's Rules tab", () => {
     serveRules([
       maskRule({ selector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders", column: "email" } }),
     ]);
@@ -224,6 +230,46 @@ describe("RulePage: Open in Data, or the tag", () => {
       "href",
       "/governance/data/wh/sales/orders?column=email&tab=masks",
     );
+  });
+});
+
+describe("RulePage: the way back", () => {
+  test("the way back names the classification the rule was opened from", async () => {
+    serveRules([maskRule()]);
+    vi.mocked(tagsApi.useTags).mockReturnValue({ data: [{ id: "t-pii", key: "pii_v2", name: "PII Data" }] } as never);
+    renderAt("/governance/rules/r1?from=classification:t-pii", WRITER);
+    const back = await screen.findByRole("link", { name: "← PII Data" });
+    expect(back).toHaveAttribute("href", "/governance/classifications/t-pii?tab=rules");
+    expect(screen.queryByRole("link", { name: "People & groups" })).not.toBeInTheDocument();
+  });
+
+  test("without tag:read it says Classification and never asks for the tag list", () => {
+    serveRules([maskRule()]);
+    renderAt("/governance/rules/r1?from=classification:t-pii", READER);
+    expect(screen.getByRole("link", { name: "← Classification" })).toHaveAttribute(
+      "href",
+      "/governance/classifications/t-pii?tab=rules",
+    );
+    expect(tagsApi.useTags).not.toHaveBeenCalled();
+  });
+
+  test("a rule opened from Data goes back to that object, named by its last segment", () => {
+    serveRules([maskRule()]);
+    const from = encodeURIComponent("/governance/data/wh/sales/orders?tab=masks");
+    renderAt(`/governance/rules/r1?from=data:${from}`, READER);
+    expect(screen.getByRole("link", { name: "← orders" })).toHaveAttribute(
+      "href",
+      "/governance/data/wh/sales/orders?tab=masks",
+    );
+  });
+
+  test("a from outside the Data area, or none, goes back to People & groups", () => {
+    serveRules([maskRule()]);
+    const { unmount } = renderAt(`/governance/rules/r1?from=data:${encodeURIComponent("//evil.example/x")}`, READER);
+    expect(screen.getByRole("link", { name: "← People & groups" })).toHaveAttribute("href", "/governance/people");
+    unmount();
+    renderPage("r1", READER);
+    expect(screen.getByRole("link", { name: "← People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 });
 

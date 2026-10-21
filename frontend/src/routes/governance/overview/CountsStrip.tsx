@@ -4,8 +4,9 @@ import { SummaryStrip, type SummaryStripItem } from "@/components/explore/Summar
 /**
  * What the reader may count (spec §2). A count the server sends as `null` is
  * one the reader may not read: it is left out, never shown as 0. "egret
- * grants/rules": hand-written engine policies are not counted, and a label
- * never claims more than it counts.
+ * grants": hand-written engine policies are not counted, and a label never
+ * claims more than it counts. "rules" needs no qualifier: a rule is egret's
+ * by the glossary (an engine's own is a policy).
  */
 export function CountsStrip({ counts }: { counts: Counts }) {
   const items: SummaryStripItem[] = [];
@@ -14,7 +15,7 @@ export function CountsStrip({ counts }: { counts: Counts }) {
   };
   add(counts.catalogs, "catalogs", "catalog");
   add(counts.grants, "egret grants", "egret grant");
-  add(counts.rules, "egret rules", "egret rule");
+  add(counts.rules, "rules", "rule");
   add(counts.tags, "classifications", "classification");
   if (items.length === 0) return null;
   return (

@@ -141,7 +141,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Table</TableHead>
-                      <TableHead>Carries it</TableHead>
+                      <TableHead>Attached to</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

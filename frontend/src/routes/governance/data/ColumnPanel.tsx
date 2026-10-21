@@ -17,6 +17,7 @@ import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
+import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
 /**
@@ -42,10 +43,12 @@ type ColumnPath = ObjectPath & { schema: string; object: string; column: string 
  * page's heading.
  *
  * It lists, for this one column:
- * - **Tags**: its own, then its table's marked "from table" (a table's tag
- *   reaches its columns, `tagNamesOn`); only an egret catalog carries tags (F9).
- * - **Masking rules** that select it, by path or by a tag it carries, with
- *   their exemptions (`ruleSelects`).
+ * - **Classifications**: its own, then its table's marked "from table" (a
+ *   table's classification reaches its columns, `tagNamesOn`); only an egret
+ *   catalog carries them (F9).
+ * - **Rules** (masks; a row filter never applies to a column) that apply to
+ *   it, by path or by a classification it carries, with their exemptions
+ *   (`ruleSelects`).
  * - **Grants** set on it (column level, by name or by a pattern that matches
  *   it, `grantCoverage` "here"); the grants on the table and above are the
  *   Permissions tab's.
@@ -204,7 +207,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
               }
             >
               <TagIcon aria-hidden />
-              Add tag
+              {TERM.addClassification}
             </Button>
             {egret ? null : (
               <p id="column-add-tag-reason" className="text-xs text-muted-foreground">
@@ -216,13 +219,13 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
       </div>
 
       {egret ? (
-        <Section title="Tags">
+        <Section title={TERM.classifications}>
           {tags.isError ? (
-            <TabError what="tags" onRetry={() => void tags.refetch()} />
+            <TabError what="classifications" onRetry={() => void tags.refetch()} />
           ) : assignments === undefined ? (
             <ListSkeleton rows={1} cols={2} />
           ) : assignments === null ? null : own.length + fromTable.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No tag on this column</p>
+            <p className="text-sm text-muted-foreground">No classification on this column</p>
           ) : (
             <TagList column={path.column} own={own} fromTable={fromTable} />
           )}
@@ -231,7 +234,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
 
       {canRead ? (
         <>
-          <Section title="Masking rules">
+          <Section title={TERM.rules}>
             <Masks path={path} catalog={catalog} tags={tags} />
           </Section>
           <Section title="Grants">
@@ -263,7 +266,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
 
 function TagList({ column, own, fromTable }: { column: string; own: ResourceTagDto[]; fromTable: ResourceTagDto[] }) {
   return (
-    <ul aria-label={`Tags of ${column}`} className="flex flex-wrap gap-1">
+    <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
           <Badge variant="secondary" title={a.tag.key}>
@@ -283,11 +286,11 @@ function TagList({ column, own, fromTable }: { column: string; own: ResourceTagD
   );
 }
 
-/** The mask rules that select the column, by path or by a tag it carries (its own or its table's). */
+/** The mask rules that apply to the column, by path or by a classification it carries (its own or its table's). */
 function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
-  if (rulesQ.isError) return <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />;
+  if (rulesQ.isError) return <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   const reach = tagReach(path, catalog, tags);
   if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const names = reach.status === "ok" ? tagNamesOn(reach.assignments, path) : [];
@@ -300,25 +303,25 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
   selected.sort((a, b) => a.rule.name.localeCompare(b.rule.name));
   const unchecked =
     reach.status === "error" && rulesQ.data.data.some((r) => r.kind.type === "mask" && r.selector.type === "tag") ? (
-      <p className="text-xs text-muted-foreground">Tag rules not checked: the tags could not be loaded.</p>
+      <p className="text-xs text-muted-foreground">Rules on classifications not checked: the classifications could not be loaded.</p>
     ) : null;
   if (selected.length === 0) {
     return (
       <>
-        <p className="text-sm text-muted-foreground">No masking rule selects this column</p>
+        <p className="text-sm text-muted-foreground">No rule applies to this column.</p>
         {unchecked}
       </>
     );
   }
   return (
     <div className="space-y-1">
-      <ul aria-label={`Masking rules of ${path.column}`} className="space-y-1">
+      <ul aria-label={`${TERM.rules} of ${path.column}`} className="space-y-1">
         {selected.map(({ rule, by }) => (
           <li key={rule.id} className="text-sm break-words">
             {rule.name}
             <span className="text-xs text-muted-foreground">
               {` ${formatRuleKind(rule)} · `}
-              {by === "path" ? "by path" : `by tag ${rule.tag_name ?? ""}`}
+              {by === "path" ? "by path" : `by classification ${rule.tag_name ?? ""}`}
               {rule.exempt.include.length > 0 ? ` · except ${formatPrincipals(rule.exempt.include, workspaceName)}` : ""}
             </span>
           </li>

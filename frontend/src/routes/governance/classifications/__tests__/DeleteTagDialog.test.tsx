@@ -121,7 +121,7 @@ describe("Delete a classification (CL14)", () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     const [message, opts] = vi.mocked(toast.error).mock.calls[0] as unknown as [string, { description: string }];
     expect(message).toBe(sentence);
-    expect(opts.description).toBe('The "Mask and filter rules" section on this page lists the rules that select this tag.');
+    expect(opts.description).toBe('The "Rules" tab on this page lists the rules that use this classification.');
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Delete" })).toHaveFocus());
     expect(where()).toBe(PAGE);

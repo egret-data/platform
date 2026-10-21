@@ -12,6 +12,7 @@ import { PrincipalHandWrittenSection } from "@/routes/governance/handwritten/Pri
 import { principalSubject, principalTitle, type Principal } from "@/routes/governance/people/principalData";
 import { REACH_GROUPS, reachesAtAll, reachGroup, setReach, type Reach, type ReachGroup } from "@/routes/governance/people/reach";
 import { GROUP_TITLE, NO_USERNAME_NOTE, reachText } from "@/routes/governance/people/tabs/PermissionsTab";
+import { TERM } from "@/routes/governance/glossary";
 
 /** The Permissions tab's group titles; an exclude here takes the principal out of an exemption. */
 const RULE_GROUP_TITLE: Record<ReachGroup, string> = { ...GROUP_TITLE, excluded: "Excluded from the exemption" };
@@ -29,19 +30,19 @@ export const EXEMPTION_NOT_ON_ENGINES =
 /** `N other rules apply to everyone they do not exempt; …`, in the singular for one. */
 export function otherRulesText(n: number): string {
   return n === 1
-    ? "1 other rule applies to everyone it does not exempt; each object's Masks & filters tab lists it."
-    : `${n} other rules apply to everyone they do not exempt; each object's Masks & filters tab lists them.`;
+    ? "1 other rule applies to everyone it does not exempt; each object's Rules tab lists it."
+    : `${n} other rules apply to everyone they do not exempt; each object's Rules tab lists them.`;
 }
 
 type Row = { rule: RuleView; reach: Reach[] };
 
 /**
- * A principal's Masks & filters tab (spec §2): every egret mask and row-filter
+ * A principal's Rules tab (spec §2; "Masks & filters" before the glossary): every egret mask and row-filter
  * rule whose exemption stands for this principal (`setReach` on `exempt`,
  * against the server's `standsFor`), grouped as the Permissions tab groups
  * grants (`reachGroup`), each row saying every path and whether engines apply
  * it. The rules exempting nobody here are counted, not listed: they apply to
- * the principal like to everyone else, and each object's Masks & filters tab
+ * the principal like to everyone else, and each object's Rules tab
  * lists them. The rules come from `GET /perm/rules` (`policy:read`, which the
  * People area's route already requires). Read-only: a rule is edited on its
  * own page, `/governance/rules/:id`.
@@ -80,7 +81,7 @@ function EgretRules({ principal }: { principal: Principal }) {
   const header = noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null;
   const pointer = (
     <HandWrittenPointer
-      subject="egret rules"
+      subject="Rules"
       lead="To see the engines' answer, use"
       explainLabel={isPublic ? null : "Check access"}
       explainTo={isPublic ? undefined : "?tab=check"}
@@ -92,7 +93,7 @@ function EgretRules({ principal }: { principal: Principal }) {
     return (
       <div className="space-y-2">
         {header}
-        <EmptyState icon={EyeOff} title={`No egret rule exempts ${name}`} />
+        <EmptyState icon={EyeOff} title={`No rule exempts ${name}`} />
         {rest}
         {pointer}
       </div>
@@ -137,7 +138,7 @@ function RuleTable({
       <TableHeader>
         <TableRow>
           <TableHead>Rule</TableHead>
-          <TableHead>Selects</TableHead>
+          <TableHead>{TERM.appliesTo}</TableHead>
           <TableHead>How the exemption reaches</TableHead>
         </TableRow>
       </TableHeader>
