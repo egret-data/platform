@@ -708,8 +708,8 @@ export default function DashboardView() {
               <DashboardViewActionRows
                 ws={ws}
                 dashboardId={dashboard.id}
-                canResetFilters={view.hasAnyParam(parameters.map((p) => p.slug))}
-                onResetFilters={() => view.resetParams(parameters.map((p) => p.slug))}
+                canResetFilters={paramsState.canReset}
+                onResetFilters={() => { filterDrafts.cancel(); paramsState.reset(); }}
               />
             </>
           )}
