@@ -241,7 +241,7 @@ function Rules({
     <div className="space-y-4">
       {canWrite ? (
         <div className="flex justify-end">
-          <Button size="sm" onClick={() => setDialog(newRuleEntry(target, catalog.id))}>
+          <Button size="sm" onClick={() => setDialog(newRuleEntry(target, catalog.id, assignments))}>
             <Plus aria-hidden />
             Add rule
           </Button>
@@ -254,7 +254,7 @@ function Rules({
         onOpenChange={(open) => {
           if (!open) setDialog(null);
         }}
-        entry={dialog ?? newRuleEntry(target, catalog.id)}
+        entry={dialog ?? newRuleEntry(target, catalog.id, assignments)}
       />
       <ConfirmDeleteDialog
         open={deleting !== null}
@@ -420,10 +420,20 @@ function RuleTable({
   );
 }
 
-/** The rule dialog's entry point for a new rule on `p` (spec C8.3): a table, or a catalog or schema. */
-function newRuleEntry(p: ObjectPath, catalogId: string): RuleEntry {
+/**
+ * The rule dialog's entry point for a new rule on `p` (spec C8.3): a table, or
+ * a catalog or schema. A table offers the classifications on its columns
+ * (`assignments`), the first preselected (Task 13); one on the whole table is
+ * left out, since a mask on it makes the table unreadable and is refused.
+ */
+function newRuleEntry(p: ObjectPath, catalogId: string, assignments: ResourceTagDto[] | null = null): RuleEntry {
   if (p.schema !== undefined && p.object !== undefined) {
-    return { kind: "table", catalogId, schema: p.schema, table: p.object };
+    const classifications = (assignments ?? [])
+      .filter((a) => a.column !== "")
+      .map((a) => ({ key: a.tag.key, name: a.tag.name }))
+      .filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return { kind: "table", catalogId, schema: p.schema, table: p.object, classifications };
   }
   return { kind: "scope", catalogId, schema: p.schema };
 }

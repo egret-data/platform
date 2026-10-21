@@ -622,7 +622,7 @@ describe("RuleDialog — defaults per entry point (C8.3)", () => {
     expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({ catalog_id: "cat-1", schema: "sales", table: "orders" });
   });
 
-  test("from a column: a mask on that column, with a switch to each classification it carries", async () => {
+  test("from a column with a classification: Applies to = that classification by default, the column's path one click away", async () => {
     const user = userEvent.setup();
     renderDialog({
       entry: {
@@ -635,19 +635,40 @@ describe("RuleDialog — defaults per entry point (C8.3)", () => {
       },
     });
     expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Mask PII Data");
+    expect(screen.getByText("PII Data")).toBeInTheDocument();
+
+    // Preview needs nothing else: the default is a complete rule.
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({ type: "tag", key: "pii_v2" });
+
+    // The column alone is one click away, with its path filled in.
+    await user.click(screen.getByRole("button", { name: "Or apply it to column email only" }));
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
     expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({
       catalog_id: "cat-1",
       schema: "sales",
       table: "orders",
       column: "email",
     });
-
-    await user.type(screen.getByLabelText(/^Name/), "mask-email");
+    // And back.
     await user.click(screen.getByRole("button", { name: "Or apply it to PII Data" }));
     expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
-    expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({ type: "tag", key: "pii_v2" });
+  });
+
+  test("from a column with no classification: a mask on that column's path", () => {
+    renderDialog({
+      entry: { kind: "column", catalogId: "cat-1", schema: "sales", table: "orders", column: "email", classifications: [] },
+    });
+    expect(screen.getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
+    expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "{}")).toEqual({
+      catalog_id: "cat-1",
+      schema: "sales",
+      table: "orders",
+      column: "email",
+    });
   });
 
   test("from a rule page: the rule's own kind and selector", () => {

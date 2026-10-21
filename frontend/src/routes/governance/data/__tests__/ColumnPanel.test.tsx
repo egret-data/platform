@@ -690,7 +690,7 @@ describe("Add classification", () => {
 describe("Add rule from the column panel (spec C8.3)", () => {
   const RULE_WRITER: Me = { ...STEWARD, permissions: ["policy:read", "policy:update", "tag:read"] };
 
-  it("opens the rule dialog on a mask of this column, offering each classification it carries", async () => {
+  it("opens the rule dialog on the column's own classification, with its table's and the column alone one click away", async () => {
     serveData(fixture());
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?column=email", RULE_WRITER);
@@ -699,13 +699,16 @@ describe("Add rule from the column panel (spec C8.3)", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "New rule" });
     expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    // Its own classification (PII), never its table's (a mask on a whole-table classification is refused).
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
+    expect(within(dialog).getByRole("button", { name: "Or apply it to CONFIDENTIAL" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Or apply it to PII" })).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Or apply it to column email only" }));
     expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
     await waitFor(() => expect(within(dialog).getByRole("combobox", { name: /^Catalog/ })).toHaveTextContent("ice"));
     expect(within(dialog).getByLabelText("Column")).toHaveValue("email");
-    // Its own classification and its table's, each one click from a rule on the classification.
-    expect(within(dialog).getByRole("button", { name: "Or apply it to PII" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Or apply it to CONFIDENTIAL" })).toBeInTheDocument();
-
     await user.click(within(dialog).getByRole("button", { name: "Or apply it to PII" }));
     expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
   });

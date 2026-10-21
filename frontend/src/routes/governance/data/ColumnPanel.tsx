@@ -60,9 +60,10 @@ type ColumnPath = ObjectPath & { schema: string; object: string; column: string 
  * F10: these are lists of what selects the column, never who sees what. Who
  * can read it is explain's answer, from "Who can read this column?".
  *
- * Add rule (`policy:update`, spec C8.3) opens `RuleDialog` on a mask of this
- * column, offering each classification the column carries as "Or apply it to
- * <classification>".
+ * Add rule (`policy:update`, spec C8.3) opens `RuleDialog` on a mask of the
+ * column's own classification when it has one (Task 13), else of the column's
+ * path; each other classification it carries, and the column alone, is one
+ * click away ("Or apply it to …").
  */
 export function ColumnPanel({
   path,
@@ -191,9 +192,10 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
   const own = (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, path.column));
   const fromTable = (assignments ?? []).filter((a) => a.column === "");
   // What a rule on a classification would reach this column through: its own and its table's, once each.
-  const carried = [...own, ...fromTable]
-    .map((a) => ({ key: a.tag.key, name: a.tag.name }))
-    .filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i);
+  const carried = [
+    ...own.map((a) => ({ key: a.tag.key, name: a.tag.name })),
+    ...fromTable.map((a) => ({ key: a.tag.key, name: a.tag.name, wholeTable: true })),
+  ].filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i);
 
   return (
     <div className="space-y-6">

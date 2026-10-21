@@ -57,6 +57,7 @@ import {
 } from "@/routes/governance/RulePreview";
 import {
   clearRuleDraft,
+  entryScope,
   loadStoredRuleDraft,
   ruleDraftKey,
   saveRuleDraft,
@@ -176,9 +177,14 @@ type FormState = {
   exempt: PrincipalSet;
 };
 
-function stateOf(rule: NewRule): FormState {
+/**
+ * The form's fields for `rule`. A rule on a classification keeps `pathScope`
+ * (the entry point's table or column) as its path, so switching Applies to =
+ * Path lands on that path rather than an empty picker.
+ */
+function stateOf(rule: NewRule, pathScope: Scope | null = null): FormState {
   const { kind, selector } = rule;
-  let scope = EMPTY_SCOPE;
+  let scope = pathScope ?? EMPTY_SCOPE;
   if (selector.type === "path") {
     const { catalog_id, schema, table, column } = selector;
     scope = { catalog_id, schema, table, column };
@@ -292,6 +298,7 @@ function RuleForm({
   const draftKey = me ? ruleDraftKey(me.user_id, entry) : null;
   const seed = seedRule(entry);
   const seedSnapshot = snapshotOf(seed);
+  const pathScope = entryScope(entry);
   /**
    * A rule carries no version, so an `edit` draft is restored only when the
    * rule is still the one it began from (its `base`). A draft of a rule
@@ -301,8 +308,8 @@ function RuleForm({
   const [start] = useState(() => {
     const stored = draftKey ? loadStoredRuleDraft(draftKey) : undefined;
     const stale = stored !== undefined && entry.kind === "edit" && stored.base !== seedSnapshot;
-    if (stored && !stale) return { state: stateOf(stored.draft), base: stored.base, restored: true, discarded: false };
-    return { state: stateOf(seed), base: seedSnapshot, restored: false, discarded: stale };
+    if (stored && !stale) return { state: stateOf(stored.draft, pathScope), base: stored.base, restored: true, discarded: false };
+    return { state: stateOf(seed, pathScope), base: seedSnapshot, restored: false, discarded: stale };
   });
 
   // Read here rather than passed down — see the same note in `GrantDialog`
@@ -324,7 +331,7 @@ function RuleForm({
   // shows the server's fields, and never becomes a draft of the old ones.
   if (!touched && seedSnapshot !== base) {
     setBase(seedSnapshot);
-    setForm(stateOf(seed));
+    setForm(stateOf(seed, pathScope));
   }
   const { name, kindType, maskType, valueExpr, filterExpr, selectorType, tagKey, scope, exempt } = form;
 
@@ -423,6 +430,27 @@ function RuleForm({
   }
 
   const previewStale = previewedFor !== bodySnapshot;
+
+  /**
+   * One click to what else this entry point could apply the rule to (spec
+   * C8.3, Task 13): each classification the table or column carries but the
+   * rule is not on, and, while it is on a classification, the entry's own path.
+   */
+  const entryClassifications = entry.kind === "column" || entry.kind === "table" ? (entry.classifications ?? []) : [];
+  const alternatives: { id: string; label: string; apply: () => void }[] = [
+    ...entryClassifications
+      .filter((c) => !(selectorType === "tag" && tagKey === c.key))
+      .map((c) => ({ id: `tag:${c.key}`, label: `Or apply it to ${c.name}`, apply: () => update({ selectorType: "tag", tagKey: c.key }) })),
+    ...(pathScope && selectorType === "tag" && entryClassifications.length > 0
+      ? [
+          {
+            id: "path",
+            label: entry.kind === "column" ? `Or apply it to column ${entry.column} only` : `Or apply it to table ${pathScope.table} only`,
+            apply: () => update({ selectorType: "path", scope: pathScope }),
+          },
+        ]
+      : []),
+  ];
 
   async function runPreview() {
     setPreviewError(null);
@@ -680,17 +708,12 @@ function RuleForm({
               <SelectItem value="path">{TERM.path}</SelectItem>
             </SelectContent>
           </Select>
-          {entry.kind === "column" && selectorType === "path" && entry.classifications.length > 0 && (
+          {alternatives.length > 0 && (
             <ul role="list" className="flex flex-wrap gap-x-3 gap-y-1">
-              {entry.classifications.map((c) => (
-                <li key={c.key}>
-                  <Button
-                    type="button"
-                    variant="link"
-                    className="h-auto p-0 text-xs"
-                    onClick={() => update({ selectorType: "tag", tagKey: c.key })}
-                  >
-                    {`Or apply it to ${c.name}`}
+              {alternatives.map((a) => (
+                <li key={a.id}>
+                  <Button type="button" variant="link" className="h-auto p-0 text-xs" onClick={a.apply}>
+                    {a.label}
                   </Button>
                 </li>
               ))}

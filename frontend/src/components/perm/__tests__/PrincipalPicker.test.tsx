@@ -143,34 +143,55 @@ describe("PrincipalPicker", () => {
     expect(screen.getByRole("combobox", { name: "Exclude kind" })).toBeInTheDocument();
   });
 
-  test("exempt mode renders no Exclude section, and Include offers no role kind", async () => {
+  test("exempt mode renders no Exclude section and no kind switch: one field searches users and groups", async () => {
     const user = userEvent.setup();
-    renderPicker({ exempt: true });
+    mockPrincipals([
+      { kind: "user", name: "alice.doe@example.com", label: "Alice Doe", username: "alice-doe" },
+      { kind: "group", name: "data-team", label: "data-team", username: null },
+    ]);
+    const { onChange } = renderPicker({ exempt: true }, { stateful: true });
 
     expect(screen.queryByText("Exclude")).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "Exclude kind" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Include")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /kind$/ })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "Include kind" }));
-    expect(await screen.findByRole("option", { name: "user" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "group" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "role" })).not.toBeInTheDocument();
+    await user.type(screen.getByRole("combobox", { name: "Exempt search" }), "a");
+    const listbox = await screen.findByRole("listbox", { name: "Exempt suggestions" });
+    // Every kind at once, each result saying which kind it is.
+    await waitFor(() => expect(within(listbox).getAllByRole("option")).toHaveLength(2));
+    expect(within(listbox).getByRole("option", { name: /^data-team\s*Group$/ })).toBeInTheDocument();
+    expect(within(listbox).getByRole("option", { name: /^Alice Doe\s*User · stored as alice-doe$/ })).toBeInTheDocument();
+    // Asked without a kind: the server answers users and groups.
+    await waitFor(() => expect(vi.mocked(policyAdminListPrincipals).mock.calls.map((c) => c[0])).toContainEqual({ q: "a" }));
+    expect(vi.mocked(policyAdminListPrincipals).mock.calls.every((c) => !("kind" in (c[0] ?? {})))).toBe(true);
+
+    await user.click(within(listbox).getByRole("option", { name: /^data-team/ }));
+    expect(onChange).toHaveBeenLastCalledWith({ include: [{ kind: "group", ref: "data-team" }], exclude: [] });
+    await user.click(within(listbox).getByRole("option", { name: /^Alice Doe/ }));
+    expect(onChange).toHaveBeenLastCalledWith({
+      include: [
+        { kind: "group", ref: "data-team" },
+        { kind: "user", ref: "alice-doe" },
+      ],
+      exclude: [],
+    });
+    // A role is never offered: an exemption cannot name one.
+    expect(screen.queryByRole("textbox", { name: /role name/ })).not.toBeInTheDocument();
   });
 
   // N26 (spec C8.5): in a rule's exemptions the group suggestions used to float over the
   // "current members" line, hiding the very sentence that explains the choice.
-  test("exempt mode lists group suggestions after the group help line, not over it", async () => {
+  test("exempt mode lists the suggestions after the group help line, not over it", async () => {
     const user = userEvent.setup();
     mockPrincipals([{ kind: "group", name: "analysts", label: "analysts", username: null }]);
     renderPicker({ exempt: true });
 
-    await user.click(screen.getByRole("combobox", { name: "Include kind" }));
-    await user.click(await screen.findByRole("option", { name: "group" }));
-    await user.click(screen.getByRole("combobox", { name: "Include group search" }));
-    const listbox = await screen.findByRole("listbox", { name: "Include group suggestions" });
+    await user.click(screen.getByRole("combobox", { name: "Exempt search" }));
+    const listbox = await screen.findByRole("listbox", { name: "Exempt suggestions" });
     const help = screen.getByText(/current members/);
 
     expect(help.compareDocumentPosition(listbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(listbox).getByRole("option", { name: "analysts" })).toBeInTheDocument();
+    expect(await within(listbox).findByRole("option", { name: /^analysts/ })).toBeInTheDocument();
   });
 
   test("selecting a user suggestion stores the server-allocated username, not the email, and shows which value is stored", async () => {

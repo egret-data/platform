@@ -6,18 +6,23 @@ import type { NewRule, Rule } from "@/api/generated/model";
  * its own draft ({@link ruleDraftKey}).
  *
  * - `classification`: a classification's page; a Redact mask on it, named after it.
- * - `table`: a table's Rules tab in Data; a mask on the table's path, Column left empty.
+ * - `table`: a table's Rules tab in Data; a mask on the first classification
+ *   its columns carry (`classifications`), else on the table's path, Column left empty.
  * - `scope`: a catalog's or schema's Rules tab in Data; a mask on that path.
  *   (Not in the plan's list: the tab is on those pages too, and a table entry
  *   would have to invent a table.)
- * - `column`: the column panel; a mask on the column. `classifications` are the
- *   ones the column carries (its own and its table's), each offered as
- *   "Or apply it to <name>".
+ * - `column`: the column panel. `classifications` are the ones the column
+ *   carries (its own, then its table's, marked `wholeTable`). The default is a
+ *   mask on the first of its OWN (Task 13: the steward's job is one fewer
+ *   detour), named after it; with none, a mask on the column's path. A
+ *   whole-table classification is never the default: a mask on it makes the
+ *   table unreadable and is refused. The others, and the column's path, are
+ *   each one click away ("Or apply it to …").
  * - `edit`: an existing rule; its own fields.
  */
 export type RuleEntry =
   | { kind: "classification"; tagKey: string; tagName: string }
-  | { kind: "table"; catalogId: string; schema: string; table: string }
+  | { kind: "table"; catalogId: string; schema: string; table: string; classifications?: EntryClassification[] }
   | { kind: "scope"; catalogId: string; schema?: string }
   | {
       kind: "column";
@@ -25,15 +30,44 @@ export type RuleEntry =
       schema: string;
       table: string;
       column: string;
-      classifications: { key: string; name: string }[];
+      classifications: EntryClassification[];
     }
   | { kind: "edit"; rule: Rule };
+
+/** A classification an entry point offers: `wholeTable` when it is on the table, not the column. */
+export type EntryClassification = { key: string; name: string; wholeTable?: boolean };
+
+/** The classification an entry point preselects: the first not on a whole table. */
+export function defaultClassification(entry: RuleEntry): EntryClassification | undefined {
+  if (entry.kind !== "column" && entry.kind !== "table") return undefined;
+  return (entry.classifications ?? []).find((c) => !c.wholeTable);
+}
+
+/** A mask on `c`, named after it: what the classification page's entry seeds too. */
+const onClassification = (c: EntryClassification): NewRule => ({
+  name: `Mask ${c.name}`,
+  kind: REDACT(),
+  selector: { type: "tag", key: c.key },
+  exempt: NOBODY_EXEMPT(),
+});
+
+/**
+ * The path an entry point is on (a table's, a column's), kept for "Applies to
+ * = Path" when the rule starts on a classification; `null` for the others.
+ */
+export function entryScope(entry: RuleEntry): { catalog_id: string; schema?: string; table?: string; column?: string } | null {
+  if (entry.kind === "table") return { catalog_id: entry.catalogId, schema: entry.schema, table: entry.table };
+  if (entry.kind === "column") return { catalog_id: entry.catalogId, schema: entry.schema, table: entry.table, column: entry.column };
+  return null;
+}
 
 const NOBODY_EXEMPT = (): NewRule["exempt"] => ({ include: [], exclude: [] });
 const REDACT = (): NewRule["kind"] => ({ type: "mask", mask_type: "MASK" });
 
 /** The rule a new dialog starts from, by entry point (spec C8.3). */
 export function seedRule(entry: RuleEntry): NewRule {
+  const preselected = defaultClassification(entry);
+  if (preselected) return onClassification(preselected);
   switch (entry.kind) {
     case "classification":
       return {

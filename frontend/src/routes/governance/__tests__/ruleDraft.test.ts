@@ -32,6 +32,29 @@ describe("seedRule: defaults per entry point (spec C8)", () => {
     expect(r.selector).toEqual({ type: "path", catalog_id: "c", schema: "s", table: "t", column: "email" });
     expect(r.kind).toEqual({ type: "mask", mask_type: "MASK" });
   });
+  it("from a column with a classification of its own: a mask on that classification, named after it", () => {
+    const r = seedRule({
+      kind: "column",
+      catalogId: "c",
+      schema: "s",
+      table: "t",
+      column: "email",
+      classifications: [
+        { key: "conf", name: "Confidential", wholeTable: true },
+        { key: "pii", name: "PII" },
+      ],
+    });
+    expect(r).toEqual({ name: "Mask PII", kind: { type: "mask", mask_type: "MASK" }, selector: { type: "tag", key: "pii" }, exempt: { include: [], exclude: [] } });
+  });
+  it("from a column whose only classification is its table's: the column's path (a mask on a whole-table classification is refused)", () => {
+    const r = seedRule({ kind: "column", catalogId: "c", schema: "s", table: "t", column: "email", classifications: [{ key: "conf", name: "Confidential", wholeTable: true }] });
+    expect(r.selector).toEqual({ type: "path", catalog_id: "c", schema: "s", table: "t", column: "email" });
+  });
+  it("from a table whose columns carry classifications: a mask on the first of them", () => {
+    const r = seedRule({ kind: "table", catalogId: "c", schema: "s", table: "t", classifications: [{ key: "pii", name: "PII" }] });
+    expect(r.selector).toEqual({ type: "tag", key: "pii" });
+    expect(r.name).toBe("Mask PII");
+  });
   it("from a catalog or schema page: a mask on that scope, no level invented", () => {
     expect(seedRule({ kind: "scope", catalogId: "c", schema: "s" }).selector).toEqual({ type: "path", catalog_id: "c", schema: "s" });
     expect(seedRule({ kind: "scope", catalogId: "c" }).selector).toEqual({ type: "path", catalog_id: "c" });

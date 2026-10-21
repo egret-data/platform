@@ -1249,15 +1249,20 @@ describe("MasksFiltersTab", () => {
     expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("opens Add rule in RuleDialog as a mask on this table's path, every column (spec C8.3)", async () => {
+  it("opens Add rule in RuleDialog on a classification its columns carry, the table's path one click away (spec C8.3, Task 13)", async () => {
     serveData(fixture({ rules: ok([]) }));
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "New rule" })).toBeInTheDocument();
-    // The area is about masking: a table opens on a mask, its Column left empty, which masks every column.
+    // `email` carries PII: the rule starts on it. The table's whole-table classification is never offered.
     expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
+    expect(within(dialog).queryByRole("button", { name: /CONFIDENTIAL/ })).not.toBeInTheDocument();
+    // The table alone: a mask on its path, its Column left empty, which masks every column.
+    await user.click(within(dialog).getByRole("button", { name: "Or apply it to table orders only" }));
     expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
     await waitFor(() => expect(within(dialog).getByRole("combobox", { name: /^Catalog/ })).toHaveTextContent("ice"));
     expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
