@@ -12417,7 +12417,7 @@
             }
           },
           "400": {
-            "description": "Invalid tag key",
+            "description": "Invalid tag key: `code` is `tag_key_invalid`",
             "content": {
               "application/json": {
                 "schema": {
@@ -12447,7 +12447,7 @@
             }
           },
           "409": {
-            "description": "A tag with that key already exists",
+            "description": "`code` is `tag_key_taken` (the key exists) or `tag_name_taken` (another classification has that name, ignoring case); `existing` names the holder",
             "content": {
               "application/json": {
                 "schema": {
@@ -12503,6 +12503,16 @@
           },
           "403": {
             "description": "Missing tag:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code` is `tag_in_use`: `rules` lists the rules that still select this classification",
             "content": {
               "application/json": {
                 "schema": {
@@ -12593,6 +12603,16 @@
           },
           "404": {
             "description": "No such tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code` is `tag_name_taken`: another classification has that name, ignoring case; `existing` names the holder",
             "content": {
               "application/json": {
                 "schema": {

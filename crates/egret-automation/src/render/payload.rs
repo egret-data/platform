@@ -354,6 +354,14 @@ fn bi_err(e: egret_bi::BiError) -> AutomationError {
                 .unwrap_or("two mask or row-filter rules overlap")
                 .to_string(),
         ),
+        egret_bi::BiError::Coded { status, body } => {
+            let msg = body["error"].as_str().unwrap_or("refused").to_string();
+            if status == axum::http::StatusCode::BAD_REQUEST {
+                AutomationError::BadRequest(msg)
+            } else {
+                AutomationError::Conflict(msg)
+            }
+        }
         egret_bi::BiError::Forbidden => {
             AutomationError::Internal("bi repo unexpectedly refused a render read".into())
         }

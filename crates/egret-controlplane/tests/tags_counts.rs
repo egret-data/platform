@@ -1,4 +1,4 @@
-//! DG #4b (spec §4.4): `GET /api/control-plane/tags` carries each tag's Data
+//! DG #4b (spec §4.4): `GET /api/tags` carries each tag's Data
 //! counts, `catalog_tables` and `catalog_columns`, additively.
 //!
 //! Fixtures are scoped to their own tags. DB-gated; FAILS
@@ -177,6 +177,33 @@ async fn get(st: &CpState, token: &str, uri: &str) -> (StatusCode, Value) {
     )
 }
 
+async fn send(
+    st: &CpState,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header("Cookie", format!("egret_session={token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = control_plane_router()
+        .with_state(st.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 /// An egret catalog over a new warehouse; returns the warehouse id.
 async fn catalog_warehouse(f: &Fixture) -> Uuid {
     let p = &f.db.pool;
@@ -300,4 +327,102 @@ async fn tags_carry_their_data_counts() {
         (json!(0), json!(0))
     );
     assert_eq!(to["assignment_count"], 0);
+}
+
+#[tokio::test]
+async fn classification_writes_answer_stable_codes() {
+    let f = setup().await;
+    let st = state(&f).await;
+    let token = session(&f, &["platform_admin"]).await;
+    // Keys allow no `_`, which `unique` emits.
+    let s = unique("cx").replace('_', "-");
+    let (status, first) = send(
+        &st,
+        &token,
+        "POST",
+        "/tags",
+        json!({"key": format!("pii-{s}"), "name": format!("PII {s}")}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+
+    // Same name, other case, other key: tag_name_taken naming the holder.
+    let (status, body) = send(
+        &st,
+        &token,
+        "POST",
+        "/tags",
+        json!({"key": format!("pii2-{s}"), "name": format!("pii {s}")}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "tag_name_taken");
+    assert_eq!(body["existing"]["key"], format!("pii-{s}"));
+    assert!(body["error"].as_str().unwrap().contains("already exists"));
+
+    // Same key: tag_key_taken.
+    let (status, body) = send(
+        &st,
+        &token,
+        "POST",
+        "/tags",
+        json!({"key": format!("pii-{s}"), "name": format!("Other {s}")}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("tag_key_taken")),
+        "{body}"
+    );
+
+    // Bad key: tag_key_invalid.
+    let (status, body) = send(
+        &st,
+        &token,
+        "POST",
+        "/tags",
+        json!({"key": "bad_key", "name": format!("Bad {s}")}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("tag_key_invalid")),
+        "{body}"
+    );
+
+    // Rename another classification INTO the taken name: refused.
+    let (_, second) = send(
+        &st,
+        &token,
+        "POST",
+        "/tags",
+        json!({"key": format!("sec-{s}"), "name": format!("Secret {s}")}),
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap();
+    let (status, body) = send(
+        &st,
+        &token,
+        "PATCH",
+        &format!("/tags/{second_id}"),
+        json!({"name": format!("PII {s}")}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("tag_name_taken")),
+        "{body}"
+    );
+
+    // Rename a classification to its own name in another case: allowed.
+    let first_id = first["id"].as_str().unwrap();
+    let (status, body) = send(
+        &st,
+        &token,
+        "PATCH",
+        &format!("/tags/{first_id}"),
+        json!({"name": format!("PII {}", s.to_uppercase())}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

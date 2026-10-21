@@ -157,10 +157,10 @@ async fn list_tags(State(st): State<CpState>, Auth(p): Auth) -> Result<Json<Vec<
     request_body = CreateTag,
     responses(
         (status = 201, description = "Tag created", body = TagDto),
-        (status = 400, description = "Invalid tag key", body = ErrorBody),
+        (status = 400, description = "Invalid tag key: `code` is `tag_key_invalid`", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
-        (status = 409, description = "A tag with that key already exists", body = ErrorBody),
+        (status = 409, description = "`code` is `tag_key_taken` (the key exists) or `tag_name_taken` (another classification has that name, ignoring case); `existing` names the holder", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -170,6 +170,9 @@ async fn create_tag(
     Json(body): Json<CreateTag>,
 ) -> Result<(StatusCode, Json<TagDto>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    if let Some(existing) = st.tags.name_taken(&body.name, None).await? {
+        return Err(egret_bi::BiError::tag_name_taken(&body.name, &existing).into());
+    }
     let tag = st
         .tags
         .create(
@@ -195,6 +198,7 @@ async fn create_tag(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
         (status = 404, description = "No such tag", body = ErrorBody),
+        (status = 409, description = "`code` is `tag_name_taken`: another classification has that name, ignoring case; `existing` names the holder", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -205,6 +209,11 @@ async fn update_tag(
     Json(body): Json<UpdateTag>,
 ) -> Result<Json<TagDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    if let Some(name) = body.name.as_deref() {
+        if let Some(existing) = st.tags.name_taken(name, Some(id)).await? {
+            return Err(egret_bi::BiError::tag_name_taken(name, &existing).into());
+        }
+    }
     let tag = st
         .tags
         .update(
@@ -227,6 +236,7 @@ async fn update_tag(
         (status = 204, description = "Tag deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
+        (status = 409, description = "`code` is `tag_in_use`: `rules` lists the rules that still select this classification", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

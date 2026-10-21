@@ -5,9 +5,11 @@
 //! Enforcement (tags feeding access decisions) is a later phase — this repo just
 //! stores and lists the classification metadata.
 
+use axum::http::StatusCode;
 use egret_auth::events::RolesChanged;
 use egret_events::EventBus;
 use egret_metastore::Db;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::BiError;
@@ -37,31 +39,68 @@ const SELECT_WITH_COUNT: &str = "SELECT t.id, t.key, t.name, t.description, t.co
      COUNT(ta.tag_id) AS assignment_count, t.created_at \
      FROM tags t LEFT JOIN tag_assignments ta ON ta.tag_id = t.id";
 
-fn map_conflict_err(e: sqlx::Error) -> BiError {
-    if let sqlx::Error::Database(ref dbe) = e {
-        if dbe.is_unique_violation() {
-            return BiError::Conflict("a tag with that key already exists".into());
-        }
-    }
-    BiError::Db(e)
-}
-
 /// A tag key must be a stable, URL/identifier-safe slug: non-empty, lowercase
 /// ascii alphanumerics plus `:`, `-`. Keeps keys usable as ABAC selector tokens
 /// later without escaping.
 fn validate_key(key: &str) -> Result<(), BiError> {
     if key.is_empty() {
-        return Err(BiError::BadRequest("tag key must not be empty".into()));
+        return Err(BiError::coded(
+            StatusCode::BAD_REQUEST,
+            "tag_key_invalid",
+            "A classification key must not be empty.",
+            json!({"key": key, "allowed": "a-z 0-9 : -"}),
+        ));
     }
     if !key
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == ':' || c == '-')
     {
-        return Err(BiError::BadRequest(format!(
-            "tag key must be lowercase ascii alphanumerics, ':' or '-': {key}"
-        )));
+        return Err(BiError::coded(
+            StatusCode::BAD_REQUEST,
+            "tag_key_invalid",
+            format!(
+                "A classification key may hold lowercase letters, digits, ':' and '-' only: {key:?}"
+            ),
+            json!({"key": key, "allowed": "a-z 0-9 : -"}),
+        ));
     }
     Ok(())
+}
+
+/// The refusal of deleting a classification some rules still select.
+fn tag_in_use(rules: &[(Uuid, String)]) -> BiError {
+    let names: Vec<&str> = rules.iter().map(|(_, n)| n.as_str()).collect();
+    BiError::coded(
+        StatusCode::CONFLICT,
+        "tag_in_use",
+        format!(
+            "Rules still use this classification: {}. Delete them or change what they apply to first.",
+            names.join(", ")
+        ),
+        json!({"rules": rules.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>()}),
+    )
+}
+
+/// A classification already holding a name (C10): the name check's answer.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
+pub struct ExistingTag {
+    pub id: Uuid,
+    pub key: String,
+    pub name: String,
+}
+
+impl BiError {
+    pub fn tag_name_taken(name: &str, existing: &ExistingTag) -> Self {
+        BiError::coded(
+            StatusCode::CONFLICT,
+            "tag_name_taken",
+            format!(
+                "A classification named {:?} already exists (key {}).",
+                existing.name, existing.key
+            ),
+            json!({"name": name, "existing": existing}),
+        )
+    }
 }
 
 impl TagRepo {
@@ -69,7 +108,28 @@ impl TagRepo {
         Self { db }
     }
 
-    /// Create a tag. Validates `key`; maps the unique-key violation to `Conflict`.
+    /// Another classification whose name equals `name` ignoring case and
+    /// surrounding spaces; `except` is the classification being renamed.
+    /// Engines match a classification rule by NAME, so two classifications
+    /// with one name share every rule written on either (spec C10).
+    pub async fn name_taken(
+        &self,
+        name: &str,
+        except: Option<Uuid>,
+    ) -> Result<Option<ExistingTag>, BiError> {
+        Ok(sqlx::query_as::<_, ExistingTag>(
+            "SELECT id, key, name FROM tags \
+              WHERE lower(btrim(name)) = lower(btrim($1)) \
+                AND ($2::uuid IS NULL OR id <> $2) \
+              ORDER BY key LIMIT 1",
+        )
+        .bind(name)
+        .bind(except)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
+    /// Create a tag. Validates `key`; a unique-key violation is `tag_key_taken`.
     pub async fn create(
         &self,
         key: &str,
@@ -81,7 +141,7 @@ impl TagRepo {
         validate_key(key)?;
         // RETURNING can't carry the join-computed count, so INSERT then re-select
         // (a freshly created tag always has assignment_count = 0).
-        let id: Uuid = sqlx::query_scalar(
+        let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO tags (key, name, description, color, created_by) \
              VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
@@ -91,8 +151,27 @@ impl TagRepo {
         .bind(color)
         .bind(created_by)
         .fetch_one(&self.db.pool)
-        .await
-        .map_err(map_conflict_err)?;
+        .await;
+        let id = match inserted {
+            Ok(id) => id,
+            Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+                let holder: (Uuid, String) =
+                    sqlx::query_as("SELECT id, name FROM tags WHERE key = $1")
+                        .bind(key)
+                        .fetch_one(&self.db.pool)
+                        .await?;
+                return Err(BiError::coded(
+                    StatusCode::CONFLICT,
+                    "tag_key_taken",
+                    format!(
+                        "A classification with the key {key:?} already exists ({}).",
+                        holder.1
+                    ),
+                    json!({"key": key, "existing": {"id": holder.0, "name": holder.1}}),
+                ));
+            }
+            Err(e) => return Err(BiError::Db(e)),
+        };
         self.get(id)
             .await?
             .ok_or_else(|| BiError::NotFound(format!("tag {id}")))
@@ -385,6 +464,16 @@ impl TagRepo {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
             egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
         }
+        let rules: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT r.id, r.name FROM perm.rules r JOIN tags t ON t.key = r.tag_key \
+              WHERE t.id = $1 ORDER BY r.name",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if !rules.is_empty() {
+            return Err(tag_in_use(&rules));
+        }
         let affected = sqlx::query("DELETE FROM tags WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
@@ -392,11 +481,8 @@ impl TagRepo {
             .map_err(|e| {
                 if let sqlx::Error::Database(ref dbe) = e {
                     if dbe.is_foreign_key_violation() {
-                        return BiError::Conflict(
-                            "this tag is still selected by a permission rule (perm.rules) — \
-                             delete or retarget that rule first"
-                                .into(),
-                        );
+                        // A rule was added between the read above and the delete.
+                        return tag_in_use(&[]);
                     }
                 }
                 BiError::Db(e)

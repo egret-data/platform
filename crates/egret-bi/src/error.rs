@@ -26,8 +26,41 @@ pub enum BiError {
     /// kind}` the rule routes answer.
     #[error("rule overlap: {body}")]
     Overlap { body: serde_json::Value },
+    /// A refusal with a stable `code` for the UI (classification UX spec
+    /// C5/C10/C11). `body` is `{error, code, ...fields}`, served as is with
+    /// `status`; `error` is always a full sentence, so a client that reads only
+    /// `error` keeps working.
+    #[error("{}", .body["error"].as_str().unwrap_or("refused"))]
+    Coded {
+        status: StatusCode,
+        body: serde_json::Value,
+    },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+impl BiError {
+    /// `{error, code}` merged with `fields` (an object; anything else is ignored).
+    pub fn coded(
+        status: StatusCode,
+        code: &str,
+        error: impl Into<String>,
+        fields: serde_json::Value,
+    ) -> Self {
+        let mut body = serde_json::json!({ "error": error.into(), "code": code });
+        if let (Some(b), serde_json::Value::Object(extra)) = (body.as_object_mut(), fields) {
+            b.extend(extra);
+        }
+        BiError::Coded { status, body }
+    }
+
+    /// The stable code of a coded or overlap refusal.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            BiError::Coded { body, .. } | BiError::Overlap { body } => body["code"].as_str(),
+            _ => None,
+        }
+    }
 }
 
 impl From<egret_query::DatabaseError> for BiError {
@@ -100,6 +133,7 @@ impl IntoResponse for BiError {
             BiError::Engine(_) => (StatusCode::BAD_GATEWAY, error(&msg)),
             // The structured body, served as is: its `error` is the sentence.
             BiError::Overlap { body } => (StatusCode::CONFLICT, body),
+            BiError::Coded { status, body } => (status, body),
             BiError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, error("internal error")),
         };
         (status, Json(body)).into_response()

@@ -34,6 +34,10 @@ pub enum CpError {
     /// console parses to name the two rules.
     #[error("rule overlap: {0}")]
     RuleOverlap(serde_json::Value),
+    /// A refusal with a stable `code`: the body (`{error, code, ...}`) is
+    /// served as is with the status.
+    #[error("{}", .1["error"].as_str().unwrap_or("refused"))]
+    Coded(StatusCode, serde_json::Value),
     #[error("internal error")]
     Internal,
     /// A dependency egret itself runs (its warehouse) failed. 503; the
@@ -119,6 +123,7 @@ impl From<egret_bi::BiError> for CpError {
             // SP4d-4 Task 3: a rule overlap is a 409 whose sentence is `error`,
             // and whose structured body is served as is.
             E::Overlap { body } => CpError::RuleOverlap(body),
+            E::Coded { status, body } => CpError::Coded(status, body),
             E::Engine(_) | E::Db(_) => CpError::Internal,
         }
     }
@@ -150,6 +155,9 @@ impl IntoResponse for CpError {
         if let CpError::RuleOverlap(body) = self {
             return (StatusCode::CONFLICT, Json(body)).into_response();
         }
+        if let CpError::Coded(status, body) = self {
+            return (status, Json(body)).into_response();
+        }
         let (status, msg) = match &self {
             CpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             CpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
@@ -164,6 +172,7 @@ impl IntoResponse for CpError {
             CpError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             CpError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
             CpError::RuleOverlap(_) => unreachable!("answered above with its structured body"),
+            CpError::Coded(..) => unreachable!("answered above with its structured body"),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
