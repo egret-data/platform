@@ -62,6 +62,14 @@ describe("the Effect strip", () => {
     expect(strip()).not.toHaveTextContent("Does nothing yet.");
   });
 
+  it("Attach in Data remembers the classification for the Add classification dialog there", async () => {
+    const { attachIntent } = await import("@/routes/governance/attachIntent");
+    serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]) });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    await userEvent.click(await within(await screen.findByRole("region", { name: "Effect" }, T)).findByRole("link", { name: "Attach in Data" }, T));
+    expect(attachIntent()).toBe("t-pii");
+  });
+
   it("says a stored rule is not enforced yet, and why, once the server says so", async () => {
     serve({
       "/tags": ok([PII]),

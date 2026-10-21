@@ -22,6 +22,7 @@ import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { fullPath } from "@/routes/governance/data/objectData";
 import { failedText } from "@/routes/governance/tabParts";
 import { TERM } from "@/routes/governance/glossary";
+import { attachIntent, clearAttachIntent } from "@/routes/governance/attachIntent";
 
 /**
  * Why Add classification is disabled on an object outside egret's catalogs (F9: the tag
@@ -142,6 +143,13 @@ function AddTagForm({
   // The control-plane route answers `Tag` (with clearance); the generated `TagDto` is egret-bi's narrower schema (`api/tags.ts`).
   const catalogue = tagsQ.data?.status === 200 ? (tagsQ.data.data as unknown as Tag[]) : undefined;
   const offered = catalogue?.filter((t) => !assigned.has(t.id)).sort((a, b) => a.name.localeCompare(b.name));
+  // The classification "Attach in Data" brought the user here for, chosen once it is offered.
+  const [intentApplied, setIntentApplied] = useState(false);
+  if (!intentApplied && offered !== undefined) {
+    setIntentApplied(true);
+    const wanted = attachIntent();
+    if (!tagId && wanted && offered.some((t) => t.id === wanted)) setTagId(wanted);
+  }
   const rules: RuleView[] | undefined = canReadRules && rulesQ.data?.status === 200 ? rulesQ.data.data : undefined;
   // With policy:read, a whole-table attach waits for the rules: until they answer, the mask check cannot be made.
   const rulesLoading = canReadRules && !rulesQ.isError && rulesQ.data?.status !== 200;
@@ -157,6 +165,7 @@ function AddTagForm({
   const serverConflict = tableTagMaskConflict(assign.error);
 
   const succeed = (message: string) => {
+    if (attachIntent() === picked?.id) clearAttachIntent();
     toast.success(message);
     onDone();
   };

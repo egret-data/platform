@@ -210,3 +210,28 @@ describe("Add classification on a whole table", () => {
   });
 });
 
+
+describe("Add classification after Attach in Data (Task 13)", () => {
+  const COLUMN: TagTarget = { ...TABLE, column: "email" };
+  const OTHER = { ...PII, id: "t-oth", key: "other", name: "Other" };
+
+  it("preselects the classification whose Attach in Data brought the user here, once", async () => {
+    const { setAttachIntent, attachIntent } = await import("@/routes/governance/attachIntent");
+    const served = serve({ "/tags": ok([OTHER, PII]), "/perm/rules": ok([]), "PUT /warehouses/wh-1/resource-tags": ok({ ok: true }) });
+    setAttachIntent("t-pii");
+    open(COLUMN, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Classification" })).toHaveTextContent("PII"));
+    await userEvent.click(screen.getByRole("button", { name: "Add classification" }));
+    await waitFor(() => expect(served.bodies["PUT /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "email", tag_id: "t-pii" }]));
+    // One-shot: the next Add classification starts empty.
+    expect(attachIntent()).toBeNull();
+  });
+
+  it("starts empty when the classification is not offered here", async () => {
+    const { setAttachIntent } = await import("@/routes/governance/attachIntent");
+    serve({ "/tags": ok([OTHER]), "/perm/rules": ok([]) });
+    setAttachIntent("t-pii");
+    open(COLUMN, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Classification" })).toHaveTextContent("Choose a classification"));
+  });
+});

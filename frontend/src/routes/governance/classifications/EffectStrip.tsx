@@ -11,6 +11,7 @@ import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { TERM } from "@/routes/governance/glossary";
 import { NotEnforcedSummary, useRuleEnforcement } from "@/routes/governance/NotEnforced";
+import { setAttachIntent } from "@/routes/governance/attachIntent";
 import { formatRuleKind } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
@@ -205,7 +206,12 @@ export function EffectStrip({ tag }: { tag: Tag }) {
           {usageFact}
           {/* The Data page offers Add classification only with catalog_registry:update (FE-ACTION-4). */}
           <dd className="text-xs text-muted-foreground">
-            <Link to="/governance/data" className="font-medium text-primary hover:underline">
+            <Link
+              to="/governance/data"
+              className="font-medium text-primary hover:underline"
+              // The Add classification dialog in Data preselects this classification (attachIntent).
+              onClick={() => setAttachIntent(tag.id)}
+            >
               {canAttach ? "Attach in Data" : "Open Data"}
             </Link>{" "}
             {canAttach ? ATTACH_HOW : ATTACH_NEEDS_CATALOG_UPDATE}
