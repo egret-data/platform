@@ -15,7 +15,7 @@ import { Caveat } from "./Caveat";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { useIsDark } from "@/hooks/useIsDark";
-import { useDatabases } from "@/api/databases";
+import { isFullConnection, useDatabases } from "@/api/databases";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GOVERNED_BLOCKED_MESSAGE, governedWithoutPerPrincipal } from "../governance";
 import { useEndpointDetail } from "../EndpointDetail";
@@ -468,7 +468,7 @@ export default function Query() {
                   {(databases ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>
                       {d.name}
-                      {d.governed ? (
+                      {isFullConnection(d) && d.governed ? (
                         <span className="ml-1.5 text-xs text-muted-foreground">Governed</span>
                       ) : null}
                     </SelectItem>

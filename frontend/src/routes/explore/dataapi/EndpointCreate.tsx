@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ListPageShell } from "@/components/explore/ListPageShell";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
-import { useDatabases } from "@/api/databases";
+import { isFullConnection, useDatabases } from "@/api/databases";
 // The mutation comes from the hand-written wrapper, never the generated hook:
 // the wrapper is what invalidates the endpoint list, so the row this page
 // creates is already in the list behind it when the user navigates back.
@@ -176,7 +176,7 @@ export default function EndpointCreate() {
                   {(databases ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>
                       {d.name}
-                      {d.governed ? (
+                      {isFullConnection(d) && d.governed ? (
                         <span className="ml-1.5 text-xs text-muted-foreground">Governed</span>
                       ) : null}
                     </SelectItem>
