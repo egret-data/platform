@@ -74,6 +74,9 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // A refusal before the query started (a bad parameter, no permission): there is
+  // no query id, so it is held here and shown in the Results panel (KI-086).
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const startedRef = useRef<number | null>(null);
 
   const submit = useSubmitQuery(ws);
@@ -82,6 +85,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   const save = useSaveQuery(ws);
   const finished = status.data?.status === "finished";
   const failed = status.data?.status === "failed";
+  const cancelled = status.data?.status === "cancelled";
   const running = status.data?.status === "queued" || status.data?.status === "running";
   const results = useResults(ws, queryId, finished);
 
@@ -92,25 +96,25 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
 
   // Freeze a client-measured elapsed time once the query reaches a terminal state.
   useEffect(() => {
-    if ((finished || failed) && startedRef.current != null && elapsedMs == null) {
+    if ((finished || failed || cancelled) && startedRef.current != null && elapsedMs == null) {
       setElapsedMs(performance.now() - startedRef.current);
       startedRef.current = null;
     }
-  }, [finished, failed, elapsedMs]);
+  }, [finished, failed, cancelled, elapsedMs]);
 
   async function run(sqlOverride?: string, dbOverride?: string | null) {
     if (running) return;
     const dbId = dbOverride ?? tab.dbId;
     if (!dbId) { toast.error("Pick a database"); return; }
     const sql = sqlOverride ?? tab.sql;
-    setQueryId(null); setElapsedMs(null); setTabValue("results"); setResultView("table");
+    setQueryId(null); setElapsedMs(null); setSubmitError(null); setTabValue("results"); setResultView("table");
     const params = extractParams(sql).map((n) => ({
       name: n, type: paramValues[n]?.type ?? "string", value: paramValues[n]?.value ?? "",
     }));
     try {
       const { id } = await submit.mutateAsync({ database_id: dbId, sql, limit: tab.limit, params });
       setQueryId(id); startedRef.current = performance.now();
-    } catch (e) { toast.error(String(e)); }
+    } catch (e) { setSubmitError(e instanceof Error ? e.message : String(e)); }
   }
   function doFormat() {
     const language = engine === "starrocks" ? "mysql" : "trino";
@@ -137,19 +141,25 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
     elapsedMs == null ? null
     : finished ? `Done in ${fmtElapsed(elapsedMs)}`
     : failed ? `Failed in ${fmtElapsed(elapsedMs)}`
+    : cancelled ? `Cancelled after ${fmtElapsed(elapsedMs)}`
     : null;
   const csvHref = finished && queryId ? csvUrl(ws, queryId) : null;
 
-  // ⌘K command palette.
+  // ⌘K command palette. Listened for in the CAPTURE phase, before the event
+  // reaches its target: Monaco takes ⌘K as the first key of a chord and stops
+  // the event on its own node, so a bubbling listener never heard it while the
+  // cursor was in the editor (KI-079). Stopped here, so Monaco does not also
+  // wait for a chord's second key.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        e.stopPropagation();
         setPaletteOpen((v) => !v);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   const actions = useMemo<PaletteAction[]>(() => {
@@ -176,8 +186,9 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   ) : statusLine ? (
     <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
       failed ? "border border-destructive/30 bg-destructive/10 text-destructive"
+      : cancelled ? "border bg-muted text-muted-foreground"
              : "border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"}`}>
-      {failed ? <Ban className="h-3 w-3" /> : <Check className="h-3 w-3" />}
+      {failed || cancelled ? <Ban className="h-3 w-3" /> : <Check className="h-3 w-3" />}
       {statusLine}{rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}
     </span>
   ) : null;
@@ -328,7 +339,9 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
               <ResultChart page={results.data} />
             ) : (
               <ResultsGrid page={results.data ?? null} truncated={status.data?.truncated ?? false}
-                error={failed ? (status.data?.error ?? "Query failed") : null} statusLine={statusLine} loading={running}
+                error={submitError ?? (failed ? (status.data?.error ?? "Query failed") : null)}
+                errorTitle={submitError ? "Query not started" : undefined}
+                cancelled={cancelled} statusLine={statusLine} loading={running}
                 csvHref={csvHref} />
             )}
           </TabsContent>

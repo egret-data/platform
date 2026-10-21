@@ -76,6 +76,17 @@ export function useDatabases(ws: string) {
 
 // ── run / poll / results (engine API) ──
 export interface QueryParamInput { name: string; type: string; value: string }
+/** The text of a refused submit: the server's `{"error": "…"}` message, else its
+ *  body, else the status. Never the raw JSON (KI-086). */
+function refusalMessage(body: string, status: number): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string") {
+      return (parsed as { error: string }).error;
+    }
+  } catch { /* not JSON: use the text */ }
+  return body.trim() || `The query could not be started (HTTP ${status}).`;
+}
 export function useSubmitQuery(ws: string) {
   return useMutation({
     // Hand-written (not the generated fetch fn) so it can carry template
@@ -87,7 +98,7 @@ export function useSubmitQuery(ws: string) {
         headers: { "Content-Type": "application/json", ...csrfHeaders() },
         body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error((await r.text().catch(() => "")) || `submit failed: ${r.status}`);
+      if (!r.ok) throw new Error(refusalMessage(await r.text().catch(() => ""), r.status));
       return (await r.json()) as { id: string; status: QueryStatus };
     },
   });
