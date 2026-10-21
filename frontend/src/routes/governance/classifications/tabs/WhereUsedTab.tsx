@@ -1,4 +1,4 @@
-import { Fragment, type ComponentType, type ReactNode } from "react";
+import { Fragment, useRef, type ComponentType, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { AppWindow, BarChart3, Database, FileCode2, Folder, LayoutDashboard, Table2, X } from "lucide-react";
 import type { ApiError } from "@/api/client";
@@ -145,7 +145,9 @@ function BiName({ o }: { o: BiObject }) {
 export function WhereUsedTab({ tagId }: { tagId: string }) {
   const q = useControlPlaneGovernanceTagUsage(tagId, { query: { retry: false } });
   const canRemove = useCanEditCatalogTags();
-  const removal = useRemoveClassification();
+  // After a remove, focus lands on the Data heading: the removed row's button, or the whole row, is gone.
+  const dataHeading = useRef<HTMLHeadingElement>(null);
+  const removal = useRemoveClassification(() => dataHeading.current);
 
   if (q.isError) {
     const message = (q.error as unknown as ApiError | null)?.message;
@@ -174,7 +176,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
 
   return (
     <div className="space-y-6">
-      <Section title="Data">
+      <Section title="Data" headingRef={dataHeading}>
         {groups.length === 0 ? (
           <EmptyState icon={Table2} title="No table or column carries this classification." />
         ) : (

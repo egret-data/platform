@@ -284,7 +284,10 @@ function Columns({
   const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
   const canEditTags = useCanEditCatalogTags();
-  const removal = useRemoveClassification();
+  // After a remove, focus lands on the column's name in this table: the removed chip's button is gone.
+  const removal = useRemoveClassification((r) =>
+    [...document.querySelectorAll<HTMLElement>("[data-column-link]")].find((a) => sameName(a.dataset.columnLink ?? "", r.target.column ?? "")),
+  );
   const warehouseId = catalog.warehouseId;
   // Remove names the coordinate as stored (the server matches it exactly) and the column as the source spells it.
   const removeFrom =

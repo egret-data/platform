@@ -127,7 +127,8 @@ export default function ObjectPage() {
 
   // Remove on the header's own classifications (spec C4), with the coordinate as stored.
   const canEditTags = useCanEditCatalogTags();
-  const removal = useRemoveClassification();
+  // After a remove, focus lands on the header's Add classification: the removed chip's button is gone.
+  const removal = useRemoveClassification(() => document.querySelector<HTMLElement>('[data-object-action="onAddTag"]'));
   const warehouseId = found?.warehouseId;
   const onRemoveTag =
     canEditTags && warehouseId != null && level === "object"

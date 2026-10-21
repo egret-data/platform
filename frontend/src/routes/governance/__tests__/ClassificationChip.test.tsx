@@ -6,12 +6,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { Me } from "@/api/hooks";
 import { AuthContext } from "@/auth/useAuth";
 
+const useTags = vi.hoisted(() =>
+  vi.fn((_opts?: { enabled?: boolean }) => ({
+    data: [{ id: "t-sec", key: "sec", name: "Secret", required_roles: ["cleared"], required_groups: [] }],
+  })),
+);
 vi.mock("@/api/tags", async () => {
   const actual = await vi.importActual<typeof import("@/api/tags")>("@/api/tags");
-  return {
-    ...actual,
-    useTags: () => ({ data: [{ id: "t-sec", key: "sec", name: "Secret", required_roles: ["cleared"], required_groups: [] }] }),
-  };
+  return { ...actual, useTags };
 });
 import { ClassificationChip } from "@/routes/governance/ClassificationChip";
 
@@ -70,5 +72,18 @@ describe("ClassificationChip", () => {
   it("links for a platform admin without tag:read", () => {
     show({ user_id: "a", email: "a@x", platform_roles: ["platform_admin"], permissions: [] });
     expect(screen.getByRole("link", { name: /Secret/ })).toHaveAttribute("href", "/governance/classifications/t-sec");
+  });
+
+  it("does not read the catalogue without tag:read, and reads it with", () => {
+    const { unmount } = show(ME([]));
+    expect(useTags).toHaveBeenLastCalledWith({ enabled: false });
+    unmount();
+    show(ME(["tag:read"]));
+    expect(useTags).toHaveBeenLastCalledWith({ enabled: true });
+  });
+
+  it("links an inherited chip's 'from table' to the table when told where it is", () => {
+    show(ME(["tag:read"]), { inherited: true, inheritedFrom: { href: "/governance/data/ice/sales/orders", label: "ice.sales.orders" } });
+    expect(screen.getByRole("link", { name: "from table ice.sales.orders" })).toHaveAttribute("href", "/governance/data/ice/sales/orders");
   });
 });

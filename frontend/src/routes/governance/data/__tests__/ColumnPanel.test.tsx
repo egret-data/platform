@@ -710,5 +710,15 @@ describe("Remove a classification from the column panel", () => {
     );
     await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
     expect(toast.success).toHaveBeenCalledWith("Removed PII from ice.sales.orders.email.");
+    // The removed chip's button is gone: focus lands on the panel's Add classification, never on <body>.
+    await waitFor(() => expect(within(panel).getByRole("button", { name: "Add classification" })).toHaveFocus());
+  });
+
+  it("links an inherited classification's 'from table' to the table", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders?column=email", TAGGER);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    const list = await within(panel).findByRole("list", { name: "Classifications of email" });
+    expect(within(list).getByRole("link", { name: "from table ice.sales.orders" })).toHaveAttribute("href", "/governance/data/ice/sales/orders");
   });
 });

@@ -174,7 +174,8 @@ describe("Where used: Remove", () => {
       expect(served.bodies["DELETE /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "email", tag_id: "t-pii" }]),
     );
     // Where used is read again.
-    await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`).length).toBeGreaterThan(1));
+    await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`).length).toBeGreaterThan(1));    // The removed row's button is gone: focus lands on the Data heading, never on <body>.
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "Data" })).toHaveFocus());
   });
 
   it("removes a table-level assignment with an empty column", async () => {

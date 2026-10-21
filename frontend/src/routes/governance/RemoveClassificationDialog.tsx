@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -50,18 +50,33 @@ export type RemoveTarget = {
  * attach refreshes (`invalidateTagAssignment`), closes and toasts: the page
  * stays (FE-ACTION-2). On failure it stays open with the server's sentence
  * (FE-ACTION-3).
+ *
+ * **Focus.** The dialog opens from state, not a Radix trigger, so Radix has
+ * nowhere to return focus and would leave it on `<body>` (as `DeleteTagDialog`
+ * found, #4a D3). Cancel returns it to `opener` (the Remove button that opened
+ * the dialog). A successful remove cannot: that button belongs to the
+ * assignment just removed, which the refetch takes off the page. So on success
+ * focus goes to `focusAfterRemove()`, a stable element the surface names (its
+ * Add classification action, the column's name, the section's heading).
  */
 export function RemoveClassificationDialog({
   open,
   onOpenChange,
   tag,
   target,
+  focusAfterRemove,
+  opener,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   tag: { id: string; name: string; key: string };
   target: RemoveTarget;
+  /** Where focus goes after a successful remove; Radix's default return when it gives nothing. */
+  focusAfterRemove?: () => HTMLElement | null | undefined;
+  /** The control that opened the dialog; focus returns to it on Cancel or Escape. */
+  opener?: HTMLElement | null;
 }) {
+  const removed = useRef(false);
   const queryClient = useQueryClient();
   const canReadRules = usePolicyPermissions()("policy:read");
   const rulesQ = usePermListRules({ query: { enabled: open && canReadRules, retry: false } });
@@ -84,6 +99,7 @@ export function RemoveClassificationDialog({
         () => {
           invalidateTagAssignment(queryClient, tag.id, target.warehouseId);
           toast.success(`Removed ${tag.name} from ${target.label}.`);
+          removed.current = true;
           remove.reset();
           onOpenChange(false);
         },
@@ -120,7 +136,15 @@ export function RemoveClassificationDialog({
 
   return (
     <AlertDialog open={open} onOpenChange={close}>
-      <AlertDialogContent>
+      <AlertDialogContent
+        onCloseAutoFocus={(event) => {
+          const element = removed.current ? focusAfterRemove?.() : opener;
+          if (element?.isConnected) {
+            event.preventDefault();
+            element.focus();
+          }
+        }}
+      >
         <AlertDialogHeader>
           <AlertDialogTitle className="break-words">{`Remove ${tag.name} from ${target.label}?`}</AlertDialogTitle>
           <AlertDialogDescription>{`Rules that apply to ${tag.name} stop applying here.`}</AlertDialogDescription>
@@ -149,14 +173,18 @@ export function RemoveClassificationDialog({
 }
 
 type Removing = { tag: { id: string; name: string; key: string }; target: RemoveTarget };
+type Asked = Removing & { opener: HTMLElement | null };
 
 /**
  * A remove dialog owned by the list that offers Remove: `ask` opens it on one
  * assignment, and `dialog` is rendered once beside the list. The list owns it,
  * not the chip, so the dialog outlives the chip it removes.
  */
-export function useRemoveClassification(): { ask: (r: Removing) => void; dialog: ReactNode } {
-  const [removing, setRemoving] = useState<Removing | null>(null);
+export function useRemoveClassification(
+  /** Where focus goes after a successful remove (see `RemoveClassificationDialog`); read when the dialog closes. */
+  focusAfterRemove: (r: Removing) => HTMLElement | null | undefined,
+): { ask: (r: Removing) => void; dialog: ReactNode } {
+  const [removing, setRemoving] = useState<Asked | null>(null);
   const dialog = removing ? (
     <RemoveClassificationDialog
       open
@@ -165,7 +193,14 @@ export function useRemoveClassification(): { ask: (r: Removing) => void; dialog:
       }}
       tag={removing.tag}
       target={removing.target}
+      focusAfterRemove={() => focusAfterRemove(removing)}
+      opener={removing.opener}
     />
   ) : null;
-  return { ask: setRemoving, dialog };
+  // What held focus when Remove was pressed: read before the dialog mounts and moves focus inside.
+  const ask = (r: Removing) => {
+    const active = document.activeElement;
+    setRemoving({ ...r, opener: active instanceof HTMLElement && active !== document.body ? active : null });
+  };
+  return { ask, dialog };
 }

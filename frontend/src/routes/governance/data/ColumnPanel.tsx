@@ -15,7 +15,7 @@ import { useRemoveClassification } from "@/routes/governance/RemoveClassificatio
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
-import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
@@ -176,7 +176,9 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
   const [whoCanRead, setWhoCanRead] = useState(false);
   const [addTag, setAddTag] = useState<TagTarget | null>(null);
   const canRemoveTag = useCanEditCatalogTags();
-  const removal = useRemoveClassification();
+  // After a remove, focus lands on the panel's Add classification (removing needs the same permission, so it is there).
+  const addTagButton = useRef<HTMLButtonElement>(null);
+  const removal = useRemoveClassification(() => addTagButton.current);
 
   const own = (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, path.column));
   const fromTable = (assignments ?? []).filter((a) => a.column === "");
@@ -193,6 +195,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
         {canTag ? (
           <div className="space-y-1">
             <Button
+              ref={addTagButton}
               variant="outline"
               size="sm"
               disabled={!egret}
@@ -236,6 +239,10 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
               own={own}
               fromTable={fromTable}
               label={fullPath(path)}
+              table={{
+                href: pathToUrl({ catalog: path.catalog, schema: path.schema, object: path.object }),
+                label: fullPath({ catalog: path.catalog, schema: path.schema, object: path.object }),
+              }}
               onRemove={
                 canRemoveTag && catalog.warehouseId != null
                   ? (a) =>
@@ -295,6 +302,7 @@ function TagList({
   fromTable,
   label,
   onRemove,
+  table,
 }: {
   column: string;
   own: ResourceTagDto[];
@@ -303,6 +311,8 @@ function TagList({
   label: string;
   /** Offers Remove on the column's own classifications (spec C4). */
   onRemove?: (a: ResourceTagDto) => void;
+  /** The table the inherited ones come from: "from table" links to its page, which closes this panel. */
+  table: { href: string; label: string };
 }) {
   return (
     <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
@@ -313,7 +323,7 @@ function TagList({
       ))}
       {fromTable.map((a) => (
         <li key={`table-${a.tag.id}`}>
-          <ClassificationChip tag={a.tag} objectLabel={label} inherited />
+          <ClassificationChip tag={a.tag} objectLabel={label} inherited inheritedFrom={table} />
         </li>
       ))}
     </ul>

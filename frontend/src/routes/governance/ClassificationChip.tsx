@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { Lock, X } from "lucide-react";
 import { useTags } from "@/api/tags";
-import { useAuth } from "@/auth/useAuth";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { Badge } from "@/components/ui/badge";
 import { IconButton } from "@/components/ui/icon-button";
 import { DEFAULT_COLOR } from "@/routes/governance/classifications/tagParts";
@@ -22,14 +22,12 @@ import { tagUrl } from "@/routes/governance/classifications/tagUrl";
  * `WAREHOUSE_WRITE`); a platform admin passes every key in the PDP.
  */
 export function useCanEditCatalogTags(): boolean {
-  const { me } = useAuth();
-  return !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("catalog_registry:update"));
+  return usePolicyPermissions()("catalog_registry:update");
 }
 
 /** Whether the viewer may open a classification's page (`GET /tags`, `tag:read`; platform admin passes). */
 function useCanReadTags(): boolean {
-  const { me } = useAuth();
-  return !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("tag:read"));
+  return usePolicyPermissions()("tag:read");
 }
 
 /**
@@ -45,17 +43,24 @@ function useCanReadTags(): boolean {
 export function ClassificationChip({
   tag,
   inherited = false,
+  inheritedFrom,
   onRemove,
   objectLabel,
 }: {
   tag: { id: string; key: string; name: string; color: string };
   inherited?: boolean;
+  /**
+   * For an inherited chip, the table it comes from: "from table" links there
+   * (spec C4.2). Left out where the chip is already on that table's page.
+   */
+  inheritedFrom?: { href: string; label: string };
   onRemove?: () => void;
   /** The object it is on, as the remove button names it (`ice.sales.orders.email`). */
   objectLabel: string;
 }) {
   const canRead = useCanReadTags();
-  const tagsQ = useTags();
+  // Without tag:read the read is refused: skip it rather than ask again on every chip's mount.
+  const tagsQ = useTags({ enabled: canRead });
   const known = tagsQ.data?.find((t) => t.id === tag.id);
   // Read defensively: a stale or partial catalogue row says nothing about clearance rather than crash the chip.
   const gated = !!known && (known.required_roles?.length ?? 0) + (known.required_groups?.length ?? 0) > 0;
@@ -89,7 +94,22 @@ export function ClassificationChip({
       ) : (
         <span className="inline-flex items-center gap-1">{name}</span>
       )}
-      {inherited ? <span className="font-normal text-muted-foreground">{" from table"}</span> : null}
+      {inherited ? (
+        <span className="font-normal text-muted-foreground">
+          {" "}
+          {inheritedFrom ? (
+            <Link
+              to={inheritedFrom.href}
+              aria-label={`from table ${inheritedFrom.label}`}
+              className="rounded-sm underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              from table
+            </Link>
+          ) : (
+            "from table"
+          )}
+        </span>
+      ) : null}
       {onRemove && !inherited ? (
         <IconButton aria-label={`Remove ${tag.name} from ${objectLabel}`} className="-mr-1 size-6" onClick={onRemove}>
           <X aria-hidden className="size-3" />

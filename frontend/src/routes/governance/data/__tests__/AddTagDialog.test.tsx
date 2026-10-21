@@ -151,4 +151,62 @@ describe("Add classification on a whole table", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add classification" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("internal error");
   });
+
+  it("waits for the rules before a whole-table add, and says so", async () => {
+    serve({ "/tags": ok([PII]), "/perm/rules": "never" });
+    open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    const add = screen.getByRole("button", { name: "Add classification" });
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    expect(add).toHaveAccessibleDescription("Checking rules…");
+  });
+
+  it("says the rules could not be read and lets the server decide", async () => {
+    serve({ "/tags": ok([PII]), "/perm/rules": fail(500, "boom") });
+    open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    expect(await screen.findByText(/The rules could not be read/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add classification" })).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("clears the columns' failure when going back to the whole table, and the ticks when the classification changes", async () => {
+    const SECRET = { ...PII, id: "t-sec", key: "sec", name: "Secret", description: "" };
+    serve({ "/tags": ok([PII, SECRET]), "/perm/rules": ok([HASH, { ...HASH, id: "r2", name: "Hash Secret", tag_name: "Secret" }]), "PUT /warehouses/wh-1/resource-tags": fail(500, "internal error") });
+    open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    await userEvent.click(await screen.findByRole("button", { name: "Attach to columns instead" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "email" }));
+    await userEvent.click(screen.getByRole("button", { name: "Attach to 1 column" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("internal error");
+    await userEvent.click(screen.getByRole("button", { name: "Attach to the whole table instead" }));
+    expect(screen.queryByText("internal error")).not.toBeInTheDocument();
+    await pick("Secret");
+    await userEvent.click(await screen.findByRole("button", { name: "Attach to columns instead" }));
+    expect(screen.getByRole("checkbox", { name: "email" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Attach to 0 columns" })).toBeInTheDocument();
+  });
+
+  it("stays open while the columns are being attached", async () => {
+    serve({ "/tags": ok([PII]), "/perm/rules": ok([HASH]), "PUT /warehouses/wh-1/resource-tags": "never" });
+    const onOpenChange = open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    await userEvent.click(await screen.findByRole("button", { name: "Attach to columns instead" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "email" }));
+    await userEvent.click(screen.getByRole("button", { name: "Attach to 1 column" }));
+    await userEvent.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(screen.getByRole("dialog", { name: "Add classification" })).toBeInTheDocument();
+  });
+
+  it("announces only the server's sentence, not its actions or details", async () => {
+    serve({ "/tags": ok([PII]), "PUT /warehouses/wh-1/resource-tags": { status: 400, body: CONFLICT } });
+    open(TABLE, me(["tag:read", "catalog_registry:update"]));
+    await pick("PII");
+    await userEvent.click(screen.getByRole("button", { name: "Add classification" }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+    expect(alert).not.toHaveTextContent("Details");
+    expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
+  });
 });
+

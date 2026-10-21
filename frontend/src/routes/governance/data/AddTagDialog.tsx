@@ -1,12 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Columns3, Loader2, Lock, Tag as TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import {
-  useControlPlaneCatalogAssignResourceTag,
-  useControlPlaneCatalogUnassignResourceTag,
-} from "@/api/generated/control-plane-catalog/control-plane-catalog";
+import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
 import type { RuleView } from "@/api/generated/model";
 import { usePermListRules } from "@/api/generated/perm/perm";
@@ -19,7 +16,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
-import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { DEFAULT_COLOR } from "@/routes/governance/classifications/tagParts";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
@@ -85,7 +81,10 @@ const columnsWord = (n: number) => `${n} ${n === 1 ? "column" : "columns"}`;
  * columns, one `PUT` per ticked column in the table's order, stopping at the
  * first failure with the ticks kept. Without `policy:read` (or with no such
  * mask) it shows a short note, and the server decides: its coded refusal is
- * shown as the same sentence, with the same way out.
+ * shown as the same sentence, with the same way out. While the rules are
+ * still loading, Add waits ("Checking rules…"); when they could not be read,
+ * it says so and the server decides. The dialog does not close while a write
+ * is in flight.
  *
  * On success it refetches what an attach changes (`invalidateTagAssignment`),
  * closes and toasts. On failure the server's sentence shows beside the field
@@ -100,16 +99,33 @@ export function AddTagDialog({
   target: TagTarget | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  // A write in flight (one column of several, or the whole table) keeps the dialog open:
+  // closing would drop the run's outcome and the remaining columns silently.
+  const [busy, setBusy] = useState(false);
   return (
-    <Dialog open={target !== null} onOpenChange={onOpenChange}>
+    <Dialog
+      open={target !== null}
+      onOpenChange={(open) => {
+        if (!open && busy) return;
+        onOpenChange(open);
+      }}
+    >
       <DialogContent className="sm:max-w-md">
-        {target ? <AddTagForm target={target} onDone={() => onOpenChange(false)} /> : null}
+        {target ? <AddTagForm target={target} onDone={() => onOpenChange(false)} onBusyChange={setBusy} /> : null}
       </DialogContent>
     </Dialog>
   );
 }
 
-function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void }) {
+function AddTagForm({
+  target,
+  onDone,
+  onBusyChange,
+}: {
+  target: TagTarget;
+  onDone: () => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
   const [tagId, setTagId] = useState("");
   const [mode, setMode] = useState<"whole" | "columns">("whole");
   const [ticked, setTicked] = useState<string[]>([]);
@@ -127,6 +143,8 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
   const catalogue = tagsQ.data?.status === 200 ? (tagsQ.data.data as unknown as Tag[]) : undefined;
   const offered = catalogue?.filter((t) => !assigned.has(t.id)).sort((a, b) => a.name.localeCompare(b.name));
   const rules: RuleView[] | undefined = canReadRules && rulesQ.data?.status === 200 ? rulesQ.data.data : undefined;
+  // With policy:read, a whole-table attach waits for the rules: until they answer, the mask check cannot be made.
+  const rulesLoading = canReadRules && !rulesQ.isError && rulesQ.data?.status !== 200;
   const picked = offered?.find((t) => t.id === tagId);
   const onTable = target.column === undefined;
   const noun = onTable ? "table" : "column";
@@ -216,6 +234,7 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
           onValueChange={(v) => {
             setTagId(v);
             setMode("whole");
+            setTicked([]);
             setColumnsError(null);
             assign.reset();
           }}
@@ -261,9 +280,22 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
         </ConflictAlert>
       );
     } else if (serverConflict) {
-      tableNotes = <ServerConflict conflict={serverConflict} canColumns={canColumns} onColumns={toColumns} onRemoved={() => assign.reset()} />;
+      tableNotes = <ServerConflict conflict={serverConflict} canColumns={canColumns} onColumns={toColumns} />;
+    } else if (rulesLoading) {
+      tableNotes = (
+        <p id="add-tag-checking" className="text-xs text-muted-foreground">
+          Checking rules…
+        </p>
+      );
     } else {
-      tableNotes = <p className="text-xs text-muted-foreground">{TABLE_LEVEL_NOTE}</p>;
+      tableNotes = (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          {canReadRules && rulesQ.isError ? (
+            <p>The rules could not be read, so whether a mask uses this classification is not checked here; egret checks it when you add.</p>
+          ) : null}
+          <p>{TABLE_LEVEL_NOTE}</p>
+        </div>
+      );
     }
   }
 
@@ -294,7 +326,17 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
               refusalMessage(columnsError, "catalog_registry:update", "The classification could not be attached. Try again.")}
           </p>
         ) : null}
-        <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={() => setMode("whole")}>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0"
+          onClick={() => {
+            setMode("whole");
+            setColumnsError(null);
+            assign.reset();
+          }}
+        >
           Attach to the whole table instead
         </Button>
       </fieldset>
@@ -304,8 +346,13 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
   let blockedBy: string | undefined;
   if (offered && offered.length > 0 && !tagId) blockedBy = "add-tag-needs";
   else if (mode === "whole" && preConflict) blockedBy = "add-tag-conflict";
+  else if (mode === "whole" && onTable && picked && rulesLoading && !serverConflict) blockedBy = "add-tag-checking";
   else if (mode === "columns" && ticked.length === 0) blockedBy = "add-tag-tick";
   const pending = assign.isPending || columnsPending;
+  useEffect(() => {
+    onBusyChange(pending);
+    return () => onBusyChange(false);
+  }, [pending, onBusyChange]);
 
   return (
     <form
@@ -388,62 +435,27 @@ function ColumnsWayOut({ canColumns, onColumns }: { canColumns: boolean; onColum
 
 /**
  * The server's `table_tag_mask_conflict` (spec C5), as the same short
- * sentence. When it names a table-level attachment already stored
- * (`warehouseId`), a viewer who may edit catalog tags can remove that one.
+ * sentence, with the same way out (the columns). On an attach the conflict is
+ * the write itself (the body's `warehouseId` is `null`: nothing is stored to
+ * remove), so there is no "Remove from table" here; the rule dialog's has one.
+ * Only the sentence is the alert; the actions and details are not announced.
  */
 function ServerConflict({
   conflict,
   canColumns,
   onColumns,
-  onRemoved,
 }: {
   conflict: TableTagMaskConflict;
   canColumns: boolean;
   onColumns: () => void;
-  onRemoved: () => void;
 }) {
-  const canEdit = useCanEditCatalogTags();
-  const queryClient = useQueryClient();
-  const remove = useControlPlaneCatalogUnassignResourceTag<ApiError>();
-  const warehouseId = conflict.warehouseId;
   return (
-    <div role="alert" className="space-y-2 rounded-md border border-destructive/50 p-3 text-sm text-destructive">
-      <p>
+    <div className="space-y-2 rounded-md border border-destructive/50 p-3 text-sm">
+      <p role="alert" className="text-destructive">
         {conflictSentence(conflict.mask, conflict.tag, conflict.schema, conflict.table)}
         {conflict.moreTables ? " Other tables carry it too." : ""}
       </p>
-      <div className="flex flex-wrap gap-2">
-        <ColumnsWayOut canColumns={canColumns} onColumns={onColumns} />
-        {warehouseId && canEdit ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-disabled={remove.isPending ? true : undefined}
-            onClick={() => {
-              if (remove.isPending) return;
-              remove
-                .mutateAsync({
-                  warehouseId,
-                  data: { schema: conflict.schema, table: conflict.table, column: "", tag_id: conflict.tagId },
-                })
-                .then(
-                  () => {
-                    invalidateTagAssignment(queryClient, conflict.tagId, warehouseId);
-                    toast.success(`Removed ${conflict.tag} from ${conflict.schema}.${conflict.table}.`);
-                    onRemoved();
-                  },
-                  () => {},
-                );
-            }}
-          >
-            Remove from table
-          </Button>
-        ) : null}
-      </div>
-      {remove.isError ? (
-        <p>{refusalMessage(remove.error, "catalog_registry:update", "The classification could not be removed. Try again.")}</p>
-      ) : null}
+      <ColumnsWayOut canColumns={canColumns} onColumns={onColumns} />
       <details className="text-xs text-muted-foreground">
         <summary>Details</summary>
         {conflict.error}

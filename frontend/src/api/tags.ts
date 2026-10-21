@@ -116,11 +116,17 @@ export function objectTagsQueryKey(ws: string, kind: string, id: string) {
 
 // ── Catalog (control-plane) ─────────────────────────────────────────────────
 
-export function useTags() {
+/**
+ * The catalogue (`GET /control-plane/tags`, `tag:read`). `enabled: false`
+ * skips the read, for a caller that knows the viewer would be refused
+ * (a 403 is not cached as data, so every mount would ask again).
+ */
+export function useTags(opts?: { enabled?: boolean }) {
   return useQuery<Tag[]>({
     queryKey: tagsQueryKey,
     queryFn: () => apiJson<Tag[]>("/control-plane/tags"),
     retry: false,
+    enabled: opts?.enabled ?? true,
   });
 }
 

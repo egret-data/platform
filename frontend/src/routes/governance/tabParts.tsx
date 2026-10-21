@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useId, type ReactNode, type Ref } from "react";
 import { Link } from "react-router-dom";
 import { RotateCw } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -30,12 +30,21 @@ export function TabError({ what, onRetry, detail }: { what: string; onRetry: () 
   );
 }
 
-/** A section of a tab: a heading and its content, named by the heading (a `region`). */
-export function Section({ title, children }: { title: string; children: ReactNode }) {
+/**
+ * A section of a tab: a heading and its content, named by the heading (a
+ * `region`). With `headingRef` the heading can take focus from script (a
+ * place to land when the control that had focus is gone), never from Tab.
+ */
+export function Section({ title, children, headingRef }: { title: string; children: ReactNode; headingRef?: Ref<HTMLHeadingElement> }) {
   const headingId = useId();
   return (
     <section aria-labelledby={headingId} className="space-y-2">
-      <h2 id={headingId} className="text-base font-semibold">
+      <h2
+        id={headingId}
+        ref={headingRef}
+        tabIndex={headingRef ? -1 : undefined}
+        className="text-base font-semibold outline-none"
+      >
         {title}
       </h2>
       {children}

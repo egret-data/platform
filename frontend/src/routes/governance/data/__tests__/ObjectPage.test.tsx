@@ -1381,4 +1381,50 @@ describe("Remove a classification in place", () => {
     expect(screen.getByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" })).toBeInTheDocument();
     expect(toast.success).not.toHaveBeenCalled();
   });
+
+  it("moves focus to the header's Add classification after removing the table's classification", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(header()).getByRole("button", { name: "Add classification" })).toHaveFocus());
+  });
+
+  it("moves focus to the column's name after removing its classification in the columns table", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(columns).getByRole("link", { name: "email" })).toHaveFocus());
+  });
+
+  it("keeps focus in the dialog when the remove fails", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), tagWrite: { status: 500, body: { error: "internal error" } } }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(await within(dialog).findByText("internal error")).toBeInTheDocument();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("returns focus to the Remove button on Cancel", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    const opener = await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" });
+    await user.click(opener);
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
 });
+

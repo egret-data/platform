@@ -130,6 +130,7 @@ export function ObjectHeader({
                 return (
                   <Button
                     key={a.key}
+                    data-object-action={a.key}
                     variant="outline"
                     size="sm"
                     onClick={handlers[a.key]}
