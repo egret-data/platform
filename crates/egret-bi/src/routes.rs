@@ -19,15 +19,15 @@ use uuid::Uuid;
 use crate::chartquery;
 use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
-use crate::expr::validate_expression;
+use crate::expr::{validate_expression, validate_metric_expression};
 use crate::model::{
     AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, ChartRunResponse,
-    CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
-    DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
-    DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, FolderDto, MetricBody, MetricDto,
-    NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SetDashboardCertification,
-    SetDatasetCertification, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
-    UpdateDataset,
+    ConfirmQuery, CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource,
+    DashboardCardDto, DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto,
+    DashboardTabDto, DatasetColumnDto, DatasetDetailDto, DatasetRefreshDto, DatasetSummaryDto,
+    DuplicateDataset, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
+    SavedQueryDto, SchemaColumn, SetDashboardCertification, SetDatasetCertification, SetFolder,
+    UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -692,6 +692,10 @@ pub fn dataset_router() -> Router<BiState> {
             get(ds_get).put(ds_update).delete(ds_remove),
         )
         .route("/ws/{workspace}/datasets/{id}/refresh", post(ds_refresh))
+        .route(
+            "/ws/{workspace}/datasets/{id}/duplicate",
+            post(ds_duplicate),
+        )
         // Certification is its own route for the same reason the dashboard's is: it is guarded by
         // a PLATFORM permission, and folding it into the object's update body is precisely how an
         // editor used to be able to certify their own work.
@@ -1086,7 +1090,7 @@ async fn ds_update(
         ("id" = Uuid, Path, description = "Dataset id"),
     ),
     responses(
-        (status = 200, description = "Physical columns reconciled from the source", body = DatasetDetailDto),
+        (status = 200, description = "Physical columns reconciled from the source; names the columns added and removed. A column that kept its engine type keeps its Time switch.", body = DatasetRefreshDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
@@ -1097,7 +1101,7 @@ async fn ds_refresh(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
-) -> Result<Json<DatasetDetailDto>, BiApiError> {
+) -> Result<Json<DatasetRefreshDto>, BiApiError> {
     let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
@@ -1111,11 +1115,66 @@ async fn ds_refresh(
     let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let source = source_of(&ds);
     let new_columns = introspect(&st, &spec, &source).await?;
-    st.datasets
+    let changes = st
+        .datasets
         .reconcile_physical_columns(id, &new_columns)
         .await
         .map_err(BiApiError::from)?;
-    Ok(Json(load_detail(&st, id).await?))
+    Ok(Json(DatasetRefreshDto {
+        dataset: load_detail(&st, id).await?,
+        added_columns: changes.added,
+        removed_columns: changes.removed,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/duplicate",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = DuplicateDataset,
+    responses(
+        (status = 200, description = "The copy: same source, every column setting and metric (not the certification)", body = DatasetDetailDto),
+        (status = 400, description = "Empty name", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "No dataset:read on the source, or no dataset:manage (or the database is not granted)", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 409, description = "A dataset with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ds_duplicate(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<DuplicateDataset>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    // Reading the source is what the copy discloses; creating a dataset is what it does. Both
+    // gates, the second the same one `ds_create` uses (dataset:manage + the database granted).
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let name = b.name.trim();
+    if name.is_empty() {
+        return Err(crate::BiError::BadRequest("name is required".into()).into());
+    }
+    let copy = st
+        .datasets
+        .duplicate(id, name, Some(ctx.principal.user_id))
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, copy.id).await?))
 }
 
 #[utoipa::path(
@@ -1125,12 +1184,14 @@ async fn ds_refresh(
     params(
         WorkspacePath,
         ("id" = Uuid, Path, description = "Dataset id"),
+        ("confirm" = Option<String>, Query, description = "The dataset's exact name. Required while charts are built on it: with it, those charts are deleted too."),
     ),
     responses(
         (status = 200, description = "Dataset deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 409, description = "Charts are built on this dataset (live or in the trash) and `confirm` is not its name. Body: `{error, code: \"in_use\", charts: [{id, name, viz_type, trashed}]}`", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1138,11 +1199,33 @@ async fn ds_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
+    AxQuery(q): AxQuery<ConfirmQuery>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
+    // D8: the charts go with the dataset (`ON DELETE CASCADE`), so a delete that would take any
+    // with it — trashed ones too — is refused with their list, unless the caller typed the name.
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let charts = st.datasets.charts_on(id).await.map_err(BiApiError::from)?;
+    if !charts.is_empty() && q.confirm.as_deref() != Some(ds.name.as_str()) {
+        let n = charts.len();
+        return Err(crate::BiError::InUse {
+            message: format!(
+                "{n} {} built on this dataset would be deleted with it; confirm with the dataset name to delete {}",
+                if n == 1 { "chart is" } else { "charts are" },
+                if n == 1 { "both" } else { "them all" },
+            ),
+            charts,
+        }
+        .into());
+    }
     st.datasets.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1303,7 +1386,7 @@ async fn require_metric_in_dataset(
     request_body = MetricBody,
     responses(
         (status = 200, description = "Metric added (expression validated)", body = DatasetDetailDto),
-        (status = 400, description = "Invalid metric expression", body = ErrorBody),
+        (status = 400, description = "Invalid metric expression, or not an aggregate", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
@@ -1327,7 +1410,7 @@ async fn ds_add_metric(
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
     let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
-    let d = validate_expression(&spec, &source_of(&ds), &b.expression)
+    let d = validate_metric_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
     st.datasets
@@ -1357,11 +1440,12 @@ async fn ds_add_metric(
     ),
     request_body = MetricBody,
     responses(
-        (status = 200, description = "Metric updated (expression validated)", body = DatasetDetailDto),
-        (status = 400, description = "Invalid metric expression", body = ErrorBody),
+        (status = 200, description = "Metric updated (expression validated). A rename rewrites the charts that use the metric in the same transaction.", body = DatasetDetailDto),
+        (status = 400, description = "Invalid metric expression, or not an aggregate", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset, or metric not in this dataset", body = ErrorBody),
+        (status = 409, description = "Name taken, or a rename of a used metric whose old or new name is also a column name (the charts could not be rewritten unambiguously). Body of the latter: `{error, code: \"in_use\", charts}`", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1376,6 +1460,46 @@ async fn ds_update_metric(
         .await
         .map_err(BiApiError::from)?;
     require_metric_in_dataset(&st, id, metric_id).await?;
+    let old_name = st
+        .datasets
+        .metrics(id)
+        .await
+        .map_err(BiApiError::from)?
+        .into_iter()
+        .find(|m| m.id == metric_id)
+        .map(|m| m.metric_name)
+        .ok_or(Error::NotFound("metric".into()))?;
+    // KI-099: a rename used to leave every chart that named the metric failing with
+    // `unknown metric: <old>`. Those charts are now rewritten with the metric, in one transaction.
+    // Decided BEFORE the engine probe below, so a rename that is going to be refused does not
+    // spend an engine round trip to find out.
+    let rewrite_charts = if old_name != b.metric_name {
+        let charts = st
+            .datasets
+            .charts_using_metric(id, &old_name)
+            .await
+            .map_err(BiApiError::from)?;
+        if !charts.is_empty() {
+            // The rewrite matches settings by value, so it is only safe while no column shares
+            // either name: `cartesian.xAxis: "revenue"` could otherwise be the column.
+            let columns = st.datasets.columns(id).await.map_err(BiApiError::from)?;
+            if let Some(clash) = [old_name.as_str(), b.metric_name.as_str()]
+                .into_iter()
+                .find(|n| columns.iter().any(|c| c.column_name == *n))
+            {
+                return Err(crate::BiError::InUse {
+                    message: format!(
+                        "cannot rename a metric that charts use while a column is also named {clash:?}: the charts could not be rewritten unambiguously"
+                    ),
+                    charts,
+                }
+                .into());
+            }
+        }
+        !charts.is_empty()
+    } else {
+        false
+    };
     let ds = st
         .datasets
         .get(id)
@@ -1383,9 +1507,27 @@ async fn ds_update_metric(
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
     let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
-    let d = validate_expression(&spec, &source_of(&ds), &b.expression)
+    let d = validate_metric_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
+    if rewrite_charts {
+        st.datasets
+            .rename_metric(
+                id,
+                metric_id,
+                &old_name,
+                &b.metric_name,
+                &b.expression,
+                &d.data_type,
+                &d.type_generic,
+                &b.verbose_name,
+                &b.description,
+                &b.format,
+            )
+            .await
+            .map_err(BiApiError::from)?;
+        return Ok(Json(load_detail(&st, id).await?));
+    }
     st.datasets
         .update_metric(
             metric_id,
@@ -1498,9 +1640,11 @@ async fn ds_set_metric_certification(
         WorkspacePath,
         ("id" = Uuid, Path, description = "Dataset id"),
         ("metric_id" = Uuid, Path, description = "Metric id"),
+        ("confirm" = Option<String>, Query, description = "The metric's exact name. Required while charts use it: with it, the metric is deleted and those charts stop running."),
     ),
     responses(
         (status = 200, description = "Metric deleted", body = DatasetDetailDto),
+        (status = 409, description = "Charts use this metric and `confirm` is not its name. Body: `{error, code: \"in_use\", charts}`", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset, or metric not in this dataset", body = ErrorBody),
@@ -1511,12 +1655,38 @@ async fn ds_delete_metric(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
+    AxQuery(q): AxQuery<ConfirmQuery>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
     let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
     require_metric_in_dataset(&st, id, metric_id).await?;
+    let name = st
+        .datasets
+        .metrics(id)
+        .await
+        .map_err(BiApiError::from)?
+        .into_iter()
+        .find(|m| m.id == metric_id)
+        .map(|m| m.metric_name)
+        .ok_or(Error::NotFound("metric".into()))?;
+    let charts = st
+        .datasets
+        .charts_using_metric(id, &name)
+        .await
+        .map_err(BiApiError::from)?;
+    if !charts.is_empty() && q.confirm.as_deref() != Some(name.as_str()) {
+        let n = charts.len();
+        return Err(crate::BiError::InUse {
+            message: format!(
+                "{n} {} this metric and would stop running; confirm with the metric name to delete it",
+                if n == 1 { "chart uses" } else { "charts use" },
+            ),
+            charts,
+        }
+        .into());
+    }
     st.datasets
         .delete_metric(metric_id)
         .await
@@ -1535,7 +1705,7 @@ async fn ds_delete_metric(
     request_body = AddColumnBody,
     responses(
         (status = 200, description = "Calculated column added (expression validated)", body = DatasetDetailDto),
-        (status = 400, description = "Invalid column expression", body = ErrorBody),
+        (status = 400, description = "Empty column name, or invalid column expression", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
         (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
@@ -1552,6 +1722,11 @@ async fn ds_add_column(
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
+    // A column is addressed by its name in the path (`/columns/{column_name}`), so an empty name
+    // makes a column no request can reach again: not editable, not deletable.
+    if b.column_name.trim().is_empty() {
+        return Err(crate::BiError::BadRequest("column name is required".into()).into());
+    }
     let ds = st
         .datasets
         .get(id)
@@ -1681,9 +1856,13 @@ async fn ds_update_column(
     get,
     path = "/api/ws/{workspace}/datasets/{id}/usage",
     tag = "datasets",
-    params(WorkspacePath, ("id" = Uuid, Path, description = "Dataset id")),
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("include_trashed" = Option<bool>, Query, description = "Also list charts in the trash: every chart a delete of the dataset would delete with it"),
+    ),
     responses(
-        (status = 200, description = "Charts that use this dataset", body = Vec<crate::model::DatasetUsageDto>),
+        (status = 200, description = "Charts that use this dataset, live ones first", body = Vec<crate::model::DatasetUsageDto>),
         (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
         (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
     ),
@@ -1692,18 +1871,26 @@ async fn ds_usage(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
+    AxQuery(q): AxQuery<UsageQuery>,
 ) -> Result<Json<Vec<crate::model::DatasetUsageDto>>, BiApiError> {
     let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    let items = st.datasets.usage(id).await.map_err(BiApiError::from)?;
+    let items = if q.include_trashed {
+        st.datasets.charts_on(id).await
+    } else {
+        st.datasets.usage(id).await
+    }
+    .map_err(BiApiError::from)?;
     Ok(Json(
         items
             .into_iter()
             .map(|u| crate::model::DatasetUsageDto {
                 id: u.id.to_string(),
                 name: u.name,
+                viz_type: u.viz_type,
+                trashed: u.trashed,
             })
             .collect(),
     ))
@@ -2700,6 +2887,12 @@ async fn require_cards_in_ws(
 }
 
 #[derive(serde::Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    include_trashed: bool,
+}
+
+#[derive(serde::Deserialize)]
 struct ListQuery {
     #[serde(default)]
     trashed: bool,
@@ -3591,6 +3784,7 @@ async fn require_folder(
         ds_update,
         ds_remove,
         ds_refresh,
+        ds_duplicate,
         ds_data,
         ds_set_certification,
         ds_add_metric,
@@ -3613,6 +3807,8 @@ async fn require_folder(
         UpdateDataset,
         SetDatasetCertification,
         DatasetDetailDto,
+        DatasetRefreshDto,
+        DuplicateDataset,
         DatasetSummaryDto,
         DatasetColumnDto,
         MetricDto,
