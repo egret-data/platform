@@ -448,7 +448,7 @@ deploy-kind: images-build
 deploy-kind-oidc: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true
+      --set oidc.enabled=true --set oidc.devRealm=true --set ingress.enabled=true
     just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
 
@@ -514,7 +514,7 @@ e2e-kind: deploy-kind-oidc
 deploy-kind-governance: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
+      --set oidc.enabled=true --set oidc.devRealm=true --set ingress.enabled=true --set ranger.enabled=true
     just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"
 

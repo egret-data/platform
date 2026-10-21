@@ -5,6 +5,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { ApiError } from "@/api/client";
 import { fqnOf, useCatalogs, useColumns, useDatabases, useSchemas, useSearchObjects, useTables } from "@/api/sqllab";
 import { emptySchemaIndex, type SchemaIndex, type SchemaSink } from "./schemaIndex";
 
@@ -258,7 +259,7 @@ function CatalogList({ ws, db, depth, filter, onInsert, sink }: {
 }
 
 export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPreview, onCollapse }: DataPanelProps) {
-  const { data: databases } = useDatabases(ws);
+  const { data: databases, isError: dbsError, error: dbsErr } = useDatabases(ws);
   // `databases` is undefined until the list loads. Don't pick the browse branch
   // until it settles: guessing non-Trino for a Trino db fires an invalid
   // `schemas?catalog=` (empty) request that the engine 502s.
@@ -361,7 +362,19 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
       </div>
 
       <div className="flex-1 overflow-auto p-1">
-        {!dbId ? (
+        {dbsError ? (
+          <div role="alert" className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-destructive">
+            <AlertTriangle className="h-5 w-5" />
+            {(dbsErr as ApiError | null)?.status === 403
+              ? "You can't list this workspace's connections. Ask a workspace admin for a role that can run queries."
+              : `Couldn't load this workspace's connections: ${dbsErr?.message || "request failed"}.`}
+          </div>
+        ) : databases?.length === 0 ? (
+          <div role="status" className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted-foreground">
+            <Database className="h-5 w-5 opacity-40" />
+            No connection is granted to this workspace. Ask a workspace admin.
+          </div>
+        ) : !dbId ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted-foreground">
             <Database className="h-5 w-5 opacity-40" />
             Select a database to browse its schema.

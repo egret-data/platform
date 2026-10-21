@@ -35,6 +35,8 @@ mod lineage_sweep;
 mod plugin_judgement;
 mod secrets;
 mod storage;
+/// KI-206/KI-129: which keys Browse and Download may touch.
+mod storage_scope;
 mod tags;
 mod view_exposure;
 
@@ -48,6 +50,7 @@ pub use governance_lineage::{
     LineageReader, LineageTableRef, ObjectLineage, ReadersIncomplete, ViewLineageInfo,
 };
 pub use governance_tags::ObjectTags;
+pub use storage_scope::{ConnStoreOpener, S3StoreOpener, StorageScope, SystemPrefixes};
 pub use view_exposure::{
     EngineNotChecked, ExposureEngine, LineageState, MatchedBy, MaterializedViewLister, MvRow,
     SecurityMode, TrinoViewItem, TrinoViewReason, ViewExposureDto, ViewExposureItem,
@@ -138,6 +141,10 @@ pub struct CpState {
     /// (`audit.retention_days <= 0`, or audit disabled, which stops the
     /// prune). Reported by `GET /governance/changes`.
     pub audit_retention_days: Option<i64>,
+    /// How the Storage router opens a connection's store for Browse and
+    /// Download, and which prefixes of egret's own bucket it keeps closed
+    /// (KI-206).
+    pub storage_scope: StorageScope,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.

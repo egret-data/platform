@@ -8,6 +8,18 @@
 import type { ObjectDto } from './objectDto';
 
 export interface ListingDto {
+  /**
+     * The connection's key prefix (`""` when it has none). Every key in
+     * this listing, and every `prefix`/`key` the routes take, is relative
+     * to it.
+     */
+  root: string;
   folders: string[];
   objects: ObjectDto[];
+  /**
+     * Folders at this level left out because egret writes its users' data
+     * there (stored SQL Lab results, Data App sources, workflow files) and
+     * the caller is not a platform admin.
+     */
+  hiddenSystemFolders: string[];
 }

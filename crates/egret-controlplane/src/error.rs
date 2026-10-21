@@ -14,6 +14,10 @@ pub enum CpError {
     /// Caller is authenticated but lacks the `platform_admin` role.
     #[error("forbidden")]
     Forbidden,
+    /// 403 with a sentence saying why: the caller holds the permission the
+    /// route checks, but the object itself is closed to them.
+    #[error("{0}")]
+    ForbiddenBecause(String),
     #[error("not found")]
     NotFound,
     #[error("already exists: {0}")]
@@ -160,6 +164,7 @@ impl IntoResponse for CpError {
         }
         let (status, msg) = match &self {
             CpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            CpError::ForbiddenBecause(_) => (StatusCode::FORBIDDEN, self.to_string()),
             CpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             CpError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),

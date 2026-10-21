@@ -110,3 +110,21 @@ describe("SecretPicker", () => {
     expect(onEmit).toHaveBeenLastCalledWith({});
   });
 });
+
+describe("SecretPicker and system secrets (KI-207)", () => {
+  it("does not offer a secret egret manages itself", () => {
+    secretsMock.mockReturnValue({
+      data: [
+        { id: "sec-1", name: "prod-secret", used_by: 1, system_managed: false },
+        { id: "sys-1", name: "engine-internal-x", used_by: 0, system_managed: true },
+      ],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    render(<Harness onEmit={() => {}} />);
+    const values = Array.from(document.querySelectorAll("option")).map((o) => o.value);
+    expect(values).toContain("sec-1");
+    expect(values).not.toContain("sys-1");
+  });
+});

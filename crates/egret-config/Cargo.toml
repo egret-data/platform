@@ -8,6 +8,7 @@ license.workspace = true
 serde.workspace = true
 figment.workspace = true
 base64.workspace = true
+serde_ignored.workspace = true
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["toml", "env", "test"] }

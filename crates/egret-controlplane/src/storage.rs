@@ -21,6 +21,7 @@ use egret_core::http::ErrorBody;
 use egret_core::Ack;
 
 use crate::error::CpError;
+use crate::storage_scope::{ConnView, KeyKind};
 use crate::CpState;
 
 /// Request body for creating/updating a global storage connection. A `new_secret`
@@ -104,13 +105,13 @@ struct DownloadQuery {
     tag = "control-plane-storage",
     params(
         ("id" = Uuid, Path, description = "Storage connection id"),
-        ("key" = String, Query, description = "Object key to download"),
+        ("key" = String, Query, description = "Object key to download, relative to the connection's key prefix"),
     ),
     responses(
         (status = 200, description = "Object bytes streamed as an attachment", content_type = "application/octet-stream"),
-        (status = 400, description = "Invalid request or object could not be read", body = ErrorBody),
+        (status = 400, description = "Invalid key (a `.`/`..` or empty segment, a backslash or a control character, also once percent-decoded), or the object could not be read", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin", body = ErrorBody),
         (status = 404, description = "No such storage connection", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -122,9 +123,11 @@ async fn download_object(
     axum::extract::Query(dq): axum::extract::Query<DownloadQuery>,
 ) -> Result<axum::response::Response, CpError> {
     egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
-    let (store, bucket) = open_store(&st, id).await?;
-    use egret_storage::ObjectStore as _;
-    let uri = format!("s3://{bucket}/{}", dq.key);
+    let conn = get_conn(&st, id).await?;
+    let view = conn_view(&st, &principal, &conn)?;
+    let key = view.scope_key(&dq.key, KeyKind::Object)?;
+    let (store, bucket) = open_store(&st, &conn).await?;
+    let uri = format!("s3://{bucket}/{key}");
     let bytes = store
         .get(&uri)
         .await
@@ -146,13 +149,37 @@ async fn download_object(
     Ok(resp)
 }
 
-/// Resolve a storage connection + its secret and open an S3 store. Returns the bucket too.
-async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, String), CpError> {
-    let conn = st
-        .storage_registry
+async fn get_conn(st: &CpState, id: Uuid) -> Result<StorageConn, CpError> {
+    st.storage_registry
         .get_storage_conn(id)
         .await?
-        .ok_or(CpError::NotFound)?;
+        .ok_or(CpError::NotFound)
+}
+
+/// The connection as `principal` may see it: under its key prefix, with
+/// egret's own prefixes closed unless they are a platform admin (KI-206).
+fn conn_view<'a>(
+    st: &'a CpState,
+    principal: &egret_core::context::Principal,
+    conn: &'a StorageConn,
+) -> Result<ConnView<'a>, CpError> {
+    let admin = principal
+        .platform_roles
+        .iter()
+        .any(|r| r == "platform_admin");
+    ConnView::new(
+        &st.storage_scope.system,
+        &conn.bucket,
+        conn.key_prefix.as_deref(),
+        admin,
+    )
+}
+
+/// Resolve a storage connection's secret and open its store. Returns the bucket too.
+async fn open_store(
+    st: &CpState,
+    conn: &StorageConn,
+) -> Result<(std::sync::Arc<dyn egret_storage::ObjectStore>, String), CpError> {
     let secret_key = match conn.secret_ref {
         Some(ref_id) => {
             let (_user, pw) = st
@@ -172,17 +199,28 @@ async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, S
         secret_key,
         path_style: conn.path_style,
     };
-    let store = egret_storage::S3Store::new(&cfg)
+    let store = st
+        .storage_scope
+        .opener
+        .open(&cfg)
         .await
         .map_err(|e| CpError::BadRequest(format!("open storage: {e}")))?;
-    Ok((store, conn.bucket))
+    Ok((store, conn.bucket.clone()))
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ListingDto {
+    /// The connection's key prefix (`""` when it has none). Every key in
+    /// this listing, and every `prefix`/`key` the routes take, is relative
+    /// to it.
+    root: String,
     folders: Vec<String>,
     objects: Vec<ObjectDto>,
+    /// Folders at this level left out because egret writes its users' data
+    /// there (stored SQL Lab results, Data App sources, workflow files) and
+    /// the caller is not a platform admin.
+    hidden_system_folders: Vec<String>,
 }
 #[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -205,13 +243,13 @@ struct BrowseQuery {
     tag = "control-plane-storage",
     params(
         ("id" = Uuid, Path, description = "Storage connection id"),
-        ("prefix" = Option<String>, Query, description = "Folder prefix to list under"),
+        ("prefix" = Option<String>, Query, description = "Folder prefix to list under, relative to the connection's key prefix"),
     ),
     responses(
         (status = 200, description = "Folders and objects under the prefix", body = ListingDto),
-        (status = 400, description = "Invalid request or bucket could not be listed", body = ErrorBody),
+        (status = 400, description = "Invalid prefix, or the bucket could not be listed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission, or the prefix is one egret writes for its users and the caller is not a platform admin", body = ErrorBody),
         (status = 404, description = "No such storage connection", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -223,23 +261,39 @@ async fn browse_objects(
     axum::extract::Query(bq): axum::extract::Query<BrowseQuery>,
 ) -> Result<Json<ListingDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
-    let (store, _bucket) = open_store(&st, id).await?;
-    use egret_storage::ObjectStore as _;
+    let conn = get_conn(&st, id).await?;
+    let view = conn_view(&st, &principal, &conn)?;
+    let prefix = view.scope_key(&bq.prefix, KeyKind::Folder)?;
+    let (store, _bucket) = open_store(&st, &conn).await?;
     let listing = store
-        .list(&bq.prefix, Some("/"))
+        .list(&prefix, Some("/"))
         .await
         .map_err(|e| CpError::BadRequest(format!("list objects: {e}")))?;
+    let hidden_system_folders = listing
+        .folders
+        .iter()
+        .filter(|f| view.is_hidden_system(f))
+        .filter_map(|f| f.strip_prefix(view.root.as_str()).map(str::to_string))
+        .collect();
     Ok(Json(ListingDto {
-        folders: listing.folders,
+        root: view.root.clone(),
+        folders: listing
+            .folders
+            .iter()
+            .filter_map(|f| view.visible(f))
+            .collect(),
         objects: listing
             .objects
             .into_iter()
-            .map(|o| ObjectDto {
-                key: o.key,
-                size: o.size,
-                last_modified: o.last_modified,
+            .filter_map(|o| {
+                Some(ObjectDto {
+                    key: view.visible(&o.key)?,
+                    size: o.size,
+                    last_modified: o.last_modified,
+                })
             })
             .collect(),
+        hidden_system_folders,
     }))
 }
 

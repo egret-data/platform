@@ -8,7 +8,7 @@
 
 export type ControlPlaneStorageBrowseObjectsParams = {
 /**
- * Folder prefix to list under
+ * Folder prefix to list under, relative to the connection's key prefix
  */
 prefix?: string;
 };

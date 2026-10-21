@@ -11755,7 +11755,7 @@
             }
           },
           "409": {
-            "description": "The new name clashes with an existing secret",
+            "description": "The new name clashes with an existing secret, or the secret is managed by egret",
             "content": {
               "application/json": {
                 "schema": {
@@ -11835,7 +11835,7 @@
             }
           },
           "409": {
-            "description": "Secret is still referenced by one or more connections",
+            "description": "Secret is still referenced by one or more connections, or is managed by egret",
             "content": {
               "application/json": {
                 "schema": {
@@ -12251,7 +12251,7 @@
           {
             "name": "key",
             "in": "query",
-            "description": "Object key to download",
+            "description": "Object key to download, relative to the connection's key prefix",
             "required": true,
             "schema": {
               "type": "string"
@@ -12266,7 +12266,7 @@
             }
           },
           "400": {
-            "description": "Invalid request or object could not be read",
+            "description": "Invalid key (a `.`/`..` or empty segment, a backslash or a control character, also once percent-decoded), or the object could not be read",
             "content": {
               "application/json": {
                 "schema": {
@@ -12286,7 +12286,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission",
+            "description": "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -12339,7 +12339,7 @@
           {
             "name": "prefix",
             "in": "query",
-            "description": "Folder prefix to list under",
+            "description": "Folder prefix to list under, relative to the connection's key prefix",
             "required": false,
             "schema": {
               "type": "string"
@@ -12358,7 +12358,7 @@
             }
           },
           "400": {
-            "description": "Invalid request or bucket could not be listed",
+            "description": "Invalid prefix, or the bucket could not be listed",
             "content": {
               "application/json": {
                 "schema": {
@@ -12378,7 +12378,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission",
+            "description": "Missing storage:read permission, or the prefix is one egret writes for its users and the caller is not a platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -24061,14 +24061,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Registered databases in the workspace",
+            "description": "Connections granted to the workspace: the full detail for a workspace admin, id/name/engine only for a member with query:run or dataset:read",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/DatabaseDetailDto"
-                  }
+                  "$ref": "#/components/schemas/DatabaseListing"
                 }
               }
             }
@@ -42297,7 +42294,7 @@
       },
       "DatabaseListDto": {
         "type": "object",
-        "description": "Minimal listing for the Explorer DB picker (no connection internals).\n\n**Nothing constructs this today.** `GET /ws/{ws}/databases` answers\n`Vec<DatabaseDetailDto>`; this type survives only as a published schema\ncomponent. Adding a field here therefore ships a documented field that no\nresponse ever carries — Package 1 added `governed` to it and the field was\ndead on arrival. If a caller needs a narrower listing, give `list` this\nreturn type first; until then, leave it alone.",
+        "description": "A connection as `GET /ws/{ws}/databases` shows it to a member who is not a\nworkspace admin but may run queries or read datasets (KI-159, decision D9):\nenough to pick it in SQL Lab, nothing about how to reach it. No host, port,\noptions (user, catalog, scheme, TLS), secret reference, status or engine id.",
         "required": [
           "id",
           "name",
@@ -42315,9 +42312,27 @@
             "$ref": "#/components/schemas/Engine"
           },
           "delegated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether queries on this connection run as the signed-in user."
           }
         }
+      },
+      "DatabaseListing": {
+        "oneOf": [
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseDetailDto"
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseListDto"
+            }
+          }
+        ],
+        "description": "The body of `GET /ws/{ws}/databases`: the full detail for a workspace admin,\nthe redacted summary for everyone else who may list."
       },
       "DatasetColumnDto": {
         "type": "object",
@@ -43789,7 +43804,8 @@
               "source",
               "runs",
               "can_manage",
-              "effective_labels"
+              "effective_labels",
+              "worker_enabled"
             ],
             "properties": {
               "source": {
@@ -43813,6 +43829,10 @@
                   "$ref": "#/components/schemas/LabelDto"
                 },
                 "description": "What the run sees as `labels`: the flow's, then `labels`, the later key\nwinning. Empty when the frozen source does not parse."
+              },
+              "worker_enabled": {
+                "type": "boolean",
+                "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
               }
             }
           }
@@ -44011,7 +44031,8 @@
           "rows",
           "total",
           "limit",
-          "offset"
+          "offset",
+          "worker_enabled"
         ],
         "properties": {
           "rows": {
@@ -44034,6 +44055,10 @@
             "type": "integer",
             "format": "int64",
             "description": "The offset actually used, after the clamp."
+          },
+          "worker_enabled": {
+            "type": "boolean",
+            "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
           }
         }
       },
@@ -44816,7 +44841,8 @@
           "created_at",
           "updated_at",
           "validation",
-          "can_manage"
+          "can_manage",
+          "worker_enabled"
         ],
         "properties": {
           "id": {
@@ -44888,6 +44914,10 @@
           "can_manage": {
             "type": "boolean",
             "description": "Whether the caller may save, publish, run and delete this flow: they\nhold `workflow:manage` in this workspace. An editor opens read-only\nwhen this is false; every mutating route still checks for itself."
+          },
+          "worker_enabled": {
+            "type": "boolean",
+            "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
           }
         }
       },
@@ -46458,10 +46488,16 @@
       "ListingDto": {
         "type": "object",
         "required": [
+          "root",
           "folders",
-          "objects"
+          "objects",
+          "hiddenSystemFolders"
         ],
         "properties": {
+          "root": {
+            "type": "string",
+            "description": "The connection's key prefix (`\"\"` when it has none). Every key in\nthis listing, and every `prefix`/`key` the routes take, is relative\nto it."
+          },
           "folders": {
             "type": "array",
             "items": {
@@ -46473,6 +46509,13 @@
             "items": {
               "$ref": "#/components/schemas/ObjectDto"
             }
+          },
+          "hiddenSystemFolders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Folders at this level left out because egret writes its users' data\nthere (stored SQL Lab results, Data App sources, workflow files) and\nthe caller is not a platform admin."
           }
         }
       },
@@ -52129,7 +52172,8 @@
           "created_at",
           "used_by",
           "type",
-          "keys"
+          "keys",
+          "system_managed"
         ],
         "properties": {
           "id": {
@@ -52161,6 +52205,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "system_managed": {
+            "type": "boolean",
+            "description": "Minted and managed by egret for an engine or a catalog: it cannot be\nrenamed, rotated or deleted here, and pickers leave it out (KI-207)."
           }
         }
       },

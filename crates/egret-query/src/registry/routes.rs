@@ -1,8 +1,9 @@
 //! Workspace-scoped database registry router (`/ws/{workspace}/databases`).
 //!
-//! ADR-19 per-workspace model: every route is gated on the caller holding
-//! `workspace:manage_members` in the path workspace (the same gate Storage uses)
-//! and every repo call is scoped to `ctx.workspace_id`, so a database owned by
+//! ADR-19 per-workspace model: every route but the list is gated on the caller
+//! holding `workspace:manage_members` in the path workspace (the same gate
+//! Storage uses). The list also answers a member holding `query:run` or
+//! `dataset:read`, redacted to id/name/engine (KI-159). Every repo call is scoped to `ctx.workspace_id`, so a database owned by
 //! another workspace is never readable, mutable, or testable through this
 //! workspace's path (cross-tenant IDOR closed → 404).
 
@@ -21,8 +22,8 @@ use egret_core::{Ack, WorkspacePath};
 
 use crate::registry::error::{DatabaseError, DbApiError};
 use crate::registry::model::{
-    DatabaseDetailDto, DatabaseInput, DatabaseListDto, TestInput, TestOutcome, WsEngineCatalogDto,
-    WsEngineDetailDto, WsEngineListDto,
+    DatabaseDetailDto, DatabaseInput, DatabaseListDto, DatabaseListing, TestInput, TestOutcome,
+    WsEngineCatalogDto, WsEngineDetailDto, WsEngineListDto,
 };
 use crate::registry::repo::DatabaseRepo;
 
@@ -58,6 +59,9 @@ impl FromRef<DatabaseState> for Authorizer {
 }
 
 const PERM_MANAGE: &str = "workspace:manage_members";
+/// Either of these lists the workspace's connections, redacted (D9): the SQL
+/// Lab and dataset pickers need the id and name, not how to reach the engine.
+const PERMS_LIST_REDACTED: [&str; 2] = ["query:run", "dataset:read"];
 /// The ws-member read-only engine view (B2) is gated on `catalog:read`, which
 /// every workspace role (ws_admin/ws_editor/ws_viewer) holds — any member may
 /// see the engines provisioned to their workspace, unlike the manage-only CRUD.
@@ -96,7 +100,7 @@ pub fn workspace_database_router() -> Router<DatabaseState> {
     tag = "databases",
     params(WorkspacePath),
     responses(
-        (status = 200, description = "Registered databases in the workspace", body = Vec<DatabaseDetailDto>),
+        (status = 200, description = "Connections granted to the workspace: the full detail for a workspace admin, id/name/engine only for a member with query:run or dataset:read", body = DatabaseListing),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing workspace permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -105,10 +109,39 @@ pub fn workspace_database_router() -> Router<DatabaseState> {
 async fn list(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
-) -> Result<Json<Vec<DatabaseDetailDto>>, DbApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
+) -> Result<Json<DatabaseListing>, DbApiError> {
+    let full = allows(&st, &ctx, PERM_MANAGE).await?;
+    if !full {
+        let mut redacted = false;
+        for perm in PERMS_LIST_REDACTED {
+            if allows(&st, &ctx, perm).await? {
+                redacted = true;
+                break;
+            }
+        }
+        if !redacted {
+            return Err(egret_core::Error::Forbidden.into());
+        }
+    }
     let dbs = st.repo.list_for_workspace(ctx.workspace_id.0).await?;
-    Ok(Json(dbs.into_iter().map(Into::into).collect()))
+    Ok(Json(if full {
+        DatabaseListing::Full(dbs.into_iter().map(Into::into).collect())
+    } else {
+        DatabaseListing::Summary(dbs.into_iter().map(Into::into).collect())
+    }))
+}
+
+async fn allows(
+    st: &DatabaseState,
+    ctx: &egret_core::WorkspaceContext,
+    action: &str,
+) -> Result<bool, DbApiError> {
+    use egret_core::authz::AuthTarget;
+    Ok(st
+        .pdp
+        .authorize(&ctx.subject(), action, &ctx.resource())
+        .await?
+        .allow)
 }
 
 /// Resolve the connection's stored `secret_id` (a `workspace_secrets` id) by
@@ -476,6 +509,7 @@ async fn engine_detail(
         DatabaseInput,
         DatabaseDetailDto,
         DatabaseListDto,
+        DatabaseListing,
         TestInput,
         TestOutcome,
         WsEngineListDto,

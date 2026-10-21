@@ -291,7 +291,7 @@ describe("FlowTriggersTab: banners, empty, read-only", () => {
     const banners = within(screen.getByTestId("trigger-banners")).getAllByRole("status").map((b) => b.textContent);
     expect(banners).toEqual([
       "The scheduler is off on this server, so schedules and flow triggers do not fire. An administrator sets workflow.schedulerEnabled.",
-      "The worker is off, so triggered executions are created but do not run.",
+      "The workflow worker is off on this server, so executions are created but do not run. An administrator turns it on with workflow.workerEnabled (EGRET_WORKFLOW__WORKER_ENABLED=true).",
       "Webhooks are off on this server; their URLs answer 404.",
       "This flow is disabled, so none of its triggers fire.",
     ]);

@@ -875,6 +875,8 @@ async fn every_repository_column_reaches_the_wire() {
         "effective_labels",
         // Not a repository column: the PDP's `workflow:manage` answer (W7b Task 3).
         "can_manage",
+        // Not a repository column: the deployment's worker flag (KI-013).
+        "worker_enabled",
     ];
     let got: std::collections::BTreeSet<&str> = detail
         .as_object()
@@ -1020,7 +1022,12 @@ async fn every_repository_column_reaches_the_wire() {
     let want_list: std::collections::BTreeSet<&str> = want_execution
         .iter()
         .copied()
-        .filter(|k| !matches!(*k, "source" | "runs" | "can_manage" | "effective_labels"))
+        .filter(|k| {
+            !matches!(
+                *k,
+                "source" | "runs" | "can_manage" | "effective_labels" | "worker_enabled"
+            )
+        })
         .collect();
     assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
     // The flattened parent's fields carry the same values through the list
@@ -3595,4 +3602,61 @@ async fn a_start_refuses_a_draft_with_a_foreach() {
         .unwrap(),
         1
     );
+}
+
+/// **KI-013: the Run answer, the flow and the executions list say whether the
+/// worker runs.** With `workflow.worker_enabled` off (the shipping default) a
+/// started execution sits in `RUNNING` and nothing runs it; until KI-013 only
+/// the trigger routes said so. The same flag ([`TriggerFlags`]) the trigger
+/// routes echo, in both directions, so a field that is always `false` (or
+/// always `true`) fails one half.
+///
+/// [`TriggerFlags`]: egret_workflow::routes::TriggerFlags
+#[tokio::test]
+async fn the_run_answer_the_flow_and_the_executions_say_whether_the_worker_runs() {
+    let Some(db) = common::db().await else { return };
+    let (ws, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, manager, &["workflow:read", "workflow:manage"]).await;
+    let flow = common::seed_flow(&db, ws, manager, &runnable_source("ki013"), "draft").await;
+
+    for worker_enabled in [false, true] {
+        let app = common::app_with_trigger_flags(
+            &db,
+            egret_workflow::routes::TriggerFlags {
+                scheduler_enabled: false,
+                worker_enabled,
+                webhooks_enabled: false,
+            },
+        )
+        .await;
+        let run = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            manager,
+        )
+        .await;
+        assert_eq!(run.status(), 201);
+        let run = common::json(run).await;
+        assert_eq!(
+            run["worker_enabled"],
+            serde_json::json!(worker_enabled),
+            "the Run answer carries the worker flag, so a script is not misled: {run}"
+        );
+        let execution = run["id"].as_str().expect("execution id").to_string();
+
+        for path in [
+            format!("/api/ws/{ws}/workflows/flows/{flow}"),
+            format!("/api/ws/{ws}/workflows/executions"),
+            format!("/api/ws/{ws}/workflows/executions/{execution}"),
+        ] {
+            let res = common::get(&app, &path, manager).await;
+            assert_eq!(res.status(), 200, "{path}");
+            let body = common::json(res).await;
+            assert_eq!(
+                body["worker_enabled"],
+                serde_json::json!(worker_enabled),
+                "{path} carries the worker flag"
+            );
+        }
+    }
 }

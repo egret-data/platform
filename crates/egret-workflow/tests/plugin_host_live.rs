@@ -344,6 +344,7 @@ impl Fx {
                 enabled: true,
                 tick_interval: Duration::from_millis(100),
                 batch: 4,
+                max_concurrent_runs: 8,
                 reaper_interval: Duration::from_secs(3600),
                 working_timeout: Duration::from_secs(3600),
                 container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,

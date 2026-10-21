@@ -68,6 +68,7 @@ function execution(state: string, extra: Record<string, unknown> = {}) {
     source: LOG_SOURCE,
     runs: [run("extract", "SUCCESS", 0), run("load", state === "RUNNING" ? "RUNNING" : "SUCCESS", 1)],
     can_manage: true,
+    worker_enabled: true,
     ...extra,
   };
 }
@@ -160,6 +161,30 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("ExecutionDetail: the worker-off notice (KI-013)", () => {
+  it("says the worker is off and what to set while the execution has not ended", async () => {
+    new Server(ok(execution("RUNNING", { worker_enabled: false })));
+    renderPage();
+    const notice = await screen.findByTestId("worker-off-notice");
+    expect(notice).toHaveTextContent("executions are created but do not run");
+    expect(notice).toHaveTextContent("EGRET_WORKFLOW__WORKER_ENABLED=true");
+  });
+
+  it("says nothing once the execution has ended, nor while the worker runs", async () => {
+    new Server(ok(execution("SUCCESS", { worker_enabled: false })));
+    const first = renderPage();
+    expect(await screen.findByRole("heading", { level: 1, name: EXEC })).toBeInTheDocument();
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    expect(await screen.findByRole("heading", { level: 1, name: EXEC })).toBeInTheDocument();
+    expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+  });
 });
 
 describe("ExecutionDetail: the header", () => {

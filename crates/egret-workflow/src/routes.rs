@@ -361,6 +361,12 @@ pub struct FlowDto {
     // W7a spec §5.2. The PDP's answer to the check the mutating routes make.
     // `workflow:manage` is workspace-scoped, so `/auth/me` cannot say it.
     pub can_manage: bool,
+    /// Whether this deployment runs the workflow worker
+    /// (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
+    /// default). **False: an execution is created and stays `RUNNING`, and
+    /// nothing runs it until an administrator turns the worker on** (KI-013).
+    /// The same flag the trigger routes echo ([`TriggerFlags`]).
+    pub worker_enabled: bool,
 }
 
 /// A flow draft as `GET /flows` lists it — no `source`/`plan`/`validation`:
@@ -500,7 +506,7 @@ pub struct PublishFlowRequest {
 /// [`update_flow`] — so it is mapped to `Error::Internal` rather than
 /// `InvalidInput`, which would misattribute a storage-layer inconsistency to
 /// the current request.
-fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
+fn draft_dto(row: FlowRow, can_manage: bool, worker_enabled: bool) -> EgretResult<FlowDto> {
     let parsed = parse(&row.source).map_err(|e| {
         Error::Internal(anyhow::anyhow!(
             "stored draft {} no longer parses: {} (line {:?}, column {:?})",
@@ -530,6 +536,7 @@ fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
         updated_at: row.updated_at,
         validation: ValidationReportDto::from(&report),
         can_manage,
+        worker_enabled,
     })
 }
 
@@ -691,7 +698,10 @@ async fn create_flow(
         }),
     ));
     // The caller just passed `workflow:manage` to get here.
-    Ok((StatusCode::CREATED, Json(draft_dto(created, true)?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(draft_dto(created, true, st.trigger_flags.worker_enabled)?),
+    ))
 }
 
 #[utoipa::path(
@@ -720,7 +730,11 @@ async fn get_flow(
     // The check the mutating routes make, so the editor and the routes
     // cannot disagree about who may write.
     let can_manage = caller_may_manage(&st, &ctx).await?;
-    Ok(Json(draft_dto(row, can_manage)?))
+    Ok(Json(draft_dto(
+        row,
+        can_manage,
+        st.trigger_flags.worker_enabled,
+    )?))
 }
 
 #[utoipa::path(
@@ -819,7 +833,11 @@ async fn update_flow(
         }),
     ));
     // The caller just passed `workflow:manage` to get here.
-    Ok(Json(draft_dto(updated, true)?))
+    Ok(Json(draft_dto(
+        updated,
+        true,
+        st.trigger_flags.worker_enabled,
+    )?))
 }
 
 #[utoipa::path(
@@ -1689,10 +1707,16 @@ pub struct ExecutionDto {
     /// What the run sees as `labels`: the flow's, then `labels`, the later key
     /// winning. Empty when the frozen source does not parse.
     pub effective_labels: Vec<LabelDto>,
+    /// Whether this deployment runs the workflow worker
+    /// (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
+    /// default). **False: an execution is created and stays `RUNNING`, and
+    /// nothing runs it until an administrator turns the worker on** (KI-013).
+    /// The same flag the trigger routes echo ([`TriggerFlags`]).
+    pub worker_enabled: bool,
 }
 
 impl ExecutionDto {
-    fn new(d: ExecutionDetail, can_manage: bool) -> Self {
+    fn new(d: ExecutionDetail, can_manage: bool, worker_enabled: bool) -> Self {
         let own = crate::labels::own_labels(d.execution.labels.as_ref());
         let flow_labels = crate::spec::parse(&d.source)
             .ok()
@@ -1708,6 +1732,7 @@ impl ExecutionDto {
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
             can_manage,
+            worker_enabled,
         }
     }
 }
@@ -1744,6 +1769,12 @@ pub struct ExecutionPageDto {
     pub limit: i64,
     /// The offset actually used, after the clamp.
     pub offset: i64,
+    /// Whether this deployment runs the workflow worker
+    /// (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
+    /// default). **False: an execution is created and stays `RUNNING`, and
+    /// nothing runs it until an administrator turns the worker on** (KI-013).
+    /// The same flag the trigger routes echo ([`TriggerFlags`]).
+    pub worker_enabled: bool,
 }
 
 /// `GET /executions`'s query parameters. Each is optional and each is ANDed
@@ -1908,6 +1939,7 @@ async fn list_executions(
         total: found.total,
         limit: page.limit,
         offset: page.offset,
+        worker_enabled: st.trigger_flags.worker_enabled,
     }))
 }
 
@@ -1939,7 +1971,11 @@ async fn get_execution(
     // is no second statement whose empty result could be mistaken for one.
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
     let can_manage = caller_may_manage(&st, &ctx).await?;
-    Ok(Json(ExecutionDto::new(detail, can_manage)))
+    Ok(Json(ExecutionDto::new(
+        detail,
+        can_manage,
+        st.trigger_flags.worker_enabled,
+    )))
 }
 
 // ---------- Execution logs (W11 Task 5, spec §6) ----------
@@ -2511,7 +2547,14 @@ async fn start_flow_execution(
         .get(ctx.workspace_id.0, execution_id)
         .await
         .map_err(core_refusal)?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
 }
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
@@ -2818,7 +2861,11 @@ async fn resume_execution(
         serde_json::json!({ "from_state": before.execution.state }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::new(detail, true)))
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
 }
 
 #[utoipa::path(
@@ -2936,6 +2983,12 @@ async fn replay_execution(
             source.execution.state
         )));
     }
+    // KI-112: the replay runs with the stored SECRET values, not the mask the
+    // row shows; the start masks and seals them again for the new row.
+    let (inputs, _) = crate::secret_inputs::reveal(
+        source.execution.inputs.clone(),
+        source.secret_inputs.as_deref(),
+    )?;
     // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
     // needs a read is rolled back, the read fetched, and the start run again.
     let replacement = crate::worker::txn::transaction!(&st.db.pool, |at| {
@@ -2945,7 +2998,7 @@ async fn replay_execution(
                 workspace_id: ctx.workspace_id.0,
                 flow_id: source.execution.flow_id,
                 source: &source.source,
-                inputs: source.execution.inputs.clone(),
+                inputs: inputs.clone(),
                 trigger: None,
                 scheduled_date: None,
                 trigger_execution_id: None,
@@ -2977,7 +3030,14 @@ async fn replay_execution(
         serde_json::json!({ "replayed_from": id, "replacement": replacement }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
 }
 
 /// `POST .../executions/{id}/kill`'s query.
@@ -3100,7 +3160,14 @@ async fn kill_execution(
         audited,
     ));
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok((StatusCode::ACCEPTED, Json(ExecutionDto::new(detail, true))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
 }
 
 /// One namespace of the workspace (W7d spec §3.1). egret has no namespace

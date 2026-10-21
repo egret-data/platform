@@ -66,6 +66,9 @@ pub struct SecretDto {
     #[serde(rename = "type")]
     pub r#type: String,
     pub keys: Vec<String>,
+    /// Minted and managed by egret for an engine or a catalog: it cannot be
+    /// renamed, rotated or deleted here, and pickers leave it out (KI-207).
+    pub system_managed: bool,
 }
 
 impl From<WorkspaceSecretMeta> for SecretDto {
@@ -78,6 +81,7 @@ impl From<WorkspaceSecretMeta> for SecretDto {
             used_by: m.used_by,
             r#type: m.r#type,
             keys: m.keys,
+            system_managed: m.system_managed,
         }
     }
 }
@@ -100,6 +104,21 @@ fn resolve_type_data(
             "give `data` or `value`, not both".into(),
         )),
     }
+}
+
+/// Refuse a rename, rotation or delete of a secret egret manages (KI-207):
+/// its engine or catalog renders it into running pods and rotates or deletes
+/// it with them, so a hand edit here would break that engine or catalog.
+async fn refuse_system_managed(st: &CpState, id: Uuid) -> Result<(), CpError> {
+    let meta = st.secrets.get_meta(None, id).await?;
+    if meta.system_managed {
+        return Err(CpError::Conflict(format!(
+            "{} is managed by egret: it is rotated and deleted with the engine or catalog \
+             that created it, not here",
+            meta.name
+        )));
+    }
+    Ok(())
 }
 
 pub fn router() -> Router<CpState> {
@@ -175,7 +194,7 @@ async fn create(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing secret:update permission", body = ErrorBody),
         (status = 404, description = "No such secret", body = ErrorBody),
-        (status = 409, description = "The new name clashes with an existing secret", body = ErrorBody),
+        (status = 409, description = "The new name clashes with an existing secret, or the secret is managed by egret", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -186,6 +205,7 @@ async fn update(
     Json(body): Json<UpdateSecretInput>,
 ) -> Result<Json<SecretDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &principal, "secret:update").await?;
+    refuse_system_managed(&st, id).await?;
     if let Some(name) = &body.name {
         st.secrets
             .rename(None, id, name, body.description.as_deref())
@@ -209,7 +229,7 @@ async fn update(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing secret:delete permission", body = ErrorBody),
         (status = 404, description = "No such secret", body = ErrorBody),
-        (status = 409, description = "Secret is still referenced by one or more connections", body = ErrorBody),
+        (status = 409, description = "Secret is still referenced by one or more connections, or is managed by egret", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -219,6 +239,7 @@ async fn remove(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
     egret_core::authz::require(&*st.pdp, &principal, "secret:delete").await?;
+    refuse_system_managed(&st, id).await?;
     st.secrets.delete(None, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

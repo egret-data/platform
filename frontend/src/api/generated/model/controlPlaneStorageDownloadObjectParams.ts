@@ -8,7 +8,7 @@
 
 export type ControlPlaneStorageDownloadObjectParams = {
 /**
- * Object key to download
+ * Object key to download, relative to the connection's key prefix
  */
 key: string;
 };

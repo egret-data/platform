@@ -22,6 +22,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { StateChip } from "@/components/workflows/StateChip";
 import { PublishDialog } from "@/components/workflows/PublishDialog";
 import { RunFlow } from "@/components/workflows/run/RunFlow";
+import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import { StaleSaveDialog } from "@/components/workflows/StaleSaveDialog";
 import {
   canCreateVersion,
@@ -505,6 +506,8 @@ function FlowWorkspace({
           </div>
         )}
       </header>
+      {/* KI-013: a Run here creates an execution that nothing runs. */}
+      {!flow.worker_enabled && <WorkerOffNotice className="mx-4 mt-3 w-auto" />}
 
       <Tabs
         value={tab}
@@ -597,6 +600,7 @@ function FlowWorkspace({
           flowId={id}
           flowName={flowName}
           source={flow.source}
+          workerEnabled={flow.worker_enabled}
           open={runOpen}
           onOpenChange={setRunOpen}
         />

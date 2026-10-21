@@ -13,6 +13,7 @@ use egret_auth::password::hash_password;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_bin::bootstrap::{admin_report, AdminPassword};
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
@@ -45,6 +46,11 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().context("loading configuration")?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     init_tracing(&config);
+    // After tracing, so the warnings reach the log. Warnings, not errors: a
+    // stale key in a running deployment must not stop it starting (KI-140).
+    for unknown in Config::unknown_keys() {
+        tracing::warn!("{unknown}");
+    }
     // Beside tracing, and for the same reason: both are process-wide sinks that
     // have to exist before anything that writes to them runs. Every
     // `metrics::counter!` in the tree records into a no-op recorder until this
@@ -89,7 +95,8 @@ async fn migrate(config: Config) -> anyhow::Result<()> {
 }
 
 /// Bootstrap the first platform admin (local provider). Idempotent: refuses if a
-/// platform_admin already exists (unless `force` is set). Prints a generated password when none is supplied.
+/// platform_admin already exists (unless `force` is set). Prints a generated password once,
+/// and never one supplied in `EGRET_ADMIN_PASSWORD`.
 async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -111,9 +118,11 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     }
 
     let email = std::env::var("EGRET_ADMIN_EMAIL").unwrap_or_else(|_| "admin@egret.local".into());
-    let password = std::env::var("EGRET_ADMIN_PASSWORD")
-        .unwrap_or_else(|_| egret_auth::token::generate_token());
-    let hash = hash_password(&password)?;
+    let password = AdminPassword::from_env(
+        std::env::var("EGRET_ADMIN_PASSWORD").ok(),
+        egret_auth::token::generate_token,
+    );
+    let hash = hash_password(password.secret())?;
 
     let users = UserRepo::new(db.clone());
     let user_id = users.insert_local(&email, "Administrator", &hash).await?;
@@ -134,8 +143,8 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     .await?;
 
     tracing::info!(%email, "bootstrap admin created");
-    println!("Bootstrap admin: {email}");
-    println!("Password: {password}");
+    // KI-146: a supplied password is never echoed into scroll-back or CI logs.
+    println!("{}", admin_report(&email, &password));
 
     // Seed a default workspace so a fresh deploy has somewhere to provision
     // warehouses (a bare `egret init` otherwise leaves 0 workspaces, and
@@ -1410,18 +1419,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Shared secret store: one `SecretStore` built from `db` + the master key,
     // reused by the per-workspace storage layer and the database-connection
     // secrets. `SecretStore` is cheap + `Clone`.
-    let secrets = {
+    let secrets_crypto = {
         use base64::Engine as _;
-        let crypto = if config.secrets.master_key.is_empty() {
+        if config.secrets.master_key.is_empty() {
             None
         } else {
             let key = base64::engine::general_purpose::STANDARD
                 .decode(config.secrets.master_key.as_bytes())
                 .map_err(|e| anyhow::anyhow!("secrets.master_key base64: {e}"))?;
             Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
-        };
-        egret_secrets::SecretStore::new(db.clone(), crypto)
+        }
     };
+    let secrets = egret_secrets::SecretStore::new(db.clone(), secrets_crypto.clone());
 
     // P1b: eagerly upgrade existing storage + DB connection credential secrets from
     // Opaque to `kubernetes.io/basic-auth` (idempotent one-shot, no-op once converged).
@@ -1706,6 +1715,22 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     {
         anyhow::bail!("the workflow file store was installed twice");
     }
+    // KI-112: a workflow's SECRET inputs are sealed with the secret store's own
+    // key, installed process-wide for the same reason as the file store: the
+    // render that opens them runs inside `settle`. Without a key a start that
+    // would store a SECRET value is refused. Then the executions stored before
+    // migration 0203 get their clear-text SECRET values masked (and sealed).
+    if let Some(crypto) = secrets_crypto {
+        if !egret_workflow::secret_inputs::install(crypto) {
+            anyhow::bail!("the workflow SECRET-input cipher was installed twice");
+        }
+    }
+    let masked = egret_workflow::secret_inputs::backfill(&db.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("masking stored SECRET inputs: {e}"))?;
+    if masked > 0 {
+        tracing::info!(executions = masked, "masked SECRET inputs stored in clear");
+    }
     // no-silent-stall §4.1: the task types this deployment's worker runs,
     // from the same configuration `handlers_for` builds the worker's handlers
     // from below (a unit test holds the two together). Installed process-wide
@@ -1987,6 +2012,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             enabled: config.workflow.worker_enabled,
             tick_interval: std::time::Duration::from_secs(config.workflow.tick_interval_secs),
             batch: config.workflow.batch,
+            max_concurrent_runs: config.workflow.max_concurrent_runs,
             reaper_interval: std::time::Duration::from_secs(config.workflow.reaper_interval_secs),
             working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
             container_default_timeout: std::time::Duration::from_secs(
@@ -2540,6 +2566,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         } else {
             None
         },
+        // KI-206: Storage Browse and Download keep the prefixes egret writes
+        // in its own bucket closed to anyone but a platform admin.
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::new(
+                &config.storage.bucket,
+                [
+                    config.engine.results_prefix.as_str(),
+                    config.apps.storage.prefix.as_str(),
+                    config.workflow.storage.prefix.as_str(),
+                ],
+            ),
+        ),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

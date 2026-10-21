@@ -88,6 +88,9 @@ pub mod scheduler;
 /// and their `taskRunner:` -- the model, the save-time refusals, and the ONE
 /// governance gate (`scripts::gate::check`) publish and the handler call.
 pub mod scripts;
+/// KI-112: `type: SECRET` inputs, masked in the row and sealed beside it.
+/// `pub` because `egret-bin` installs the cipher and runs the backfill.
+pub mod secret_inputs;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.

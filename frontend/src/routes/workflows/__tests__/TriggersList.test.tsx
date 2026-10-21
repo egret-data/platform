@@ -628,7 +628,7 @@ describe("TriggersList: states", () => {
     await table();
     const banners = within(screen.getByTestId("trigger-banners"));
     expect(banners.getByText(/The scheduler is off on this server/)).toBeInTheDocument();
-    expect(banners.getByText("The worker is off, so triggered executions are created but do not run.")).toBeInTheDocument();
+    expect(banners.getByText("The workflow worker is off on this server, so executions are created but do not run. An administrator turns it on with workflow.workerEnabled (EGRET_WORKFLOW__WORKER_ENABLED=true).")).toBeInTheDocument();
     expect(banners.getByText("Webhooks are off on this server; their URLs answer 404.")).toBeInTheDocument();
   });
 

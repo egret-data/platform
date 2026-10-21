@@ -97,6 +97,9 @@ fn build_app(
         catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
         audit_retention_days: Some(90),
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::default(),
+        ),
     })
 }
 
@@ -707,6 +710,9 @@ async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
         catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
         audit_retention_days: Some(90),
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::default(),
+        ),
     });
 
     Some(Fixture {

@@ -8,6 +8,7 @@ import type {
   TriggerKindDto,
 } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
+import { WORKER_OFF_TEXT } from "@/components/workflows/workerOff";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 
 /**
@@ -198,7 +199,7 @@ export function bannersFor(page: BannerPage): Banner[] {
     });
   }
   if (!page.worker_enabled) {
-    out.push({ id: "worker", text: "The worker is off, so triggered executions are created but do not run." });
+    out.push({ id: "worker", text: WORKER_OFF_TEXT });
   }
   if (!page.webhooks_enabled && kinds.has("webhook")) {
     out.push({ id: "webhooks", text: "Webhooks are off on this server; their URLs answer 404." });
