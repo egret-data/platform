@@ -29,6 +29,16 @@
 //! separate `tokio::spawn`s reading separate intervals, and a slow reaper pass
 //! must never delay a claim tick.
 //!
+//! # Runs in flight, bounded (KI-187)
+//!
+//! The claim loop does not wait for the runs it claims. Each tick calls
+//! [`worker::start_claimed`](crate::worker::start_claimed) with the slots
+//! [`RuntimeConfig::max_concurrent_runs`] has left; every run is `run_one` on
+//! its own task, so a `Sleep` holds one slot and the loop goes on claiming. On
+//! cancel the loop claims nothing more and waits for every run in flight.
+//! Until KI-187 the loop awaited `tick`, which runs its batch one run after
+//! another, and one long task stalled every execution on the replica.
+//!
 //! # The `SKIP LOCKED` argument covers the claim and NOTHING ELSE
 //!
 //! `egret-automation`'s scheduler needs no leader election because its claim is
@@ -266,6 +276,11 @@ pub struct RuntimeConfig {
     /// `tick`'s `n`: the most runs one tick may claim, and the most executions
     /// its waker may name.
     pub batch: usize,
+    /// KI-187: how many claimed runs this replica runs at once. The claim loop
+    /// starts each run it claims and ticks again while they run; a tick claims
+    /// at most the free slots. `egret_config::WorkflowConfig::max_concurrent_runs`
+    /// (default 8); `0` is read as `1`.
+    pub max_concurrent_runs: usize,
     /// Between reaper passes.
     pub reaper_interval: Duration,
     /// How long a lease may go unreleased before a reaper pass takes it back.
@@ -311,8 +326,9 @@ pub struct RuntimeHandle {
 
 impl RuntimeHandle {
     /// Wait for the claim loop, then the log writer (which the claim loop's
-    /// end releases, see [`spawn_with_logs`]), then the pruners. Unbounded if a
-    /// tick is in flight; the caller bounds it.
+    /// end releases, see [`spawn_with_logs`]), then the pruners. Unbounded while
+    /// a run is in flight (the claim loop waits for every one); the caller
+    /// bounds it.
     pub async fn join(self) {
         for h in [
             self.claim_loop,
@@ -350,9 +366,9 @@ impl RuntimeHandle {
 ///
 /// The writer is **not** cancelled by `cancel`. It has its own token, and the
 /// only thing that fires it is the **claim loop's task ending** (a drop guard
-/// inside that task, so a panic fires it too). The claim loop checks `cancel`
-/// only between ticks, so by the time it ends, any tick in flight -- and every
-/// handler writing through the sink -- has returned. Then the writer stops
+/// inside that task, so a panic fires it too). On `cancel` the claim loop
+/// stops claiming and waits for every run in flight (KI-187), so by the time
+/// it ends every handler writing through the sink has returned. Then the writer stops
 /// accepting, drains what is queued and exits within
 /// [`WriterConfig::drain_within`](crate::logs::WriterConfig::drain_within).
 /// A write that still arrives after that (nothing in this crate produces one)
@@ -585,6 +601,7 @@ fn spawn_worker(
     tracing::info!(
         tick_interval_secs = cfg.tick_interval.as_secs(),
         batch = cfg.batch,
+        max_concurrent_runs = cfg.max_concurrent_runs,
         reaper_interval_secs = cfg.reaper_interval.as_secs(),
         working_timeout_s = cfg.working_timeout.as_secs(),
         "workflow worker started"
@@ -602,9 +619,14 @@ fn spawn_worker(
         let cancel = cancel.clone();
         tokio::spawn(async move {
             // W11: the log writer's stop signal, fired when this task ends --
-            // after its loop has broken, so after any tick in flight has
+            // after its loop has broken and every run in flight has
             // returned -- or unwinds. See `spawn_with_logs`.
             let _release = release_on_stop.map(CancellationToken::drop_guard);
+            // KI-187: the runs in flight, at most `max_concurrent_runs`. Each
+            // is `run_one` on its own task, so a slow one holds a slot and not
+            // the loop; a tick claims only the slots that are free.
+            let bound = cfg.max_concurrent_runs.max(1);
+            let mut running = tokio::task::JoinSet::new();
             let mut tick = tokio::time::interval(cfg.tick_interval);
             // A replica that pauses (or a laptop that sleeps) must not then fire
             // a burst of catch-up ticks: the runnable runs are still there and
@@ -615,21 +637,30 @@ fn spawn_worker(
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
+                    Some(joined) = running.join_next(), if !running.is_empty() => {
+                        log_join(joined);
+                    }
                     _ = tick.tick() => {
-                        // NOT `while n > 0`. See this module's doc: `tick`
-                        // returns results COMMITTED, and a tick that only woke
-                        // something returns 0 while having changed the database.
-                        match crate::worker::tick_with(&pool, cfg.batch, &*reg, timing).await {
+                        // NOT `while n > 0`: a fixed interval, see this
+                        // module's doc. A tick with no free slot claims nothing.
+                        let free = bound.saturating_sub(running.len()).min(cfg.batch);
+                        match crate::worker::start_claimed(&pool, free, &reg, timing, &mut running)
+                            .await
+                        {
                             Ok(0) => {}
-                            Ok(n) => tracing::debug!(committed = n, "workflow tick"),
-                            // A failing tick must not end the loop. The next one
-                            // re-reads the database, and the run this one could
-                            // not settle is still there -- either claimable or
-                            // leased for the reaper.
+                            Ok(n) => tracing::debug!(started = n, "workflow tick"),
+                            // A failing claim must not end the loop. The next
+                            // tick re-reads the database.
                             Err(e) => tracing::warn!(error = %e, "workflow tick failed"),
                         }
                     }
                 }
+            }
+            // Graceful: nothing new is claimed, and every run in flight is
+            // waited for, so its outcome commits (or its lease is left for the
+            // reaper) before the log writer is released by `_release`.
+            while let Some(joined) = running.join_next().await {
+                log_join(joined);
             }
             tracing::info!("workflow claim loop stopped");
         })
@@ -656,6 +687,15 @@ fn spawn_worker(
         tracing::info!("workflow reaper stopped");
     });
     claim_loop
+}
+
+/// A run's task ended. Its own errors are logged inside it
+/// (`worker::start_claimed`); a panic is logged here, and its run keeps its
+/// lease until the reaper hands it back, as a failed run's does.
+fn log_join(joined: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(e) = joined {
+        tracing::error!(error = %e, "a workflow task run panicked; its lease lapses and the reaper hands it back");
+    }
 }
 
 /// One reaper tick: reclaim expired leases, then sweep the orphans of ended

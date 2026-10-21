@@ -179,6 +179,7 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         enabled: true,
         tick_interval: Duration::from_millis(tick_ms),
         batch,
+        max_concurrent_runs: 8,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
@@ -329,6 +330,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         enabled: true,
         tick_interval: Duration::from_millis(10),
         batch: 4,
+        max_concurrent_runs: 8,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(1),
         container_default_timeout: Duration::from_secs(3600),
@@ -421,17 +423,22 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
 /// **`MissedTickBehavior::Skip`: a ticker held up past several of its own
 /// intervals does not then fire a burst of catch-up ticks.**
 ///
-/// The arithmetic, because the numbers are the test: the interval is 200 ms and
-/// the first handler call blocks for 1200 ms, so **six** ticks are missed. Under
-/// `Burst` — `tokio::time::interval`'s default, and what deleting the
-/// `set_missed_tick_behavior` line restores — those six fire back to back the
-/// instant the slow tick returns, so with `batch = 1` all seven runs are through
-/// a handler by roughly t=1250 ms. Under `Skip` the next tick is at t=1400 ms
-/// and the rest follow one interval apart, so at t=1500 ms at most **two** have
-/// run.
+/// **What holds the ticker up is the claim statement, not a handler** (KI-187).
+/// Since the loop runs each claimed run on its own task, a slow handler no
+/// longer stops the loop (that is the fix); a tick is held up only inside its
+/// own statements. So the first tick's claim is made to wait on a table lock:
+/// another transaction holds `LOCK TABLE workflow.task_runs IN EXCLUSIVE MODE`
+/// for 2000 ms, which the claim's `UPDATE` (and its `FOR UPDATE SKIP LOCKED`,
+/// a ROW SHARE lock) must wait for.
 ///
-/// Measured at t=1500 ms, which is 250 ms clear of `Burst`'s completion and
-/// 100 ms clear of `Skip`'s third tick.
+/// The arithmetic: the interval is 200 ms and the first tick's claim blocks for
+/// 2000 ms, so **ten** ticks are missed and twelve runs are claimable (batch 1).
+/// Under `Burst` — `tokio::time::interval`'s default, and what deleting the
+/// `set_missed_tick_behavior` line restores — the ten fire back to back, one
+/// claim round trip apart (some 25 ms in a debug build). Under `Skip` the next
+/// tick waits for the next 200 ms boundary. Counted 300 ms after the first run
+/// reaches a handler: `Skip` allows at most 3, `Burst` reaches about 11; the
+/// assertion is `<= 4`.
 ///
 /// **Why it matters here and not only in `egret-automation`:** a replica whose
 /// host slept, or whose event loop was starved, would otherwise wake and issue
@@ -441,7 +448,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
 async fn a_paused_ticker_does_not_fire_catch_up_ticks(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let ws = seed(&pool).await;
-    for i in 0..7 {
+    for i in 0..12 {
         start_execution(
             &pool,
             ws,
@@ -453,27 +460,39 @@ async fn a_paused_ticker_does_not_fire_catch_up_ticks(pool: sqlx::PgPool) {
         .expect("start execution");
     }
 
-    let reg = Arc::new(Recorder::new().delaying_the_first_call_by(Duration::from_millis(1200)));
+    let mut hold = pool.begin().await.expect("begin the hold");
+    sqlx::query("LOCK TABLE workflow.task_runs IN EXCLUSIVE MODE")
+        .execute(&mut *hold)
+        .await
+        .expect("hold the table");
+    let reg = Arc::new(Recorder::new());
     let cancel = CancellationToken::new();
     spawn(pool.clone(), reg.clone(), fast(200, 1), cancel.clone());
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert_eq!(reg.count(), 0, "the first tick's claim waited on the hold");
+    hold.commit().await.expect("release the hold");
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Counted 300 ms after the first run reaches a handler, rather than at a
+    // fixed instant, so a slow machine moves the window and not the answer.
+    wait_until("the held tick's run", Duration::from_secs(5), || async {
+        match reg.count() {
+            0 => Err("none yet".into()),
+            _ => Ok(()),
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let ran = reg.count();
     cancel.cancel();
 
     assert!(
-        ran < 7,
-        "the first tick's handler blocked for 1200 ms, i.e. past six of this \
+        ran <= 4,
+        "the first tick's claim blocked for 2000 ms, i.e. past ten of this \
          ticker's own 200 ms intervals. With MissedTickBehavior::Skip the next \
-         tick is at t=1400 ms and only one or two more runs can have started by \
-         t=1500 ms; with Burst (the default, which is what deleting the \
-         set_missed_tick_behavior line restores) all six missed ticks fire back \
-         to back and every one of the 7 runs is through a handler. {ran} ran."
-    );
-    assert!(
-        ran >= 1,
-        "the positive control: the ticker has to have run at all, or this test \
-         passes against a loop that never started. {ran} ran."
+         tick is on the next 200 ms boundary, so within 300 ms of the held run \
+         at most two more can start; with Burst (the default, which is what \
+         deleting the set_missed_tick_behavior line restores) the ten missed \
+         ticks fire back to back and claim one run each. {ran} ran."
     );
 }
 
@@ -901,6 +920,7 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         enabled: true,
         tick_interval: Duration::from_millis(10),
         batch: 4,
+        max_concurrent_runs: 8,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
@@ -3203,5 +3223,276 @@ async fn two_concurrent_backfill_creates_make_one_backfill(pool: sqlx::PgPool) {
         row["total_ticks"],
         serde_json::json!(5),
         "the first's window"
+    );
+}
+
+// ── KI-187: the claim loop runs its claimed runs concurrently, bounded ──────
+//
+// Through `runtime::spawn` and the shipped `Handlers::with_core_tasks`, so the
+// `Sleep` below is the real `core.flow.Sleep` handler and the loop is the
+// real claim loop. Until KI-187 the loop awaited each claimed run in turn and
+// ticked again only after the last one, so one `Sleep` held every other
+// execution on the replica (measured on the demo stack: a two-`Log` flow
+// started 4 s after a 90 s `Sleep` finished 88 s later, with it).
+
+/// A one-task flow whose task is the real `Sleep` handler.
+fn a_sleep(id: &str, duration: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: wait\n    type: io.kestra.plugin.core.flow.Sleep\n\
+         \x20   duration: {duration}\n"
+    )
+}
+
+/// Two `Log` tasks in sequence: the second is only claimable once the first
+/// has committed, so the execution needs two ticks of the loop, not one.
+fn two_logs(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: one\n\
+         \x20 - id: b\n    type: io.kestra.plugin.core.log.Log\n    message: two\n"
+    )
+}
+
+fn shipped_handlers() -> egret_workflow::worker::Handlers {
+    egret_workflow::worker::Handlers::with_core_tasks(None)
+}
+
+/// The shipped handlers behind a gauge: how many runs are inside a handler at
+/// once (and the most ever), and every run handed over. It delegates every
+/// call, so the handlers and the loop are the real ones.
+struct Gauge {
+    inner: egret_workflow::worker::Handlers,
+    now: AtomicUsize,
+    most: AtomicUsize,
+    seen: Mutex<Vec<(Uuid, String, usize)>>,
+}
+
+impl Gauge {
+    fn new() -> Self {
+        Self {
+            inner: shipped_handlers(),
+            now: AtomicUsize::new(0),
+            most: AtomicUsize::new(0),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for Gauge {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.execution_id, task.task_id.clone(), task.attempt));
+        let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        let out = self.inner.run(task).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        out
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.inner.cancel(task).await
+    }
+}
+
+/// **KI-187's own steps, through the real worker**: a fast execution started
+/// while a slow one sleeps finishes while the slow one is still running.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_slow_task_does_not_hold_up_another_execution_on_the_replica(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+    let slow = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_sleep("slow", "PT6S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the slow execution");
+    let cancel = CancellationToken::new();
+    let handle = spawn(
+        pool.clone(),
+        Arc::new(shipped_handlers()),
+        fast(50, 8),
+        cancel.clone(),
+    );
+    wait_until("the Sleep claimed", Duration::from_secs(5), || async {
+        match lease_of(&pool, slow).await {
+            Some(_) => Ok(()),
+            None => Err("not claimed".into()),
+        }
+    })
+    .await;
+
+    let quick = start_execution(&pool, ws, None, &two_logs("quick"), serde_json::json!({}))
+        .await
+        .expect("start the fast execution");
+    wait_until(
+        "the fast execution terminal while the Sleep runs",
+        Duration::from_secs(4),
+        || async {
+            if is_terminal(&pool, quick).await {
+                Ok(())
+            } else {
+                Err(format!(
+                    "fast: {}, slow: {}",
+                    execution_state(&pool, quick).await,
+                    execution_state(&pool, slow).await
+                ))
+            }
+        },
+    )
+    .await;
+    assert_eq!(execution_state(&pool, quick).await, "SUCCESS");
+    assert_eq!(
+        run_state(&pool, slow, "wait").await.as_deref(),
+        Some("RUNNING"),
+        "the Sleep is still running: the fast execution did not wait for it"
+    );
+
+    wait_until("the Sleep terminal", Duration::from_secs(10), || async {
+        if is_terminal(&pool, slow).await {
+            Ok(())
+        } else {
+            Err(execution_state(&pool, slow).await)
+        }
+    })
+    .await;
+    assert_eq!(execution_state(&pool, slow).await, "SUCCESS");
+    assert_eq!(attempts_of(&pool, slow, "wait").await, 1);
+    cancel.cancel();
+    handle.join().await;
+}
+
+/// **The bound is honoured, in both directions**: three claimable `Sleep`s
+/// under `max_concurrent_runs = 2` are never more than two inside a handler at
+/// once, and two of them are (the loop does run them together). Each runs
+/// exactly once, so no claimed run is lost or run twice.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_claim_loop_runs_at_most_max_concurrent_runs_at_once(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+    let mut executions = Vec::new();
+    for i in 0..3 {
+        let id = format!("sleep{i}");
+        executions.push(
+            start_execution(
+                &pool,
+                ws,
+                None,
+                &a_sleep(&id, "PT2S"),
+                serde_json::json!({}),
+            )
+            .await
+            .expect("start execution"),
+        );
+    }
+    let gauge = Arc::new(Gauge::new());
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        max_concurrent_runs: 2,
+        ..fast(50, 8)
+    };
+    let handle = spawn(pool.clone(), gauge.clone(), cfg, cancel.clone());
+
+    // While the first two sleep, the third is not even claimed: a tick claims
+    // only free slots, so no lease waits for a slot.
+    wait_until("two runs in a handler", Duration::from_secs(5), || async {
+        match gauge.now.load(Ordering::SeqCst) {
+            2 => Ok(()),
+            n => Err(format!("{n} in a handler")),
+        }
+    })
+    .await;
+    let leased: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.task_runs WHERE claimed_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("count leases");
+    assert_eq!(leased, 2, "only the runs that have a slot are claimed");
+
+    wait_until("all three terminal", Duration::from_secs(15), || async {
+        let mut done = 0;
+        for &e in &executions {
+            if is_terminal(&pool, e).await {
+                done += 1;
+            }
+        }
+        if done == 3 {
+            Ok(())
+        } else {
+            Err(format!("{done} of 3"))
+        }
+    })
+    .await;
+    cancel.cancel();
+    handle.join().await;
+
+    assert_eq!(
+        gauge.most.load(Ordering::SeqCst),
+        2,
+        "never more than max_concurrent_runs at once, and that many at once"
+    );
+    let mut seen = gauge.seen.lock().unwrap().clone();
+    seen.sort();
+    let mut expected: Vec<_> = executions
+        .iter()
+        .map(|&e| (e, "wait".to_string(), 1))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "each claimed run handed to a handler exactly once"
+    );
+    for &e in &executions {
+        assert_eq!(execution_state(&pool, e).await, "SUCCESS");
+    }
+}
+
+/// **Shutdown stays graceful**: a cancel stops the claiming and waits for the
+/// run in flight, whose outcome commits before `join` returns; a run made
+/// claimable after the cancel is not claimed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cancel_waits_for_the_runs_in_flight_and_claims_nothing_new(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+    let slow = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_sleep("slow", "PT2S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    let cancel = CancellationToken::new();
+    let handle = spawn(
+        pool.clone(),
+        Arc::new(shipped_handlers()),
+        fast(50, 8),
+        cancel.clone(),
+    );
+    wait_until("the Sleep claimed", Duration::from_secs(5), || async {
+        match lease_of(&pool, slow).await {
+            Some(_) => Ok(()),
+            None => Err("not claimed".into()),
+        }
+    })
+    .await;
+    cancel.cancel();
+    let late = start_execution(&pool, ws, None, &one_task("late"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+    handle.join().await;
+
+    assert_eq!(
+        execution_state(&pool, slow).await,
+        "SUCCESS",
+        "the run in flight finished and committed before join returned"
+    );
+    assert!(
+        lease_of(&pool, late).await.is_none(),
+        "nothing is claimed after the cancel"
     );
 }

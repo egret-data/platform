@@ -929,6 +929,12 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// **2. Pick `n` deliberately.** `n = 1` makes the property above unreachable
 /// and is what `oracle-exec/driver.rs` uses.
 ///
+/// *(KI-187: the production claim loop no longer calls this function. It calls
+/// [`start_claimed`], which claims only as many runs as it has free slots and
+/// starts each at once, so on that path no claimed run waits for another and
+/// the window of point 1 does not exist. `tick` stays the sequential primitive
+/// the tests and the oracle driver use.)*
+///
 /// # Two ways a run HANGS FOR EVER, both shipped and neither bounded
 ///
 /// **Cause 3 is closed since no-silent-stall Task 4** and is kept below as
@@ -1297,6 +1303,67 @@ pub async fn tick_with(
         Some(e) => Err(e),
         None => Ok(done),
     }
+}
+
+/// **The runtime's tick (KI-187): wake, claim up to `free` runs, and START each
+/// on `running` without waiting for it.** Returns how many runs it started.
+///
+/// [`tick_with`] runs its batch one run after another and returns when the
+/// last one has committed, so a claim loop built on it holds every other
+/// execution on the replica behind one `Sleep`. The claim loop
+/// (`runtime::spawn`) calls this instead, with `free` = the slots its
+/// `max_concurrent_runs` bound has left, and ticks again while the runs go on.
+///
+/// Each run is [`run_one`] on its own task, exactly as [`tick_with`] calls it,
+/// so the lease, the kill path and the commit are unchanged; what changes:
+///
+/// * **a claimed run starts at once**, so its lease is renewed from the claim
+///   on. The pre-invocation window of *READ THIS* cause 1 (a later member of
+///   a batch reaped while it waited) does not exist on this path, because the
+///   caller claims only as many runs as it has free slots;
+/// * **no member of a batch waits for another's commit**, so a sibling's
+///   render does not see a batch-mate's outputs (the *fifth thing* above).
+///   Kestra runs worker tasks concurrently, and a `Parallel` sibling reading a
+///   sibling is a race there too.
+///
+/// A run's `Err` is logged by its task with the run named, as the claim loop
+/// logged a failed tick: the run stays leased and the reaper hands it back.
+/// A wake that fails is logged and does not stop the claim, for
+/// [`tick_with`]'s reason. Only a failed claim is returned.
+pub async fn start_claimed(
+    pool: &PgPool,
+    free: usize,
+    reg: &std::sync::Arc<dyn Registry>,
+    timing: WorkerTiming,
+    running: &mut tokio::task::JoinSet<()>,
+) -> Result<usize> {
+    if free == 0 {
+        return Ok(0);
+    }
+    if let Err(e) = wake(pool, free as i64).await {
+        tracing::warn!(error = %e, "workflow wake failed; claiming anyway");
+    }
+    let leased_at = tokio::time::Instant::now();
+    let claimed = claim(pool, free as i64).await?;
+    let started = claimed.len();
+    for c in claimed {
+        let pool = pool.clone();
+        let reg = reg.clone();
+        running.spawn(async move {
+            match run_one(&pool, &c, &*reg, timing, leased_at).await {
+                Ok(Committed::Yes) => {}
+                Ok(Committed::LeaseLost) => {}
+                Err(e) => tracing::warn!(
+                    execution = %c.execution_id,
+                    run = %c.id,
+                    task_id = %c.task_id,
+                    error = %e,
+                    "workflow task run failed; it stays leased until the reaper hands it back"
+                ),
+            }
+        });
+    }
+    Ok(started)
 }
 
 /// One claimed run: its handler, the budget the handler runs under, and the
