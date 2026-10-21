@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { clearRuleDraft, loadRuleDraft, ruleDraftKey, saveRuleDraft, seedRule } from "@/routes/governance/ruleDraft";
+import {
+  clearAllRuleDrafts,
+  clearRuleDraft,
+  loadRuleDraft,
+  loadStoredRuleDraft,
+  ruleDraftKey,
+  saveRuleDraft,
+  seedRule,
+} from "@/routes/governance/ruleDraft";
 import type { Rule } from "@/api/generated/model";
 
 describe("seedRule: defaults per entry point (spec C8)", () => {
@@ -69,5 +77,23 @@ describe("the draft store", () => {
       }),
     ];
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("cannot be confused by a separator inside a name", () => {
+    const a = ruleDraftKey("u1", { kind: "table", catalogId: "c", schema: "a/b", table: "t" });
+    const b = ruleDraftKey("u1", { kind: "table", catalogId: "c", schema: "a", table: "b/t" });
+    const c = ruleDraftKey("u1|table:c", { kind: "scope", catalogId: "x" });
+    const d = ruleDraftKey("u1", { kind: "scope", catalogId: "|table:c" });
+    expect(a).not.toBe(b);
+    expect(c).not.toBe(d);
+  });
+
+  it("keeps the version a draft began from beside it", () => {
+    const key = ruleDraftKey("u1", { kind: "classification", tagKey: "pii", tagName: "PII" });
+    const draft = seedRule({ kind: "classification", tagKey: "pii", tagName: "PII" });
+    saveRuleDraft(key, draft, "base-1");
+    expect(loadStoredRuleDraft(key)).toEqual({ draft, base: "base-1" });
+    clearAllRuleDrafts();
+    expect(loadStoredRuleDraft(key)).toBeUndefined();
   });
 });

@@ -82,39 +82,54 @@ export function seedRule(entry: RuleEntry): NewRule {
 /**
  * The draft store (spec C8.4): in memory only, so a draft survives a detour
  * within the app (the dialog unmounted, reopened from the same place) but not
- * a reload. Not `localStorage`, which FE-DATA-3 keeps for preferences.
+ * a reload. Not `localStorage`, which FE-DATA-3 keeps for preferences. Every
+ * identity switch empties it (`clearUserScopedCache`).
+ *
+ * Each draft keeps its `base`: the snapshot of the rule it began from. A rule
+ * carries no version, so this is how the dialog tells that an `edit` draft
+ * was written against a rule that has changed since, and must not be restored
+ * over it.
  */
-const drafts = new Map<string, NewRule>();
+export type StoredRuleDraft = { draft: NewRule; base: string };
+const drafts = new Map<string, StoredRuleDraft>();
 
-/** One draft per signed-in user and entry point. */
+/**
+ * One draft per signed-in user and entry point. The parts are JSON-encoded, so
+ * a separator inside a name (a schema `a/b`) cannot make two entries collide.
+ */
 export function ruleDraftKey(userId: string, entry: RuleEntry): string {
   switch (entry.kind) {
     case "classification":
-      return `${userId}|classification:${entry.tagKey}`;
+      return JSON.stringify([userId, entry.kind, entry.tagKey]);
     case "table":
-      return `${userId}|table:${entry.catalogId}/${entry.schema}/${entry.table}`;
+      return JSON.stringify([userId, entry.kind, entry.catalogId, entry.schema, entry.table]);
     case "scope":
-      return `${userId}|scope:${entry.catalogId}/${entry.schema ?? ""}`;
+      return JSON.stringify([userId, entry.kind, entry.catalogId, entry.schema ?? null]);
     case "column":
-      return `${userId}|column:${entry.catalogId}/${entry.schema}/${entry.table}/${entry.column}`;
+      return JSON.stringify([userId, entry.kind, entry.catalogId, entry.schema, entry.table, entry.column]);
     case "edit":
-      return `${userId}|edit:${entry.rule.id}`;
+      return JSON.stringify([userId, entry.kind, entry.rule.id]);
   }
 }
 
 export function loadRuleDraft(key: string): NewRule | undefined {
+  return drafts.get(key)?.draft;
+}
+
+/** The draft with the snapshot of the rule it began from. */
+export function loadStoredRuleDraft(key: string): StoredRuleDraft | undefined {
   return drafts.get(key);
 }
 
-export function saveRuleDraft(key: string, draft: NewRule): void {
-  drafts.set(key, draft);
+export function saveRuleDraft(key: string, draft: NewRule, base = ""): void {
+  drafts.set(key, { draft, base });
 }
 
 export function clearRuleDraft(key: string): void {
   drafts.delete(key);
 }
 
-/** Forgets every draft. The store outlives a test's render, so tests reset it. */
+/** Forgets every draft: on an identity switch, and between tests. */
 export function clearAllRuleDrafts(): void {
   drafts.clear();
 }

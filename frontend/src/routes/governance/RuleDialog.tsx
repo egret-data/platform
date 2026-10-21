@@ -43,7 +43,7 @@ import { formatScope } from "./permFormat";
 import { MASK_TYPES, TERM } from "@/routes/governance/glossary";
 import {
   clearRuleDraft,
-  loadRuleDraft,
+  loadStoredRuleDraft,
   ruleDraftKey,
   saveRuleDraft,
   seedRule,
@@ -245,7 +245,8 @@ export function RuleDialog({
         else onOpenChange(false);
       }}
     >
-      <DialogContent className="max-h-[85vh] max-w-2xl">
+      {/* `scroll-pb-32`: a field focused near the end scrolls clear of the sticky footer. */}
+      <DialogContent className="max-h-[85vh] max-w-2xl" bodyClassName="scroll-pb-32">
         {open && (
           <RuleForm
             key={round}
@@ -278,10 +279,21 @@ function RuleForm({
 }) {
   const existing = entry.kind === "edit" ? entry.rule : null;
   const { me } = useAuth();
-  const draftKey = ruleDraftKey(me?.user_id ?? "", entry);
+  // A draft is a signed-in user's; with nobody signed in, nothing is kept.
+  const draftKey = me ? ruleDraftKey(me.user_id, entry) : null;
+  const seed = seedRule(entry);
+  const seedSnapshot = snapshotOf(seed);
+  /**
+   * A rule carries no version, so an `edit` draft is restored only when the
+   * rule is still the one it began from (its `base`). A draft of a rule
+   * changed since is dropped, and the form says so: restoring it would PATCH
+   * the old fields over the newer ones (round 1 review).
+   */
   const [start] = useState(() => {
-    const draft = loadRuleDraft(draftKey);
-    return { state: stateOf(draft ?? seedRule(entry)), restored: draft !== undefined };
+    const stored = draftKey ? loadStoredRuleDraft(draftKey) : undefined;
+    const stale = stored !== undefined && entry.kind === "edit" && stored.base !== seedSnapshot;
+    if (stored && !stale) return { state: stateOf(stored.draft), base: stored.base, restored: true, discarded: false };
+    return { state: stateOf(seed), base: seedSnapshot, restored: false, discarded: stale };
   });
 
   // Read here rather than passed down — see the same note in `GrantDialog`
@@ -291,7 +303,20 @@ function RuleForm({
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const [form, setForm] = useState<FormState>(start.state);
-  const update = (patch: Partial<FormState>) => setForm((f) => ({ ...f, ...patch }));
+  // Whether the user changed anything: only then is there a draft to keep or a close to confirm.
+  const [touched, setTouched] = useState(start.restored);
+  // The snapshot of the rule the form began from, kept beside its draft.
+  const [base, setBase] = useState(start.base);
+  const update = (patch: Partial<FormState>) => {
+    setTouched(true);
+    setForm((f) => ({ ...f, ...patch }));
+  };
+  // An untouched form follows its seed: a refetch of the rule being edited
+  // shows the server's fields, and never becomes a draft of the old ones.
+  if (!touched && seedSnapshot !== base) {
+    setBase(seedSnapshot);
+    setForm(stateOf(seed));
+  }
   const { name, kindType, maskType, valueExpr, filterExpr, selectorType, tagKey, scope, exempt } = form;
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -313,13 +338,14 @@ function RuleForm({
   const body = bodyOf(form);
   const snapshot = JSON.stringify(body);
   const bodySnapshot = JSON.stringify({ id: existing?.id ?? null, body });
-  const dirty = snapshot !== snapshotOf(seedRule(entry));
+  const dirty = touched && snapshot !== seedSnapshot;
 
-  // The draft follows the form: kept while it differs from the entry point's defaults.
+  // The draft follows the form: kept while the user's changes differ from the entry point's defaults.
   useEffect(() => {
-    if (dirty) saveRuleDraft(draftKey, JSON.parse(snapshot) as NewRule);
+    if (!draftKey) return;
+    if (dirty) saveRuleDraft(draftKey, JSON.parse(snapshot) as NewRule, base);
     else clearRuleDraft(draftKey);
-  }, [snapshot, draftKey, dirty]);
+  }, [snapshot, draftKey, dirty, base]);
   useUnsavedChangesWarning(dirty);
 
   function requestClose() {
@@ -407,7 +433,7 @@ function RuleForm({
       } else {
         await createRule.mutateAsync({ data: body });
       }
-      clearRuleDraft(draftKey);
+      if (draftKey) clearRuleDraft(draftKey);
       toast.success(existing ? "Rule updated." : "Rule created.");
       onOpenChange(false);
     } catch (e) {
@@ -438,9 +464,15 @@ function RuleForm({
   const footerError = saveError
     ? { title: "The rule was not saved.", message: saveError }
     : previewError
-      ? { title: "The preview was refused.", message: previewError }
+      ? {
+          // Kept after an edit, so the server's words stay readable, but named as the earlier version's.
+          title: previewStale ? "The preview of an earlier version was refused." : "The preview was refused.",
+          message: previewError,
+        }
       : null;
-  const errorRef = useRef<HTMLDivElement>(null);
+  // Focus goes to the error's title, not the `role="alert"` container, which is announced already.
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const columnHelpId = useId();
   useEffect(() => {
     // The footer is sticky, so the error is in view; focus takes the reader there too.
     if (errorSeq > 0) errorRef.current?.focus();
@@ -457,6 +489,11 @@ function RuleForm({
       </DialogHeader>
 
       <div className="space-y-5">
+        {start.discarded && (
+          <p role="status" className="text-xs text-muted-foreground">
+            This rule changed since your draft; the draft was discarded.
+          </p>
+        )}
         {start.restored && (
           <p role="status" className="text-xs text-muted-foreground">
             Restored your unsaved rule ·{" "}
@@ -465,7 +502,7 @@ function RuleForm({
               variant="link"
               className="h-auto p-0 text-xs"
               onClick={() => {
-                clearRuleDraft(draftKey);
+                if (draftKey) clearRuleDraft(draftKey);
                 onStartOver();
               }}
             >
@@ -591,8 +628,13 @@ function RuleForm({
               onChange={(next) => update({ scope: next })}
               rowFilterMode={kindType === "row_filter"}
               catalogRequired
+              columnDescribedBy={kindType === "mask" ? columnHelpId : undefined}
             />
-            {kindType === "mask" && <p className="text-xs text-muted-foreground">{EMPTY_COLUMN_MASKS_EVERY_COLUMN}</p>}
+            {kindType === "mask" && (
+              <p id={columnHelpId} className="text-xs text-muted-foreground">
+                {EMPTY_COLUMN_MASKS_EVERY_COLUMN}
+              </p>
+            )}
             {scope.catalog_id && (
               <p className="text-xs text-muted-foreground">
                 {TERM.appliesTo} {formatScope(scope, catalogName(scope.catalog_id))}
@@ -678,17 +720,18 @@ function RuleForm({
         className="sticky bottom-0 z-10 space-y-2 border-t border-border bg-background pt-3"
       >
         {footerError && (
-          <Alert ref={errorRef} variant="destructive" tabIndex={-1}>
-            <AlertTitle>{footerError.title}</AlertTitle>
+          <Alert variant="destructive">
+            <AlertTitle ref={errorRef} tabIndex={-1}>
+              {footerError.title}
+            </AlertTitle>
             <AlertDescription>{footerError.message}</AlertDescription>
           </Alert>
         )}
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {createReason && (
-            <p id={reasonId} className="mr-auto text-xs text-muted-foreground">
-              {createReason}
-            </p>
-          )}
+          {/* Always rendered: a live region must exist before its text changes. */}
+          <p id={reasonId} aria-live="polite" className="mr-auto text-xs text-muted-foreground">
+            {createReason}
+          </p>
           <Button type="button" variant="outline" onClick={requestClose}>
             Cancel
           </Button>
@@ -719,7 +762,7 @@ function RuleForm({
               type="button"
               variant="destructive"
               onClick={() => {
-                clearRuleDraft(draftKey);
+                if (draftKey) clearRuleDraft(draftKey);
                 setConfirmDiscard(false);
                 onOpenChange(false);
               }}

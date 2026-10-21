@@ -42,6 +42,8 @@ export interface ScopePickerProps {
    * caller reads as before.
    */
   catalogRequired?: boolean;
+  /** The id of a caller's help about the Column field, tied to it as its description. */
+  columnDescribedBy?: string;
 }
 
 /**
@@ -65,6 +67,7 @@ export function ScopePicker({
   onApply,
   disabled = false,
   catalogRequired = false,
+  columnDescribedBy,
 }: ScopePickerProps) {
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
@@ -180,6 +183,7 @@ export function ScopePicker({
           <Label htmlFor="scope-column">Column</Label>
           <Input
             id="scope-column"
+            aria-describedby={columnDescribedBy}
             value={value.column ?? ""}
             onChange={(e) => patch({ column: e.target.value || undefined })}
             disabled={disabled || !canPickColumn}

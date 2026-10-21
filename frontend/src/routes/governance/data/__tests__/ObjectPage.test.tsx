@@ -1223,7 +1223,7 @@ describe("MasksFiltersTab", () => {
     expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
     expect(within(dialog).getByLabelText(/^Table/)).toHaveValue("orders");
     expect(within(dialog).getByLabelText("Column")).toHaveValue("");
-    expect(within(dialog).getByText("Leave Column empty to mask every column of the table.")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Column")).toHaveAccessibleDescription("Leave Column empty to mask every column of the table.");
     expect(within(dialog).getByText("Applies to ice.sales.orders")).toBeInTheDocument();
   });
 

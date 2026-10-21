@@ -16,6 +16,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useExitImpersonation, useLogin, useLogout } from "@/api/hooks";
 import { useStartPlatformImpersonation } from "@/api/impersonation";
+import { clearUserScopedCache } from "@/api/queryClient";
+import { loadRuleDraft, saveRuleDraft } from "@/routes/governance/ruleDraft";
 
 const STALE_WORKSPACES = [{ id: "w1", slug: "w1", name: "Previous user's workspace", features: [] }];
 
@@ -147,5 +149,13 @@ describe("query cache is cleared on every user-identity switch (F1)", () => {
     });
 
     expect(qc.getQueryData(["my-workspaces"])).toBeUndefined();
+  });
+
+  // Round 1 review of the rule dialog (spec C8.4): a draft is the signed-in user's, kept in memory;
+  // every identity switch clears the user-scoped cache, and the drafts with it.
+  it("forgets every rule draft with the user-scoped cache", () => {
+    saveRuleDraft("k", { name: "kept", kind: { type: "mask", mask_type: "MASK" }, selector: { type: "tag", key: "pii" } });
+    clearUserScopedCache(new QueryClient());
+    expect(loadRuleDraft("k")).toBeUndefined();
   });
 });

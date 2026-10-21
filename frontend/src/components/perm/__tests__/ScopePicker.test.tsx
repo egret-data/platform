@@ -79,6 +79,16 @@ describe("ScopePicker", () => {
     expect(screen.getByRole("combobox", { name: /^Catalog/ })).toHaveAttribute("aria-required", "true");
   });
 
+  test("columnDescribedBy ties a caller's help to the Column field", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <p id="col-help">Leave it empty.</p>
+        <ScopePicker value={{ catalog_id: CATALOGS[0].id, schema: "s", table: "t" }} onChange={vi.fn()} columnDescribedBy="col-help" />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByLabelText("Column")).toHaveAccessibleDescription("Leave it empty.");
+  });
+
   test("without catalogRequired the Catalog field reads as before", () => {
     renderPicker();
     expect(screen.getByText("Catalog").closest("label")).toHaveTextContent(/^Catalog$/);

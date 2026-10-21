@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
@@ -72,7 +72,7 @@ export default function RulePage() {
   return (
     <>
       <RuleBody rule={found} onEdit={() => setEditing(true)} onDelete={() => setDeleting(true)} />
-      <RuleDialog open={editing} onOpenChange={setEditing} entry={{ kind: "edit", rule: found }} />
+      <EditRuleDialog rule={found} open={editing} onOpenChange={setEditing} />
       <ConfirmDeleteDialog
         open={deleting}
         onOpenChange={setDeleting}
@@ -85,6 +85,18 @@ export default function RulePage() {
       />
     </>
   );
+}
+
+/**
+ * The rule dialog on this rule. The entry keeps its identity while the rule's
+ * content is the same, so a background refetch of the rules list does not hand
+ * the open form a new entry; when the content does change, an untouched form
+ * follows it and an edited one keeps its edits (`RuleDialog`).
+ */
+function EditRuleDialog({ rule, open, onOpenChange }: { rule: RuleView; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const content = JSON.stringify(rule);
+  const entry = useMemo(() => ({ kind: "edit" as const, rule: JSON.parse(content) as RuleView }), [content]);
+  return <RuleDialog open={open} onOpenChange={onOpenChange} entry={entry} />;
 }
 
 function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () => void; onDelete: () => void }) {

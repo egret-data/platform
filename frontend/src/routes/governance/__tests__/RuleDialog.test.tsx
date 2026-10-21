@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -59,7 +59,7 @@ import type { GovernanceCatalog, Rule } from "@/api/generated/model";
 import type { Me } from "@/api/hooks";
 import { AuthContext } from "@/auth/useAuth";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
-import { clearAllRuleDrafts, type RuleEntry } from "@/routes/governance/ruleDraft";
+import { clearAllRuleDrafts, loadRuleDraft, ruleDraftKey, type RuleEntry } from "@/routes/governance/ruleDraft";
 
 const ME: Me = { user_id: "u1", email: "", platform_roles: ["platform_admin"], permissions: [] };
 const CLASSIFICATION_ENTRY: RuleEntry = { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" };
@@ -113,17 +113,20 @@ let previewMutateAsync: ReturnType<typeof vi.fn>;
 let createMutateAsync: ReturnType<typeof vi.fn>;
 let patchMutateAsync: ReturnType<typeof vi.fn>;
 
-function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = {}) {
+function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = {}, me: Me | null = ME) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onOpenChange = vi.fn();
-  const utils = render(
-    <AuthContext.Provider value={{ me: ME, isLoading: false }}>
+  const tree = (p: Partial<React.ComponentProps<typeof RuleDialog>>) => (
+    <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <RuleDialog open onOpenChange={onOpenChange} entry={CLASSIFICATION_ENTRY} {...props} />
+        <RuleDialog open onOpenChange={onOpenChange} entry={CLASSIFICATION_ENTRY} {...p} />
       </QueryClientProvider>
-    </AuthContext.Provider>,
+    </AuthContext.Provider>
   );
-  return { ...utils, onOpenChange };
+  const utils = render(tree(props));
+  /** Re-renders the same open dialog with new props, as a parent's refetch would. */
+  const rerenderWith = (p: Partial<React.ComponentProps<typeof RuleDialog>>) => utils.rerender(tree(p));
+  return { ...utils, onOpenChange, rerenderWith };
 }
 
 /** A table entry switched to Applies to = Classification: the tag picker starts empty. */
@@ -723,5 +726,125 @@ describe("RuleDialog — errors stay with the form (C8.5)", () => {
     expect(err).toHaveTextContent("rule name already used");
     expect(err.contains(document.activeElement) || err === document.activeElement).toBe(true);
     expect(screen.getByLabelText(/^Name/)).toHaveValue("Mask PII Data");
+  });
+});
+
+describe("RuleDialog — closing and drafts, round 1 review", () => {
+  test("the close button on a dirty form asks first", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(await screen.findByRole("alertdialog", { name: "Discard this rule?" })).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  test("a click outside a dirty form asks first", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    // A modal dialog sets `pointer-events: none` on the page behind it, so user-event refuses
+    // to click there; the press Radix listens for is dispatched directly (jsdom's pointer event
+    // has no pointerType, so Radix waits for the click that follows, as on touch).
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+    expect(await screen.findByRole("alertdialog", { name: "Discard this rule?" })).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  test("a draft belongs to its user: another account opens the same entry clean", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderDialog({ entry: TABLE_ENTRY });
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    unmount();
+    renderDialog({ entry: TABLE_ENTRY }, { ...ME, user_id: "u2" });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+    expect(screen.queryByText(/Restored your unsaved rule/)).not.toBeInTheDocument();
+  });
+
+  test("with nobody signed in, nothing is kept", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderDialog({ entry: TABLE_ENTRY }, null);
+    await user.type(screen.getByLabelText(/^Name/), "mask email");
+    unmount();
+    renderDialog({ entry: TABLE_ENTRY }, null);
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("");
+  });
+
+  test("the reason line is a polite live region", () => {
+    renderDialog({ entry: TABLE_ENTRY });
+    expect(screen.getByText("Name the rule.")).toHaveAttribute("aria-live", "polite");
+  });
+
+  test("focus lands on the error's title, and a refusal of an earlier version says so once the form changes", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(400, "bad request: nope"));
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const title = await screen.findByRole("heading", { name: "The preview was refused." });
+    expect(title).toHaveFocus();
+
+    await user.type(screen.getByLabelText(/^Name/), "!");
+    expect(screen.getByRole("heading", { name: "The preview of an earlier version was refused." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAccessibleDescription("Preview the rule to enable Create.");
+  });
+});
+
+describe("RuleDialog — an edit draft never overwrites a newer rule (round 1 review)", () => {
+  const RULE: Rule = {
+    id: "r1",
+    name: "mask-ssn",
+    kind: { type: "mask", mask_type: "MASK_HASH" },
+    selector: { type: "tag", key: "pii_v2" },
+    exempt: { include: [], exclude: [] },
+  };
+  const CHANGED: Rule = { ...RULE, exempt: { include: [{ kind: "user", ref: "bob" }], exclude: [] } };
+
+  test("a draft of a rule changed since is dropped: the server's values show, with a notice", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderDialog({ entry: { kind: "edit", rule: RULE } });
+    await user.type(screen.getByLabelText(/^Name/), "-v2");
+    unmount();
+
+    renderDialog({ entry: { kind: "edit", rule: CHANGED } });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("mask-ssn");
+    expect(screen.getByText("This rule changed since your draft; the draft was discarded.")).toBeInTheDocument();
+    expect(screen.queryByText(/Restored your unsaved rule/)).not.toBeInTheDocument();
+    expect(loadRuleDraft(ruleDraftKey("u1", { kind: "edit", rule: CHANGED }))).toBeUndefined();
+  });
+
+  test("a draft of an unchanged rule is restored", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderDialog({ entry: { kind: "edit", rule: RULE } });
+    await user.type(screen.getByLabelText(/^Name/), "-v2");
+    unmount();
+
+    renderDialog({ entry: { kind: "edit", rule: { ...RULE } } });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("mask-ssn-v2");
+    expect(screen.getByText(/Restored your unsaved rule/)).toBeInTheDocument();
+  });
+
+  test("a refetch with changed data under an untouched form creates no draft, and the form follows it", () => {
+    const { rerenderWith, unmount, onOpenChange } = renderDialog({ entry: { kind: "edit", rule: RULE } });
+    rerenderWith({ entry: { kind: "edit", rule: CHANGED } });
+
+    expect(screen.getByText("bob")).toBeInTheDocument();
+    expect(loadRuleDraft(ruleDraftKey("u1", { kind: "edit", rule: CHANGED }))).toBeUndefined();
+    unmount();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    renderDialog({ entry: { kind: "edit", rule: CHANGED } });
+    expect(screen.queryByText(/Restored your unsaved rule/)).not.toBeInTheDocument();
+  });
+
+  test("a refetch under an edited form keeps the edits, and their draft is still checked against the version they began from", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, unmount } = renderDialog({ entry: { kind: "edit", rule: RULE } });
+    await user.type(screen.getByLabelText(/^Name/), "-v2");
+    rerenderWith({ entry: { kind: "edit", rule: CHANGED } });
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("mask-ssn-v2");
+    unmount();
+
+    renderDialog({ entry: { kind: "edit", rule: CHANGED } });
+    expect(screen.getByText("This rule changed since your draft; the draft was discarded.")).toBeInTheDocument();
   });
 });
