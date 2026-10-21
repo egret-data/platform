@@ -164,18 +164,24 @@ describe("the charts the earlier PRs repaired stay repaired", () => {
  * as this harness's own `MB By Category` question does with `ORDER BY revenue DESC`.
  */
 describe("the seed asks for the order each chart draws in", () => {
-  for (const name of ["MB · Bar", "MB · Row"]) {
-    it(`${name} orders by its category, ascending`, () => {
-      expect(chartParams(chartByName(name)).spec.orderby).toEqual([{ field: "category", desc: false }]);
-    });
-  }
+  it("MB · Bar orders by its category, ascending", () => {
+    expect(chartParams(chartByName("MB · Bar")).spec.orderby).toEqual([{ field: "category", desc: false }]);
+  });
 
-  it("every un-broken-out cartesian chart orders by its own x-axis, and by nothing else", () => {
+  // D7 / KI-045: the row chart is the one cartesian that ranks — largest first, as egret's gallery
+  // promises — with the category kept as the tie-breaker. A deliberate divergence from Metabase's
+  // implicit ascending default.
+  it("MB · Row orders by its metric, descending, then by its category", () => {
+    expect(chartParams(chartByName("MB · Row")).spec.orderby)
+      .toEqual([{ field: "revenue", desc: true }, { field: "category", desc: false }]);
+  });
+
+  it("every un-broken-out cartesian chart but the row orders by its own x-axis, and by nothing else", () => {
     // The single-clause shape is the point: with one breakout there is one implicit order-by. The
     // broken-out cards have two, which is `add-implicit-breakout-order-by` reducing over every
     // breakout — asserted in `charts.breakout.test.ts` rather than here.
     const expected: Record<string, string> = {
-      "MB · Bar": "category", "MB · Row": "category", "MB · Line": "order_month",
+      "MB · Bar": "category", "MB · Line": "order_month",
       "MB · Area": "order_month", "MB · Combo": "order_month", "MB · Scatter": "price",
     };
     for (const [name, field] of Object.entries(expected)) {
