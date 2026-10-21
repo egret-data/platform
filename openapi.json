@@ -43498,7 +43498,8 @@
               "source",
               "runs",
               "can_manage",
-              "effective_labels"
+              "effective_labels",
+              "worker_enabled"
             ],
             "properties": {
               "source": {
@@ -43522,6 +43523,10 @@
                   "$ref": "#/components/schemas/LabelDto"
                 },
                 "description": "What the run sees as `labels`: the flow's, then `labels`, the later key\nwinning. Empty when the frozen source does not parse."
+              },
+              "worker_enabled": {
+                "type": "boolean",
+                "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
               }
             }
           }
@@ -43720,7 +43725,8 @@
           "rows",
           "total",
           "limit",
-          "offset"
+          "offset",
+          "worker_enabled"
         ],
         "properties": {
           "rows": {
@@ -43743,6 +43749,10 @@
             "type": "integer",
             "format": "int64",
             "description": "The offset actually used, after the clamp."
+          },
+          "worker_enabled": {
+            "type": "boolean",
+            "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
           }
         }
       },
@@ -44495,7 +44505,8 @@
           "created_at",
           "updated_at",
           "validation",
-          "can_manage"
+          "can_manage",
+          "worker_enabled"
         ],
         "properties": {
           "id": {
@@ -44567,6 +44578,10 @@
           "can_manage": {
             "type": "boolean",
             "description": "Whether the caller may save, publish, run and delete this flow: they\nhold `workflow:manage` in this workspace. An editor opens read-only\nwhen this is false; every mutating route still checks for itself."
+          },
+          "worker_enabled": {
+            "type": "boolean",
+            "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
           }
         }
       },
