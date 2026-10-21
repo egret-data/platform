@@ -42,6 +42,9 @@ impl From<egret_query::EngineError> for BiError {
     fn from(e: egret_query::EngineError) -> Self {
         match e {
             egret_query::EngineError::NotFound(s) => BiError::NotFound(s),
+            // The engine's own words. `EngineError::Engine` already reads
+            // "engine: …", and `BiError::Engine` adds that prefix again (KI-087).
+            egret_query::EngineError::Engine(s) => BiError::Engine(s),
             other => BiError::Engine(other.to_string()),
         }
     }
@@ -172,6 +175,14 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("recompiling profile"));
+    }
+
+    #[test]
+    fn an_engine_error_carries_one_engine_prefix() {
+        let e = BiError::from(egret_query::EngineError::Engine(
+            "line 1:14: mismatched input".into(),
+        ));
+        assert_eq!(e.to_string(), "engine: line 1:14: mismatched input");
     }
 
     #[test]
