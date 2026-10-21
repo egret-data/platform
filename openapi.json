@@ -42575,6 +42575,60 @@
           "deny"
         ]
       },
+      "EffectCatalog": {
+        "type": "object",
+        "description": "One catalog a rule reaches, and who enforces it there.",
+        "required": [
+          "catalogId",
+          "catalogName",
+          "engines"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "catalogName": {
+            "type": "string"
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectEngine"
+            },
+            "description": "Attached engines bound to a policy profile, by name."
+          },
+          "notEnforced": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`no_engine` (nothing attached) or `no_profile` (engines attached, none\nbound to a profile); absent when some engine enforces the rule."
+          }
+        }
+      },
+      "EffectEngine": {
+        "type": "object",
+        "description": "An engine that enforces a rule on a catalog.",
+        "required": [
+          "id",
+          "name",
+          "engineType"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "engineType": {
+            "type": "string",
+            "description": "`trino` | `starrocks` | …."
+          }
+        }
+      },
       "EffectiveAccess": {
         "type": "object",
         "required": [
@@ -43748,6 +43802,36 @@
             "type": "integer",
             "format": "int64",
             "description": "The offset actually used, after the clamp."
+          }
+        }
+      },
+      "ExistingMask": {
+        "type": "object",
+        "description": "Another mask rule that already reaches a column this rule reaches.",
+        "required": [
+          "ruleId",
+          "ruleName",
+          "maskType",
+          "coordinate",
+          "exempt"
+        ],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ruleName": {
+            "type": "string"
+          },
+          "maskType": {
+            "type": "string"
+          },
+          "coordinate": {
+            "type": "string",
+            "description": "`catalog.schema.table.column`."
+          },
+          "exempt": {
+            "$ref": "#/components/schemas/PrincipalSet"
           }
         }
       },
@@ -48845,6 +48929,17 @@
           },
           "compile": {
             "$ref": "#/components/schemas/CompileResponse"
+          },
+          "effect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RuleEffect",
+                "description": "A rule preview only: what the rule will do — the tables and columns it\nreaches, the engines that enforce it (or why none does), how many\npeople it exempts and the other masks already on its columns. Computed\nfrom the model (`crate::effect`), so it answers on a catalog no engine\nserves. Absent on a grant preview."
+              }
+            ]
           }
         }
       },
@@ -50889,6 +50984,72 @@
           },
           "exempt": {
             "$ref": "#/components/schemas/PrincipalSet"
+          }
+        }
+      },
+      "RuleEffect": {
+        "type": "object",
+        "description": "The rule's effect: reach, enforcement, exemptions and overlapping masks.",
+        "required": [
+          "kind",
+          "catalogs",
+          "enforcedBy",
+          "exemptMembers",
+          "exemptEveryone",
+          "alreadyMasked"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`mask` or `row_filter`."
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectCatalog"
+            },
+            "description": "Every registry catalog the rule reaches, by name."
+          },
+          "tableCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Distinct tables reached; `None` when a path level is a pattern (or absent).",
+            "minimum": 0
+          },
+          "columnCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Masks only; `None` for a pattern, for \"every column\" (a path mask\nwithout a column, or a tag on a whole table) and for row filters.",
+            "minimum": 0
+          },
+          "enforcedBy": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct engines, bound to a profile, attached to a reached catalog.",
+            "minimum": 0
+          },
+          "exemptMembers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct users in `exempt.include`, groups, roles and workspaces expanded.",
+            "minimum": 0
+          },
+          "exemptEveryone": {
+            "type": "boolean",
+            "description": "`exempt.include` names the `public` group: nobody is masked."
+          },
+          "alreadyMasked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExistingMask"
+            },
+            "description": "Other mask rules that reach a column this rule reaches (at most 20)."
           }
         }
       },

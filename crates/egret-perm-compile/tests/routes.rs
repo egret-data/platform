@@ -8070,3 +8070,341 @@ async fn a_tag_mask_over_a_table_level_attachment_answers_table_tag_mask_conflic
         "the warehouse tiebreaker reports the smaller id: {two_warehouses}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rule preview `effect` (classification UX spec C6, C7)
+// ---------------------------------------------------------------------------
+
+async fn preview_rule(f: &Fixture, token: &str, rule: Value) -> (StatusCode, Value) {
+    into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                token,
+                Some(json!({ "rule": rule })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+fn mask_rule(name: &str, selector: Value, exempt_include: Value) -> Value {
+    json!({
+        "name": unique(name),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": selector,
+        "exempt": { "include": exempt_include, "exclude": [] }
+    })
+}
+
+/// Spec C7 (a)+(d): the fixture's catalog has one engine bound to a profile, and
+/// its tag sits on one column, so a tag mask reaches 1 table and 1 column and is
+/// enforced by 1 engine.
+#[tokio::test]
+async fn a_tag_mask_preview_states_its_reach_and_its_engines() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule(
+            "eff-tag",
+            json!({"type": "tag", "key": f.tag_key}),
+            json!([]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e = &body["effect"];
+    assert_eq!(e["kind"], "mask");
+    assert_eq!(
+        (e["tableCount"].as_u64(), e["columnCount"].as_u64()),
+        (Some(1), Some(1)),
+        "{e}"
+    );
+    assert_eq!(e["enforcedBy"], 1, "{e}");
+    let cat = &e["catalogs"][0];
+    assert_eq!(cat["catalogId"], f.catalog_id.to_string());
+    assert!(cat["notEnforced"].is_null(), "{cat}");
+    assert_eq!(cat["engines"].as_array().unwrap().len(), 1);
+    assert_eq!(cat["engines"][0]["engineType"], "starrocks", "{cat}");
+}
+
+/// Spec C7 (b): a catalog no engine serves is reported as not enforced.
+#[tokio::test]
+async fn a_path_mask_on_a_catalog_without_an_engine_is_not_enforced() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-orphan").await;
+    let selector = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-orphan", selector, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e = &body["effect"];
+    assert_eq!(e["enforcedBy"], 0, "{e}");
+    assert_eq!(e["catalogs"][0]["notEnforced"], "no_engine", "{e}");
+    assert_eq!(
+        (e["tableCount"].as_u64(), e["columnCount"].as_u64()),
+        (Some(1), Some(1))
+    );
+    // A path with no column masks every column: the count is not a number.
+    let every = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t"});
+    let (status, body) = preview_rule(&f, &token, mask_rule("eff-every", every, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["tableCount"], 1, "{body}");
+    assert!(body["effect"]["columnCount"].is_null(), "{body}");
+    // A pattern level has no count either.
+    let pattern = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "ord*", "column": "email"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-pattern", pattern, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["kind"], "mask", "{body}");
+    assert!(body["effect"]["tableCount"].is_null(), "{body}");
+    assert!(body["effect"]["columnCount"].is_null(), "{body}");
+}
+
+/// Spec C7 (b), second reason: engines attached, none bound to a profile.
+#[tokio::test]
+async fn a_catalog_whose_engines_have_no_profile_is_not_enforced() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-noprof").await;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1,'trino','egret','{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("eff-unbound"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("unbound engine");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(orphan)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach");
+    let selector = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-noprof", selector, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["enforcedBy"], 0, "{body}");
+    assert_eq!(
+        body["effect"]["catalogs"][0]["notEnforced"], "no_profile",
+        "{body}"
+    );
+    assert_eq!(
+        body["effect"]["catalogs"][0]["engines"],
+        json!([]),
+        "{body}"
+    );
+}
+
+/// Spec C7 (c): exemptions count distinct people — a group of two plus one of
+/// them named directly is two.
+#[tokio::test]
+async fn exempt_members_counts_distinct_people() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let a = known_user(&f, unique("effa")).await;
+    let b = known_user(&f, unique("effb")).await;
+    let group = unique("eff_group");
+    let gid: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    for u in [&a, &b] {
+        sqlx::query(
+            "INSERT INTO user_groups (user_id, group_id) SELECT id, $2 FROM users WHERE username = $1",
+        )
+        .bind(u)
+        .bind(gid)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    }
+    let include = json!([{"kind": "group", "ref": group}, {"kind": "user", "ref": a}]);
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule(
+            "eff-exempt",
+            json!({"type": "tag", "key": f.tag_key}),
+            include,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["exemptMembers"], 2, "{body}");
+    assert_eq!(body["effect"]["exemptEveryone"], false);
+}
+
+/// Spec C6: on a catalog no engine serves (nothing compiles, so the compiler's
+/// overlap check sees nothing), a second mask on one column is still reported.
+#[tokio::test]
+async fn a_second_mask_on_a_column_is_reported_without_any_engine() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-overlap").await;
+    let path = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"});
+    let first = mask_rule("eff-first", path.clone(), json!([]));
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(first.clone())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let first_id = created["id"].as_str().unwrap().to_string();
+
+    // The same column spelled in another case: resource levels match without regard to case.
+    let same_column = json!({"type": "path", "catalog_id": orphan, "schema": "S", "table": "T", "column": "EMAIL"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-second", same_column, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hits = body["effect"]["alreadyMasked"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{body}");
+    assert_eq!(hits[0]["ruleId"], first_id);
+    assert_eq!(hits[0]["maskType"], "MASK_HASH");
+
+    // A different column of the same table is not "already masked".
+    let other_column = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "phone"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-other", other_column, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["alreadyMasked"], json!([]), "{body}");
+
+    // Previewing a PATCH of the first rule does not report the rule against itself.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": first_id, "rule": first })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["alreadyMasked"], json!([]), "{body}");
+}
+
+/// Bounds: at most `ALREADY_MASKED_CAP` (20) overlapping masks are listed.
+#[tokio::test]
+async fn already_masked_lists_at_most_twenty() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-cap").await;
+    let path = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"});
+    for _ in 0..21 {
+        let (status, created) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/rules",
+                    &token,
+                    Some(mask_rule("eff-cap", path.clone(), json!([]))),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+    }
+    let (status, body) = preview_rule(&f, &token, mask_rule("eff-cap-new", path, json!([]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["effect"]["alreadyMasked"].as_array().unwrap().len(),
+        20,
+        "{body}"
+    );
+}
+
+/// Bounds: a tag's reach is COUNTED in SQL, not truncated by the cap on the
+/// coordinates the overlap check examines (60 columns > 50).
+#[tokio::test]
+async fn a_tag_on_more_columns_than_the_scan_cap_is_still_counted_exactly() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-wide").await;
+    let wh: Uuid = sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+        .bind(orphan)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let key = unique("effwide");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(&key)
+            .bind(unique("EffWide"))
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    // Two columns per table, thirty tables: `t{n}.c` and `t{n}.d`.
+    for i in 0..30 {
+        for column in ["c", "d"] {
+            sqlx::query(
+                "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+                 VALUES ($1,$2,'s',$3,$4)",
+            )
+            .bind(tag_id)
+            .bind(wh)
+            .bind(format!("t{i}"))
+            .bind(column)
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule("eff-wide", json!({"type": "tag", "key": key}), json!([])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e = &body["effect"];
+    assert_eq!(
+        (e["tableCount"].as_u64(), e["columnCount"].as_u64()),
+        (Some(30), Some(60)),
+        "{e}"
+    );
+    assert_eq!(e["catalogs"][0]["notEnforced"], "no_engine", "{e}");
+}
+
+/// A grant preview carries no effect.
+#[tokio::test]
+async fn a_grant_preview_has_no_effect_block() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let user = known_user(&f, unique("effg")).await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "grant": grant_body(f.catalog_id, &user) })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("effect").is_none_or(|e| e.is_null()), "{body}");
+}

@@ -66,6 +66,9 @@ pub mod harness_support;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;
+// What a rule preview will do: reach, enforcing engines, exemptions and
+// overlapping masks (classification UX spec C6, C7).
+pub mod effect;
 /// F11: the curated engine capability catalogue.
 pub mod engine_capabilities;
 /// F11: compile an engine grant into its engine's profile.

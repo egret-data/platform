@@ -283,6 +283,10 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         PreviewRequest,
         PreviewResponse,
         AffectedProfile,
+        crate::effect::RuleEffect,
+        crate::effect::EffectCatalog,
+        crate::effect::EffectEngine,
+        crate::effect::ExistingMask,
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,
@@ -962,6 +966,13 @@ pub struct AffectedProfile {
 pub struct PreviewResponse {
     pub affected: Vec<AffectedProfile>,
     pub compile: CompileResponse,
+    /// A rule preview only: what the rule will do — the tables and columns it
+    /// reaches, the engines that enforce it (or why none does), how many
+    /// people it exempts and the other masks already on its columns. Computed
+    /// from the model (`crate::effect`), so it answers on a catalog no engine
+    /// serves. Absent on a grant preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<crate::effect::RuleEffect>,
 }
 
 /// A grant, a rule, or a tag's classification clearance that a recompile could
@@ -2072,6 +2083,12 @@ async fn preview(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Every exit from here rolls back: the explicit `rollback()` on success, and
     // dropping `tx` on any `?`. Nothing below commits.
+    // The rule's effect is read from the model BEFORE the write, so the stored
+    // rows it compares against are the ones the write would join.
+    let effect = match (&grant, &rule) {
+        (None, Some(r)) => Some(crate::effect::rule_effect(&mut tx, id, r).await?),
+        _ => None,
+    };
     let outcome = match (grant, rule) {
         (Some(g), None) => write_grant(&mut tx, id, g, &p).await?,
         (None, Some(r)) => write_rule(&mut tx, id, r, &p).await?,
@@ -2085,7 +2102,11 @@ async fn preview(
     let (_, compile) = outcome.into_compile_response();
     tx.rollback().await.map_err(PermHttpError::db)?;
 
-    Ok(Json(PreviewResponse { affected, compile }))
+    Ok(Json(PreviewResponse {
+        affected,
+        compile,
+        effect,
+    }))
 }
 
 // ---------------------------------------------------------------------------
