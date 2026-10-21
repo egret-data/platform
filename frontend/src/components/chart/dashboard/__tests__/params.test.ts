@@ -86,3 +86,30 @@ describe("interpolateParams", () => {
     expect(interpolateParams("no tokens", params, {})).toBe("no tokens");
   });
 });
+
+// KI-063: a text or heading card must print every filter value shape readably, never the
+// `[object Object]` that String() gives a date picker's value.
+describe("interpolateParams value shapes (KI-063)", () => {
+  const cases: Array<[string, Partial<DashboardParameter>, unknown, string]> = [
+    ["text", { type: "text" }, "EU", "EU"],
+    ["category list", { type: "category" }, ["A", "B"], "A, B"],
+    ["number", { type: "number", operator: "=" }, 42, "42"],
+    ["number between", { type: "number", operator: "between" }, [10, 20], "10 – 20"],
+    ["date single", { type: "date", operator: "single" }, "1997-06-01", "1997-06-01"],
+    ["date range", { type: "date", operator: "range" }, ["1995-01-01", "1996-12-31"], "1995-01-01 – 1996-12-31"],
+    ["date relative", { type: "date", operator: "relative" }, "last30", "Last 30 days"],
+    ["date quarter-year", { type: "date", operator: "quarter-year" }, "1997-2", "Q2 1997"],
+    ["all-options on", { type: "date", operator: "all-options" }, { mode: "specific", op: "on", from: "1997-06-01" }, "On 1997-06-01"],
+    ["all-options after", { type: "date", operator: "all-options" }, { mode: "specific", op: "after", from: "1997-06-01" }, "After 1997-06-01"],
+    ["all-options between", { type: "date", operator: "all-options" }, { mode: "specific", op: "between", from: "1995-01-01", to: "1996-12-31" }, "1995-01-01 – 1996-12-31"],
+    ["all-options past", { type: "date", operator: "all-options" }, { mode: "relative", dir: "past", n: 3, unit: "month" }, "Past 3 months"],
+    ["all-options current", { type: "date", operator: "all-options" }, { mode: "relative", dir: "current", n: 1, unit: "week" }, "Current week"],
+    ["an object on a non-date filter", { type: "text" }, { a: 1 }, ""],
+    ["a list holding an object", { type: "category" }, ["A", { a: 1 }], "A"],
+  ];
+  it.each(cases)("%s", (_name, over, value, expected) => {
+    const out = interpolateParams("{{p}}", [p(over)], { p: value });
+    expect(out).toBe(expected);
+    expect(out).not.toContain("[object Object]");
+  });
+});
