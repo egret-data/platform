@@ -557,6 +557,18 @@ export function fadeColor(color: string, alpha: number): string {
  * `weight` is clamped to 0..1. Unparseable input comes back verbatim — the same "leave it alone"
  * degradation `chartTint` and `fadeColor` already use rather than throwing.
  */
+/**
+ * The colour as `#rrggbb`, for the one consumer that cannot take anything else: a native
+ * `<input type="color">`, whose `value` must be a hex. A browser-resolved token comes back as
+ * `oklch(...)`, which that input rejects (and then shows black). Unparseable input comes back
+ * verbatim, the same degradation the other helpers here use.
+ */
+export function toHexColor(color: string): string {
+  const rgb = parseColor(color);
+  if (!rgb) return color;
+  return `#${rgb.map((c) => Math.round(Math.min(255, Math.max(0, c))).toString(16).padStart(2, "0")).join("")}`;
+}
+
 export function mixColor(color: string, backdrop: string, weight: number): string {
   const fg = parseColor(color);
   const bg = parseColor(backdrop);

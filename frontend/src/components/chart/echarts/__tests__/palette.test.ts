@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, resolveFontFamily, CHART_FONT_FALLBACK, chartShade, chartTint, ringVariantColor, getTextColorForBackground, getTextHaloForBackground, LABEL_HALO_WIDTH, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, resolveFontFamily, CHART_FONT_FALLBACK, chartShade, chartTint, ringVariantColor, getTextColorForBackground, getTextHaloForBackground, LABEL_HALO_WIDTH, parseColor, COLOR_FALLBACK, onThemeChange, toHexColor } from "../palette";
 
 // egret's REAL theme tokens, copied verbatim from src/index.css (`:root` and `.dark`), together
 // with the rgb a browser actually resolves each one to. Every number below was computed from the
@@ -131,6 +131,18 @@ describe("chart palette", () => {
   // WCAG maths and the ring variants' shading. It understood only hex and rgb(), so every egret
   // design token — all of which are oklch() (Tailwind v4) — was unparseable, and both callers
   // silently took their "can't read it" branch.
+  describe("toHexColor", () => {
+    // The waterfall's Total swatch (KI-057) hands a resolved token to a native colour input.
+    it("writes a resolved oklch token as the hex a colour input accepts", () => {
+      expect(toHexColor(TOKENS.light.foreground)).toBe("#000f49");
+      expect(toHexColor(TOKENS.dark.foreground)).toBe("#fcfcfc");
+      expect(toHexColor("#4C5773")).toBe("#4c5773");
+    });
+    it("returns what it cannot read unchanged", () => {
+      expect(toHexColor("var(--foreground)")).toBe("var(--foreground)");
+    });
+  });
+
   describe("parseColor", () => {
     it("reads the live theme tokens to the rgb a browser resolves them to", () => {
       expect(parseColor(TOKENS.dark.foreground)).toEqual([252, 252, 252]);
