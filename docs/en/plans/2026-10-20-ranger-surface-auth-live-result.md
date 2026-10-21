@@ -727,3 +727,375 @@ existing initpwd design, unrelated to Ranger.
   measurements doc covers it with the real 2.8.0 jar. Scenario 4 used connection refused, which is
   what "egret down" produces.
 - `ranger.authMode=anonymous` was not exercised: the brief forbids it.
+
+## Live check #2: tag-based policies under the authenticated surface
+
+Run on 2026-10-21 (UTC, 04:13 to 04:31) against `feat/ranger-surface-auth-b` at `ddb29b6d`, which has
+`691e93b2` (the `/ranger/service/tags/secure/download/{service}` route) and `f6adf09a` (the forced
+`AuditProviderFactory=WARN`). Same recipe as the first check: a fresh kind cluster
+`egret-ranger-live`, Trino 483 (plugin 2.8.0), StarRocks 4.1.6 (plugin 2.9.0, operator v1.11.6), egret
+Helm with `ranger.enabled=true` and `ranger.authMode` at its default (`EGRET_RANGER__AUTH_MODE: required`
+in the rendered ConfigMap). Images `egret-backend:live9e` and `egret-frontend:live9e` were built from the
+worktree, the backend with the scratch Dockerfile and its own BuildKit cache id; the binary was checked
+to contain the string `tags/secure/download/{service}` before it was loaded. Passwords are never
+printed; where a password would appear the output shows `<redacted>`, its length or its first two
+characters.
+
+Why this run: the first check proved resource policies only. Measurement Q4 then showed that a plugin
+with credentials fetches tags from `/service/tags/secure/download/<svc>`, which egret did not serve, so
+every credentialed Trino engine's tag enricher got 404 and no tag policy applied.
+
+### Summary
+
+| # | Scenario | Verdict |
+|---|---|---|
+| T1 | A tag on a real column plus a tag-selected rule reaches both engines; tag version visible in the ledger and the plugin logs | **PASS** |
+| T2 | Enforcement by tag: tagged column masked (rule) and denied (clearance), untagged column raw, detach restores access after one poll | **PASS** on Trino (tag service). **PASS** on StarRocks through egret's per-column expansion; StarRocks has no tag service, so the tag download is not on its path |
+| T3 | On the wire: the Trino plugins request `/ranger/service/tags/secure/download/live-trino` with Basic, and get 200 and 304 | **PASS** |
+| T4 | Cross-profile 403, no credentials 401, wrong password 401, root `/service/tags/...` 404 | **PASS** |
+| T5 | Surprises, password sweep, `AUDIT PROPERTY` line | Password: 0 hits everywhere. `AUDIT PROPERTY`: 0 lines, even with a user `INFO` override. 3 observations, below |
+
+Corrections to the brief, both measured here: the Trino plugin requests tags under its **resource**
+profile name (`/tags/secure/download/live-trino`), not under the tag service name
+(`live-trino_tag`), which matches the comment on `download_tags`. And egret serves no
+"request log", so the wire evidence in T3 comes from a packet capture in an ephemeral debug
+container (no sidecar, no change to the egret Deployment).
+
+### Setup
+
+Through the API as `admin@egret.local`: storage `live-store` (RustFS, prefix `live9e2`), warehouse
+`live-wh` (`ebba3959-391c-4e5e-b47b-0541d468d155`, registry catalog `live_wh`
+`8e386a56-9a94-4e29-b1c0-e856df293015`), engine `live-trino` (`80812990-1a89-44a1-b5c9-2109ce410209`,
+1 coordinator and 1 worker, 2Gi, profile 2 auto-created) and, after
+`POST /policies/services {"name":"live-sr","type":"starrocks"}` (id 3), engine `live-sr`
+(`0b8c7b85-980c-4344-b422-a298bf1766a5`, `authzServiceId: 3`, 1 FE, 1 CN). Both were assigned to the
+Default workspace so SQL Lab could reach them. The Trino engine was created with
+`trinoConfig.additionalLogProperties`:
+
+```json
+{"org.apache.ranger.admin.client.RangerAdminRESTClient":"DEBUG",
+ "org.apache.ranger.audit.provider.AuditProviderFactory":"INFO"}
+```
+
+The first entry makes the plugin log each tag poll; the second tries to re-enable the line that leaked
+the password in the first check (T5 shows egret drops it).
+
+```text
+ id |      name      |   type    |  tag_service
+----+----------------+-----------+----------------
+  1 | live-trino_tag | tag       |
+  2 | live-trino     | trino     | live-trino_tag
+  3 | live-sr        | starrocks |
+```
+
+Table, created through SQL Lab on Trino as `admin`:
+`CREATE TABLE live_wh.live9e.t (id integer, email varchar, city varchar)` with two rows. Before any tag:
+
+```text
+state=finished error=
+[[1,"ann@example.com","Hanoi","admin"],[2,"bob@example.com","Hue","admin"]]
+```
+
+All queries below go through SQL Lab as `admin` (egret mints the engine JWT on both engines; StarRocks
+reports the user as `'admin'@'10.244.0.26'`). The rules below name `{public}`, so they apply to
+`admin` too; `admin` holds the `egret-admin` resource policies, and `admin` is not in the role the
+clearance names.
+
+### T1. A tag and a tag-selected rule reach the engines
+
+```text
+04:21:19 POST /api/control-plane/tags {"key":"live9e-pii","name":"live9e-pii",...}
+{"id":"b05664b3-40a6-435e-a7c0-5b07c0e872ae","key":"live9e-pii","name":"live9e-pii",...}  HTTP 201
+04:21:26 POST /api/control-plane/perm/rules
+  {"name":"live9e-mask-pii","kind":{"type":"mask","mask_type":"MASK","value_expr":null},"selector":{"type":"tag","key":"live9e-pii"},"exempt":{"include":[],"exclude":[]}}
+{"id":"fda6a3af-f5ff-426b-849b-f1d0da4f6097","compile":{"services":[2,3],"created":1,"updated":0,"deleted":0,"unchanged":2,"skipped":[]}}  HTTP 201
+04:22:32 PUT /api/control-plane/warehouses/ebba3959-…/resource-tags {"schema":"live9e","table":"t","column":"email","tag_id":"b05664b3-…"}
+{"ok":true} HTTP 200
+```
+
+(The first attachment, at 04:21:19, passed the **catalog** id in the `warehouse_id` path segment. It
+returned 200 and stored a row that attaches the tag to nothing; see observation 1. It was removed,
+and the 04:22:32 call above is the one that counts.)
+
+Compiled policies and versions right after the attachment:
+
+```text
+ service_id | name                                                                  | ptype | res                                                         | items
+          1 | perm-rule-fda6a3af-f5ff-426b-849b-f1d0da4f6097                        | 1     | {"tag": {"values": ["live9e-pii"], ...}}                    | [{"groups": ["public"], ... "dataMaskInfo": {"dataMaskType": "MASK"}}]
+          3 | perm-rule-fda6a3af-f5ff-426b-849b-f1d0da4f6097-live_wh.live9e.t.email | 1     | {"table": {"values": ["t"]}, "column": {"values": ["email"]}, "catalog": {"values": ["live_wh"]} ...} | [{"groups": ["public"], ... "MASK"}]
+
+ id |      name      | policy_version | tag_version
+  1 | live-trino_tag |              2 |           2
+  2 | live-trino     |             20 |           2
+  3 | live-sr        |             17 |           2
+```
+
+On Trino the rule is one policy in the **tag service** (`live-trino_tag`); on StarRocks it is one
+resource policy per tagged column in the `live-sr` profile.
+
+`policy.ranger_plugin_downloads` at 04:23:02 (one row per plugin and kind, updated in place):
+
+```text
+    name    |                        plugin_id                        |   kind   | last_known_version | served_version |              at
+------------+---------------------------------------------------------+----------+--------------------+----------------+-------------------------------
+ live-trino | trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino | tags     |                  1 |              2 | 2026-10-21 04:22:50.39871+00
+ live-trino | trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino | policies |                 20 |             20 | 2026-10-21 04:22:50.295105+00
+ live-sr    | starrocks@live-sr-fe-0-live-sr                          | policies |                 16 |             17 | 2026-10-21 04:22:46.82918+00
+ live-trino | trino@live-trino-worker-65b9785698-vfjhk-live-trino     | tags     |                  1 |              2 | 2026-10-21 04:22:34.592598+00
+ live-trino | trino@live-trino-worker-65b9785698-vfjhk-live-trino     | policies |                 20 |             20 | 2026-10-21 04:22:34.441724+00
+```
+
+The coordinator's own log (tabs shown as spaces):
+
+```text
+2026-10-21T04:21:50.357Z INFO PolicyRefresher(serviceName=live-trino)-145 org.apache.ranger.plugin.util.PolicyRefresher PolicyRefresher(serviceName=live-trino): found updated version. lastKnownVersion=19; newVersion=20
+2026-10-21T04:22:20.401Z DEBUG RangerTagRefresher(serviceName=live-trino)-268 org.apache.ranger.admin.client.RangerAdminRESTClient No change in tags. secureMode=true, response={"httpStatusCode":304,"statusCode":0}, serviceName=live-trino, lastKnownVersion=1, lastActivationTimeInMillis=1792556510389
+2026-10-21T04:22:50.430Z INFO RangerTagRefresher(serviceName=live-trino)-268 org.apache.ranger.plugin.contextenricher.RangerTagEnricher$RangerTagRefresher RangerTagRefresher(serviceName=live-trino).populateTags() - Updated tags-cache to new version of tags, lastKnownVersion=1; newVersion=2
+```
+
+Every tag-version transition the coordinator logged during the run:
+`-1→1` (start), `-1→1` (enricher rebuilt at policy 20), `1→2` (attach), `2→3` (detach), `-1→4`
+(enricher rebuilt at policy 21, the clearance), `4→5` (detach). The StarRocks FE:
+
+```text
+2026-10-21 04:22:46.872Z INFO (PolicyRefresher(serviceName=live-sr)-65|65) [PolicyRefresher.loadPolicyfromPolicyAdmin():298] PolicyRefresher(serviceName=live-sr): found updated version. lastKnownVersion=16; newVersion=17
+```
+
+**Verdict: PASS.**
+
+### T2. Enforcement by tag
+
+**Mask rule.** Tagged column `email`, untagged column `city`, at 04:23:02 (12 s after the coordinator
+took tag version 2):
+
+```text
+trino: state=finished error=
+[[1,"xxx@xxxxxxx.xxx","Hanoi","admin"],[2,"xxx@xxxxxxx.xxx","Hue","admin"]]
+sr:    state=finished error=
+[[1,"xxx@xxxxxxx.xxx","Hanoi"],[2,"xxx@xxxxxxx.xxx","Hue"]]
+```
+
+Detach at 04:23:38 (`DELETE …/resource-tags` → `{"ok":true} HTTP 200`; tag version 3, `live-sr`
+policy version 18):
+
+```text
+04:23:38 trino: [[1,"xxx@xxxxxxx.xxx","Hanoi"],[2,"xxx@xxxxxxx.xxx","Hue"]]
+04:23:41 sr:    [[1,"ann@example.com","Hanoi"],[2,"bob@example.com","Hue"]]
+04:23:47 trino: [[1,"xxx@xxxxxxx.xxx","Hanoi"],[2,"xxx@xxxxxxx.xxx","Hue"]]
+04:23:49 sr:    [[1,"ann@example.com","Hanoi"],[2,"bob@example.com","Hue"]]
+04:23:54 trino: [[1,"ann@example.com","Hanoi"],[2,"bob@example.com","Hue"]]
+… unchanged through 04:24:48 on both
+```
+
+Trino unmasked at its next tag poll (`2→3` at 04:23:50); the StarRocks FE took policy 18 at 04:23:40.
+
+**Clearance (deny).** `PUT /api/control-plane/tags/b05664b3-…/access-policy
+{"required_roles":["data_steward"],"required_groups":[]}` → `{"ok":true,"skipped":[]} HTTP 200` at
+04:25:25, then the tag was attached to `email` again. Compiled: `perm-clearance-b05664b3-…` in
+`live-trino_tag` (policyType 0, deny `{public}` on `select`, `insert`, …, `denyExceptions` users `[]`,
+since `data_steward` has no members), and in `live-sr` a per-column deny
+`perm-clearance-…-live_wh.live9e.t.email` plus a per-column `perm-clearance-…-mask-live_wh.live9e.t.email`
+(view governance A2).
+
+```text
+04:26:00 trino email: state=failed error=engine: Access Denied: Cannot select from columns [id, email] in table or view t
+04:26:01 trino city:  state=finished error= [[1,"Hanoi"],[2,"Hue"]]
+04:26:03 sr email:    state=finished error= [[1,null],[2,null]]
+04:26:04 sr city:     state=finished error= [[1,"Hanoi"],[2,"Hue"]]
+… identical every ~10 s through 04:26:53
+```
+
+Detach at 04:29:15:
+
+```text
+04:29:15 trino email: state=failed error=engine: Access Denied: Cannot select from columns [id, email] in table or view t
+04:29:16 sr email:    state=finished error= [[1,null],[2,null]]
+04:29:24 trino email: state=finished error= [[1,"ann@example.com"],[2,"bob@example.com"]]
+04:29:25 sr email:    state=finished error= [[1,null],[2,null]]
+04:29:34 sr email:    state=finished error= [[1,null],[2,null]]
+04:29:43 sr email:    state=finished error= [[1,"ann@example.com"],[2,"bob@example.com"]]
+… both raw through 04:30:09
+```
+
+**Verdict: PASS.** On Trino the mask and the deny are tag policies: the `live-trino` resource profile
+holds no `perm-rule-*` or `perm-clearance-*` policy, so they can only have matched `email` through
+the tag download. Without the secure tag route the enricher would have had no tagged resources and
+`email` would have come back raw. StarRocks has no tag service (`starrocks#67458`): egret expands the
+tag into per-column resource policies at compile time, so the tag download is not on StarRocks'
+enforcement path. That path also enforced (masked, then `NULL` under clearance) and lifted on detach.
+It is not NOT-APPLICABLE, but it says nothing about the new route. The StarRocks clearance withheld the
+column as `NULL`, not as an access error (observation 2).
+
+### T3. On the wire
+
+egret logs no request lines, so the requests were captured in the egret pod's network namespace by an
+ephemeral container (`kubectl debug --image=alpine:3.20 --profile=netadmin`, `tcpdump -A` on
+`tcp dst port 8080`, filtered by an awk script that prints the request line and only the scheme of
+the `Authorization` header). The capture ran 04:29:00 to 04:30:40 across the 04:29:15 detach.
+Excerpt (StarRocks lines removed except one):
+
+```text
+04:29:10 GET /ranger/service/plugins/secure/policies/download/live-sr?supportsPolicyDeltas=false&pluginId=starrocks%40live-sr-fe-0-live-sr&clusterName=&lastActivationTime=1792556740303&pluginCapabilities=7ffff&lastKnownVersion=19 | Authorization: Basic <redacted>
+04:29:20 GET /ranger/service/roles/secure/download/live-trino?pluginId=trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino&clusterName=&lastActivationTime=1792556268286&pluginCapabilities=7ffff&lastKnownRoleVersion=-1 | Authorization: Basic <redacted>
+04:29:20 GET /ranger/service/plugins/secure/policies/download/live-trino?supportsPolicyDeltas=false&pluginId=trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino&clusterName=&lastActivationTime=1792556750447&pluginCapabilities=7ffff&lastKnownVersion=21 | Authorization: Basic <redacted>
+04:29:20 GET /ranger/service/tags/secure/download/live-trino?pluginId=trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino&lastActivationTime=1792556750379&pluginCapabilities=7ffff&lastKnownVersion=4&supportsTagDeltas=false | Authorization: Basic <redacted>
+04:29:34 GET /ranger/service/tags/secure/download/live-trino?pluginId=trino@live-trino-worker-65b9785698-vfjhk-live-trino&lastActivationTime=1792556734523&pluginCapabilities=7ffff&lastKnownVersion=4&supportsTagDeltas=false | Authorization: Basic <redacted>
+04:29:50 GET /ranger/service/tags/secure/download/live-trino?pluginId=trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino&lastActivationTime=1792556960410&pluginCapabilities=7ffff&lastKnownVersion=5&supportsTagDeltas=false | Authorization: Basic <redacted>
+04:30:04 GET /ranger/service/tags/secure/download/live-trino?pluginId=trino@live-trino-worker-65b9785698-vfjhk-live-trino&lastActivationTime=1792556974569&pluginCapabilities=7ffff&lastKnownVersion=5&supportsTagDeltas=false | Authorization: Basic <redacted>
+```
+
+Every tag request in the capture (6 from the two Trino pods) was `GET /ranger/service/tags/secure/download/live-trino`
+with `Authorization: Basic`; none used the plain `/tags/download/` path, and none came from StarRocks.
+The capture was on the request direction only. The status codes come from the next request and the
+ledger. The coordinator asked with `lastKnownVersion=4` at 04:29:20, after the 04:29:15 detach, and
+with `lastKnownVersion=5` at 04:29:50, so the 04:29:20 answer was a 200 carrying version 5. Its log
+says `RangerTagRefresher … lastKnownVersion=4; newVersion=5` at 04:29:20.410. The polls at an unchanged
+version are 304s (`No change in tags. secureMode=true, response={"httpStatusCode":304,…}`: 24 such
+lines on each Trino pod and 0 `Error getting tags`). Ledger after the capture:
+
+```text
+ service_id |                        plugin_id                        | kind | last_known_version | served_version |              at
+------------+---------------------------------------------------------+------+--------------------+----------------+-------------------------------
+          2 | trino@live-trino-coordinator-8b5548f98-rqmkp-live-trino | tags |                  5 |              5 | 2026-10-21 04:30:50.398895+00
+          2 | trino@live-trino-worker-65b9785698-vfjhk-live-trino     | tags |                  5 |              5 | 2026-10-21 04:30:34.544817+00
+```
+
+Without the route: the request would have reached the surface's catch-all, which answers an
+authenticated caller 404. That is the same answer measured live here for the other unserved secure
+paths (`/ranger/service/xusers/secure/download/live-trino` and `/roles/secure/download/live-trino` with
+Trino's credential → 404, T4). `ranger_router` before `691e93b2` had no `/tags/secure/download/{service}`
+route, so it gave the same answer. `the_secure_tags_path_serves_the_same_body_as_the_plain_path` and
+`the_secure_tags_path_is_authenticated_and_bound_to_the_profile` (`crates/egret-policy/tests/ranger_surface_auth.rs`)
+pin the new route. No old image was rebuilt.
+
+**Verdict: PASS.**
+
+### T4. Negative cases
+
+`live9e-t4.sh` (credentials read from the engines' `-rc-` Secrets inside the script; port-forward
+`svc/egret 28090:8080`). Output as printed, with the 304 line re-run after a fix to the script (it had
+printed the previous response's leftover body; a 304 has none):
+
+```text
+trino user=engine-80812990-1a89-44a1-b5c9-2109ce410209  starrocks user=engine-0b8c7b85-980c-4344-b422-a298bf1766a5 (passwords not printed; lengths 43 / 43)
+trino credential, /ranger/service/tags/secure/download/live-trino => HTTP 200 | www-authenticate:  | body: {"op":"add","serviceName":"live-trino","tagVersion":4,"tags":{"1":{"type":"live9e-pii","owner":0}},"serviceResources":[{"id":1,"isEnabled":true,"serviceName":"live-trino","resourceElements":{"catalog"
+trino credential, /ranger/service/tags/secure/download/live-trino_tag => HTTP 200 | www-authenticate:  | body: {"op":"add","serviceName":"live-trino_tag","tagVersion":4,"tags":{"1":{"type":"live9e-pii","owner":0}},...
+trino credential, plain /ranger/service/tags/download/live-trino => HTTP 200 | www-authenticate:  | body: {"op":"add","serviceName":"live-trino","tagVersion":4,...
+trino credential, /ranger/service/tags/secure/download/live-trino?lastKnownVersion=4 => 304 size=0
+starrocks credential, /ranger/service/tags/secure/download/live-trino (other engine's profile) => HTTP 403 | www-authenticate:  | body: {"msg":"forbidden","statusCode":403}
+starrocks credential, /ranger/service/tags/secure/download/live-trino_tag (other engine's tag svc) => HTTP 403 | www-authenticate:  | body: {"msg":"forbidden","statusCode":403}
+trino credential, /ranger/service/tags/secure/download/live-sr (other engine's profile) => HTTP 403 | www-authenticate:  | body: {"msg":"forbidden","statusCode":403}
+starrocks credential, /ranger/service/tags/secure/download/live-sr (own profile, no tag service) => HTTP 200 | www-authenticate:  | body: {"op":"add","serviceName":"live-sr","tagVersion":4,"tags":{"1":{"type":"live9e-pii","owner":0}},...
+no credentials, /ranger/service/tags/secure/download/live-trino => HTTP 401 | www-authenticate: Basic realm="egret-ranger" | body:
+no credentials, plain /ranger/service/tags/download/live-trino => HTTP 401 | www-authenticate: Basic realm="egret-ranger" | body:
+wrong password (engine-80812990-1a89-44a1-b5c9-2109ce410209:wrong), /ranger/service/tags/secure/download/live-trino => HTTP 401 | www-authenticate: Basic realm="egret-ranger" | body:
+trino credential, /ranger/service/tags/secure/download/nope => HTTP 404 | www-authenticate:  | body: {"msg":"service nope","statusCode":404}
+root /service/tags/download/live-trino, no creds => HTTP 404 | www-authenticate:  | body:
+root /service/tags/download/live-trino, trino creds => HTTP 404 | www-authenticate:  | body:
+root /service/tags/secure/download/live-trino, trino creds => HTTP 404 | www-authenticate:  | body:
+userstore /ranger/service/xusers/secure/download/live-trino, no creds => HTTP 401 | www-authenticate: Basic realm="egret-ranger" | body:
+userstore /ranger/service/xusers/secure/download/live-trino, trino creds => HTTP 404 | www-authenticate:  | body:
+roles /ranger/service/roles/secure/download/live-trino, trino creds => HTTP 404 | www-authenticate:  | body:
+```
+
+egret's log for the same probes (ANSI colour removed):
+
+```text
+WARN egret_policy::ranger::api::download: engine credential asked for a service it is not bound to engine_id=0b8c7b85-980c-4344-b422-a298bf1766a5 requested=live-trino
+WARN egret_policy::ranger::api::download: engine credential asked for a service it is not bound to engine_id=0b8c7b85-980c-4344-b422-a298bf1766a5 requested=live-trino_tag
+WARN egret_policy::ranger::api::download: engine credential asked for a service it is not bound to engine_id=80812990-1a89-44a1-b5c9-2109ce410209 requested=live-sr
+WARN egret_policy::auth_failures: ranger credential rejected engine_id=80812990-1a89-44a1-b5c9-2109ce410209 rejected=1
+```
+
+**Verdict: PASS.** The 403s cover the case the brief names: engine A's (StarRocks) credential asking
+for engine B's tag service (`live-trino_tag`) and for its profile. These were the only egret WARN
+lines for the Ranger surface in the whole run.
+
+### T5. Surprises, password sweep, `AUDIT PROPERTY`
+
+The rendered `log.properties` on the coordinator. The user's `AuditProviderFactory=INFO` entry was
+dropped and egret's line is last:
+
+```text
+org.apache.ranger.admin.client.RangerAdminRESTClient=DEBUG
+org.apache.ranger.audit.provider.AuditProviderFactory=WARN
+```
+
+`live9e-sweep.sh`, run at the end with each engine's current password in a shell variable:
+
+```text
+live-trino (len 43, DM…): egret-pod-logs=0 trino-coord=0 trino-worker=0 sr-fe-stdout=0 sr-fe-logfiles=0 sr-cn=0 local-scratch-logs=0
+live-sr (len 43, 7Z…): egret-pod-logs=0 trino-coord=0 trino-worker=0 sr-fe-stdout=0 sr-fe-logfiles=0 sr-cn=0 local-scratch-logs=0
+AUDIT PROPERTY lines: coordinator=0 worker=0
+lines containing 'Basic ' in trino logs: coordinator=0 worker=0
+live-trino basic-token hits: egret=0 coord=0 fe=0
+live-sr basic-token hits: egret=0 coord=0 fe=0
+```
+
+`egret-pod-logs` covers every container of the egret pod, including the two capture containers.
+`local-scratch-logs` covers the saved coordinator log, the capture output and the probe output.
+The Trino plugin ran with `RangerAdminRESTClient` at DEBUG for the whole run, and that logger does not
+print the credential either. Finding 1 of the first check is fixed on a live engine: the
+`AUDIT PROPERTY` line is gone, not merely at WARN, and the user override cannot bring it back.
+
+Plugin complaints, counted over each pod's whole log:
+
+```text
+deploy/live-trino-coordinator: tags-errors=0 roles-404=29 secureMode-true-tag-lines=24 userstore=1 stack-traces=6
+deploy/live-trino-worker: tags-errors=0 roles-404=29 secureMode-true-tag-lines=24 userstore=1 stack-traces=6
+StarRocks fe.log: "Error getting Roles" 53, "Error getting tags|xusers|userstore" 2
+```
+
+The `userstore` hits are the `PolicyEngineOptions` line (an option name), not a request; the
+capture shows no `xusers` request at all. The roles 404 is logged at ERROR on every poll by both
+engines. It was expected (Q3), and it is the only ERROR the Ranger plugins logged. The 6 stack traces
+on each Trino pod are `java.lang.InterruptedException` from `RangerTagRefresher … Interrupted! Exiting
+thread`, logged at INFO each time a new policy version makes the plugin rebuild its tag enricher. They
+are benign, but at first sight they look like a failure.
+
+**Verdict: PASS**, with these observations:
+
+1. **`PUT /api/control-plane/warehouses/{warehouse_id}/resource-tags` accepts an id that is not a
+   warehouse, answers 200, and stores an attachment that matches nothing.** Passing the registry
+   **catalog** id (`8e386a56-…`, the id `GET /control-plane/catalogs` lists and engines attach) stored
+   a `catalog_tag_assignments` row with `warehouse_id = 8e386a56-…`. The column has no foreign key.
+   The tag download stayed empty
+   (`{"op":"add","serviceName":"live-trino","tagVersion":1,"tags":{},"serviceResources":[],…}`), no
+   tag version moved, and the StarRocks expansion emitted nothing, while the rule's compile response
+   said `"skipped":[]`. A steward who makes this mistake sees a 200 and an unenforced classification.
+   This predates the branch.
+2. **On StarRocks, the clearance on a column of an Iceberg table returned `NULL` to `admin` rather
+   than an access error.** Both the per-column deny and the A2 `MASK_NULL` policy were in the
+   download (policy version 19 and later). The data was withheld either way. That the direct read was
+   not refused contradicts the `clearance_mask` module doc ("[the deny] withholds the column from a
+   DIRECT read"). Not investigated here; the tag route is not on this path.
+3. **A StarRocks FE runs two plugin instances, and both poll egret.** The capture shows two
+   `pluginId=starrocks@live-sr-fe-0-live-sr` pollers with different `lastActivationTime` values, each
+   every 30 s. `fe.log` shows the second one created on the first delegated query
+   (`RangerPluginConfig.<init>` on `starrocks-mysql-nio-pool-0` at 04:19:38). This doubles StarRocks'
+   poll load and makes the ledger row for that `pluginId` flip between two clients.
+
+Setup surprises (environment, not egret): image pulls of `postgres:16` and `rustfs/rustfs:1.0.1`
+inside the kind node hung for 15 minutes, so the Helm `--wait` timed out. Side-loading them with
+`docker save | ctr images import` worked. Postgres had been started twice on the same PVC (the stuck
+pod and its replacement), its WAL was corrupt (`PANIC: could not locate a valid checkpoint record`),
+and the PVC and the engines namespace were recreated before any measurement above.
+
+### Findings requiring action
+
+None for this branch: the secure tag route works end to end on a live Trino 483 with plugin 2.8.0
+under `required` mode, and the first check's finding 1 is fixed live. For the follow-up list:
+
+1. Observation 1 (`resource-tags` with a non-warehouse id is a silent 200). Validate `warehouse_id`
+   against `registry.catalogs.warehouse_id` and answer 404, or accept the catalog id the rest of the
+   API uses.
+2. Observation 2 (StarRocks clearance shows as `NULL`, not denied, on an Iceberg column). Re-measure
+   the claim in the `clearance_mask` module doc.
+3. Observation 3 (two plugin instances per StarRocks FE). Doubles the poll load; worth knowing when
+   reading the ledger.
+
+### Cleanup
+
+The kind cluster `egret-ranger-live` was deleted, and so were the images `egret-backend:live9e` and
+`egret-frontend:live9e`. The BuildKit cache `live9c-egret-target` was kept: it holds only this
+worktree's builds.
