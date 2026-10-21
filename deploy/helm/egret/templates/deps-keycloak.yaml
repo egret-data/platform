@@ -1,4 +1,7 @@
 {{- if .Values.oidc.enabled }}
+{{- if not .Values.oidc.devRealm }}
+{{- fail "oidc.enabled bundles a Keycloak whose only realm is the DEVELOPMENT realm (sslRequired none, a * redirect URI, the password grant, published user passwords, client secret egret-secret). Set oidc.devRealm=true to install it anyway, on a cluster nobody else can reach." }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

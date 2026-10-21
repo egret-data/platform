@@ -1,0 +1,11 @@
+{{- if and .Values.oidc.enabled .Values.oidc.devRealm }}
+################################################################################
+#  WARNING: DEVELOPMENT KEYCLOAK REALM INSTALLED (oidc.devRealm=true)          #
+#                                                                              #
+#  The bundled Keycloak imported files/egret-realm.json: sslRequired none, a   #
+#  `*` redirect URI, the password grant, users with published passwords and   #
+#  the client secret `egret-secret`. Anyone who reaches it can sign in as a    #
+#  platform admin. Use this release only on a cluster nobody else can reach.   #
+################################################################################
+{{- end }}
+egret is installed in namespace {{ .Release.Namespace }}.

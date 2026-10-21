@@ -261,6 +261,7 @@ impl Claimed {
         ),
         script_default: std::time::Duration,
     ) -> Result<(TaskInput, Budget)> {
+        let redactions = render.redactions().to_vec();
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
         // No-silent-stall spec §5: a task that is not a leaf of its source
@@ -326,7 +327,9 @@ impl Claimed {
                     },
                     log.0,
                     log.1,
-                ),
+                )
+                // KI-112: no line of the run carries a SECRET input's value.
+                .masked(&redactions),
             },
             budget,
         ))
@@ -1492,6 +1495,13 @@ async fn run_one(
         }
         (other, _) => other,
     };
+    // KI-112: the stored message (`task_runs.message`) is masked as the log is.
+    let outcome = outcome.map(|o| Outcome {
+        message: o
+            .message
+            .map(|m| crate::logs::mask(&m, input.render.redactions()).into_owned()),
+        ..o
+    });
     if let Ok(Outcome {
         state: RunState::Failed,
         message: Some(message),
@@ -3851,15 +3861,18 @@ async fn start_execution_in_on(
     } else {
         serde_json::json!({})
     };
+    // KI-112: a SECRET input's value is masked in `inputs`, which every read
+    // returns, and sealed into `secret_inputs`, which only the render opens.
+    let (inputs, secret_inputs) = crate::secret_inputs::split(&flow, inputs)?;
     let id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
             flow_trigger_event_id, replayed_from_execution_id, labels, backfill_id, \
-            variables, ",
+            variables, secret_inputs, ",
         stamp_columns!(),
         ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
-                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, ",
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, $17, ",
         // Both NULL for a row born `CREATED`; spelled through the helper so the
         // rule has no exception for the reader to remember (`stamps`).
         stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
@@ -3881,6 +3894,7 @@ async fn start_execution_in_on(
     .bind(labels)
     .bind(backfill_id)
     .bind(variables)
+    .bind(secret_inputs)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;

@@ -76,6 +76,11 @@ egret-workflow-api.workspace = true
 # dev-dependency (see below), and this makes it a normal one.
 egret-config.workspace = true
 
+# KI-112: `secret_inputs` seals a SECRET input's value with `egret_secrets::Crypto`,
+# the workspace secret store's own AES-256-GCM. It was a dev-dependency (see
+# below) and depends only on egret-core and egret-metastore, so no cycle.
+egret-secrets.workspace = true
+
 # Task 7 (routes): the HTTP surface. `axum`/`utoipa` for the router and its
 # OpenAPI doc; `egret-workspace` for `WsContext` (the extractor that resolves
 # `{workspace}`, membership, and the feature-entitlement gate); `egret-auth`
@@ -338,7 +343,6 @@ egret-workflow = { path = ".", features = ["test-util"] }
 # W9c Task 3: `tokio::time::pause` for the KV expiry sweeper's first-pass
 # test (`#[tokio::test(start_paused = true)]`).
 tokio = { workspace = true, features = ["test-util"] }
-egret-secrets.workspace = true
 egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
 # suite parses it.
