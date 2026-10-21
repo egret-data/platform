@@ -1,7 +1,7 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <groupId>egret</groupId><artifactId>ranger-enforcement-test</artifactId><version>1.0</version>
-  <properties><maven.compiler.release>11</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><ranger.version>2.5.0</ranger.version></properties>
+  <properties><maven.compiler.release>11</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><ranger.version>2.8.0</ranger.version></properties>
   <dependencies>
     <dependency><groupId>org.apache.ranger</groupId><artifactId>ranger-plugins-common</artifactId><version>${ranger.version}</version></dependency>
     <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
@@ -47,6 +47,8 @@
                  `equalsIgnoreCase` can disagree, so the resolver's fold declines 25 code
                  points instead of every non-ASCII value. Measures the JDK, not the jar. -->
             <include>EgretCaseFoldAgreementTest.java</include>
+            <!-- Ranger surface auth: what a stock plugin sends (Basic, secure path) at >= 2.8.0. -->
+            <include>EgretPluginAuthTest.java</include>
             <!-- fix/tag-policies-service-def: measures that the `tagPolicies` block's OWN
                  service-def decides which tag policies run — with trino.json every tag
                  policy reaches every tagged column (the live fail-open), with tag.json

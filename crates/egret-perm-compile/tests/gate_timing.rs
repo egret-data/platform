@@ -13,7 +13,7 @@
 //!
 //! Shapes: `base` (single-user allow policies), `deny` (the base plus one deny
 //! policy for a group on a wildcard table) and `wild` (every policy names a
-//! wildcard schema and a table prefix). Versions: 2.5.0, 2.8.0 and both. Each
+//! wildcard schema and a table prefix). Versions: 2.8.0, 2.9.0 and both. Each
 //! row prints `shape=… N=… tag=… ver=… full=… pruned=… work=… count=…s plan=…s
 //! compare=…s total=…s`; `work` is `pruned x versions x (policies before +
 //! after)`, the unit the cap counts. The rows are what the constant's doc
@@ -194,8 +194,8 @@ fn one_row(shape: Shape, tag: Tag, n: usize, versions: &[PluginVersion], def: &S
         Tag::Changed => "changed",
     };
     let ver = match versions {
-        [PluginVersion::Ranger2_5_0] => "2.5.0",
         [PluginVersion::Ranger2_8_0] => "2.8.0",
+        [PluginVersion::Ranger2_9_0] => "2.9.0",
         _ => "both",
     };
     println!(
@@ -217,9 +217,9 @@ fn one_row(shape: Shape, tag: Tag, n: usize, versions: &[PluginVersion], def: &S
 fn gate_time_by_profile_size() {
     let def = ServiceDef::parse(&def_json("trino.json"));
     let version_sets = [
-        vec![PluginVersion::Ranger2_5_0],
         vec![PluginVersion::Ranger2_8_0],
-        vec![PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0],
+        vec![PluginVersion::Ranger2_9_0],
+        vec![PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0],
     ];
     for shape in [Shape::Base, Shape::Deny, Shape::Wild] {
         for tag in [Tag::None, Tag::Unchanged, Tag::Changed] {

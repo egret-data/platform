@@ -6,18 +6,25 @@ The control plane shows the result for every engine: the image it runs, the Rang
 
 ## What egret pins
 
-These four images are the ones egret has measured: the plugin jar was read out of each image. Defaults for new engines are pinned by digest.
+These three images are the ones egret has measured: the plugin jar was read out of each image. Defaults for new engines are pinned by digest.
 
 | Engine | Image | Digest | Ranger plugin |
 |---|---|---|---|
-| Trino | `trinodb/trino:470` | `sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67` | 2.5.0 |
 | Trino | `trinodb/trino:483` | `sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.4` | `sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.6` | `sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31` | 2.9.0 |
 
-A new engine defaults to Trino 483 and StarRocks 4.1.6 (FE and CN, each pinned by digest). The modelled (type, plugin version) pairs are Trino 2.5.0 and 2.8.0, StarRocks 2.8.0 and 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` lists them, and the register form for an external engine offers only the pairs for the chosen type, plus "Other…".
+A new engine defaults to Trino 483 and StarRocks 4.1.6 (FE and CN, each pinned by digest). The modelled (type, plugin version) pairs are Trino 2.8.0, StarRocks 2.8.0 and StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` lists them, and the register form for an external engine offers only the pairs for the chosen type, plus "Other…".
 
 A tag with a digest matches only if the digest is the measured one. A tag without a digest matches the measured tag.
+
+## Ranger plugin 2.8.0 is the floor (Trino 470 is dropped)
+
+egret supports Ranger plugin 2.8.0 and later. Plugin 2.5.0, which `trinodb/trino:470` ships, cannot send the per-engine credential egret's Ranger surface requires, so it is no longer supported:
+
+- Creating an engine on `trinodb/trino:470`, or updating one onto it, is refused with a 400.
+- Registering an external engine that declares a plugin older than 2.8.0 is refused with a 400.
+- An engine that already runs Trino 470 stays readable but is reported as not modelled and unsupported; it is not migrated. Upgrade it with `PUT /api/control-plane/engines/{id}` and `imageVersion: "483"`, or delete it.
 
 ## What StarRocks 4.1.6 changes
 

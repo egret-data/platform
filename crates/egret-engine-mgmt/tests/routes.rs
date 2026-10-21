@@ -4378,7 +4378,7 @@ async fn trino_update_without_an_image_keeps_the_stored_image() {
         "/engines",
         &token,
         Some(serde_json::json!({
-            "name": name, "warehouseId": wh_id, "imageVersion": "470",
+            "name": name, "warehouseId": wh_id, "imageVersion": "483",
             "coordinatorReplicas": 1, "workerReplicas": 1,
             "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
         })),
@@ -4386,7 +4386,7 @@ async fn trino_update_without_an_image_keeps_the_stored_image() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "create; body={j}");
     let id = j["id"].as_str().unwrap().to_string();
-    assert_eq!(stored_spec(&f, &id).await["imageVersion"], "470");
+    assert_eq!(stored_spec(&f, &id).await["imageVersion"], "483");
 
     let resp = f
         .app
@@ -4406,9 +4406,61 @@ async fn trino_update_without_an_image_keeps_the_stored_image() {
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "update; body={j}");
     let spec = stored_spec(&f, &id).await;
-    assert_eq!(spec["imageVersion"], "470", "stored image kept");
+    assert_eq!(spec["imageVersion"], "483", "stored image kept");
     assert_eq!(spec["workerReplicas"], 3, "the resize itself applied");
-    assert_eq!(port.last_updated().image_version, "470", "applied image");
+    assert_eq!(port.last_updated().image_version, "483", "applied image");
+}
+
+/// Plugin 2.5.0 (Trino 470) is dropped: creating an engine on that image, or
+/// moving one onto it, is a 400 naming the floor and the way up.
+#[tokio::test]
+async fn trino_470_is_refused_on_create_and_on_update() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_470_refused_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let body = |image: &str| {
+        serde_json::json!({
+            "name": name, "warehouseId": wh_id, "imageVersion": image,
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        })
+    };
+    let (status, j) = call(&f, "POST", "/engines", &token, Some(body("470"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "create on 470; body={j}");
+    assert!(j.to_string().contains("2.8.0"), "names the floor: {j}");
+
+    let (status, j) = call(&f, "POST", "/engines", &token, Some(body("483"))).await;
+    assert_eq!(status, StatusCode::CREATED, "create on 483; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}"),
+        &token,
+        Some(body("470")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "update to 470; body={j}");
+    assert!(
+        j.to_string().contains("trinodb/trino:483"),
+        "names the way up: {j}"
+    );
+    assert_eq!(
+        stored_spec(&f, &id).await["imageVersion"],
+        "483",
+        "not written"
+    );
 }
 
 /// The StarRocks twin: an update that omits `feImage`/`cnImage` keeps both.
@@ -11212,7 +11264,7 @@ async fn get_engine_never_asks_the_provisioner_for_an_external_engine() {
         "POST",
         "/engines/external",
         &token,
-        Some(register_body(&name, "trino", "2.5.0", None, &[])),
+        Some(register_body(&name, "trino", "2.8.0", None, &[])),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{j}");
@@ -11239,7 +11291,7 @@ async fn get_engine_never_asks_the_provisioner_for_an_external_engine() {
         .find(|e| e["id"] == id.as_str())
         .expect("listed");
     assert_eq!(row["origin"], "external");
-    assert_eq!(row["rangerPluginVersion"], "2.5.0");
+    assert_eq!(row["rangerPluginVersion"], "2.8.0");
 }
 
 #[tokio::test]
@@ -11249,7 +11301,7 @@ async fn registration_validates_its_input_and_states_an_unmodelled_version() {
         return;
     };
     let token = session_for(&f, "ext_validate_admin", true).await;
-    let ok = |name: &str| register_body(name, "trino", "2.5.0", None, &[]);
+    let ok = |name: &str| register_body(name, "trino", "2.8.0", None, &[]);
     let mut cases: Vec<(&str, serde_json::Value)> = Vec::new();
     let mut with = |why, field: &str, v: serde_json::Value| {
         let mut b = ok(&external_name("ext-bad"));
@@ -11282,32 +11334,37 @@ async fn registration_validates_its_input_and_states_an_unmodelled_version() {
         );
     }
 
-    // A real Ranger release the evaluator does not model is accepted as
-    // declared, and the response says it is not modelled.
-    let name = external_name("ext-260");
-    let (status, j) = call(
-        &f,
-        "POST",
-        "/engines/external",
-        &token,
-        Some(register_body(&name, "trino", "2.6.0", None, &[])),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{j}");
-    assert_eq!(j["rangerPluginVersion"], "2.6.0");
-    assert_eq!(j["rangerPluginVersionModelled"], false, "{j}");
+    // Below the floor is refused at registration, whatever the type: a plugin
+    // older than 2.8.0 cannot send the per-engine credential (spec section 2).
+    for version in ["2.5.0", "2.6.0"] {
+        for kind in ["trino", "starrocks"] {
+            let name = external_name("ext-below");
+            let (status, j) = call(
+                &f,
+                "POST",
+                "/engines/external",
+                &token,
+                Some(register_body(&name, kind, version, None, &[])),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}@{version}: {j}");
+            assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing is written");
+        }
+    }
 
     // "Modelled" is a (type, version) PAIR (user ruling 2026-10-12): 2.8.0 is
-    // modelled for both engines, 2.5.0 for Trino only and 2.9.0 for StarRocks only.
+    // modelled for both engines and 2.9.0 for StarRocks only.
+    let mut name = String::new();
     for (kind, version, modelled) in [
-        ("trino", "2.5.0", true),
         ("trino", "2.8.0", true),
         ("trino", "2.9.0", false),
-        ("starrocks", "2.5.0", false),
         ("starrocks", "2.8.0", true),
         ("starrocks", "2.9.0", true),
     ] {
         let n = external_name("ext-pair");
+        if name.is_empty() {
+            name = n.clone();
+        }
         let (status, j) = call(
             &f,
             "POST",
@@ -11329,10 +11386,34 @@ async fn registration_validates_its_input_and_states_an_unmodelled_version() {
         "POST",
         "/engines/external",
         &token,
-        Some(register_body(&name, "trino", "2.5.0", None, &[])),
+        Some(register_body(&name, "trino", "2.8.0", None, &[])),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{j}");
+}
+
+#[tokio::test]
+async fn registers_external_below_the_floor_is_400_naming_it() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_floor_admin", true).await;
+    let name = external_name("ext-270");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "trino", "2.7.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(
+        j.to_string().contains("2.8.0"),
+        "the body names the floor: {j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing is written");
 }
 
 /// Last of the external tests by name only; reports the unscoped count and
@@ -11352,7 +11433,7 @@ async fn the_whole_table_agrees_declared_means_external() {
         "POST",
         "/engines/external",
         &token,
-        Some(register_body(&name, "trino", "2.5.0", None, &[catalog])),
+        Some(register_body(&name, "trino", "2.8.0", None, &[catalog])),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{j}");
@@ -11613,7 +11694,7 @@ async fn registering_an_external_engine_that_creates_an_overlap_is_409_and_write
         Some(register_body(
             &name,
             "trino",
-            "2.5.0",
+            "2.8.0",
             Some(unit.profile),
             &[unit.catalog_id],
         )),
@@ -11638,7 +11719,7 @@ async fn registering_an_external_engine_that_creates_an_overlap_is_409_and_write
         Some(register_body(
             &ok_name,
             "trino",
-            "2.5.0",
+            "2.8.0",
             Some(ok_unit.profile),
             &[ok_unit.catalog_id],
         )),
@@ -11665,7 +11746,7 @@ async fn declaring_a_catalog_that_creates_an_overlap_is_409_and_attaches_nothing
         Some(register_body(
             &name,
             "trino",
-            "2.5.0",
+            "2.8.0",
             Some(unit.profile),
             &[],
         )),
@@ -11703,7 +11784,7 @@ async fn declaring_a_catalog_that_creates_an_overlap_is_409_and_attaches_nothing
         Some(register_body(
             &ok_name,
             "trino",
-            "2.5.0",
+            "2.8.0",
             Some(ok_unit.profile),
             &[],
         )),
@@ -12304,7 +12385,7 @@ async fn a_pair_committed_between_the_dry_run_and_the_real_recompile_refuses_the
     let second_tag = unit.second_tag;
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1, 'trino', 'egret', '{\"imageVersion\":\"470\"}'::jsonb, $2) RETURNING id",
+         VALUES ($1, 'trino', 'egret', '{\"imageVersion\":\"483\"}'::jsonb, $2) RETURNING id",
     )
     .bind(external_name("prov-race"))
     .bind(unit.profile)
@@ -12529,7 +12610,7 @@ async fn put_on_an_external_engine_is_409_and_never_updates_the_cluster() {
         return;
     };
     let token = session_for(&f, "ext_put_admin", true).await;
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     let body = serde_json::json!({
         "name": name, "coordinatorReplicas": 1, "workerReplicas": 1,
         "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
@@ -12555,7 +12636,7 @@ async fn restart_and_rotate_on_an_external_engine_are_409() {
         return;
     };
     let token = session_for(&f, "ext_restart_admin", true).await;
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     for path in ["restart", "rotate-secrets"] {
         assert_refused_as_external(
             &f,
@@ -12579,7 +12660,7 @@ async fn pod_logs_follow_and_exec_on_an_external_engine_are_409() {
         return;
     };
     let token = session_for(&f, "ext_logs_admin", true).await;
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     // The websocket routes answer before the upgrade is even looked at: a plain
     // GET is enough to reach the refusal.
     for path in ["logs", "logs/follow", "exec"] {
@@ -12605,7 +12686,7 @@ async fn monitor_routes_on_an_external_engine_are_409() {
         return;
     };
     let token = session_for(&f, "ext_monitor_admin", true).await;
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     for (method, path) in [
         ("GET", "queries"),
         ("GET", "queries/q1"),
@@ -12646,7 +12727,7 @@ async fn catalog_test_and_apply_on_an_external_engine_are_409_and_the_registry_t
     .await;
     assert_eq!(status, StatusCode::CREATED, "{j}");
     let catalog = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[catalog]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[catalog]).await;
 
     assert_refused_as_external(
         &f,
@@ -12695,7 +12776,7 @@ async fn workspace_assignment_of_an_external_engine_is_409() {
         return;
     };
     let token = session_for(&f, "ext_assign_admin", true).await;
-    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     let ws = seed_workspace(&f).await;
     assert_refused_as_external(
         &f,
@@ -12795,7 +12876,7 @@ async fn deleting_an_external_engine_needs_no_kubernetes_and_a_provisioned_one_s
     let token = session_for(&f, "ext_delete_nokube_admin", true).await;
     let _wh = seed_provisioned_warehouse(&f).await;
     let provisioned = seed_jwt_engine(&f).await;
-    let (external, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (external, _name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
 
     let (status, j) = call(&f, "DELETE", &format!("/engines/{external}"), &token, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
@@ -12829,7 +12910,7 @@ async fn deleting_an_external_engine_with_dependents_is_409_and_keeps_it() {
         return;
     };
     let token = session_for(&f, "ext_delete_dep_admin", true).await;
-    let (id, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
     // An external engine cannot be assigned through the API, so a connection
     // that names it is put there by hand: the preflight reads the table.
     let ws = seed_workspace(&f).await;
@@ -12956,7 +13037,7 @@ async fn reapplying_a_catalog_converges_the_provisioned_engine_and_skips_the_ext
         .await
         .unwrap();
     let (_external, external_name_) =
-        register_external(&f, &token, "trino", "2.5.0", None, &[catalog]).await;
+        register_external(&f, &token, "trino", "2.8.0", None, &[catalog]).await;
     let updates_before = port.updated.lock().unwrap().len();
 
     let (status, j) = call(
@@ -13023,7 +13104,7 @@ async fn patching_an_external_engine_persists_address_and_version_and_touches_no
         return;
     };
     let token = session_for(&f, "ext_patch_admin", true).await;
-    let (id, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
 
     let (status, j) = call(
         &f,
@@ -13031,17 +13112,17 @@ async fn patching_an_external_engine_persists_address_and_version_and_touches_no
         &format!("/engines/{id}/external"),
         &token,
         Some(serde_json::json!({
-            "host": "new-trino.example.com", "port": 8443, "rangerPluginVersion": "2.6.0"
+            "host": "new-trino.example.com", "port": 8443, "rangerPluginVersion": "2.9.0"
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{j}");
     assert_eq!(j["host"], "new-trino.example.com", "{j}");
     assert_eq!(j["port"], 8443, "{j}");
-    assert_eq!(j["rangerPluginVersion"], "2.6.0", "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.9.0", "{j}");
     assert_eq!(
         j["rangerPluginVersionModelled"], false,
-        "Trino@2.6.0 is not modelled: {j}"
+        "Trino@2.9.0 is not modelled: {j}"
     );
     // The row the migration gate and explain read their declared version from.
     let version: String = sqlx::query_scalar(
@@ -13051,7 +13132,7 @@ async fn patching_an_external_engine_persists_address_and_version_and_touches_no
     .fetch_one(&f.db.pool)
     .await
     .unwrap();
-    assert_eq!(version, "2.6.0");
+    assert_eq!(version, "2.9.0");
 
     // Invalid values are 400s that write nothing.
     for body in [
@@ -13075,7 +13156,7 @@ async fn patching_an_external_engine_persists_address_and_version_and_touches_no
         (
             Some("new-trino.example.com".into()),
             Some(8443),
-            Some("2.6.0".into()),
+            Some("2.9.0".into()),
             None
         )
     );
@@ -13092,7 +13173,7 @@ async fn patching_a_rebind_that_creates_an_overlap_is_409_and_writes_nothing() {
     let unit = overlap_unit(&f, None, true).await;
     // Unbound, so declaring the catalog creates no pair yet.
     let (id, _name) =
-        register_external(&f, &token, "trino", "2.5.0", None, &[unit.catalog_id]).await;
+        register_external(&f, &token, "trino", "2.8.0", None, &[unit.catalog_id]).await;
     let before = external_row(&f, id).await;
 
     let (status, body) = call(
@@ -13188,7 +13269,7 @@ async fn patching_a_provisioned_engine_is_400_and_needs_engine_update() {
     attach_real_pdp(&mut f).await;
     let _wh = seed_provisioned_warehouse(&f).await;
     let provisioned = seed_jwt_engine(&f).await;
-    let (external, _name) = register_external(&f, &admin, "trino", "2.5.0", None, &[]).await;
+    let (external, _name) = register_external(&f, &admin, "trino", "2.8.0", None, &[]).await;
     let body = serde_json::json!({ "host": "h.example.com" });
 
     let (status, j) = call(
@@ -13309,8 +13390,9 @@ async fn an_unmodelled_declared_version_is_stated_on_the_plugin_config() {
         return;
     };
     let token = session_for(&f, "ext_cfg_unmodelled_admin", true).await;
-    let profile = starrocks_profile(&f).await;
-    let (id, _name) = register_external(&f, &token, "starrocks", "2.4.0", Some(profile), &[]).await;
+    // Trino@2.9.0 is the one registrable pair the evaluator does not model.
+    let profile = seed_typed_profile(&f, &external_name("exttr-unmodelled"), "trino").await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.9.0", Some(profile), &[]).await;
     let (status, j) = call(
         &f,
         "GET",
@@ -13320,7 +13402,7 @@ async fn an_unmodelled_declared_version_is_stated_on_the_plugin_config() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{j}");
-    assert_eq!(j["rangerPluginVersion"], "2.4.0");
+    assert_eq!(j["rangerPluginVersion"], "2.9.0");
     assert_eq!(j["rangerPluginVersionModelled"], false);
     assert!(j["warnings"].to_string().contains("refused"), "{j}");
 }
@@ -13756,7 +13838,7 @@ async fn former_profile_deleting_an_external_engine_recompiles_a_profile_another
     };
     let token = session_for(&f, "former_profile_ext_shared", true).await;
     let profile = seed_ranger_profile(&f, &format!("ext-{}", Uuid::new_v4().simple()), &[]).await;
-    let (engine_id, _) = register_external(&f, &token, "trino", "2.5.0", Some(profile), &[]).await;
+    let (engine_id, _) = register_external(&f, &token, "trino", "2.8.0", Some(profile), &[]).await;
     former_profile_share(&f, "trino", profile).await;
     let grant = former_profile_grant(&f, engine_id).await;
     former_profile_recompile(&f, profile).await;
@@ -13790,7 +13872,7 @@ async fn former_profile_deleting_the_only_engine_of_a_profile_compiles_nothing()
     assert_eq!(status, StatusCode::CREATED, "create; body={j}");
     let engine_id = j["id"].as_str().unwrap().to_string();
     let profile = seed_ranger_profile(&f, &format!("ext-{}", Uuid::new_v4().simple()), &[]).await;
-    let (ext_id, _) = register_external(&f, &token, "trino", "2.5.0", Some(profile), &[]).await;
+    let (ext_id, _) = register_external(&f, &token, "trino", "2.8.0", Some(profile), &[]).await;
     compiler.calls.lock().unwrap().clear();
     compiler.in_tx_calls.lock().unwrap().clear();
 

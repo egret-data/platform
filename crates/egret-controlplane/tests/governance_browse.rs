@@ -443,7 +443,7 @@ async fn engine(f: &Fixture, prefix: &str, e: Eng) -> (Uuid, String) {
                 "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
                  external_host, external_port, ranger_plugin_version) \
                  VALUES ($1,'trino','','{}'::jsonb,'running','external','trino.example.com',443, \
-                         '2.5.0') RETURNING id",
+                         '2.8.0') RETURNING id",
             )
             .bind(&name)
             .fetch_one(&f.db.pool)

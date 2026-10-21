@@ -51,9 +51,20 @@ pub const ORIGIN_PROVISIONED: &str = "provisioned";
 /// engine. A closed list so a typo (`2.55.0`) is a 400 rather than a profile
 /// that is quietly never provable. A release absent here is a deliberate edit,
 /// not a guess.
-pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 10] = [
-    "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0",
-];
+pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 2] = ["2.8.0", "2.9.0"];
+
+/// The lowest plugin release egret supports. Below it a plugin cannot send the
+/// per-engine credential the Ranger surface requires (measured, spec section 2).
+pub use egret_perm::MIN_SUPPORTED_RANGER_PLUGIN;
+
+/// `true` when `version` (`major.minor.patch`) is at least [`MIN_SUPPORTED_RANGER_PLUGIN`].
+pub fn plugin_version_is_supported(version: &str) -> bool {
+    fn parts(v: &str) -> Option<(u32, u32, u32)> {
+        let mut it = v.split('.').map(|p| p.parse::<u32>().ok());
+        Some((it.next()??, it.next()??, it.next()??))
+    }
+    matches!((parts(version), parts(MIN_SUPPORTED_RANGER_PLUGIN)), (Some(v), Some(min)) if v >= min)
+}
 
 /// Whether egret's Ranger evaluator has been read against `engine_type` at
 /// `version` (a PAIR; the list is `egret_perm::MODELLED_RANGER_PLUGINS`). The same predicate
@@ -198,11 +209,17 @@ fn validate_host(host: &str) -> Result<(), CpError> {
 }
 
 fn validate_plugin_version(version: &str) -> Result<(), CpError> {
+    if !plugin_version_is_supported(version) {
+        return Err(CpError::BadRequest(format!(
+            "Ranger plugin {version} is not supported: egret requires \
+             {MIN_SUPPORTED_RANGER_PLUGIN} or later"
+        )));
+    }
     if KNOWN_RANGER_PLUGIN_VERSIONS.contains(&version) {
         Ok(())
     } else {
         Err(CpError::BadRequest(format!(
-            "rangerPluginVersion {version:?} is not a Ranger 2.x release egret knows; one of \
+            "rangerPluginVersion {version:?} is not a Ranger release egret knows; one of \
              {}. Only {} are modelled by egret's evaluator: any other (type, version) pair is \
              accepted as declared, and a migration to its profile is then refused, never \
              evaluated with the wrong semantics",

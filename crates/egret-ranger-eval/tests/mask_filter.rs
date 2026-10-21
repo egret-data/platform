@@ -1017,7 +1017,7 @@ fn the_same_mask_policy_differs_between_the_two_engines() {
     // matches.
     let mut trino_engine = EngineConfig::without_super_users();
     trino_engine.engine = Some(EngineType::Trino);
-    trino_engine.plugin_version = Some(PluginVersion::Ranger2_5_0);
+    trino_engine.plugin_version = Some(PluginVersion::Ranger2_8_0);
     assert_eq!(
         evaluate_data_mask(
             &set,
@@ -1109,13 +1109,14 @@ fn a_declared_plugin_version_must_match_the_measured_one_for_the_engine() {
         mask_causes(&d)
     );
 
-    assert!(EngineType::Trino.models(PluginVersion::Ranger2_5_0));
+    // 2.5.0 (Trino 470) is no longer supported: its arm is history, not modelled.
+    assert!(!EngineType::Trino.models(PluginVersion::Ranger2_5_0));
     // Trino 483 runs 2.8.0: read and proved on the real jar (engine-upgrade Task 5).
     assert!(EngineType::Trino.models(PluginVersion::Ranger2_8_0));
     assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_8_0));
     assert!(!EngineType::StarRocks.models(PluginVersion::Ranger2_5_0));
     // 2.9.0: read (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`) and proved on
-    // the real jar for StarRocks only; Trino 470 does not run it.
+    // the real jar for StarRocks only; Trino does not run it.
     assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_9_0));
     assert!(!EngineType::Trino.models(PluginVersion::Ranger2_9_0));
 }
@@ -1131,7 +1132,7 @@ fn a_matching_engine_declaration_changes_nothing() {
     )]));
     let mut engine = EngineConfig::without_super_users();
     engine.engine = Some(EngineType::Trino);
-    engine.plugin_version = Some(PluginVersion::Ranger2_5_0);
+    engine.plugin_version = Some(PluginVersion::Ranger2_8_0);
     assert_eq!(
         masked(&evaluate_data_mask(
             &set,

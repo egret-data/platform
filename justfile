@@ -169,14 +169,14 @@ check:
     @echo "── just check: what this green covers, and what it does not"
     @echo "   RAN  database-gated suites        ({{ test_database_url }})"
     @echo "   RAN  shared-store suites          ({{ test_store_url }} — crates/egret-dataapi/tests/serving_shared_store.rs)"
-    @echo "   RAN  the two Ranger gates against the real 2.5.0 + 2.8.0 + 2.9.0 jars"
+    @echo "   RAN  the two Ranger gates against the real 2.8.0 + 2.9.0 jars"
     @echo "   SKIPPED engine-gated suites       (EGRET_ALLOW_ENGINE_SKIP=1) → just test-workflow-starrocks, test-engine-mgmt-starrocks, test-dataapi-starrocks"
     @echo "   SKIPPED docker-gated suites       (EGRET_ALLOW_DOCKER_SKIP=1) → just test-workflow-docker"
 
 # The two gates whose other side is Apache Ranger ITSELF rather than this repository's
 # reading of the jars: the enforcement gate (`crates/egret-policy`) and the differential
-# corpus (`crates/egret-ranger-eval`, ~4000 generated cases at plugin versions 2.5.0,
-# 2.8.0 and 2.9.0 — the ones the Trino and StarRocks plugins run).
+# corpus (`crates/egret-ranger-eval`, ~4000 generated cases at plugin versions 2.8.0
+# and 2.9.0 — the ones the Trino and StarRocks plugins run; 2.5.0 / Trino 470 is no longer supported).
 #
 # **A FAILURE HERE ON A MACHINE WITH NO JVM OR MAVEN IS THE CORRECT OUTCOME**, and it is
 # why this is not another `EGRET_ALLOW_*_SKIP` axis. Those exist because a contributor can
@@ -205,7 +205,7 @@ check:
 # the policy holding, not a vacuous green being fixed.
 #
 # SP4d-3 Task 8: the LAST line is the migration differential — every hand-written policy the
-# grammar accepts, compiled by egret's real compiler, asked of the real 2.5.0 and 2.8.0 engines
+# grammar accepts, compiled by egret's real compiler, asked of the real 2.8.0 and 2.9.0 engines
 # before and after. It lives in the same test binary as the second line, so the second line
 # `--skip`s it and the last names it `--exact`, so each runs once and the slow one (minutes,
 # not seconds) is its own visible step. A name filter that matches nothing makes cargo print
@@ -219,11 +219,11 @@ check:
 # after, and requires every one to decide identically.
 #
 # SP4d-4 Task 1: the THIRD and FOURTH lines are the editor-shaped levels matrix — what a policy
-# that stops above the leaf (or names a level below an absent one) grants on the real 2.5.0 and
-# 2.8.0 jars under both service-defs, plus the two evalOrder pins Part A rests on. Same binary,
+# that stops above the leaf (or names a level below an absent one) grants on the real 2.8.0 and
+# 2.9.0 jars under both service-defs, plus the two evalOrder pins Part A rests on. Same binary,
 # so the second line `--skip`s it too, and it carries the same listing guard.
 test-ranger-gates:
-    @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0 + 2.9.0). Needs a JVM and Maven; a failure"
+    @echo "── Ranger gates (real jars, 2.8.0 + 2.9.0). Needs a JVM and Maven; a failure"
     @echo "   here means the differential did NOT run, which is the thing to know."
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential -- --list --exact probes_the_gate_prunes_decide_identically_on_the_real_engine | grep -qx 'probes_the_gate_prunes_decide_identically_on_the_real_engine: test'

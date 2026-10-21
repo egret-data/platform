@@ -429,8 +429,8 @@ struct Profile {
 fn trino() -> Profile {
     Profile {
         engine: EngineType::Trino,
-        plugin_version: PluginVersion::Ranger2_5_0,
-        ranger_version: "2.5.0",
+        plugin_version: PluginVersion::Ranger2_8_0,
+        ranger_version: "2.8.0",
         service_name: "trino_prod",
         tag_service_name: "trino_prod_tag",
         def_path: concat!(
@@ -445,18 +445,6 @@ fn trino() -> Profile {
             "select", "insert", "create", "drop", "use", "execute", "all",
         ],
         mask_types: &["MASK", "MASK_HASH", "MASK_NULL", "MASK_NONE", "CUSTOM"],
-    }
-}
-
-/// Trino as it runs once Trino 483 ships Ranger 2.8.0 (engine-upgrade Task 5):
-/// the same service-def, hierarchy and vocabulary as [`trino`], a different
-/// `ranger-plugins-common`. Its own profile so every test that iterates profiles
-/// reports it on its own line.
-fn trino_2_8_0() -> Profile {
-    Profile {
-        plugin_version: PluginVersion::Ranger2_8_0,
-        ranger_version: "2.8.0",
-        ..trino()
     }
 }
 
@@ -4497,7 +4485,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
 fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineConfig) {
     let pins = pinned_divergences(def_json);
     let cases: Vec<Case> = pins.iter().map(|p| p.case.clone()).collect();
-    let verdicts = ask_ranger(&cases, "trino", "2.5.0", "pinned");
+    let verdicts = ask_ranger(&cases, "trino", "2.8.0", "pinned");
 
     for (pin, verdict) in pins.iter().zip(&verdicts) {
         let set: ServicePolicySet = serde_json::from_value(pin.case.service_policies.clone())
@@ -4706,7 +4694,7 @@ fn check_measured_priority_composite(
         }
     }
 
-    for version in ["2.5.0", "2.8.0", "2.9.0"] {
+    for version in ["2.8.0", "2.9.0"] {
         let verdicts = ask_ranger(&cases, "trino", version, "t7pin");
         for (verdict, case) in verdicts.iter().zip(&cases) {
             assert_eq!(
@@ -4815,7 +4803,7 @@ fn check_measured_tag_crash(
          allowed to generate a shape the real plugin cannot answer at all"
     );
 
-    for version in ["2.5.0", "2.8.0", "2.9.0"] {
+    for version in ["2.8.0", "2.9.0"] {
         let verdicts = ask_ranger(std::slice::from_ref(&case), "trino", version, "tagcrash");
         let error = verdicts[0]
             .get("error")
@@ -5279,7 +5267,7 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     check_measured_priority_composite(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
 
     let mut total = Tally::default();
-    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
+    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
         let tally = run_profile(&profile, seed, count);
         eprintln!(
             "differential: ranger {} — {} cases ({} with a tag phase), {} compared and \
@@ -5548,7 +5536,7 @@ fn the_prepared_path_decides_every_corpus_case_exactly_as_the_unprepared_one() {
     };
     const REUSE: usize = 4;
     let mut compared = 0usize;
-    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
+    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
         let (def_json, def, engine) = load_engine(&profile);
         let tag_def_json = load_tag_def();
         let mut rng =
@@ -7580,7 +7568,7 @@ fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
         total_refused += tally.refused;
         total_accepted += tally.accepted;
 
-        for version in ["2.5.0", "2.8.0", "2.9.0"] {
+        for version in ["2.8.0", "2.9.0"] {
             let t = std::time::Instant::now();
             let run = mig_run(&profile, &pairs, version);
             eprintln!(
@@ -7728,11 +7716,7 @@ fn prune_dropped(pair: &PrunePair, def: &ServiceDef) -> PruneDropped {
         after: &after,
         service_def: def,
         engine: EngineConfig::without_super_users(),
-        versions: vec![
-            PluginVersion::Ranger2_5_0,
-            PluginVersion::Ranger2_8_0,
-            PluginVersion::Ranger2_9_0,
-        ],
+        versions: vec![PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0],
         probes,
     };
     let mut undecidable = Vec::new();
@@ -8021,7 +8005,7 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
         grand_sent += sample.len();
         grand_undecidable += undecidable;
 
-        for version in ["2.5.0", "2.8.0", "2.9.0"] {
+        for version in ["2.8.0", "2.9.0"] {
             let t = std::time::Instant::now();
             let items: Vec<(&PrunePair, &egret_perm_compile::equivalence::Probe)> = sample
                 .iter()
@@ -8071,7 +8055,7 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
         // The trie pair: ask the KEPT probes too, so the retention is shown to matter.
         if name == "trie false positive" {
             for (pi, pair) in pairs.iter().enumerate() {
-                for version in ["2.5.0", "2.8.0", "2.9.0"] {
+                for version in ["2.8.0", "2.9.0"] {
                     let kept: Vec<&_> = per_pair[pi].kept.iter().collect();
                     let items: Vec<(&PrunePair, &_)> = kept.iter().map(|p| (pair, *p)).collect();
                     let results = prune_ask(profile, &items, version);
@@ -8456,11 +8440,7 @@ fn an_editor_saved_table_policy_grants_select_at_column_depth_on_the_real_jars()
             body
         };
 
-        for (version, label) in [
-            ("2.5.0", "ranger_2_5_0"),
-            ("2.8.0", "ranger_2_8_0"),
-            ("2.9.0", "ranger_2_9_0"),
-        ] {
+        for (version, label) in [("2.8.0", "ranger_2_8_0"), ("2.9.0", "ranger_2_9_0")] {
             let mut cases: Vec<(&str, usize, &str, bool)> = Vec::new();
             // (which body, depth, access, expected isAllowed)
             for (which, expect_select) in [("saved", true), ("old", false)] {
@@ -8513,7 +8493,8 @@ fn an_editor_saved_table_policy_grants_select_at_column_depth_on_the_real_jars()
     }
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!("editor-saved table policy on the real jars: {asked} cells in {elapsed:.2} s");
-    assert!(asked == 24, "all twenty-four cells were asked: {asked}");
+    // Eight cells at each of the two supported plugin versions, 2.8.0 and 2.9.0.
+    assert!(asked == 16, "all sixteen cells were asked: {asked}");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
@@ -8578,7 +8559,6 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
         let pins = lv_pins(&profile, &def_json, &tag_def_json);
 
         for (version, plugin_version) in [
-            ("2.5.0", PluginVersion::Ranger2_5_0),
             ("2.8.0", PluginVersion::Ranger2_8_0),
             ("2.9.0", PluginVersion::Ranger2_9_0),
         ] {
@@ -9450,7 +9430,7 @@ fn engine_capability_policies_decide_identically_on_the_real_jars() {
     let mut failures: Vec<String> = Vec::new();
     let mut asked = 0usize;
 
-    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
+    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
         let service_type = profile.engine.service_def_name();
         let (def_json, def, engine) = load_engine(&profile);
         let cases = match profile.engine {
@@ -9519,7 +9499,8 @@ fn engine_capability_policies_decide_identically_on_the_real_jars() {
     }
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!("engine capability differential: {asked} cases in {elapsed:.2} s");
-    assert_eq!(asked, 2 * 13 + 2 * 9, "every case was asked");
+    // Trino (13 cases) once at 2.8.0; StarRocks (9) at 2.8.0 and 2.9.0.
+    assert_eq!(asked, 13 + 2 * 9, "every case was asked");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"

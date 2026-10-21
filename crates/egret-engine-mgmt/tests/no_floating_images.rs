@@ -177,7 +177,7 @@ fn a_hub_prefixed_or_mirrored_engine_image_is_still_collected() {
 fn the_frontend_scan_sees_every_literal_and_skips_interpolations() {
     let src = r#"
         const a = "starrocks/fe-ubuntu:4.1-latest";
-        const b = 'docker.io/trinodb/trino:470';
+        const b = 'docker.io/trinodb/trino:483';
         const c = `trinodb/trino:${v}`;
         // overrides the default `trinodb/trino:{version}`
         const d = "mirror.corp/starrocks/cn-ubuntu:4.1.6";
@@ -185,7 +185,7 @@ fn the_frontend_scan_sees_every_literal_and_skips_interpolations() {
     assert_eq!(
         literal_engine_refs(src),
         vec![
-            "docker.io/trinodb/trino:470".to_string(),
+            "docker.io/trinodb/trino:483".to_string(),
             "starrocks/fe-ubuntu:4.1-latest".to_string(),
             "mirror.corp/starrocks/cn-ubuntu:4.1.6".to_string(),
         ]
