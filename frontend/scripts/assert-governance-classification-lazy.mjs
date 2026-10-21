@@ -56,7 +56,7 @@ const MARKERS = [
 const AREA_ANCHORS = {
   Data: "Reading grants needs the policy:read permission, which this account does not have.",
   People: "Users, groups and roles, and the egret grants and rules that reach each one.",
-  Classification: "No hand-written tag policy names this classification.",
+  Classification: "No manual tag policy names this classification.",
 };
 const HANDWRITTEN = [
   // Route A's section (Data).
