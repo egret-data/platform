@@ -3163,7 +3163,12 @@ function baseOption(
     }));
   } else if (horizontal) {
     xAxis = mkValueAxis(leftSeries);
-    yAxis = categoryAxis;
+    // TOP TO BOTTOM IN ROW ORDER, as Metabase's row chart reads. ECharts lays a vertical category
+    // axis out from the bottom, so the first row the query returned — the largest, under the row
+    // chart's default sort — was drawn LAST, at the foot of the card, and a "top 10" read upside
+    // down (KI-045). `inverse` flips the drawing only; the data, the drills and the tooltips are
+    // indexed as before.
+    yAxis = { ...categoryAxis, inverse: true };
   } else if (dual) {
     xAxis = xCategory;
     yAxis = [mkValueAxis(leftSeries, "left"), mkValueAxis(rightSeries, "right")];

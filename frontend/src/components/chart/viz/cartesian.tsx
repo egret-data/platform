@@ -529,7 +529,11 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
         // renderer then does with a non-empty `orderby` is the other half of honouring it; see
         // `preserveCategoryOrder` in `echarts/options/cartesian.ts`.
         orderby: withImplicitBreakoutOrder(
-          shared.orderby,
+          // A ROW CHART RANKS: with no sort asked for it is ordered by its first metric, largest
+          // first, as the gallery promises (D7, KI-045). That is also what makes a Row limit of 10
+          // return the top ten rather than the first ten names. An authored sort still wins, and
+          // the breakouts still follow as tie-breakers so equal values come back in a fixed order.
+          shared.orderby.length === 0 && kind === "row" && ys[0] ? [{ field: ys[0], desc: true }] : shared.orderby,
           // `dims` itself, which is already "the breakouts, in breakout order" and already filtered
           // to the strings — deriving the list twice is how the two come to disagree about which
           // fields the query groups by.

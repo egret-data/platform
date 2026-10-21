@@ -91,9 +91,11 @@ describe("a cartesian spec carries the order it draws in", () => {
     expect(spec.orderby).toEqual([{ field: "category", desc: false }]);
   });
 
-  it("orders a row chart's dimension the same way", () => {
+  // D7 / KI-045: a row chart ranks, so its default is by value (largest first), the dimension only
+  // breaking ties. See orderby.test.ts.
+  it("orders a row chart by its metric, descending, with the dimension as tie-breaker", () => {
     const spec = cartesianDescriptor("row").buildSpec({ xAxis: "category", yMetrics: ["revenue"] }, SHARED);
-    expect(spec.orderby).toEqual([{ field: "category", desc: false }]);
+    expect(spec.orderby).toEqual([{ field: "revenue", desc: true }, { field: "category", desc: false }]);
   });
 
   /**
