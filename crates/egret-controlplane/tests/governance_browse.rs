@@ -353,6 +353,9 @@ fn app_with(
         catalog_lister: lister,
         browse_timeout,
         audit_retention_days: Some(90),
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::default(),
+        ),
     })
 }
 

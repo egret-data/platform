@@ -2540,6 +2540,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         } else {
             None
         },
+        // KI-206: Storage Browse and Download keep the prefixes egret writes
+        // in its own bucket closed to anyone but a platform admin.
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::new(
+                &config.storage.bucket,
+                [
+                    config.engine.results_prefix.as_str(),
+                    config.apps.storage.prefix.as_str(),
+                    config.workflow.storage.prefix.as_str(),
+                ],
+            ),
+        ),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

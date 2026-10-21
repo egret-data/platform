@@ -101,6 +101,9 @@ async fn state(f: &Fixture, retention: Option<i64>) -> CpState {
         catalog_lister: Arc::new(UnwiredCatalogLister),
         browse_timeout: std::time::Duration::from_secs(15),
         audit_retention_days: retention,
+        storage_scope: egret_controlplane::StorageScope::s3(
+            egret_controlplane::SystemPrefixes::default(),
+        ),
     }
 }
 
