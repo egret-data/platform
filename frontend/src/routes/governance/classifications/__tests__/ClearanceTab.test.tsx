@@ -252,6 +252,7 @@ describe("Clearance tab: what the engines do not enforce (premise 3)", () => {
 describe("Clearance tab: scope first, and who is cleared (C9)", () => {
   const PEOPLE = "/perm/clearances/t-pii/people";
   const NOBODY = { count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0 };
+  const ENGINES_NOT = "Engines do not enforce this clearance: anyone with SQL access can read the data.";
   const via = (kind: "role" | "group", name: string, extra = {}) => ({
     kind,
     name,
@@ -310,9 +311,71 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     const list = screen.getByRole("list", { name: "Cleared people" });
     expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
       "Ann · ann · role cleared · engines",
-      "Bo · group data-team",
+      "Bo · group data-team · Cleared in egret, refused on engines",
       "Cy · cy · role cleared through group ops · Cleared in egret, refused on engines",
     ]);
+    // The marker is defined where it appears.
+    expect(within(list).getByTitle(/^Named in the engines' policy/)).toHaveTextContent("engines");
+  });
+
+  it("marks no one refused on engines when engines enforce nothing", async () => {
+    open(pii({ required_groups: ["g1"] }), ADMIN, {
+      [PEOPLE]: ok({
+        count: 1,
+        truncated: false,
+        enginesEnforce: false,
+        onEnginesCount: 0,
+        people: [{ userId: "u2", label: "Bo", username: "bo", status: "active", serviceAccount: false, via: [via("group", "data-team")], onEngines: false }],
+      }),
+    });
+    await userEvent.click(await screen.findByText("1 person holds a required role or belongs to a required group", undefined, T));
+    expect(within(screen.getByRole("list", { name: "Cleared people" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "Bo · bo · group data-team",
+    ]);
+  });
+
+  it("says plainly when the clearance lists no one, with no empty disclosure", async () => {
+    open(pii({ required_roles: ["cleared"] }), ADMIN, { [PEOPLE]: ok({ ...NOBODY, enginesEnforce: true }) });
+    expect(
+      await screen.findByText("No one holds a required role or belongs to a required group yet.", undefined, T),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/0 people/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Cleared people" })).not.toBeInTheDocument();
+  });
+
+  it("names a workspace-scoped role without an id as one workspace", async () => {
+    open(pii({ required_roles: ["cleared"] }), ADMIN, {
+      [PEOPLE]: ok({
+        count: 1,
+        truncated: false,
+        enginesEnforce: true,
+        onEnginesCount: 1,
+        people: [
+          { userId: "u1", label: "Ann", username: "ann", status: "active", serviceAccount: false, via: [via("role", "cleared", { scope: "workspace", scopeId: null })], onEngines: true },
+        ],
+      }),
+    });
+    await userEvent.click(await screen.findByText("1 person holds a required role or belongs to a required group", undefined, T));
+    expect(within(screen.getByRole("list", { name: "Cleared people" })).getByRole("listitem")).toHaveTextContent(
+      "Ann · ann · role cleared in one workspace only · engines",
+    );
+  });
+
+  it("states nothing about engines while a clearance change is being saved", async () => {
+    const user = userEvent.setup();
+    open(pii({ required_groups: ["g1"] }), ADMIN, { [PEOPLE]: ok(NOBODY), [`PUT ${POLICY}`]: "never" });
+    expect(await screen.findByText(ENGINES_NOT, undefined, T)).toBeInTheDocument();
+    await pickAndAdd(user, "Role", "auditor");
+    await waitFor(() => expect(screen.queryByText(ENGINES_NOT)).not.toBeInTheDocument());
+    expect(screen.queryByText(/hold a required role|holds a required role|No one holds/)).not.toBeInTheDocument();
+  });
+
+  it("offers add a mask rule only with policy:update, and says what it needs otherwise", async () => {
+    const served = open(pii(), STEWARD);
+    await screen.findByText(/Clearance decides who may open data with this classification/, undefined, T);
+    expect(screen.queryByRole("button", { name: "add a mask rule" })).not.toBeInTheDocument();
+    expect(screen.getByText("Adding a mask rule needs the policy:update permission.")).toBeInTheDocument();
+    expect(served.asked).not.toContain("POST /perm/preview");
   });
 
   it("qualifies scoped roles, marks disabled and service accounts, and says how many are not listed", async () => {
@@ -392,12 +455,19 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
 
   it("asks again for the cleared people after a clearance change", async () => {
     const user = userEvent.setup();
-    const served = open(pii({ required_roles: ["finance_cleared"] }), ADMIN, {
+    const answers: Record<string, Answer> = {
+      "/tags": ok([pii({ required_roles: ["finance_cleared"] })]),
+      "/access/roles": ok(ROLES),
+      "/groups": ok(GROUPS),
       [PEOPLE]: ok(NOBODY),
       [`PUT ${POLICY}`]: ok({ ok: true, skipped: [] }),
-    });
+    };
+    const served = serve(answers);
+    openArea(URL_TAB, ADMIN);
     await table();
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${PEOPLE}`)).toHaveLength(1));
+    // The server now holds the new set.
+    answers["/tags"] = ok([pii({ required_roles: ["finance_cleared", "auditor"] })]);
     await pickAndAdd(user, "Role", "auditor");
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${PEOPLE}`).length).toBeGreaterThan(1));
   });
@@ -408,6 +478,13 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     await table();
     expect(screen.getByText("Engine details")).toBeInTheDocument();
     expect(document.body.querySelector(".bg-yellow-600")).toBeNull();
-    for (const note of screen.getAllByRole("note")) expect(note.className).toMatch(/bg-highlight\/15/);
+    const notes = screen.getAllByRole("note");
+    // The scope statement is neutral (muted); the measured warnings are highlighted.
+    const scope = notes.find((n) => /Clearance decides/.test(n.textContent ?? ""));
+    expect(scope?.className).toMatch(/bg-muted/);
+    expect(scope?.className).not.toMatch(/highlight/);
+    const warnings = notes.filter((n) => n !== scope);
+    expect(warnings).toHaveLength(4);
+    for (const note of warnings) expect(note.className).toMatch(/bg-highlight\/15/);
   });
 });

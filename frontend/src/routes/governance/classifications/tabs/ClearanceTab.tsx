@@ -1,7 +1,7 @@
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useId, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronsUpDown, Plus, X } from "lucide-react";
+import { AlertTriangle, ChevronsUpDown, Info, Plus, X } from "lucide-react";
 import { type AccessGroup, type AccessRole, listGroups, listRoles } from "@/api/access";
 import { ApiError } from "@/api/client";
 import type { ClearedPerson, ClearedVia } from "@/api/generated/model";
@@ -56,10 +56,25 @@ export const NO_CLEARANCE = "None: anyone who can read the data can open it.";
 export const CLEARED_NEEDS_POLICY_READ = "Seeing who is cleared needs the policy:read permission.";
 export const ADMINS_ALWAYS = "Platform admins can always open it in egret.";
 export const ENGINES_DO_NOT_ENFORCE = "Engines do not enforce this clearance: anyone with SQL access can read the data.";
-export const THROUGH_GROUP_ONLY = "Cleared in egret, refused on engines";
+/** A person egret clears whom the engines' deny does not except (spec C9 table). */
+export const REFUSED_ON_ENGINES = "Cleared in egret, refused on engines";
+export const NO_ONE_LISTED = "No one holds a required role or belongs to a required group yet.";
+export const ADD_MASK_NEEDS_POLICY_UPDATE = "Adding a mask rule needs the policy:update permission.";
+/** What the "engines" marker means, said where it appears. */
+const ENGINES_MARK_TITLE = "Named in the engines' policy: engines let this person read the data.";
+
+/** A neutral statement (the clearance's scope), muted with an Info icon; warnings use `Callout`. */
+function ScopeNote({ children }: { children: ReactNode }) {
+  return (
+    <div role="note" className="flex gap-2 rounded-md border bg-muted/50 p-3 text-sm text-foreground">
+      <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+      <div className="min-w-0 space-y-1">{children}</div>
+    </div>
+  );
+}
 
 /**
- * A warning or a statement of scope, drawn with tokens only (spec C9.3,
+ * A measured warning, drawn with tokens only (spec C9.3,
  * N21): a 15% tint of `--highlight` behind `--foreground` text, which keeps
  * the foreground's contrast. `Badge variant="warning"` (a raw palette) is not
  * used here.
@@ -78,34 +93,63 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 /** One way a person is listed: `role cleared in workspace Sales only through group ops`. */
 function viaText(v: ClearedVia, workspaceName: WorkspaceNames): string {
   let text = `${v.kind} ${v.name}`;
-  if (v.scope === "workspace") text += ` in workspace ${(v.scopeId && workspaceName(v.scopeId)) ?? v.scopeId ?? ""} only`;
+  if (v.scope === "workspace") {
+    text += v.scopeId ? ` in workspace ${workspaceName(v.scopeId) ?? v.scopeId} only` : " in one workspace only";
+  }
   else if (v.scope === "object") text += " on one object only";
   if (v.throughGroup) text += ` through group ${v.throughGroup}`;
   return text;
 }
 
-/** `label · username · ways · markers` (spec C9.2). */
-function personText(p: ClearedPerson, workspaceName: WorkspaceNames): string {
-  const parts = [p.label];
+/**
+ * `label · username · ways · markers` (spec C9.2). "engines" marks a person
+ * the engines' deny excepts; when engines enforce the clearance, everyone
+ * else listed is cleared in egret and refused on engines (a group member, a
+ * role held through a group, a holder without a username).
+ */
+function Person({ p, enginesEnforce, workspaceName }: { p: ClearedPerson; enginesEnforce: boolean; workspaceName: WorkspaceNames }) {
+  const parts: ReactNode[] = [p.label];
   if (p.username) parts.push(p.username);
   if (p.via.length > 0) parts.push(p.via.map((v) => viaText(v, workspaceName)).join(", "));
   if (p.serviceAccount) parts.push("service account");
   if (p.status === "disabled") parts.push("disabled");
-  if (p.onEngines) parts.push("engines");
-  if (p.via.length > 0 && p.via.every((v) => !!v.throughGroup)) parts.push(THROUGH_GROUP_ONLY);
-  return parts.join(" · ");
+  if (p.onEngines)
+    parts.push(
+      <abbr key="engines" title={ENGINES_MARK_TITLE} className="no-underline">
+        engines
+      </abbr>,
+    );
+  if (enginesEnforce && !p.onEngines) parts.push(REFUSED_ON_ENGINES);
+  return (
+    <li className="break-words">
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 ? " · " : null}
+          {part}
+        </Fragment>
+      ))}
+    </li>
+  );
 }
 
 /** The listed people; mounted only with an answer, so workspace names are asked for only then. */
-function ClearedList({ people, count, truncated }: { people: ClearedPerson[]; count: number; truncated: boolean }) {
+function ClearedList({
+  people,
+  count,
+  truncated,
+  enginesEnforce,
+}: {
+  people: ClearedPerson[];
+  count: number;
+  truncated: boolean;
+  enginesEnforce: boolean;
+}) {
   const workspaceName = useWorkspaceNames();
   return (
     <>
       <ul aria-label="Cleared people" className="mt-2 space-y-0.5 text-sm">
         {people.map((p) => (
-          <li key={p.userId} className="break-words">
-            {personText(p, workspaceName)}
-          </li>
+          <Person key={p.userId} p={p} enginesEnforce={enginesEnforce} workspaceName={workspaceName} />
         ))}
       </ul>
       {truncated ? <p className="text-xs text-muted-foreground">{`and ${count - people.length} more`}</p> : null}
@@ -125,9 +169,12 @@ function ClearedPeople({ tag }: { tag: Tag }) {
   const roles = tag.required_roles.length;
   const groups = tag.required_groups.length;
   const peopleQ = usePermClearedPeople(tag.id, { query: { retry: false, enabled: canRead } });
-  const answer = peopleQ.data?.status === 200 ? peopleQ.data.data : null;
-  // A clearance that names no role compiles to nothing on engines (`enginesEnforce`); the tag says the same.
-  const enginesEnforce = answer ? answer.enginesEnforce : roles > 0;
+  // Only a settled answer speaks: during the refetch a clearance write starts,
+  // the old answer would describe the old clearance.
+  const answer = peopleQ.data?.status === 200 && !peopleQ.isFetching ? peopleQ.data.data : null;
+  // A clearance that names no role compiles to nothing on engines (`enginesEnforce`);
+  // the server's tag says the same. Unknown (null) while the answer is pending.
+  const enginesEnforce: boolean | null = !canRead ? roles > 0 : answer ? answer.enginesEnforce : null;
 
   let list: ReactNode;
   if (!canRead) {
@@ -139,10 +186,12 @@ function ClearedPeople({ tag }: { tag: Tag }) {
         <p className="text-sm text-muted-foreground">{CLEARED_NEEDS_POLICY_READ}</p>
       </>
     );
-  } else if (peopleQ.isError) {
+  } else if (peopleQ.isError && !peopleQ.isFetching) {
     list = <TabError what="cleared people" onRetry={() => void peopleQ.refetch()} />;
   } else if (!answer) {
     list = <Skeleton className="h-4 w-64" />;
+  } else if (answer.count === 0) {
+    list = <p className="text-sm">{NO_ONE_LISTED}</p>;
   } else {
     list = (
       <details>
@@ -151,7 +200,12 @@ function ClearedPeople({ tag }: { tag: Tag }) {
             ? "1 person holds a required role or belongs to a required group"
             : `${answer.count} people hold a required role or belong to a required group`}
         </summary>
-        <ClearedList people={answer.people} count={answer.count} truncated={answer.truncated} />
+        <ClearedList
+          people={answer.people}
+          count={answer.count}
+          truncated={answer.truncated}
+          enginesEnforce={answer.enginesEnforce}
+        />
         {answer.enginesEnforce ? (
           <p className="mt-1 text-xs text-muted-foreground tabular-nums">
             {`${answer.onEnginesCount} of them ${plural(answer.onEnginesCount, "is", "are")} named in the engines' policy (marked “engines”).`}
@@ -165,7 +219,7 @@ function ClearedPeople({ tag }: { tag: Tag }) {
     <section aria-label="Who is cleared" className="space-y-1">
       {list}
       <p className="text-sm text-muted-foreground">{ADMINS_ALWAYS}</p>
-      {!enginesEnforce ? <p className="text-sm">{ENGINES_DO_NOT_ENFORCE}</p> : null}
+      {enginesEnforce === false ? <p className="text-sm">{ENGINES_DO_NOT_ENFORCE}</p> : null}
     </section>
   );
 }
@@ -205,6 +259,7 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
   const setAccessPolicy = useSetTagAccessPolicy();
   const clearAccessPolicy = useClearTagAccessPolicy();
   const queryClient = useQueryClient();
+  const canAddRule = usePolicyPermissions()("policy:update");
   const [addingMask, setAddingMask] = useState(false);
 
   // The editable set, reseeded whenever the server's set changes (adjusted
@@ -274,10 +329,15 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
   const engineGated = requiredRoles.length > 0;
 
   const hasClearance = requiredRoles.length + requiredGroups.length > 0;
+  const serverHasClearance = tag.required_roles.length + tag.required_groups.length > 0;
+  // The editable set differs from the server's: a write is in flight (or just failed and is snapping back).
+  // Compared as sets: the server may answer the same set in another order.
+  const asSet = (roles: string[], groups: string[]) => JSON.stringify([[...roles].sort(), [...groups].sort()]);
+  const saving = asSet(requiredRoles, requiredGroups) !== asSet(tag.required_roles, tag.required_groups);
 
   return (
     <div className="space-y-3">
-      <Callout>
+      <ScopeNote>
         <p>
           <strong>{CLEARANCE_SCOPE.lead}</strong>
           {CLEARANCE_SCOPE.where}
@@ -285,17 +345,24 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
         <p>{CLEARANCE_SCOPE.engines}</p>
         <p>
           {CLEARANCE_SCOPE.maskBefore}
-          <Button variant="link" className="h-auto p-0 align-baseline" onClick={() => setAddingMask(true)}>
-            {CLEARANCE_SCOPE.maskAction}
-          </Button>
+          {canAddRule ? (
+            <Button variant="link" className="h-auto p-0 align-baseline" onClick={() => setAddingMask(true)}>
+              {CLEARANCE_SCOPE.maskAction}
+            </Button>
+          ) : (
+            CLEARANCE_SCOPE.maskAction
+          )}
           {CLEARANCE_SCOPE.maskAfter}
         </p>
-      </Callout>
-      <RuleDialog
-        open={addingMask}
-        onOpenChange={setAddingMask}
-        entry={{ kind: "classification", tagKey: tag.key, tagName: tag.name }}
-      />
+        {canAddRule ? null : <p className="text-xs text-muted-foreground">{ADD_MASK_NEEDS_POLICY_UPDATE}</p>}
+      </ScopeNote>
+      {canAddRule ? (
+        <RuleDialog
+          open={addingMask}
+          onOpenChange={setAddingMask}
+          entry={{ kind: "classification", tagKey: tag.key, tagName: tag.name }}
+        />
+      ) : null}
       {(rolesQ.isError && !refused(rolesQ.error)) || (groupsQ.isError && !refused(groupsQ.error)) ? (
         <TabError
           what="roles and groups"
@@ -364,7 +431,12 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
         onRemove={remove}
       />
       {engineGated ? <p className="text-xs text-muted-foreground">{COMPILES_TO}</p> : null}
-      {hasClearance ? <ClearedPeople tag={tag} /> : <p className="text-sm text-muted-foreground">{ADMINS_ALWAYS}</p>}
+      {/* From the server's tag only, and not while a write is in flight, so no sentence describes a set that is not saved. */}
+      {saving ? null : serverHasClearance ? (
+        <ClearedPeople tag={tag} />
+      ) : (
+        <p className="text-sm text-muted-foreground">{ADMINS_ALWAYS}</p>
+      )}
     </div>
   );
 }

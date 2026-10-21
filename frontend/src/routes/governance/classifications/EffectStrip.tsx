@@ -7,6 +7,7 @@ import { usePermListRules } from "@/api/generated/perm/perm";
 import type { Tag } from "@/api/tags";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { TERM } from "@/routes/governance/glossary";
 import { formatRuleKind } from "@/routes/governance/permFormat";
@@ -23,6 +24,7 @@ export const NO_RULE_YET = "No rule uses this classification yet.";
 export const NO_CLEARANCE = "None: anyone who can read the data can open it.";
 export const NOT_ON_DATA_YET = "Not on any data yet.";
 export const ATTACH_HOW = "Open a table or a column and use Add classification.";
+export const ATTACH_NEEDS_CATALOG_UPDATE = "Attaching needs the catalog_registry:update permission.";
 export const RULES_NEED_POLICY_READ_SHORT = "Reading rules needs the policy:read permission.";
 export const ADD_RULE_NEEDS_POLICY_UPDATE = "Adding a rule needs the policy:update permission.";
 export const SET_CLEARANCE_NEEDS_TAG_MANAGE = "Setting clearance needs the tag:manage permission.";
@@ -41,11 +43,14 @@ function clearanceText(tag: Tag): string {
   const roles = tag.required_roles.length;
   const groups = tag.required_groups.length;
   if (roles === 0 && groups === 0) return NO_CLEARANCE;
-  const who = [roles > 0 ? count(roles, "role", "roles") : null, groups > 0 ? count(groups, "group", "groups") : null]
+  const who = [
+    roles > 0 ? `holders of ${count(roles, "role", "roles")}` : null,
+    groups > 0 ? `members of ${count(groups, "group", "groups")}` : null,
+  ]
     .filter(Boolean)
     .join(" or ");
   const engines = roles === 0 ? " Engines do not enforce it." : "";
-  return `Only ${who} may open data with it in egret.${engines}`;
+  return `Only ${who}, and platform admins, may open data with it in egret.${engines}`;
 }
 
 function Fact({ term, children }: { term: string; children: ReactNode }) {
@@ -88,6 +93,7 @@ export function EffectStrip({ tag }: { tag: Tag }) {
   const canReadRules = can("policy:read");
   const canAddRule = can("policy:update");
   const canManage = useCanManageTags();
+  const canAttach = useCanEditCatalogTags();
   const rulesQ = usePermListRules({ query: { retry: false, enabled: canReadRules } });
   const usageQ = useControlPlaneGovernanceTagUsage(tag.id, { query: { retry: false } });
   const [, setSearch] = useSearchParams();
@@ -183,11 +189,12 @@ export function EffectStrip({ tag }: { tag: Tag }) {
         </Fact>
         <Fact term={TERM.whereUsed}>
           {usageFact}
+          {/* The Data page offers Add classification only with catalog_registry:update (FE-ACTION-4). */}
           <dd className="text-xs text-muted-foreground">
             <Link to="/governance/data" className="font-medium text-primary hover:underline">
-              Attach in Data
+              {canAttach ? "Attach in Data" : "Open Data"}
             </Link>{" "}
-            {ATTACH_HOW}
+            {canAttach ? ATTACH_HOW : ATTACH_NEEDS_CATALOG_UPDATE}
           </dd>
         </Fact>
       </dl>

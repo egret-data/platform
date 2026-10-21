@@ -27,12 +27,12 @@ const TABLES: TagUsage["data"]["tables"] = [
   { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "crm", table: "accounts", onTable: true, columns: [] },
 ];
 
-const open = (u: TagUsage | "error" | "never") => {
+const open = (u: TagUsage | "error" | "never", as = TAG_READER) => {
   const served = serve({
     "/tags": ok([PII]),
     [USAGE]: u === "error" ? fail(500, "database unavailable") : u === "never" ? "never" : ok(u),
   });
-  openArea(URL_PII, TAG_READER);
+  openArea(URL_PII, as);
   return served;
 };
 const data = () => screen.getByRole("region", { name: "Data" });
@@ -73,10 +73,19 @@ describe("Where used: Data", () => {
   });
 
   it("says so when no table or column carries it, and where to attach it", async () => {
-    open(usage());
+    open(usage(), ADMIN);
     expect(await screen.findByText("No table or column carries this classification.", {}, T)).toBeInTheDocument();
     expect(within(data()).getByRole("link", { name: "Attach in Data" })).toHaveAttribute("href", "/governance/data");
     expect(within(data()).getByText("Open a table or a column and use Add classification.")).toBeInTheDocument();
+  });
+
+  it("without catalog_registry:update, promises no Add classification and says what attaching needs", async () => {
+    open(usage());
+    expect(await screen.findByText("No table or column carries this classification.", {}, T)).toBeInTheDocument();
+    expect(within(data()).getByText("Attaching needs the catalog_registry:update permission.")).toBeInTheDocument();
+    expect(within(data()).queryByText(/use Add classification/)).not.toBeInTheDocument();
+    expect(within(data()).queryByRole("link", { name: "Attach in Data" })).not.toBeInTheDocument();
+    expect(within(data()).getByRole("link", { name: "Open Data" })).toHaveAttribute("href", "/governance/data");
   });
 });
 

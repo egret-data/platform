@@ -53,10 +53,13 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
   );
 
   let body;
+  // How many rules the list shows; the toolbar's Add rule appears only beside a list.
+  let listed = 0;
   if (rulesQ.isError) body = <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   else if (rulesQ.data?.status !== 200) body = <ListSkeleton rows={3} cols={3} />;
   else {
     const rules = rulesOnTag(rulesQ.data.data, tag).sort((a, b) => a.name.localeCompare(b.name));
+    listed = rules.length;
     body =
       rules.length === 0 ? (
         <EmptyState icon={EyeOff} title="No rule uses this classification yet." action={canAdd ? addButton : undefined} />
@@ -104,9 +107,12 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
         Rules that mask or filter data carrying this classification. Engines match a rule by the classification&apos;s
         name, so a rule written on another classification with the same name applies here too.
       </p>
-      <div className="flex justify-end">
-        {canAdd ? addButton : <p className="text-xs text-muted-foreground">Adding a rule needs the policy:update permission.</p>}
-      </div>
+      {/* While the list is empty its empty state carries Add rule, so the toolbar does not repeat it. */}
+      {!canAdd ? (
+        <p className="text-xs text-muted-foreground">Adding a rule needs the policy:update permission.</p>
+      ) : listed > 0 ? (
+        <div className="flex justify-end">{addButton}</div>
+      ) : null}
       {body}
       {canAdd ? (
         <RuleDialog

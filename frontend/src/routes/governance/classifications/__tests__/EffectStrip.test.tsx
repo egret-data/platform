@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ADMIN, fail, ok, openArea, serve, STEWARD, tag, TAG_READER, where, type Answer } from "./harness";
+import { ADMIN, fail, me, ok, openArea, serve, STEWARD, tag, TAG_READER, where, type Answer } from "./harness";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 afterEach(() => vi.unstubAllGlobals());
@@ -24,6 +24,9 @@ const HASH = {
 };
 const NULLIFY = { ...HASH, id: "r2", name: "Null phone", kind: { type: "mask", mask_type: "MASK_NULL" } };
 const strip = () => screen.getByRole("region", { name: "Effect" });
+const PREVIEWED = { affected: [], compile: { services: [], created: 0, updated: 0, deleted: 0, unchanged: 0, skipped: [] } };
+/** May attach classifications in Data (`catalog_registry:update`), nothing else beyond reading. */
+const DATA_EDITOR = me(["tag:read", "policy:read", "catalog_registry:update"]);
 
 describe("the Effect strip", () => {
   it("says a new classification does nothing yet, and how to change that", async () => {
@@ -50,9 +53,43 @@ describe("the Effect strip", () => {
     });
     openArea("/governance/classifications/t-pii", ADMIN);
     await waitFor(() => expect(strip()).toHaveTextContent("Mask · Hash: Hash email and 1 more"), T);
-    expect(strip()).toHaveTextContent("Only 2 groups may open data with it");
+    expect(
+      within(strip()).getByText(
+        "Only members of 2 groups, and platform admins, may open data with it in egret. Engines do not enforce it.",
+      ),
+    ).toBeInTheDocument();
     expect(strip()).toHaveTextContent("2 tables · 3 columns · 0 BI objects");
     expect(strip()).not.toHaveTextContent("Does nothing yet.");
+  });
+
+  it.each([
+    [{ required_roles: ["cleared"] }, "Only holders of 1 role, and platform admins, may open data with it in egret."],
+    [
+      { required_roles: ["cleared"], required_groups: ["g1", "g2"] },
+      "Only holders of 1 role or members of 2 groups, and platform admins, may open data with it in egret.",
+    ],
+  ])("states a clearance with roles (%j) without the engine caveat", async (over, sentence) => {
+    serve({ "/tags": ok([{ ...PII, ...over }]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]) });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    expect(await within(await screen.findByRole("region", { name: "Effect" }, T)).findByText(sentence, {}, T)).toBeInTheDocument();
+    expect(strip()).not.toHaveTextContent("Engines do not enforce it.");
+  });
+
+  it("promises the Data page's Add classification only to who may attach", async () => {
+    serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]) });
+    openArea("/governance/classifications/t-pii", STEWARD);
+    await waitFor(() => expect(strip()).toHaveTextContent("Attaching needs the catalog_registry:update permission."), T);
+    expect(strip()).not.toHaveTextContent("use Add classification");
+    expect(within(strip()).queryByRole("link", { name: "Attach in Data" })).not.toBeInTheDocument();
+    expect(within(strip()).getByRole("link", { name: "Open Data" })).toHaveAttribute("href", "/governance/data");
+  });
+
+  it("tells a viewer who may attach how to", async () => {
+    serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]) });
+    openArea("/governance/classifications/t-pii", DATA_EDITOR);
+    await waitFor(() => expect(strip()).toHaveTextContent("Open a table or a column and use Add classification."), T);
+    expect(within(strip()).getByRole("link", { name: "Attach in Data" })).toHaveAttribute("href", "/governance/data");
+    expect(strip()).not.toHaveTextContent("Attaching needs");
   });
 
   it("never says it does nothing while a fact is unknown", async () => {
@@ -75,12 +112,32 @@ describe("the Effect strip", () => {
     expect(strip()).not.toHaveTextContent("Does nothing yet.");
   });
 
-  it("Add rule opens the rule dialog on this classification", async () => {
-    serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]), "/governance/catalogs": ok([]) });
+  it("Add rule opens the rule dialog on this classification, previews on its key, and the strip shows the new rule", async () => {
+    const user = userEvent.setup();
+    const answers: Record<string, Answer> = {
+      "/tags": ok([PII]),
+      "/classifications/t-pii/usage": ok(USAGE_NONE),
+      "/perm/rules": ok([]),
+      "/governance/catalogs": ok([]),
+      "POST /perm/preview": ok(PREVIEWED),
+      "POST /perm/rules": ok({ ...HASH, kind: { type: "mask", mask_type: "MASK" }, name: "Mask PII" }),
+    };
+    const served = serve(answers);
     openArea("/governance/classifications/t-pii", ADMIN);
-    await userEvent.click(await within(await screen.findByRole("region", { name: "Effect" }, T)).findByRole("button", { name: "Add rule" }));
+    await user.click(await within(await screen.findByRole("region", { name: "Effect" }, T)).findByRole("button", { name: "Add rule" }));
     const dialog = await screen.findByRole("dialog", { name: "New rule" });
     expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
+    await user.click(within(dialog).getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(served.bodies["POST /perm/preview"]).toHaveLength(1));
+    const body = served.bodies["POST /perm/preview"][0] as { rule: { selector: unknown; name: string } };
+    expect(body.rule.selector).toEqual({ type: "tag", key: "pii" });
+    expect(body.rule.name).toBe("Mask PII");
+    const create = within(dialog).getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create).toHaveAttribute("aria-disabled", "false"));
+    answers["/perm/rules"] = ok([{ ...HASH, kind: { type: "mask", mask_type: "MASK" }, name: "Mask PII" }]);
+    await user.click(create);
+    await waitFor(() => expect(strip()).toHaveTextContent("Mask · Redact: Mask PII"), T);
+    expect(strip()).not.toHaveTextContent("No rule uses this classification yet.");
   });
 
   it("says which permission is missing instead of hiding facts", async () => {
@@ -123,6 +180,9 @@ describe("the Effect strip", () => {
     await user.click(await screen.findByRole("combobox", { name: "Role to add" }, T));
     await user.click(await screen.findByRole("button", { name: "auditor" }));
     await user.click(screen.getByRole("button", { name: "Add clearance" }));
-    await waitFor(() => expect(strip()).toHaveTextContent("Only 1 role may open data with it"), T);
+    await waitFor(
+      () => expect(strip()).toHaveTextContent("Only holders of 1 role, and platform admins, may open data with it in egret."),
+      T,
+    );
   });
 });

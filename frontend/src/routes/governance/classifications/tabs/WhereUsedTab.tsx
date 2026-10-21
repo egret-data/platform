@@ -178,13 +178,18 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
     <div className="space-y-6">
       <Section title="Data" headingRef={dataHeading}>
         {groups.length === 0 ? (
+          // The Data page offers Add classification only with catalog_registry:update (FE-ACTION-4).
           <EmptyState
             icon={Table2}
             title="No table or column carries this classification."
-            description="Open a table or a column and use Add classification."
+            description={
+              canRemove
+                ? "Open a table or a column and use Add classification."
+                : "Attaching needs the catalog_registry:update permission."
+            }
             action={
               <Link to="/governance/data" className="text-sm font-medium text-primary hover:underline">
-                Attach in Data
+                {canRemove ? "Attach in Data" : "Open Data"}
               </Link>
             }
           />

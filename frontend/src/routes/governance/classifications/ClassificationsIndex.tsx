@@ -27,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { TabError } from "@/routes/governance/tabParts";
 import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
@@ -277,14 +278,18 @@ export default function ClassificationsIndex() {
 }
 
 export const CREATING_NEEDS_TAG_MANAGE = "Creating needs the tag:manage permission.";
+/** Step 2 happens on the Data page, whose Add classification needs `catalog_registry:update` (FE-ACTION-4). */
+export const ATTACHING_NEEDS_CATALOG_UPDATE = "Attaching needs the catalog_registry:update permission.";
 
 /**
  * The first-run steps (spec C3): create, attach in Data, then add a rule or
  * set clearance on the classification's page. Step 1 carries New
  * classification for a `tag:manage` holder; anyone else is told what
- * creating needs (FE-ACTION-4).
+ * creating needs, and a viewer who cannot attach in Data what attaching
+ * needs (FE-ACTION-4).
  */
 function HowClassificationWorks({ newButton }: { newButton: ReactNode }) {
+  const canAttach = useCanEditCatalogTags();
   return (
     <div className="space-y-3 text-left">
       <ol aria-label="How classification works" className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
@@ -298,6 +303,7 @@ function HowClassificationWorks({ newButton }: { newButton: ReactNode }) {
         </li>
         <li>Add a rule (mask or row filter) or set clearance on the classification&apos;s page.</li>
       </ol>
+      {canAttach ? null : <p className="text-xs text-muted-foreground">{ATTACHING_NEEDS_CATALOG_UPDATE}</p>}
       <div className="flex justify-center">
         {newButton ?? <p className="text-xs text-muted-foreground">{CREATING_NEEDS_TAG_MANAGE}</p>}
       </div>

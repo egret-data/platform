@@ -29,14 +29,26 @@ describe("Rules tab", () => {
     expect(screen.queryByText(/egret rule/)).not.toBeInTheDocument();
   });
 
-  it("offers Add rule in the toolbar and in the empty state with policy:update, on this classification", async () => {
+  it("offers Add rule in the toolbar once rules exist", async () => {
+    open("rules", ADMIN, {
+      "/perm/rules": ok([
+        { id: "r1", name: "Hash email", kind: { type: "mask", mask_type: "MASK_HASH" }, selector: { type: "tag", key: "pii" }, exempt: { include: [], exclude: [] }, tag_name: "PII" },
+      ]),
+    });
+    const rules = await screen.findByRole("region", { name: "Rules" }, T);
+    await within(rules).findByRole("link", { name: "Hash email" }, T);
+    expect(within(rules).getAllByRole("button", { name: "Add rule" })).toHaveLength(1);
+  });
+
+  it("offers Add rule in the empty state with policy:update, on this classification", async () => {
     const user = userEvent.setup();
     open("rules", ADMIN, { "/perm/rules": ok([]), "/governance/catalogs": ok([]) });
     const rules = await screen.findByRole("region", { name: "Rules" }, T);
     await within(rules).findByText("No rule uses this classification yet.", {}, T);
+    // While the list is empty, the empty state carries the one Add rule (no toolbar duplicate).
     const adds = within(rules).getAllByRole("button", { name: "Add rule" });
-    expect(adds).toHaveLength(2);
-    await user.click(adds[1]);
+    expect(adds).toHaveLength(1);
+    await user.click(adds[0]);
     const dialog = await screen.findByRole("dialog", { name: "New rule" });
     expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
   });

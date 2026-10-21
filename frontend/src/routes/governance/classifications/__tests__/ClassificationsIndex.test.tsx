@@ -231,6 +231,15 @@ describe("the Classification index", () => {
     ]);
     expect(within(steps).getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
     expect(screen.queryByText("Creating needs the tag:manage permission.")).not.toBeInTheDocument();
+    // The steward cannot attach in Data, and is told so.
+    expect(screen.getByText("Attaching needs the catalog_registry:update permission.")).toBeInTheDocument();
+  });
+
+  it("says nothing of a missing permission to a platform admin", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, ADMIN);
+    await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(screen.queryByText(/needs the/)).not.toBeInTheDocument();
   });
 
   it("without tag:manage, the steps say what creating needs", async () => {
