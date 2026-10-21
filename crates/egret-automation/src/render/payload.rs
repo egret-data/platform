@@ -354,6 +354,8 @@ fn bi_err(e: egret_bi::BiError) -> AutomationError {
                 .unwrap_or("two mask or row-filter rules overlap")
                 .to_string(),
         ),
+        // Only a delete or a metric rename answers this; a render never does.
+        egret_bi::BiError::InUse { message, .. } => AutomationError::Conflict(message),
         egret_bi::BiError::Forbidden => {
             AutomationError::Internal("bi repo unexpectedly refused a render read".into())
         }

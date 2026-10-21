@@ -123,6 +123,8 @@ impl From<egret_bi::BiError> for CpError {
             // SP4d-4 Task 3: a rule overlap is a 409 whose sentence is `error`,
             // and whose structured body is served as is.
             E::Overlap { body } => CpError::RuleOverlap(body),
+            // Only a dataset or metric delete/rename answers this; no control-plane route does.
+            E::InUse { message, .. } => CpError::Conflict(message),
             E::Engine(_) | E::Db(_) => CpError::Internal,
         }
     }
