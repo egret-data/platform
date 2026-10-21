@@ -419,9 +419,14 @@ export function buildBoxplotOption(
       .map((v) => fmt(v, true, cfg.compactValues ?? true))
     : [];
   const labelFont = { size: CHART_THEME.labelFontSize, family: resolveFontFamily(), weight: CHART_THEME.labelWeight };
-  const labelRoom = measurable && size && lastLabels.length > 0
+  const lastLabelWidth = measurable && lastLabels.length > 0
+    ? widestLabelWidth(lastLabels, (t) => measureText(t, labelFont))
+    : 0;
+  const labelRoom = size && lastLabelWidth > 0
     ? labelOverhangRight({
-        labelWidth: widestLabelWidth(lastLabels, (t) => measureText(t, labelFont)),
+        // + 4: Metabase's label padding, so the text clears the card edge rather than touching it
+        // (measured live at 1024px: without it the label ended 1px past the <svg>).
+        labelWidth: lastLabelWidth + 4,
         distance: LABEL_DISTANCE,
         plotWidth: estimatePlotWidth(size, axisWidest, (v) => fmt(v, true), Boolean(yTitle)),
         categories: stats.length,
