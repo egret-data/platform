@@ -5,10 +5,10 @@ import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import { formatValue } from "@/components/chart/format";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import {
-  buildMapOption, pinCoverage, pinNote, pinProblem, type MapBuildConfig,
+  buildMapOption, pinCoverage, pinNote, pinProblem, regionCoverage, regionNote, type MapBuildConfig,
 } from "@/components/chart/echarts/options/map";
 import {
-  MAPS, indexRegionExtent, indexRegionNames, regionExtent, resolveRegion,
+  MAPS, indexRegionExtent, indexRegionNames, regionExtent, regionKeys, resolveRegion,
 } from "@/components/chart/echarts/maps/registry";
 import type { ResultColumn } from "@/components/chart/ChartTable";
 import type { DrillContext } from "@/components/chart/drill";
@@ -90,6 +90,9 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
     // "plotted" and "offMap", both of which count toward `drawnPins`, so whether a pin is
     // drawable AT ALL — the question `pinProblem` answers — never depends on it being indexed yet.
     extent: isPin ? regionExtent(def.key) : undefined,
+    // Undefined until indexed, like `extent`: before then the builder has no opinion on which rows
+    // land, and `regionNote` stays silent rather than counting every row as unmatched.
+    regions: isPin ? undefined : regionKeys(def.key),
     tooltipColumns: map.tooltipColumns,
     // The extra columns print through the dataset's own column formats — the same `formatValue`
     // the table and every other tooltip use, keyed on the RESULT column's type rather than a
@@ -126,7 +129,12 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
    */
   const coverage = isPin ? pinCoverage(columns, rows, cfg) : undefined;
   const problem = coverage && pinProblem(coverage, def.label);
-  const note = coverage && pinNote(coverage, def.label);
+  // The region map's half of the same accounting: rows naming no region are not drawn, and the
+  // line under the card says how many and which (KI-046). Never on a pin map, never before the
+  // geojson is indexed (`regions` undefined), so the two notes cannot both appear.
+  const note = coverage
+    ? pinNote(coverage, def.label)
+    : cfg.regions && regionNote(regionCoverage(columns, rows, cfg), def.label);
 
   // The FOUR terminal non-drawing states — "no map", "no data" and now "nothing plottable" — count
   // as finished for the same reason a chart's own empty state does: nothing further is coming.

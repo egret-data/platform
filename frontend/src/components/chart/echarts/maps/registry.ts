@@ -40,6 +40,12 @@ export function indexRegionNames(mapKey: string, geojson: unknown): void {
   nameToKey.set(mapKey, index);
 }
 
+/** The geojson keys of a map, once it has been indexed; undefined while it is still loading. */
+export function regionKeys(mapKey: string): ReadonlySet<string> | undefined {
+  const index = nameToKey.get(mapKey);
+  return index && new Set(index.values());
+}
+
 /** Resolve a raw cell to the geojson key it names, by key or by name; falls back to the map's own
  *  normaliser so a chart still renders before the geojson has been indexed. */
 export function resolveRegion(def: MapDef, value: unknown): string {
