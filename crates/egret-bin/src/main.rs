@@ -8,12 +8,12 @@ use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
 use cli::{Cli, Command, WorkspaceAction};
-use egret_bin::bootstrap::{admin_report, AdminPassword};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_bin::bootstrap::{admin_report, AdminPassword};
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
@@ -1716,7 +1716,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // would store a SECRET value is refused. Then the executions stored before
     // migration 0203 get their clear-text SECRET values masked (and sealed).
     if let Some(crypto) = secrets_crypto {
-        if egret_workflow::secret_inputs::install(crypto).is_err() {
+        if !egret_workflow::secret_inputs::install(crypto) {
             anyhow::bail!("the workflow SECRET-input cipher was installed twice");
         }
     }

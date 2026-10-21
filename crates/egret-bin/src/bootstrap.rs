@@ -39,9 +39,9 @@ pub fn admin_report(email: &str, password: &AdminPassword) -> String {
         AdminPassword::Supplied(_) => format!(
             "Bootstrap admin: {email}\nPassword: taken from EGRET_ADMIN_PASSWORD (not shown)"
         ),
-        AdminPassword::Generated(p) => format!(
-            "Bootstrap admin: {email}\nPassword: {p}\n(generated; shown only this once)"
-        ),
+        AdminPassword::Generated(p) => {
+            format!("Bootstrap admin: {email}\nPassword: {p}\n(generated; shown only this once)")
+        }
     }
 }
 

@@ -53,7 +53,10 @@ async fn init_never_prints_a_password_taken_from_the_environment() {
 
     let out = printed(&init(&url, &email(), Some(&supplied)));
 
-    assert!(!out.contains(&supplied), "the supplied password was printed: {out}");
+    assert!(
+        !out.contains(&supplied),
+        "the supplied password was printed: {out}"
+    );
     assert!(
         out.contains("taken from EGRET_ADMIN_PASSWORD"),
         "says where the password came from: {out}"

@@ -52,10 +52,10 @@ const NONCE_BYTES: usize = 12;
 
 static CIPHER: OnceLock<Crypto> = OnceLock::new();
 
-/// Process-wide, set once by egret-bin from `secrets.master_key`. A second
-/// call returns the cipher it was given back, and the first stays.
-pub fn install(cipher: Crypto) -> std::result::Result<(), Crypto> {
-    CIPHER.set(cipher)
+/// Process-wide, set once by egret-bin from `secrets.master_key`. `false`
+/// when one was already installed; the first stays.
+pub fn install(cipher: Crypto) -> bool {
+    CIPHER.set(cipher).is_ok()
 }
 
 /// Idempotent: a fixed test key. The first caller in a test binary installs it.

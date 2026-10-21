@@ -100,6 +100,17 @@ impl Fx {
 
     /// Run the real runtime until `exec` is in `state`.
     async fn run_until(&self, exec: Uuid, state: &str) {
+        self.run_until_row(
+            "SELECT state FROM workflow.executions WHERE id = $1",
+            exec,
+            state,
+        )
+        .await
+    }
+
+    /// Run the real runtime until the row `query` finds for `exec` is in
+    /// `state` (no row yet counts as not yet).
+    async fn run_until_row(&self, query: &'static str, exec: Uuid, state: &str) {
         let cancel = CancellationToken::new();
         let rt = spawn_with_logs(
             self.pool.clone(),
@@ -121,18 +132,17 @@ impl Fx {
         );
         let started = std::time::Instant::now();
         loop {
-            let now: String =
-                sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
-                    .bind(exec)
-                    .fetch_one(&self.pool)
-                    .await
-                    .unwrap();
-            if now == state {
+            let now: Option<String> = sqlx::query_scalar(query)
+                .bind(exec)
+                .fetch_optional(&self.pool)
+                .await
+                .unwrap();
+            if now.as_deref() == Some(state) {
                 break;
             }
             assert!(
                 started.elapsed() < Duration::from_secs(20),
-                "timed out: execution {exec} is {now}, waiting for {state}"
+                "timed out: {now:?} for {exec}, waiting for {state}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -169,13 +179,12 @@ impl Fx {
 
     /// The stored row, as text: nothing a backup or a SELECT shows may hold it.
     async fn assert_row_holds_no_plaintext(&self, exec: Uuid) {
-        let (inputs, sealed): (Value, Option<Vec<u8>>) = sqlx::query_as(
-            "SELECT inputs, secret_inputs FROM workflow.executions WHERE id = $1",
-        )
-        .bind(exec)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap();
+        let (inputs, sealed): (Value, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT inputs, secret_inputs FROM workflow.executions WHERE id = $1")
+                .bind(exec)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
         assert_eq!(inputs["pw"], MASK, "inputs holds the mask: {inputs}");
         let sealed = sealed.expect("the secret is sealed beside the row");
         assert!(
@@ -225,7 +234,8 @@ async fn a_secret_input_is_masked_in_every_read_and_the_run_sees_the_real_value(
     assert_masked("the list", &f.get("/workflows/executions").await);
     assert_masked(
         "the flow's list",
-        &f.get(&format!("/workflows/executions?flow_id={flow}")).await,
+        &f.get(&format!("/workflows/executions?flow_id={flow}"))
+            .await,
     );
     assert_masked(
         "the graph",
@@ -305,7 +315,9 @@ async fn a_resumed_execution_still_sees_the_secret(pool: sqlx::PgPool) {
 async fn a_loop_iteration_and_a_retry_replacement_see_the_secret(pool: sqlx::PgPool) {
     // Arrange
     let f = fx(pool).await;
-    let body = LOG_TASK.replace("\n    ", "\n        ").replace("  - id", "      - id");
+    let body = LOG_TASK
+        .replace("\n    ", "\n        ")
+        .replace("  - id", "      - id");
     let tasks = format!(
         "  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks:\n{body}\
          \x20 - id: boom\n    type: io.kestra.plugin.core.execution.Fail\n    \
@@ -316,8 +328,15 @@ async fn a_loop_iteration_and_a_retry_replacement_see_the_secret(pool: sqlx::PgP
 
     // Act
     let (exec, _) = f.start(flow, json!({"pw": PLAIN, "who": "world"})).await;
-    // A `CREATE_NEW_EXECUTION` retry ends the original `RETRIED`.
-    f.run_until(exec, "RETRIED").await;
+    // A `CREATE_NEW_EXECUTION` retry ends the original `RETRIED` and starts
+    // the replacement after its interval; the replacement fails again.
+    f.run_until_row(
+        "SELECT state FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
+        exec,
+        "FAILED",
+    )
+    .await;
     let replacement: Uuid = sqlx::query_scalar(
         "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
     )
@@ -325,7 +344,14 @@ async fn a_loop_iteration_and_a_retry_replacement_see_the_secret(pool: sqlx::PgP
     .fetch_one(&f.pool)
     .await
     .expect("the retry made a replacement");
-    f.run_until(replacement, "FAILED").await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM workflow.executions WHERE id = $1")
+            .bind(exec)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        "RETRIED"
+    );
 
     // Assert
     let iteration: Uuid = sqlx::query_scalar(
@@ -420,8 +446,7 @@ async fn the_backfill_masks_and_seals_a_secret_stored_in_clear(pool: sqlx::PgPoo
             .await
             .unwrap();
     assert_eq!(inputs, json!({"pw": MASK, "who": "world"}));
-    let (revealed, _) =
-        egret_workflow::secret_inputs::reveal(inputs, sealed.as_deref()).unwrap();
+    let (revealed, _) = egret_workflow::secret_inputs::reveal(inputs, sealed.as_deref()).unwrap();
     assert_eq!(revealed, json!({"pw": PLAIN, "who": "world"}));
     assert_masked(
         "the old execution's detail",

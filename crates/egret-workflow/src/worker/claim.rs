@@ -1497,9 +1497,9 @@ async fn run_one(
     };
     // KI-112: the stored message (`task_runs.message`) is masked as the log is.
     let outcome = outcome.map(|o| Outcome {
-        message: o.message.map(|m| {
-            crate::logs::mask(&m, input.render.redactions()).into_owned()
-        }),
+        message: o
+            .message
+            .map(|m| crate::logs::mask(&m, input.render.redactions()).into_owned()),
         ..o
     });
     if let Ok(Outcome {

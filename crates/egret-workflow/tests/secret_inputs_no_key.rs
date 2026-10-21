@@ -9,9 +9,7 @@ use egret_metastore::Db;
 use serde_json::json;
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_secret_value_without_a_master_key_is_refused_and_nothing_is_stored(
-    pool: sqlx::PgPool,
-) {
+async fn a_secret_value_without_a_master_key_is_refused_and_nothing_is_stored(pool: sqlx::PgPool) {
     // Arrange
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
