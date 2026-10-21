@@ -6,24 +6,25 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { EffectCatalog } from './effectCatalog';
+import type { EffectKind } from './effectKind';
 import type { ExistingMask } from './existingMask';
+import type { NotEnforced } from './notEnforced';
 
 /**
  * The rule's effect: reach, enforcement, exemptions and overlapping masks.
  */
 export interface RuleEffect {
-  /** `mask` or `row_filter`. */
-  kind: string;
+  kind: EffectKind;
   /** Every registry catalog the rule reaches, by name. */
   catalogs: EffectCatalog[];
   /**
-     * Distinct tables reached; `None` when a path level is a pattern (or absent).
+     * Distinct tables reached; `null` when a path level is a pattern (or absent).
      * @minimum 0
      * @nullable
      */
   tableCount?: number | null;
   /**
-     * Masks only; `None` for a pattern, for "every column" (a path mask
+     * Masks only; `null` for a pattern, for "every column" (a path mask
      * without a column, or a tag on a whole table) and for row filters.
      * @minimum 0
      * @nullable
@@ -34,6 +35,7 @@ export interface RuleEffect {
      * @minimum 0
      */
   enforcedBy: number;
+  notEnforced?: null | NotEnforced;
   /**
      * Distinct users in `exempt.include`, groups, roles and workspaces expanded.
      * @minimum 0
@@ -43,4 +45,9 @@ export interface RuleEffect {
   exemptEveryone: boolean;
   /** Other mask rules that reach a column this rule reaches (at most 20). */
   alreadyMasked: ExistingMask[];
+  /**
+     * `alreadyMasked` may be incomplete: a cap cut the columns examined
+     * (50), the classifications read (1000) or the entries listed (20).
+     */
+  truncated: boolean;
 }

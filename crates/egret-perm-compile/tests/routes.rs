@@ -8126,6 +8126,8 @@ async fn a_tag_mask_preview_states_its_reach_and_its_engines() {
         "{e}"
     );
     assert_eq!(e["enforcedBy"], 1, "{e}");
+    assert!(e["notEnforced"].is_null(), "{e}");
+    assert_eq!(e["truncated"], false, "{e}");
     let cat = &e["catalogs"][0];
     assert_eq!(cat["catalogId"], f.catalog_id.to_string());
     assert!(cat["notEnforced"].is_null(), "{cat}");
@@ -8147,6 +8149,7 @@ async fn a_path_mask_on_a_catalog_without_an_engine_is_not_enforced() {
     let e = &body["effect"];
     assert_eq!(e["enforcedBy"], 0, "{e}");
     assert_eq!(e["catalogs"][0]["notEnforced"], "no_engine", "{e}");
+    assert_eq!(e["notEnforced"], "no_engine", "{e}");
     assert_eq!(
         (e["tableCount"].as_u64(), e["columnCount"].as_u64()),
         (Some(1), Some(1))
@@ -8331,6 +8334,7 @@ async fn already_masked_lists_at_most_twenty() {
         20,
         "{body}"
     );
+    assert_eq!(body["effect"]["truncated"], true, "{body}");
 }
 
 /// Bounds: a tag's reach is COUNTED in SQL, not truncated by the cap on the
@@ -8383,6 +8387,8 @@ async fn a_tag_on_more_columns_than_the_scan_cap_is_still_counted_exactly() {
         (Some(30), Some(60)),
         "{e}"
     );
+    // Sixty columns, fifty examined: the overlap answer says it may be partial.
+    assert_eq!(e["truncated"], true, "{e}");
     assert_eq!(e["catalogs"][0]["notEnforced"], "no_engine", "{e}");
 }
 
@@ -8407,4 +8413,259 @@ async fn a_grant_preview_has_no_effect_block() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.get("effect").is_none_or(|e| e.is_null()), "{body}");
+}
+
+// --- Review round 1: tag-name overlap (spec C6), whole-table and pattern
+// columns, `truncated`, `no_assignment`.
+
+/// Stores a rule over HTTP and returns its id.
+async fn store_rule(f: &Fixture, token: &str, rule: Value) -> String {
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", token, Some(rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created["id"].as_str().unwrap().to_string()
+}
+
+/// A classification `(key, name)` with the given name, assigned nowhere yet.
+async fn classification_named(f: &Fixture, name: &str) -> (String, Uuid) {
+    let key = unique("effkey");
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(&key)
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    (key, id)
+}
+
+async fn warehouse_of(f: &Fixture, catalog_id: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap()
+}
+
+/// Assigns `tag_id` to `s.<table>.<column>` (`""` = the whole table).
+async fn assign(f: &Fixture, tag_id: Uuid, wh: Uuid, table: &str, column: &str) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'s',$3,$4)",
+    )
+    .bind(tag_id)
+    .bind(wh)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+fn hit_ids(body: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = body["effect"]["alreadyMasked"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no alreadyMasked: {body}"))
+        .iter()
+        .map(|h| h["ruleId"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Spec C6's own scenario, on a catalog no engine serves: a path mask on a
+/// column that a TAG mask already reaches names the tag rule. Controls: a
+/// classification whose name differs only in case is not the same
+/// classification (engines match tag names case-sensitively), and a
+/// classification on the whole TABLE reaches every column of it.
+#[tokio::test]
+async fn a_path_mask_on_a_column_a_tag_mask_reaches_names_the_tag_rule() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-c6").await;
+    let wh = warehouse_of(&f, orphan).await;
+
+    let name = unique("EffCls");
+    let (key_a, tag_a) = classification_named(&f, &name).await;
+    let (key_b, tag_b) = classification_named(&f, &name.to_lowercase()).await;
+    let (key_c, tag_c) = classification_named(&f, &unique("EffWhole")).await;
+    let none = json!([]);
+    let tag_sel = |k: &str| json!({"type": "tag", "key": k});
+    // Stored before any table-level assignment exists (a tag mask over one is refused).
+    let mask_a = store_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6-a", tag_sel(&key_a), none.clone()),
+    )
+    .await;
+    let mask_b = store_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6-b", tag_sel(&key_b), none.clone()),
+    )
+    .await;
+    let mask_c = store_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6-c", tag_sel(&key_c), none.clone()),
+    )
+    .await;
+    assign(&f, tag_a, wh, "t", "email").await;
+    assign(&f, tag_b, wh, "t", "phone").await;
+    assign(&f, tag_c, wh, "t2", "").await;
+
+    let path = |table: &str, column: &str| json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": table, "column": column});
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6-p", path("t", "email"), none.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        hit_ids(&body),
+        vec![mask_a.clone()],
+        "only the tag rule on `email`, not its lower-case twin: {body}"
+    );
+    assert_ne!(mask_a, mask_b);
+    let hit = &body["effect"]["alreadyMasked"][0];
+    assert!(
+        hit["coordinate"].as_str().unwrap().ends_with(".s.t.email"),
+        "{hit}"
+    );
+
+    // The table-level classification reaches `t2.email`.
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6-q", path("t2", "email"), none.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), vec![mask_c], "{body}");
+}
+
+/// The reverse of C6: a TAG mask previewed against a stored PATH mask on a
+/// column the classification sits on.
+#[tokio::test]
+async fn a_tag_mask_on_a_column_a_path_mask_reaches_names_the_path_rule() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-c6r").await;
+    let wh = warehouse_of(&f, orphan).await;
+    let (key, tag) = classification_named(&f, &unique("EffRev")).await;
+    assign(&f, tag, wh, "t", "email").await;
+    let stored = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "eff-c6r-p",
+            json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"}),
+            json!([]),
+        ),
+    )
+    .await;
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule("eff-c6r-t", json!({"type": "tag", "key": key}), json!([])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), vec![stored], "{body}");
+}
+
+/// A literal table with no column, or a column pattern, still finds the masks
+/// already on that table's columns — path masks and tag masks — and nothing
+/// on another table.
+#[tokio::test]
+async fn a_whole_table_or_pattern_mask_finds_the_masks_on_its_columns() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-wt").await;
+    let wh = warehouse_of(&f, orphan).await;
+    let none = json!([]);
+    let column_mask = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "eff-wt-col",
+            json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "email"}),
+            none.clone(),
+        ),
+    )
+    .await;
+    let (key, tag) = classification_named(&f, &unique("EffWt")).await;
+    let tag_mask = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "eff-wt-tag",
+            json!({"type": "tag", "key": key}),
+            none.clone(),
+        ),
+    )
+    .await;
+    assign(&f, tag, wh, "t", "phone").await;
+
+    let mut both = vec![column_mask.clone(), tag_mask.clone()];
+    both.sort();
+
+    // The whole table: both.
+    let whole = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-wt-whole", whole, none.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), both, "{body}");
+
+    // `e*` meets `email` but not the classification on `phone`.
+    let pattern =
+        json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "e*"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-wt-pat", pattern, none.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), vec![column_mask], "{body}");
+
+    // `p*` meets the classification on `phone` only.
+    let pattern =
+        json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "t", "column": "p*"});
+    let (status, body) =
+        preview_rule(&f, &token, mask_rule("eff-wt-pat2", pattern, none.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), vec![tag_mask], "{body}");
+
+    // Another table: nothing.
+    let other = json!({"type": "path", "catalog_id": orphan, "schema": "s", "table": "other"});
+    let (status, body) = preview_rule(&f, &token, mask_rule("eff-wt-other", other, none)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["effect"]["alreadyMasked"], json!([]), "{body}");
+}
+
+/// A classification assigned nowhere reaches nothing, and says so.
+#[tokio::test]
+async fn a_tag_assigned_nowhere_is_not_enforced_for_no_assignment() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (key, _) = classification_named(&f, &unique("EffNowhere")).await;
+    let (status, body) = preview_rule(
+        &f,
+        &token,
+        mask_rule("eff-nowhere", json!({"type": "tag", "key": key}), json!([])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e = &body["effect"];
+    assert_eq!(e["notEnforced"], "no_assignment", "{e}");
+    assert_eq!(e["catalogs"], json!([]), "{e}");
+    assert_eq!(e["enforcedBy"], 0, "{e}");
+    assert_eq!(e["tableCount"], 0, "{e}");
+    assert_eq!(e["truncated"], false, "{e}");
 }

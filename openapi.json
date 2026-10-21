@@ -42599,11 +42599,15 @@
             "description": "Attached engines bound to a policy profile, by name."
           },
           "notEnforced": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`no_engine` (nothing attached) or `no_profile` (engines attached, none\nbound to a profile); absent when some engine enforces the rule."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule here; otherwise `no_engine`\n(nothing attached) or `no_profile` (engines attached, none bound)."
+              }
+            ]
           }
         }
       },
@@ -42628,6 +42632,14 @@
             "description": "`trino` | `starrocks` | …."
           }
         }
+      },
+      "EffectKind": {
+        "type": "string",
+        "description": "`mask` or `row_filter`.",
+        "enum": [
+          "mask",
+          "row_filter"
+        ]
       },
       "EffectiveAccess": {
         "type": "object",
@@ -43828,7 +43840,7 @@
           },
           "coordinate": {
             "type": "string",
-            "description": "`catalog.schema.table.column`."
+            "description": "`catalog.schema.table.column`; the column is the pattern, or `*`, when\nthe overlap is on a pattern or a whole table."
           },
           "exempt": {
             "$ref": "#/components/schemas/PrincipalSet"
@@ -47676,6 +47688,15 @@
           "catalog_not_in_profile"
         ]
       },
+      "NotEnforced": {
+        "type": "string",
+        "description": "Why no query is affected by the rule yet.",
+        "enum": [
+          "no_assignment",
+          "no_engine",
+          "no_profile"
+        ]
+      },
       "NotEvaluatedReason": {
         "type": "string",
         "description": "Why a member was not evaluated.",
@@ -50996,12 +51017,12 @@
           "enforcedBy",
           "exemptMembers",
           "exemptEveryone",
-          "alreadyMasked"
+          "alreadyMasked",
+          "truncated"
         ],
         "properties": {
           "kind": {
-            "type": "string",
-            "description": "`mask` or `row_filter`."
+            "$ref": "#/components/schemas/EffectKind"
           },
           "catalogs": {
             "type": "array",
@@ -51016,7 +51037,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Distinct tables reached; `None` when a path level is a pattern (or absent).",
+            "description": "Distinct tables reached; `null` when a path level is a pattern (or absent).",
             "minimum": 0
           },
           "columnCount": {
@@ -51025,7 +51046,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Masks only; `None` for a pattern, for \"every column\" (a path mask\nwithout a column, or a tag on a whole table) and for row filters.",
+            "description": "Masks only; `null` for a pattern, for \"every column\" (a path mask\nwithout a column, or a tag on a whole table) and for row filters.",
             "minimum": 0
           },
           "enforcedBy": {
@@ -51033,6 +51054,17 @@
             "format": "int32",
             "description": "Distinct engines, bound to a profile, attached to a reached catalog.",
             "minimum": 0
+          },
+          "notEnforced": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule (`enforcedBy > 0`); otherwise\nwhy not: `no_assignment` (nothing reached), `no_profile` (some reached\ncatalog has engines, none bound) or `no_engine`."
+              }
+            ]
           },
           "exemptMembers": {
             "type": "integer",
@@ -51050,6 +51082,10 @@
               "$ref": "#/components/schemas/ExistingMask"
             },
             "description": "Other mask rules that reach a column this rule reaches (at most 20)."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`alreadyMasked` may be incomplete: a cap cut the columns examined\n(50), the classifications read (1000) or the entries listed (20)."
           }
         }
       },

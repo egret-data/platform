@@ -287,6 +287,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::EffectCatalog,
         crate::effect::EffectEngine,
         crate::effect::ExistingMask,
+        crate::effect::EffectKind,
+        crate::effect::NotEnforced,
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,

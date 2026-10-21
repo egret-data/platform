@@ -294,15 +294,18 @@ RuleEffect {
   tableCount: number | null,     // null when a path level is a pattern
   columnCount: number | null,    // masks only; null for a pattern or a row filter
   enforcedBy: number,            // distinct engines across catalogs
+  notEnforced: null | "no_assignment" | "no_engine" | "no_profile",   // the rule as a whole; null when enforcedBy > 0
   exemptMembers: number,         // distinct users in exempt.include (groups, roles, workspaces expanded; `public` counts as 0 and sets exemptEveryone)
   exemptEveryone: boolean,
   alreadyMasked: [ { ruleId, ruleName, maskType, coordinate, exempt: PrincipalSet } ]   // C6, masks only, ≤ 20
+  truncated: boolean,            // alreadyMasked may be incomplete: a cap cut it (50 columns examined, 1000 classifications read, 20 entries)
 }
 ```
 
 - **Tag rule reach.** The `catalog_tag_assignments` rows of the classification's key, joined to `registry.catalogs` on `warehouse_id`. Rows whose warehouse no catalog names are ignored here; Where used already counts them as `orphaned`.
 - **Path rule reach.** The scope's catalog. `tableCount` is 1 when `schema` and `table` are named without glob characters (`*`, `?`), else `null`. `columnCount` follows the same rule for `column`. An absent column on a mask means "every column": `columnCount` is `null`, and the UI says "every column of <table>" (see C8).
-- **`notEnforced`.** `"no_engine"` when the catalog has no engine attachment. `"no_profile"` when engines are attached but none is bound to a profile.
+- **`notEnforced`.** Per catalog: `"no_engine"` when the catalog has no engine attachment, `"no_profile"` when engines are attached but none is bound to a profile, `null` when some engine enforces the rule there. On the rule as a whole: `"no_assignment"` when the rule reaches no catalog (a classification assigned nowhere a registry catalog fronts), else `null` when `enforcedBy > 0`, else `"no_profile"` when any reached catalog has that reason, else `"no_engine"`.
+- **`alreadyMasked` reach.** An exact column, a column pattern and a whole table (a path mask without a column, on a literal table) are all checked. Against stored path masks the levels must match; two column patterns count as overlapping when either matches the other. Against stored tag masks, the classifications assigned to the reached columns, and to the whole table, are matched by name, case-sensitively. A tag rule checks its first 50 columns; `truncated` says when any cap applied.
 
 **New, frontend.**
 

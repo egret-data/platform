@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { EffectEngine } from './effectEngine';
+import type { NotEnforced } from './notEnforced';
 
 /**
  * One catalog a rule reaches, and who enforces it there.
@@ -15,10 +16,5 @@ export interface EffectCatalog {
   catalogName: string;
   /** Attached engines bound to a policy profile, by name. */
   engines: EffectEngine[];
-  /**
-     * `no_engine` (nothing attached) or `no_profile` (engines attached, none
-     * bound to a profile); absent when some engine enforces the rule.
-     * @nullable
-     */
-  notEnforced?: string | null;
+  notEnforced?: null | NotEnforced;
 }

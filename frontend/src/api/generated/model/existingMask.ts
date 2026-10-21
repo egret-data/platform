@@ -14,7 +14,10 @@ export interface ExistingMask {
   ruleId: string;
   ruleName: string;
   maskType: string;
-  /** `catalog.schema.table.column`. */
+  /**
+     * `catalog.schema.table.column`; the column is the pattern, or `*`, when
+     * the overlap is on a pattern or a whole table.
+     */
   coordinate: string;
   exempt: PrincipalSet;
 }
