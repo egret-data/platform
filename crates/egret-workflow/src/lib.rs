@@ -92,6 +92,9 @@ pub mod scripts;
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.
 pub mod sla;
+/// KI-112: `type: SECRET` inputs, masked in the row and sealed beside it.
+/// `pub` because `egret-bin` installs the cipher and runs the backfill.
+pub mod secret_inputs;
 pub mod spec;
 /// W9a: internal storage -- `kestra://` URIs, the file index, the ONE
 /// readability decision (`storage::resolve_readable_many`) and the

@@ -99,6 +99,9 @@ pub(super) struct Surface {
     parsed: Option<Flow>,
     /// `inputs`, already merged with the flow's declared defaults.
     inputs: Value,
+    /// The values of the execution's SECRET inputs (KI-112), which every log
+    /// line and failure message of its runs is masked with.
+    secrets: Vec<String>,
     /// `vars`.
     vars: Value,
     /// `flow`.
@@ -177,7 +180,8 @@ impl Surface {
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables \
+                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables, \
+                    secret_inputs \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -186,7 +190,11 @@ impl Surface {
         .map_err(db_err)?;
 
         let flow = crate::spec::parse(&ctx.source).ok();
-        let posted: Value = row.get("inputs");
+        // KI-112: the one reader that opens the sealed SECRET values.
+        let (posted, secrets) = crate::secret_inputs::reveal(
+            row.get("inputs"),
+            row.get::<Option<Vec<u8>>, _>("secret_inputs").as_deref(),
+        )?;
         let inputs = with_declared_defaults(posted, flow.as_ref());
         // Group C2 (spec §3.2): the execution's own variables first, the flow's as
         // the fallback -- Kestra's `RunVariables` rule (`RunVariables.java:541-550`).
@@ -541,6 +549,7 @@ impl Surface {
         Ok(Surface {
             parsed: flow,
             inputs,
+            secrets,
             vars,
             flow: flow_value,
             labels,
@@ -712,6 +721,7 @@ impl Surface {
     ) -> RenderContext {
         let mut cx = RenderContext::new();
         cx.insert("inputs", self.inputs.clone());
+        cx.redact(&self.secrets);
         cx.insert("vars", self.vars.clone());
         cx.insert("flow", self.flow.clone());
         cx.insert("labels", self.labels.clone());
@@ -1090,6 +1100,7 @@ mod tests {
             // reads the flow.
             parsed: None,
             inputs: json!({}),
+            secrets: Vec::new(),
             vars: Value::Null,
             flow: Value::Null,
             labels: json!({}),
@@ -1132,6 +1143,7 @@ mod tests {
         Surface {
             parsed: None,
             inputs: json!({}),
+            secrets: Vec::new(),
             vars: Value::Null,
             flow: Value::Null,
             labels: json!({}),

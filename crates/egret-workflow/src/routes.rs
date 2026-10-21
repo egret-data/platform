@@ -2936,6 +2936,12 @@ async fn replay_execution(
             source.execution.state
         )));
     }
+    // KI-112: the replay runs with the stored SECRET values, not the mask the
+    // row shows; the start masks and seals them again for the new row.
+    let (inputs, _) = crate::secret_inputs::reveal(
+        source.execution.inputs.clone(),
+        source.secret_inputs.as_deref(),
+    )?;
     // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
     // needs a read is rolled back, the read fetched, and the start run again.
     let replacement = crate::worker::txn::transaction!(&st.db.pool, |at| {
@@ -2945,7 +2951,7 @@ async fn replay_execution(
                 workspace_id: ctx.workspace_id.0,
                 flow_id: source.execution.flow_id,
                 source: &source.source,
-                inputs: source.execution.inputs.clone(),
+                inputs: inputs.clone(),
                 trigger: None,
                 scheduled_date: None,
                 trigger_execution_id: None,

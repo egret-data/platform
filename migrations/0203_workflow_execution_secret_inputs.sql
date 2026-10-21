@@ -1,0 +1,12 @@
+-- KI-112: the values of an execution's `type: SECRET` inputs, sealed with
+-- AES-256-GCM under `secrets.master_key` (`egret_workflow::secret_inputs`):
+-- the 12-byte nonce followed by the ciphertext of one JSON object
+-- `{input id: value}`. `inputs` holds `******` for each of them. NULL when the
+-- execution has no SECRET value. No read of an execution selects this column;
+-- only the worker's render surface opens it.
+--
+-- Executions written before this migration keep their SECRET values in clear
+-- in `inputs`: SQL cannot tell which inputs a flow declares SECRET (that is in
+-- the YAML of `source`), so egret masks and seals them at startup instead
+-- (`egret_workflow::secret_inputs::backfill`).
+ALTER TABLE workflow.executions ADD COLUMN secret_inputs bytea;

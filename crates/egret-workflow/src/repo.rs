@@ -1086,6 +1086,11 @@ pub struct ExecutionDetail {
     /// copies it (D3); skipped by `Serialize`, so no response carries it.
     #[serde(skip)]
     pub variables: Option<serde_json::Value>,
+    /// The sealed SECRET input values (migration 0203, KI-112), which only
+    /// the replay route reads, to start the replay with them. Skipped by
+    /// `Serialize`, so no response carries even the ciphertext.
+    #[serde(skip)]
+    pub secret_inputs: Option<Vec<u8>>,
 }
 
 /// The one statement that needs `source` beside the shared projection.
@@ -1096,6 +1101,7 @@ struct ExecutionWithSource {
     execution: ExecutionRow,
     source: String,
     variables: Option<serde_json::Value>,
+    secret_inputs: Option<Vec<u8>>,
 }
 
 /// Filters for [`ExecutionRepo::list`]. Every field `None` lists the whole
@@ -1367,7 +1373,8 @@ impl ExecutionRepo {
         let row: Option<ExecutionWithSource> = sqlx::query_as(concat!(
             "SELECT ",
             execution_cols!(),
-            ", source, variables FROM workflow.executions WHERE id = $1 AND workspace_id = $2"
+            ", source, variables, secret_inputs \
+             FROM workflow.executions WHERE id = $1 AND workspace_id = $2"
         ))
         .bind(id)
         .bind(ws)
@@ -1384,6 +1391,7 @@ impl ExecutionRepo {
             source: row.source,
             runs,
             variables: row.variables,
+            secret_inputs: row.secret_inputs,
         })
     }
 

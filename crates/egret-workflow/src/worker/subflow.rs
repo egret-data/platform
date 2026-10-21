@@ -493,6 +493,14 @@ pub(super) async fn spawn_one(
             return Ok(fail_run(ctx, r.run, &format!("subflow inputs: {e}")));
         }
     };
+    // KI-112: the CHILD's declaration decides which of them are SECRET.
+    let (inputs, secret_inputs) = match crate::secret_inputs::split(&child, inputs) {
+        Ok(split) => split,
+        Err(Error::InvalidInput(e)) => {
+            return Ok(fail_run(ctx, r.run, &format!("subflow inputs: {e}")));
+        }
+        Err(e) => return Err(e),
+    };
 
     // **In a savepoint, because the FILE-input check needs the row and may
     // refuse it** (W9a spec §7.1). The readable set is walked FROM the child
@@ -505,9 +513,9 @@ pub(super) async fn spawn_one(
     let child_id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-                trigger_execution_id, trigger_run_ix, inputs, execution_depth, ",
+                trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, ",
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10, ",
         super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
         ") RETURNING id",
     ))
@@ -520,6 +528,7 @@ pub(super) async fn spawn_one(
     .bind(r.run as i32)
     .bind(&inputs)
     .bind(child_depth)
+    .bind(secret_inputs)
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;

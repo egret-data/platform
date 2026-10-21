@@ -179,7 +179,8 @@ pub(super) async fn spawn_due(
 
     let row = sqlx::query(
         "SELECT flow_id, namespace, flow_key, inputs, parent_run_ix, \
-                attempt_number, origin_offset_ms, execution_depth, labels, variables \
+                attempt_number, origin_offset_ms, execution_depth, labels, variables, \
+                secret_inputs \
            FROM workflow.executions WHERE id = $1",
     )
     .bind(ctx.id)
@@ -243,9 +244,9 @@ pub(super) async fn spawn_due(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 parent_execution_id, attempt_number, origin_offset_ms, inputs, \
-                execution_depth, labels, variables, ",
+                execution_depth, labels, variables, secret_inputs, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10,$11,$12, ",
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10,$11,$12,$13, ",
         super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
         ") RETURNING id",
     ))
@@ -277,6 +278,8 @@ pub(super) async fn spawn_due(
     .bind(row.get::<Option<Value>, _>("labels"))
     // D3: `Execution.childExecution` copies the variables like everything else.
     .bind(row.get::<Option<Value>, _>("variables"))
+    // KI-112: the sealed SECRET values travel with the masked `inputs`.
+    .bind(row.get::<Option<Vec<u8>>, _>("secret_inputs"))
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;

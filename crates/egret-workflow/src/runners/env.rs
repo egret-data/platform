@@ -334,6 +334,9 @@ pub enum RenderError {
 pub struct RenderContext {
     bindings: Vec<(String, MjValue)>,
     files: Option<FileScope>,
+    /// Values no line a run writes may carry (KI-112): its execution's SECRET
+    /// inputs. Not a binding; nothing renders them from here.
+    redactions: Vec<String>,
 }
 
 impl RenderContext {
@@ -371,6 +374,17 @@ impl RenderContext {
     /// The attached file scope, `None` where the four file functions refuse.
     pub fn files(&self) -> Option<&FileScope> {
         self.files.as_ref()
+    }
+
+    /// Adds values the run's log lines and failure message are masked with.
+    pub fn redact(&mut self, values: &[String]) -> &mut Self {
+        self.redactions.extend(values.iter().cloned());
+        self
+    }
+
+    /// The values [`Self::redact`] added.
+    pub fn redactions(&self) -> &[String] {
+        &self.redactions
     }
 
     /// A render against this context has ended: the file scope releases what
@@ -436,6 +450,7 @@ impl RenderContext {
         Self {
             bindings,
             files: None,
+            redactions: Vec::new(),
         }
     }
 
