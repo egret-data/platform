@@ -238,15 +238,18 @@ describe("RulePage: the way back", () => {
     serveRules([maskRule()]);
     vi.mocked(tagsApi.useTags).mockReturnValue({ data: [{ id: "t-pii", key: "pii_v2", name: "PII Data" }] } as never);
     renderAt("/governance/rules/r1?from=classification:t-pii", WRITER);
-    const back = await screen.findByRole("link", { name: "← PII Data" });
+    const back = await screen.findByRole("link", { name: "Back to PII Data" });
     expect(back).toHaveAttribute("href", "/governance/classifications/t-pii?tab=rules");
-    expect(screen.queryByRole("link", { name: "People & groups" })).not.toBeInTheDocument();
+    // The arrow is shown, not read out.
+    expect(back).toHaveTextContent("← PII Data");
+    expect(within(back).getByText("←")).toHaveAttribute("aria-hidden");
+    expect(screen.queryByRole("link", { name: /People & groups/ })).not.toBeInTheDocument();
   });
 
   test("without tag:read it says Classification and never asks for the tag list", () => {
     serveRules([maskRule()]);
     renderAt("/governance/rules/r1?from=classification:t-pii", READER);
-    expect(screen.getByRole("link", { name: "← Classification" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Back to Classification" })).toHaveAttribute(
       "href",
       "/governance/classifications/t-pii?tab=rules",
     );
@@ -257,7 +260,7 @@ describe("RulePage: the way back", () => {
     serveRules([maskRule()]);
     const from = encodeURIComponent("/governance/data/wh/sales/orders?tab=masks");
     renderAt(`/governance/rules/r1?from=data:${from}`, READER);
-    expect(screen.getByRole("link", { name: "← orders" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Back to orders" })).toHaveAttribute(
       "href",
       "/governance/data/wh/sales/orders?tab=masks",
     );
@@ -266,10 +269,21 @@ describe("RulePage: the way back", () => {
   test("a from outside the Data area, or none, goes back to People & groups", () => {
     serveRules([maskRule()]);
     const { unmount } = renderAt(`/governance/rules/r1?from=data:${encodeURIComponent("//evil.example/x")}`, READER);
-    expect(screen.getByRole("link", { name: "← People & groups" })).toHaveAttribute("href", "/governance/people");
+    expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
     unmount();
     renderPage("r1", READER);
-    expect(screen.getByRole("link", { name: "← People & groups" })).toHaveAttribute("href", "/governance/people");
+    expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
+  });
+
+  test.each([
+    ["an empty segment", "/governance/data/wh//orders"],
+    ["a .. segment", "/governance/data/wh/../../people"],
+    ["an encoded .. segment", "/governance/data/wh/%2E%2E/x"],
+    ["the Data root itself", "/governance/data/"],
+  ])("a Data from with %s goes back to People & groups", (_what, path) => {
+    serveRules([maskRule()]);
+    renderAt(`/governance/rules/r1?from=data:${encodeURIComponent(path)}`, READER);
+    expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 });
 

@@ -7,7 +7,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { TERM } from "@/routes/governance/glossary";
-import { formatRuleKind } from "@/routes/governance/permFormat";
+import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { Section, TabError } from "@/routes/governance/tabParts";
@@ -64,7 +64,9 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
                     {r.name}
                   </Link>
                 </TableCell>
-                <TableCell className="whitespace-normal break-words font-mono text-xs">{formatRuleKind(r)}</TableCell>
+                <TableCell className="whitespace-normal break-words text-sm">
+                  <RuleKindLabel rule={r} />
+                </TableCell>
                 <TableCell className="whitespace-normal text-sm">{reachText(r, tag)}</TableCell>
                 <TableCell className="whitespace-normal text-sm">
                   <PrincipalNames list={r.exempt.include} workspaceName={workspaceName} />

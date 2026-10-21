@@ -11,7 +11,8 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { OpenInDataLink, scopeToDataLink, useCatalogNameById, useWorkspaceNames } from "@/routes/governance/openInData";
-import { formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
+import { formatSelector } from "@/routes/governance/permFormat";
+import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
@@ -112,7 +113,9 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
       <RuleHeader title={r.name} actions={actions} />
       <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
         <Detail term={TERM.kind}>
-          <span className="break-words font-mono">{formatRuleKind(r)}</span>
+          <span className="break-words">
+            <RuleKindLabel rule={r} />
+          </span>
         </Detail>
         <Detail term={TERM.appliesTo}>
           <span className="break-all">{formatSelector(r)}</span>
@@ -167,7 +170,8 @@ function TagLink({ tagKey, subject }: { tagKey: string; subject: string }) {
  *   classification (`TagPage` lists rules with this, through `TagRulesSection`).
  * - `data:<url-encoded path>`: that Data-area page, named by its last path
  *   segment. Only a path inside the Data area is followed; anything else (an
- *   absolute URL, `//host`) falls back, so `from` cannot send the reader off egret.
+ *   absolute URL, `//host`, an empty or `..` segment) falls back, so `from`
+ *   cannot send the reader off egret or out of the Data area.
  * - Anything else, or none: People & groups (`ItemHeader`'s default).
  */
 type RuleFrom = { kind: "classification"; id: string } | { kind: "data"; back: ItemBack } | null;
@@ -186,8 +190,11 @@ function parseRuleFrom(from: string | null): RuleFrom {
       return null;
     }
     if (!to.startsWith(`${DATA_BASE}/`)) return null;
-    const segment = to.slice(DATA_BASE.length + 1).split(/[?#]/)[0].split("/").filter(Boolean).at(-1);
-    if (!segment) return null;
+    const segments = to.slice(DATA_BASE.length + 1).split(/[?#]/)[0].split("/");
+    // An empty, `.` or `..` segment (raw or encoded) is not a Data page; a router would resolve it elsewhere.
+    const dotty = (s: string) => /^(\.|%2e){1,2}$/i.test(s);
+    if (segments.some((s) => s === "" || dotty(s))) return null;
+    const segment = segments[segments.length - 1];
     let label = segment;
     try {
       label = decodeURIComponent(segment);

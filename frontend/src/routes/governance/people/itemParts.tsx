@@ -15,7 +15,8 @@ export type ItemBack = { to: string; label: string };
 const PEOPLE_BACK: ItemBack = { to: PEOPLE_BASE, label: "People & groups" };
 
 /**
- * The way back (`back`, else People & groups) as `← label`, the item's kind
+ * The way back (`back`, else People & groups) as `← label`, named "Back to
+ * <label>" for assistive technology (the arrow is hidden), the item's kind
  * above its title, and its actions.
  */
 export function ItemHeader({
@@ -31,8 +32,8 @@ export function ItemHeader({
 }) {
   return (
     <header className="space-y-2">
-      <Link to={back.to} className="text-sm text-muted-foreground hover:underline">
-        {`← ${back.label}`}
+      <Link to={back.to} aria-label={`Back to ${back.label}`} className="text-sm text-muted-foreground hover:underline">
+        <span aria-hidden>←</span> {back.label}
       </Link>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">

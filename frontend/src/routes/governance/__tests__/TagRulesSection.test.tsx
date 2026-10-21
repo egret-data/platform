@@ -98,6 +98,10 @@ describe("TagRulesSection", () => {
     expect(within(rows[1]).getByRole("link", { name: "auditor" })).toHaveAttribute("href", "/governance/people/roles/auditor");
     expect(rows[2]).toHaveTextContent("Classification pii_us, which has the same name");
     expect(rows[2]).toHaveTextContent("Row filter · region = 'eu'");
+    // The label is words; only the expression is code.
+    expect(within(rows[2]).getByText("region = 'eu'").tagName).toBe("CODE");
+    expect(within(rows[1]).queryByRole("code")).not.toBeInTheDocument();
+    expect(within(rows[1]).getAllByRole("cell")[1].className).not.toMatch(/font-mono/);
     expect(rows[0]).toHaveTextContent("Classification p, whose name “P*” matches this one's");
     expect(region()).not.toHaveTextContent("lowercase");
     expect(region()).not.toHaveTextContent("orphan");
