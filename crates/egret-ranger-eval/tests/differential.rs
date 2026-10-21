@@ -7925,9 +7925,12 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
     // matcher rejects it at `wh.sales.*` while the trie cannot omit it.
     let trie_pairs = {
         use prune_corpus::{envelope_json, item, level};
-        let at = |name: &str, schema: &str, table: &str, users: &[&str]| {
+        // Each policy needs its OWN id: Ranger 2.8.0/2.9.0 de-duplicate candidate
+        // evaluators by policy id, so policies sharing one id leave a survivor that
+        // depends on JVM identity hashes (and the verdict then varies run to run).
+        let at = |id: u64, name: &str, schema: &str, table: &str, users: &[&str]| {
             json!({
-                "id": 500, "name": name, "service": "trino-p", "policyType": 0,
+                "id": id, "name": name, "service": "trino-p", "policyType": 0,
                 "isEnabled": true, "policyPriority": 0,
                 "resources": {"catalog": level(&["wh"]), "schema": level(&[schema]),
                               "table": level(&[table]), "column": level(&["*"])},
@@ -7935,16 +7938,15 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
                 "denyPolicyItems": [], "allowExceptions": [], "denyExceptions": []
             })
         };
-        let mut excluding = at("not sales", "sales", "orders", &["alice"]);
+        let mut excluding = at(502, "not sales", "sales", "orders", &["alice"]);
         excluding["resources"]["schema"]["isExcludes"] = json!(true);
-        let other = at("hr", "hr", "people", &["carol"]);
-        // The same shape as a DENY: where the trie keeps an evaluator the matcher
-        // rejected, offset 553 reads `hasDeny()` alone, which a deny evaluator makes true.
-        let mut deny_excluding = at("deny not sales", "sales", "orders", &[]);
+        let other = at(500, "hr", "hr", "people", &["carol"]);
+        // The same shape as a DENY evaluator.
+        let mut deny_excluding = at(502, "deny not sales", "sales", "orders", &[]);
         deny_excluding["resources"]["schema"]["isExcludes"] = json!(true);
         deny_excluding["policyItems"] = json!([]);
         deny_excluding["denyPolicyItems"] = json!([item(&["alice"], &[], &["select"])]);
-        let allow_sales = at("allow sales", "sales", "orders", &["alice"]);
+        let allow_sales = at(501, "allow sales", "sales", "orders", &["alice"]);
         let pair = |label: &str, base: Vec<Value>, changed: Value| {
             let mut after = base.clone();
             after.push(changed);
@@ -8079,17 +8081,13 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
                         !at_sales.is_empty(),
                         "the trie false positive kept no probe at schema=sales"
                     );
-                    // Measured on both jars: with a DENY evaluator the trie keeps and
-                    // the matcher rejects, the real engine does decide kept probes at
-                    // schema=sales differently, so the retention is load-bearing, not
-                    // caution. (The allow variant shows none, and is not asserted.)
-                    if pair.label.ends_with("(deny)") {
-                        assert!(
-                            differing > 0,
-                            "{version}: the real engine decides no kept probe at schema=sales \
-                             differently, so the trie false positive is not shown to matter"
-                        );
-                    }
+                    // No "the retention is load-bearing" assertion: an earlier version
+                    // asserted that a DENY evaluator makes kept probes at schema=sales
+                    // differ, but that only held when the fixture's policies shared one
+                    // id (Ranger then kept an arbitrary one of them, by JVM hash order).
+                    // With distinct ids, measured on 2.8.0 and 2.9.0 under several hash
+                    // modes, no kept probe at schema=sales differs in either variant,
+                    // so the retention is caution, not proven necessary.
                 }
             }
         }
