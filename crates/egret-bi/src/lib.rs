@@ -23,9 +23,12 @@ pub use chart::{Chart, ChartRepo};
 pub use dashboard::{
     Dashboard, DashboardCard, DashboardRepo, DashboardRevision, DashboardTab, NewCard, NewTab,
 };
-pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
+pub use dataset::{
+    Dataset, DatasetColumn, DatasetRepo, DatasetUsage, Metric, NewColumn, RefreshChanges,
+    SourceSpec,
+};
 pub use error::{BiApiError, BiError};
-pub use expr::{validate_expression, DescribedExpr};
+pub use expr::{validate_expression, validate_metric_expression, DescribedExpr};
 pub use routes::{
     chart_router, compile_chart_sql, conn_spec_granted, dashboard_router, dataset_router,
     folder_router, resolve_delegation, sqllab_router, BiState,

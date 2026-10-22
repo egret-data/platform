@@ -32,6 +32,7 @@ vi.mock("@/api/charts", async (orig) => ({
     created_by: null, updated_at: "" }] }),
 }));
 vi.mock("@/api/datasets", () => ({
+  useDatasetsFilterOff: () => new Map(),
   useDataset: (_ws: string, id: string | null) => ({
     data: id
       ? { columns: [{ column_name: "region", data_type: "varchar" }, { column_name: "revenue", data_type: "double" }] }

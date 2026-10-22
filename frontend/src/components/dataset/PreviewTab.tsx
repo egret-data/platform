@@ -4,8 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
-import type { ColumnFormat } from "@/components/chart/format-types";
-import { parseFormat } from "@/components/dataset/FormatPicker";
+import { datasetColumnDefaults } from "@/components/dataset/columnDefaults";
 import type { DatasetColumn } from "@/api/datasets";
 import { datasetsDsData } from "@/api/generated/datasets/datasets";
 
@@ -42,23 +41,10 @@ export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
     refetchOnWindowFocus: false,
   });
 
-  // Apply each column's semantic-layer format (a ColumnFormat) to the preview,
-  // so setting e.g. Currency on a column is visible here, not just stored.
-  const columnSettings = useMemo(() => {
-    const m: Record<string, ColumnFormat> = {};
-    for (const c of columns) {
-      const cf: ColumnFormat = { ...parseFormat(c.format) };
-      // Semantic type gives a default rendering when the column has no explicit format.
-      if (!cf.view_as) {
-        if (c.semantic_type === "email") cf.view_as = "email";
-        else if (c.semantic_type === "url") cf.view_as = "link";
-        else if (c.semantic_type === "image") cf.view_as = "image";
-      }
-      if (c.semantic_type === "currency" && !cf.number_style) { cf.number_style = "currency"; cf.currency = cf.currency ?? "USD"; }
-      if (Object.keys(cf).length) m[c.column_name] = cf;
-    }
-    return m;
-  }, [columns]);
+  // Apply each column's semantic layer to the preview: its format (setting e.g. Currency on a
+  // column is visible here, not just stored) and its display name as the header (KI-103). The
+  // rows stay keyed by the column name.
+  const columnSettings = useMemo(() => datasetColumnDefaults(columns), [columns]);
 
   function refresh() {
     preview.refetch();

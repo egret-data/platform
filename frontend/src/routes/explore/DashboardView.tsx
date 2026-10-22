@@ -6,7 +6,8 @@ import { type LayoutItem } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, useDashboardRevisions, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
-import { useDataset } from "@/api/datasets";
+import { useDataset, useDatasetsFilterOff } from "@/api/datasets";
+import { filterableColumns } from "@/components/dataset/pickableColumns";
 import { columnLabels } from "@/components/chart/config/field-names";
 import { useFolders } from "@/api/folders";
 import { useAuth } from "@/auth/useAuth";
@@ -176,6 +177,17 @@ export default function DashboardView() {
     () => columnLabels(panelDataset.data?.columns ?? []),
     [panelDataset.data],
   );
+
+  // A dashboard filter maps only onto card columns whose dataset has Filter ON (KI-096). Loaded
+  // only while a filter's mapping is being edited, since that is the only reader.
+  const filterOffByDataset = useDatasetsFilterOff(
+    ws,
+    (dash?.cards ?? []).map((c) => chartById.get(c.chart_id ?? "")?.dataset_id).filter((x): x is string => !!x),
+    editing && editPanel?.kind === "filter",
+  );
+  /** `columnsForParam` for one chart, without the columns its dataset marks not filterable. */
+  const mappableColumns = (chart: Chart, paramType: DashboardParameter["type"], current?: string | null) =>
+    filterableColumns(columnsForParam(chart.params.spec, paramType), filterOffByDataset.get(chart.dataset_id), current);
 
   // The value-source picker names a card first, then one of ITS columns — so the labels follow
   // the card the user picked, not the card whose settings are open.
@@ -499,7 +511,7 @@ export default function DashboardView() {
     const paramType = parameters.find((p) => p.id === paramId)?.type ?? "text";
     const columnsOf = (cardId: string) => {
       const chart = chartById.get((cards as DraftCard[]).find((x) => x.id === cardId)?.chart_id ?? "");
-      return chart ? columnsForParam(chart.params.spec, paramType) : [];
+      return chart ? mappableColumns(chart, paramType) : [];
     };
     const targets = findAutoConnectTargets({
       cards: cards as DraftCard[], columnsOf, paramId, column, sourceCardId,
@@ -890,7 +902,7 @@ export default function DashboardView() {
                       // One column rule for the whole dashboard: the overlay and auto-connect both
                       // call this, so a card can never offer a column that auto-connect would not
                       // also match.
-                      columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
+                      columns: baseChart ? mappableColumns(baseChart, activeParam.type, mappings[activeParamId]) : [],
                       rows: c.size_y,
                       chartMissing: c.card_type === "chart" && !baseChart,
                       // W2 BUILT THIS BRANCH AND LEFT IT INERT; THIS IS THE LINE THAT TURNS IT ON.

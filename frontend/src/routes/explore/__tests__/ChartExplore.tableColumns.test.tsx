@@ -154,7 +154,10 @@ async function mountTable(id = "c-raw-table") {
   );
 }
 
-/** The headers the rendered table actually draws, in draw order. */
+/**
+ * The headers the rendered table actually draws, in draw order. `id` draws as "Mã": a table header
+ * reads the dataset's Display name (KI-103), while every stored list keeps keying on `id`.
+ */
 const drawnHeaders = () =>
   screen.queryAllByRole("columnheader").map((th) => th.textContent?.replace(/[ ▲▼]+$/, "") ?? "");
 
@@ -215,11 +218,11 @@ describe("a column put back into the query is drawn again", () => {
   it("does not keep a stale hidden flag across a column leaving and re-entering the result", async () => {
     await mountTable();
     // Auto-run is debounced (`useAutoRun`, 500ms), so the first result lands a beat after mount.
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor"]), { timeout: 3000 });
 
     // ── step 1: hide `vendor` in Display ▸ Visible columns
     await userEvent.click(eye("vendor"));
-    expect(drawnHeaders()).toEqual(["id", "state"]);
+    expect(drawnHeaders()).toEqual(["Mã", "state"]);
 
     // ── step 2: drop `vendor` from the query, through Display's field picker
     await toggleQueryColumn("vendor");
@@ -230,13 +233,13 @@ describe("a column put back into the query is drawn again", () => {
     // then measures a column that never left. The Visible-columns list is built from the RESULT,
     // so `vendor` dropping out of it is the signal that the new query came back without it.
     await waitFor(() => expect(noEye("vendor")).not.toBeInTheDocument(), { timeout: 3000 });
-    expect(drawnHeaders()).toEqual(["id", "state"]);
+    expect(drawnHeaders()).toEqual(["Mã", "state"]);
 
     // ── step 3: put `vendor` back into the query
     await toggleQueryColumn("vendor");
     expect(dataColumn("vendor")).toBeChecked();
     await closePicker();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor"]), { timeout: 3000 });
 
     // …and the Columns tab agrees, rather than showing it as still hidden.
     await tab("Data");
@@ -265,10 +268,10 @@ describe("a column put back into the query is drawn again", () => {
   it("keeps a hidden flag for a renamed column that never left the result", async () => {
     await mountTable("c-renamed");
     // The header, like the panel row, shows the rename; the column is still `vendor` underneath.
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "Supplier"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "Supplier"]), { timeout: 3000 });
 
     await userEvent.click(eye("vendor"));
-    expect(drawnHeaders()).toEqual(["id", "state"]);
+    expect(drawnHeaders()).toEqual(["Mã", "state"]);
     // The rename is live in the PANEL too, not only in the header the click just removed: the row
     // shows "Supplier" while its toggle is still addressed as `vendor`. That pairing is the whole
     // point of this fixture, and it is what the old `getByLabelText("Supplier")` used to carry.
@@ -277,7 +280,7 @@ describe("a column put back into the query is drawn again", () => {
     // An edit that re-runs the query without touching `vendor`: drop `state` instead.
     await toggleQueryColumn("state");
     await closePicker();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã"]), { timeout: 3000 });
 
     await tab("Data");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "false");
@@ -298,7 +301,7 @@ describe("Add or remove columns, from the Display tab", () => {
 
   it("removes a column from the QUERY and the table stops drawing it", async () => {
     await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor"]), { timeout: 3000 });
 
     // The picker floats over the list now rather than replacing it, so the row stays put while
     // its query membership is edited — the pivot's field-zone shape.
@@ -306,7 +309,7 @@ describe("Add or remove columns, from the Display tab", () => {
     expect(noEye("vendor")).toBeInTheDocument();
 
     await userEvent.click(dataColumn("vendor"));
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state"]), { timeout: 3000 });
 
     // …and the picker agrees, because there is one stored key, not two.
     await openPicker();
@@ -319,14 +322,14 @@ describe("Add or remove columns, from the Display tab", () => {
    */
   it("reaches the metrics list from the same panel", async () => {
     await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor"]), { timeout: 3000 });
 
     expect(screen.queryByLabelText("revenue")).not.toBeInTheDocument();
     await openPicker();
     await userEvent.click(dataColumn("revenue"));
 
     // Aggregating turns the raw columns into dimensions and adds the metric to the result.
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor", "revenue"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor", "revenue"]), { timeout: 3000 });
   }, 30000);
 
   /**
@@ -347,11 +350,12 @@ describe("Add or remove columns, from the Display tab", () => {
    */
   it("names a renamed column the way the dataset does, and still keys on the raw name", async () => {
     await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "state", "vendor"]), { timeout: 3000 });
     await openPicker();
-    expect(screen.getByText("Mã")).toBeInTheDocument();
-    expect(within(screen.getByText("Mã")).queryByText("id")).toBeNull();
-    expect(screen.getByText("Mã")).toHaveAttribute("title", "Mã (id)");
+    // The header now says "Mã" too (KI-103), so the picker's row is found by its hover title.
+    const row = screen.getByTitle("Mã (id)");
+    expect(row).toHaveTextContent("Mã");
+    expect(within(row).queryByText("id")).toBeNull();
     expect(dataColumn("Mã")).toBeChecked();
   }, 30000);
 });
@@ -368,7 +372,7 @@ describe("reordering from the panel moves the drawn column", () => {
   it("draws the table AND the panel in the stored order, not in result order", async () => {
     await mountTable("c-ordered");
     // The query projects id, state, vendor; the stored order says id, vendor, state.
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "vendor", "state"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "vendor", "state"]), { timeout: 3000 });
     // …and the panel's own list is the same list, not a second one that disagrees.
     expect(Array.from(document.querySelectorAll("[data-column]")).map((e) => e.getAttribute("data-column")))
       .toEqual(["id", "vendor", "state"]);
@@ -393,6 +397,6 @@ describe("reordering from the panel moves the drawn column", () => {
    */
   it("resolves a stored order by the RAW name even when the header is renamed", async () => {
     await mountTable("c-renamed-ordered");
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]), { timeout: 3000 });
+    await waitFor(() => expect(drawnHeaders()).toEqual(["Mã", "Supplier", "state"]), { timeout: 3000 });
   }, 30000);
 });

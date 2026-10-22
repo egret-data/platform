@@ -10,9 +10,11 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { HelpCircle } from "lucide-react";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FormatPicker } from "@/components/dataset/FormatPicker";
+import { ChartList } from "@/components/dataset/ChartList";
 import { useAuth } from "@/auth/useAuth";
-import { useDatasetMutations, useSetDatasetCertification, type DatasetMetric, type MetricInput } from "@/api/datasets";
+import { inUseCharts, useDatasetMutations, useSetDatasetCertification, type DatasetMetric, type InUseChart, type MetricInput } from "@/api/datasets";
 
 /** A column header with an info icon that explains the field in plain language. */
 function HeaderHint({ label, hint, center }: { label: string; hint: string; center?: boolean }) {
@@ -45,6 +47,22 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
   const { me } = useAuth();
   const canCertify = !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("dataset:certify"));
   const [editing, setEditing] = useState<Editing>(null);
+  // The metric being deleted. `charts` is null until the server has refused the plain delete
+  // because charts use the metric (KI-099): the dialog then names them and asks for the metric's
+  // name instead of the word "delete", which is what the server checks.
+  const [pendingDelete, setPendingDelete] = useState<{ metric: DatasetMetric; charts: InUseChart[] | null } | null>(null);
+
+  function confirmDelete() {
+    if (!pendingDelete) return;
+    const { metric, charts } = pendingDelete;
+    deleteMetric.mutateAsync({ metricId: metric.id, confirm: charts ? metric.metric_name : undefined })
+      .then(() => toast.success(`Deleted metric ${metric.metric_name}`))
+      .catch((e) => {
+        const used = inUseCharts(e);
+        if (used && !charts) setPendingDelete({ metric, charts: used });
+        else toast.error(String(e));
+      });
+  }
 
   // Inline edits (format/certified) resend the whole metric so the backend can
   // re-validate the expression.
@@ -133,7 +151,7 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                     <div className="flex justify-end gap-1">
                       <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setEditing({ ...m })}>Edit</Button>
                       <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                        onClick={() => deleteMetric.mutateAsync(m.id).catch((e) => toast.error(String(e)))}>Delete</Button>
+                        onClick={() => setPendingDelete({ metric: m, charts: null })}>Delete</Button>
                     </div>
                   </td>
                 </tr>
@@ -142,6 +160,21 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
           </table>
         </div>
       )}
+
+      <ConfirmDeleteDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title={`Delete metric “${pendingDelete?.metric.metric_name ?? ""}”?`}
+        description={pendingDelete?.charts
+          ? `${pendingDelete.charts.length} ${pendingDelete.charts.length === 1 ? "chart uses" : "charts use"} this metric and will stop running until it is removed from them. This cannot be undone.`
+          : "This cannot be undone."}
+        confirmText={pendingDelete?.charts ? pendingDelete.metric.metric_name : "delete"}
+        caseSensitive={!!pendingDelete?.charts}
+        confirmLabel="Delete metric"
+        onConfirm={confirmDelete}
+      >
+        {pendingDelete?.charts && <ChartList ws={ws} charts={pendingDelete.charts} />}
+      </ConfirmDeleteDialog>
 
       <Dialog open={editing != null} onOpenChange={(o) => { if (!o) setEditing(null); }}>
         <DialogContent className="sm:max-w-lg">

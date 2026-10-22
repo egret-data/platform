@@ -29,4 +29,10 @@ export interface DatasetDetailDto {
   certified: boolean;
   certified_by: string;
   certification_details: string;
+  /**
+     * When the dataset was moved to the trash; null while it is live. Its charts keep running
+     * until it is deleted, and say so.
+     * @nullable
+     */
+  deleted_at?: string | null;
 }

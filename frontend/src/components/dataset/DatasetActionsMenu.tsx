@@ -5,9 +5,10 @@ import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
 import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import { useRefreshDataset, type DatasetSummary } from "@/api/datasets";
 import type { Folder } from "@/api/folders";
+import { refreshSummary } from "@/components/dataset/refreshSummary";
 
 /**
- * Per-row actions. Live: Edit, Refresh, Duplicate (virtual), Move to folder,
+ * Per-row actions. Live: Edit, Refresh, Duplicate, Move to folder,
  * Move to Trash. Trashed: Restore, Delete permanently.
  */
 export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare, onTags }: {
@@ -42,10 +43,12 @@ export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMo
       <DropdownMenuItem onClick={() => nav(`/explore/${ws}/datasets/${ds.id}?edit=1`)}>Edit</DropdownMenuItem>
       <DropdownMenuItem
         disabled={refresh.isPending}
-        onClick={() => refresh.mutateAsync().then(() => toast.success("Refreshed")).catch((e) => toast.error(String(e)))}>
+        onClick={() => refresh.mutateAsync().then((r) => toast.success(refreshSummary(r))).catch((e) => toast.error(String(e)))}>
         {refresh.isPending ? "Refreshing…" : "Refresh"}
       </DropdownMenuItem>
-      {ds.kind === "virtual" && <DropdownMenuItem onClick={() => onDuplicate(ds)}>Duplicate</DropdownMenuItem>}
+      {/* Both kinds (KI-110): the copy keeps the column settings and metrics, which is the part
+          of a physical dataset that cannot be recreated by picking the table again. */}
+      <DropdownMenuItem onClick={() => onDuplicate(ds)}>Duplicate</DropdownMenuItem>
       <MoveToFolderItems
         folders={folders}
         currentFolderId={ds.folder_id ?? null}

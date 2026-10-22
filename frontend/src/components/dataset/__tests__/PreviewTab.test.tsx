@@ -115,3 +115,18 @@ test("PreviewTab: an empty result says so instead of showing a table", async () 
 
   await waitFor(() => expect(screen.getByText("No rows.")).toBeInTheDocument());
 });
+
+test("PreviewTab: a header reads the column's Display name, the data stays keyed by the column (KI-103)", async () => {
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "order_size", type: "varchar" }], rows: [["big"]] }));
+  const columns = [{
+    column_name: "order_size", data_type: "varchar", type_generic: "string", is_temporal: false,
+    ordinal: 1, expression: null, verbose_name: "Order size", description: "", is_calculated: false,
+    groupby: true, filterable: true, format: "", semantic_type: "",
+  }] as DatasetColumn[];
+  renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" columns={columns} />);
+
+  await waitFor(() => expect(screen.getByText("big")).toBeInTheDocument());
+  const headers = screen.getAllByRole("columnheader").map((h) => h.textContent ?? "");
+  expect(headers.some((h) => h.includes("Order size"))).toBe(true);
+  expect(headers.some((h) => h.includes("order_size"))).toBe(false);
+});

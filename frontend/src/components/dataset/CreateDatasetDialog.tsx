@@ -14,7 +14,7 @@ import { useCreateDataset, type CreateSource } from "@/api/datasets";
  * Two shapes, one component (matches Superset's split):
  *  - Default (no `initialSql`): create a PHYSICAL dataset by picking a table.
  *    Virtual/SQL datasets are made in SQL Lab, not here.
- *  - `initialSql` provided (SQL Lab "Save as dataset", or Duplicate): a
+ *  - `initialSql` provided (SQL Lab "Save as dataset"): a
  *    "Save as dataset" form — name it; the query is fixed and shown read-only.
  */
 export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initialDbId, initialName }: {

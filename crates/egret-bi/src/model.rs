@@ -15,13 +15,14 @@ use crate::dashboard::{Dashboard, DashboardCard, NewCard};
 use crate::dataset::{Dataset, DatasetColumn, Metric};
 
 pub use egret_analytics_api::bi::{
-    AddColumnBody, CardInput, ChartDataResponse, ChartDto, ChartRunResponse, CreateChart,
-    CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
+    AddColumnBody, CardInput, ChartDataResponse, ChartDto, ChartRunResponse, ConfirmQuery,
+    CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
     DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
-    DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, DatasetUsageDto, FolderDto, MetricBody,
-    MetricDto, NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SearchHit,
-    SetDashboardCertification, SetDatasetCertification, SetFolder, SnippetBody, SnippetDto,
-    UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    DatasetColumnDto, DatasetDetailDto, DatasetRefreshDto, DatasetSummaryDto, DatasetUsageDto,
+    DuplicateDataset, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
+    SavedQueryDto, SchemaColumn, SearchHit, SetDashboardCertification, SetDatasetCertification,
+    SetFolder, SnippetBody, SnippetDto, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {
@@ -135,6 +136,7 @@ pub fn detail_dto(
         certified: ds.certified,
         certified_by: ds.certified_by,
         certification_details: ds.certification_details,
+        deleted_at: ds.deleted_at,
     }
 }
 

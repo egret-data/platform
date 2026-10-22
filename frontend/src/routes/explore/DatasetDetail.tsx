@@ -8,19 +8,20 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import { useAuth } from "@/auth/useAuth";
-import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset, useSetDatasetCertification } from "@/api/datasets";
+import { useDataset, useRefreshDataset, useUpdateDataset, useSetDatasetCertification } from "@/api/datasets";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
 import { PreviewTab } from "@/components/dataset/PreviewTab";
 import { UsageTab } from "@/components/dataset/UsageTab";
+import { DeleteDatasetDialog } from "@/components/dataset/DeleteDatasetDialog";
+import { refreshSummary } from "@/components/dataset/refreshSummary";
 
 /** Compact "n unit(s)" stat chip for the header. */
 function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
@@ -38,7 +39,6 @@ export default function DatasetDetail() {
   const listHref = `/explore/${ws}/datasets`;
   const { data: ds, isLoading, isError, error } = useDataset(ws, id || null);
   const refresh = useRefreshDataset(ws, id);
-  const del = useDeleteDataset(ws);
   const update = useUpdateDataset(ws, id);
   const setCertification = useSetDatasetCertification(ws, id);
   // PLATFORM-scoped, so unlike `dashboard:manage` this DOES appear in the session permission
@@ -187,8 +187,8 @@ export default function DatasetDetail() {
               </div>
               {ds.description && <p className="mt-0.5 text-sm text-muted-foreground">{ds.description}</p>}
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-                <Stat icon={<Columns3 className="h-3.5 w-3.5" />}>{ds.columns.length} columns</Stat>
-                <Stat icon={<Sigma className="h-3.5 w-3.5" />}>{ds.metrics.length} metrics</Stat>
+                <Stat icon={<Columns3 className="h-3.5 w-3.5" />}>{ds.columns.length} {ds.columns.length === 1 ? "column" : "columns"}</Stat>
+                <Stat icon={<Sigma className="h-3.5 w-3.5" />}>{ds.metrics.length} {ds.metrics.length === 1 ? "metric" : "metrics"}</Stat>
                 <Stat icon={<Clock className="h-3.5 w-3.5" />}>updated <RelativeTime iso={ds.updated_at} /></Stat>
               </div>
               <div className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -210,7 +210,7 @@ export default function DatasetDetail() {
               )}
               <Button variant="outline" size="icon" title="Edit" onClick={startEdit}><Pencil className="h-4 w-4" /></Button>
               <Button variant="outline" size="icon" title="Refresh columns" disabled={refresh.isPending}
-                onClick={() => refresh.mutateAsync().then(() => toast.success("Refreshed")).catch((e) => toast.error(String(e)))}>
+                onClick={() => refresh.mutateAsync().then((r) => toast.success(refreshSummary(r))).catch((e) => toast.error(String(e)))}>
                 <RefreshCw className={`h-4 w-4 ${refresh.isPending ? "animate-spin" : ""}`} />
               </Button>
               <Button variant="outline" size="icon" title="Delete" className="text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
@@ -266,12 +266,12 @@ export default function DatasetDetail() {
         </DialogContent>
       </Dialog>
 
-      <ConfirmDeleteDialog
-        open={confirmDelete}
+      <DeleteDatasetDialog
+        ws={ws}
+        dataset={confirmDelete ? ds : null}
         onOpenChange={setConfirmDelete}
-        title={`Delete dataset “${ds.name}”?`}
-        description="This removes the dataset and its column snapshot. The underlying table or query is not affected. This cannot be undone."
-        onConfirm={() => del.mutate(id, { onSuccess: () => { toast.success("Deleted"); nav(listHref); }, onError: (e) => toast.error(String((e as Error)?.message ?? e)) })}
+        toastOnSuccess={false}
+        onDeleted={() => nav(listHref)}
       />
     </div>
   );
