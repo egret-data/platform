@@ -8896,6 +8896,129 @@ async fn rule_enforcement_answers_each_catalog_the_rule_reaches() {
     assert_eq!(single["catalogs"], entry["catalogs"], "one computation");
 }
 
+/// A Trino profile (named `name`, `config_jsonb` = `config`, inserted raw so a
+/// dangling `tagService` survives) with an engine bound to it, attached to a
+/// new catalog in a new warehouse. Returns the catalog id.
+async fn trino_catalog_with_config(f: &Fixture, tag: &str, config: Value) -> Uuid {
+    let _universe = advisory_lock(&f.dsn).await;
+    egret_policy::seed_trino(&f.policy)
+        .await
+        .expect("seed trino service-def");
+    let service_id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino',$2) RETURNING id",
+    )
+    .bind(unique(tag))
+    .bind(config)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("trino profile");
+    let catalog_id = orphan_catalog(f, tag).await;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique(tag))
+    .bind(service_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach catalog");
+    catalog_id
+}
+
+/// A classification rule is compiled for a Trino profile only through the
+/// profile's `tagService`, and skipped (`MissingTagService`) when it names no
+/// existing profile. So a Trino engine on such a profile does NOT enforce a
+/// classification rule: `no_tag_service` per catalog and rule-wide. A path
+/// rule on the same catalog IS enforced there (it needs no tag service), and a
+/// Trino profile whose `tagService` resolves enforces the classification rule.
+#[tokio::test]
+async fn a_trino_engine_without_a_usable_tag_service_does_not_enforce_a_classification_rule() {
+    let Some(f) = setup().await else { return };
+    let admin = admin_session(&f).await;
+    egret_policy::seed_tag(&f.policy).await.expect("seed tag");
+    let tag_service = f
+        .policy
+        .create_service(&unique("eff_tagsvc"), "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let unset = trino_catalog_with_config(&f, "eff-nots", json!({})).await;
+    let dangling =
+        trino_catalog_with_config(&f, "eff-dangl", json!({"tagService": unique("nobody")})).await;
+    let wired =
+        trino_catalog_with_config(&f, "eff-wired", json!({"tagService": tag_service.name})).await;
+    // After the fixtures: `trino_catalog_with_config` takes the lock itself.
+    let _lock = exclusive(&f).await;
+    let table = unique("eff_ts");
+    let mut rules = Vec::new();
+    for (catalog, label) in [(unset, "unset"), (dangling, "dangling"), (wired, "wired")] {
+        let (key, tag_id) = classification_named(&f, &unique("EffTagSvc")).await;
+        assign(&f, tag_id, warehouse_of(&f, catalog).await, &table, "email").await;
+        let id = store_rule(
+            &f,
+            &admin,
+            mask_rule(
+                &format!("eff-ts-{label}"),
+                json!({"type": "tag", "key": key}),
+                json!([]),
+            ),
+        )
+        .await;
+        rules.push((catalog, id));
+    }
+    let path_rule = store_rule(
+        &f,
+        &admin,
+        mask_rule(
+            "eff-ts-path",
+            json!({"type": "path", "catalog_id": unset, "schema": "s", "table": table, "column": "email"}),
+            json!([]),
+        ),
+    )
+    .await;
+
+    let ids = rules
+        .iter()
+        .map(|(_, id)| id.clone())
+        .chain([path_rule.clone()])
+        .collect::<Vec<_>>()
+        .join(",");
+    let (status, got) = get_json(&f, &admin, &format!("/perm/rules/enforcement?ids={ids}")).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let entry = |id: &str| {
+        got.as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["ruleId"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing: {got}"))
+            .clone()
+    };
+    for (catalog, id) in &rules[..2] {
+        let e = entry(id);
+        assert_eq!(e["enforcedBy"], 0, "{e}");
+        assert_eq!(e["notEnforced"], "no_tag_service", "{e}");
+        assert_eq!(e["catalogs"][0]["catalogId"], json!(catalog), "{e}");
+        assert_eq!(e["catalogs"][0]["notEnforced"], "no_tag_service", "{e}");
+        assert_eq!(e["catalogs"][0]["engines"], json!([]), "{e}");
+        // The single read says the same.
+        let (_, single) = get_json(&f, &admin, &format!("/perm/rules/{id}/effect")).await;
+        assert_eq!(single["notEnforced"], "no_tag_service", "{single}");
+    }
+    let e = entry(&rules[2].1);
+    assert_eq!(e["enforcedBy"], 1, "a resolving tagService enforces: {e}");
+    assert!(e["notEnforced"].is_null(), "{e}");
+    let e = entry(&path_rule);
+    assert_eq!(e["enforcedBy"], 1, "a path rule needs no tag service: {e}");
+    assert!(e["notEnforced"].is_null(), "{e}");
+}
+
 /// Bounded: more than `RULE_ENFORCEMENT_CAP` (100) distinct ids, or an id that
 /// is not a UUID, is refused before anything is read; no ids is an empty list.
 #[tokio::test]

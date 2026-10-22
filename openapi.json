@@ -9913,7 +9913,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)",
+            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`, `no_tag_service`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)",
             "content": {
               "application/json": {
                 "schema": {
@@ -43234,7 +43234,7 @@
             "items": {
               "$ref": "#/components/schemas/EffectEngine"
             },
-            "description": "Attached engines bound to a policy profile, by name."
+            "description": "Attached engines that enforce the rule here, by name: bound to a policy\nprofile, and for a classification rule on a Trino profile, one whose\n`tagService` names an existing profile."
           },
           "notEnforced": {
             "oneOf": [
@@ -43243,7 +43243,7 @@
               },
               {
                 "$ref": "#/components/schemas/NotEnforced",
-                "description": "`null` when some engine enforces the rule here; otherwise `no_engine`\n(nothing attached) or `no_profile` (engines attached, none bound)."
+                "description": "`null` when some engine enforces the rule here; otherwise `no_engine`\n(nothing attached), `no_profile` (engines attached, none bound) or\n`no_tag_service` (bound, but a classification rule cannot compile for\nany of their profiles: Trino without a usable tag service)."
               }
             ]
           }
@@ -48360,7 +48360,8 @@
         "enum": [
           "no_assignment",
           "no_engine",
-          "no_profile"
+          "no_profile",
+          "no_tag_service"
         ]
       },
       "NotEvaluatedReason": {
@@ -51728,7 +51729,7 @@
               },
               {
                 "$ref": "#/components/schemas/NotEnforced",
-                "description": "`null` when some engine enforces the rule (`enforcedBy > 0`); otherwise\nwhy not: `no_assignment` (nothing reached), `no_profile` (some reached\ncatalog has engines, none bound) or `no_engine`."
+                "description": "`null` when some engine enforces the rule (`enforcedBy > 0`); otherwise\nwhy not: `no_assignment` (nothing reached), `no_tag_service` (a\nclassification rule, and some reached catalog's bound engines are all\non Trino profiles with no usable tag service), `no_profile` (some\nreached catalog has engines, none bound) or `no_engine`."
               }
             ]
           },

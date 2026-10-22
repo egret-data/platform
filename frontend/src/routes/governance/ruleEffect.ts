@@ -80,6 +80,14 @@ export function notEnforcedWarning(e: RuleEffect, appliesTo: "tag" | "path" = "t
         `${one ? "Its" : "Their"} engines have no policy profile; bind one in Governance > Engine & policy.`,
     );
   }
+  const noTagService = named("no_tag_service");
+  if (noTagService.length > 0) {
+    const one = noTagService.length === 1;
+    lines.push(
+      `${one ? `${noTagService[0]}'s engines are` : `The engines of ${listOf(noTagService)} are`} in a policy profile with no tag service, ${stored} ` +
+        "Classification rules reach a Trino engine only through its profile's tag service; see the profile in Governance > Engine & policy.",
+    );
+  }
   const noEngine = named("no_engine");
   if (noEngine.length > 0) {
     lines.push(
@@ -101,12 +109,21 @@ export function notEnforcedReason(reason: NotEnforced | null | undefined, applie
       return "no engine attached";
     case "no_profile":
       return "its engines have no policy profile";
+    case "no_tag_service":
+      return "the engines' policy profile has no tag service, so classification rules are not applied";
     case "no_assignment":
       return appliesTo === "tag"
         ? "this classification is not attached to any data a catalog serves"
         : "no catalog egret knows serves this path";
-    default:
+    case null:
+    case undefined:
       return "no engine enforces it";
+    default: {
+      // Exhaustive at compile time; a reason a newer server adds reads plainly.
+      const unknown: never = reason;
+      void unknown;
+      return "no engine enforces it";
+    }
   }
 }
 

@@ -61,6 +61,11 @@ pub enum NotEnforced {
     NoEngine,
     /// Engines are attached, but none is bound to a policy profile.
     NoProfile,
+    /// A classification (tag) rule whose catalog's engines are bound only to
+    /// Trino profiles with no usable `tagService` (unset, or naming no
+    /// existing profile): the compiler skips the rule there
+    /// (`CompileError::MissingTagService`), so those engines do not apply it.
+    NoTagService,
 }
 
 /// The rule's effect: reach, enforcement, exemptions and overlapping masks.
@@ -78,8 +83,10 @@ pub struct RuleEffect {
     /// Distinct engines, bound to a profile, attached to a reached catalog.
     pub enforced_by: u32,
     /// `null` when some engine enforces the rule (`enforcedBy > 0`); otherwise
-    /// why not: `no_assignment` (nothing reached), `no_profile` (some reached
-    /// catalog has engines, none bound) or `no_engine`.
+    /// why not: `no_assignment` (nothing reached), `no_tag_service` (a
+    /// classification rule, and some reached catalog's bound engines are all
+    /// on Trino profiles with no usable tag service), `no_profile` (some
+    /// reached catalog has engines, none bound) or `no_engine`.
     pub not_enforced: Option<NotEnforced>,
     /// Distinct users in `exempt.include`, groups, roles and workspaces expanded.
     pub exempt_members: u32,
@@ -98,10 +105,14 @@ pub struct RuleEffect {
 pub struct EffectCatalog {
     pub catalog_id: Uuid,
     pub catalog_name: String,
-    /// Attached engines bound to a policy profile, by name.
+    /// Attached engines that enforce the rule here, by name: bound to a policy
+    /// profile, and for a classification rule on a Trino profile, one whose
+    /// `tagService` names an existing profile.
     pub engines: Vec<EffectEngine>,
     /// `null` when some engine enforces the rule here; otherwise `no_engine`
-    /// (nothing attached) or `no_profile` (engines attached, none bound).
+    /// (nothing attached), `no_profile` (engines attached, none bound) or
+    /// `no_tag_service` (bound, but a classification rule cannot compile for
+    /// any of their profiles: Trino without a usable tag service).
     pub not_enforced: Option<NotEnforced>,
 }
 
@@ -252,7 +263,8 @@ pub async fn rule_effect(
 
     let ids: Vec<Uuid> = reached.iter().map(|(id, _)| *id).collect();
     let attached = attached_engines(conn, &ids).await?;
-    let (catalogs, enforced_by, not_enforced) = enforcement(&reached, &attached);
+    let tag_rule = matches!(rule.selector, Selector::Tag { .. });
+    let (catalogs, enforced_by, not_enforced) = enforcement(&reached, &attached, tag_rule);
 
     let (exempt_members, exempt_everyone) = count_exempt(conn, &rule.exempt).await?;
 
@@ -323,7 +335,8 @@ pub async fn rules_enforcement(
         .iter()
         .zip(&reached)
         .map(|(rule, reached)| {
-            let (catalogs, enforced_by, not_enforced) = enforcement(reached, &attached);
+            let tag_rule = matches!(rule.selector, Selector::Tag { .. });
+            let (catalogs, enforced_by, not_enforced) = enforcement(reached, &attached, tag_rule);
             RuleEnforcement {
                 rule_id: rule.id,
                 enforced_by,
@@ -367,8 +380,14 @@ async fn reached_catalogs(
 }
 
 /// An engine attached to a catalog: `(catalog id, engine id, engine name,
-/// engine type, bound to a policy profile)`.
-type Attached = (Uuid, Uuid, String, String, bool);
+/// engine type, bound to a policy profile, a classification rule compiles for
+/// that profile)`.
+///
+/// The last is what the compiler checks (`trigger.rs`, `tag_service`): a
+/// `trino`-typed profile hosts a tag rule only when its
+/// `config_jsonb.tagService` is a string naming an existing
+/// `policy.authz_services` row; any other profile type needs nothing more.
+type Attached = (Uuid, Uuid, String, String, bool, bool);
 
 /// The engines attached to any of `catalog_ids`, in ONE query.
 async fn attached_engines(
@@ -379,9 +398,14 @@ async fn attached_engines(
         return Ok(Vec::new());
     }
     sqlx::query_as(
-        "SELECT a.catalog_id, e.id, e.name, e.type, e.authz_service_id IS NOT NULL \
+        "SELECT a.catalog_id, e.id, e.name, e.type, e.authz_service_id IS NOT NULL, \
+                (s.type IS DISTINCT FROM 'trino' \
+                 OR (jsonb_typeof(s.config_jsonb -> 'tagService') = 'string' \
+                     AND EXISTS (SELECT 1 FROM policy.authz_services t \
+                                  WHERE t.name = s.config_jsonb ->> 'tagService'))) \
            FROM registry.engine_catalog_attachments a \
            JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+           LEFT JOIN policy.authz_services s ON s.id = e.authz_service_id \
           WHERE a.catalog_id = ANY($1) ORDER BY e.name, e.id",
     )
     .bind(catalog_ids)
@@ -391,18 +415,22 @@ async fn attached_engines(
 }
 
 /// Who enforces a rule that reaches `reached`, given the `attached` engines:
-/// per catalog, the distinct enforcing engines, and why none does.
+/// per catalog, the distinct enforcing engines, and why none does. A
+/// `tag_rule` (classification selector) is enforced only by engines whose
+/// profile can host it (the last field of [`Attached`]).
 fn enforcement(
     reached: &[(Uuid, String)],
     attached: &[Attached],
+    tag_rule: bool,
 ) -> (Vec<EffectCatalog>, u32, Option<NotEnforced>) {
     let mut catalogs = Vec::with_capacity(reached.len());
     let mut engine_ids = BTreeSet::new();
     for (catalog_id, catalog_name) in reached {
         let here: Vec<_> = attached.iter().filter(|a| a.0 == *catalog_id).collect();
+        let bound = here.iter().any(|a| a.4);
         let engines: Vec<EffectEngine> = here
             .iter()
-            .filter(|a| a.4)
+            .filter(|a| a.4 && (!tag_rule || a.5))
             .map(|a| EffectEngine {
                 id: a.1,
                 name: a.2.clone(),
@@ -412,8 +440,10 @@ fn enforcement(
         engine_ids.extend(engines.iter().map(|e| e.id));
         let not_enforced = if here.is_empty() {
             Some(NotEnforced::NoEngine)
-        } else if engines.is_empty() {
+        } else if !bound {
             Some(NotEnforced::NoProfile)
+        } else if engines.is_empty() {
+            Some(NotEnforced::NoTagService)
         } else {
             None
         };
@@ -428,6 +458,11 @@ fn enforcement(
         Some(NotEnforced::NoAssignment)
     } else if !engine_ids.is_empty() {
         None
+    } else if catalogs
+        .iter()
+        .any(|c| c.not_enforced == Some(NotEnforced::NoTagService))
+    {
+        Some(NotEnforced::NoTagService)
     } else if catalogs
         .iter()
         .any(|c| c.not_enforced == Some(NotEnforced::NoProfile))

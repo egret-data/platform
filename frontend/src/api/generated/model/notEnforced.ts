@@ -16,4 +16,5 @@ export const NotEnforced = {
   no_assignment: 'no_assignment',
   no_engine: 'no_engine',
   no_profile: 'no_profile',
+  no_tag_service: 'no_tag_service',
 } as const;

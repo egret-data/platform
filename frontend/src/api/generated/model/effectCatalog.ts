@@ -14,7 +14,11 @@ import type { NotEnforced } from './notEnforced';
 export interface EffectCatalog {
   catalogId: string;
   catalogName: string;
-  /** Attached engines bound to a policy profile, by name. */
+  /**
+     * Attached engines that enforce the rule here, by name: bound to a policy
+     * profile, and for a classification rule on a Trino profile, one whose
+     * `tagService` names an existing profile.
+     */
   engines: EffectEngine[];
   notEnforced?: null | NotEnforced;
 }

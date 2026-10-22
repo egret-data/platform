@@ -36,7 +36,7 @@ describe("effectSentence", () => {
 });
 
 describe("notEnforcedWarning (spec C7.2)", () => {
-  const cat = (catalogName: string, notEnforced: "no_engine" | "no_profile" | null) => ({
+  const cat = (catalogName: string, notEnforced: "no_engine" | "no_profile" | "no_tag_service" | null) => ({
     catalogId: catalogName, catalogName, engines: [], notEnforced,
   });
 
@@ -60,6 +60,18 @@ describe("notEnforcedWarning (spec C7.2)", () => {
     ]);
     expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_profile", catalogs: [cat("a", "no_profile"), cat("b", "no_profile")] })).toEqual([
       "The engines of a and b are not in a policy profile, so this rule is stored but no query is masked. Their engines have no policy profile; bind one in Governance > Engine & policy.",
+    ]);
+  });
+
+  it("says when the engines' policy profiles have no tag service for a classification rule", () => {
+    expect(
+      notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_tag_service", catalogs: [cat("wh", "no_tag_service"), cat("lake", "no_engine")] }),
+    ).toEqual([
+      "wh's engines are in a policy profile with no tag service, so this rule is stored but no query is masked. Classification rules reach a Trino engine only through its profile's tag service; see the profile in Governance > Engine & policy.",
+      "lake has no engine attached, so this rule is stored but no query is masked. Attach an engine in Control Plane > Engines.",
+    ]);
+    expect(notEnforcedWarning({ ...base, enforcedBy: 0, notEnforced: "no_tag_service", catalogs: [cat("a", "no_tag_service"), cat("b", "no_tag_service")] })).toEqual([
+      "The engines of a and b are in a policy profile with no tag service, so this rule is stored but no query is masked. Classification rules reach a Trino engine only through its profile's tag service; see the profile in Governance > Engine & policy.",
     ]);
   });
 

@@ -15,6 +15,9 @@ describe("notEnforcedReason", () => {
     expect(notEnforcedReason("no_profile", "path")).toBe("its engines have no policy profile");
     expect(notEnforcedReason("no_assignment", "tag")).toBe("this classification is not attached to any data a catalog serves");
     expect(notEnforcedReason("no_assignment", "path")).toBe("no catalog egret knows serves this path");
+    expect(notEnforcedReason("no_tag_service", "tag")).toBe(
+      "the engines' policy profile has no tag service, so classification rules are not applied",
+    );
     expect(notEnforcedReason(null, "tag")).toBe("no engine enforces it");
   });
 });
