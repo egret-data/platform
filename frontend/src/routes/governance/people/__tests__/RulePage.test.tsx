@@ -451,6 +451,27 @@ describe("RulePage: enforcement (Task 13)", () => {
     expect(screen.queryByText(/Not enforced/)).not.toBeInTheDocument();
   });
 
+  test("a rule enforced in one catalog but not another says Partly enforced, naming the catalog and why (live check D2)", () => {
+    serveRules([maskRule()]);
+    serveEffect({
+      status: 200,
+      data: effect({
+        tableCount: 2,
+        columnCount: 2,
+        enforcedBy: 1,
+        notEnforced: null,
+        catalogs: [
+          { catalogId: "cat-1", catalogName: "sales", engines: [{ id: "e-1", name: "trino-a", engineType: "trino" }], notEnforced: null },
+          { catalogId: "cat-2", catalogName: "demo_warehouse", engines: [], notEnforced: "no_engine" },
+        ],
+      }),
+    });
+    renderPage();
+    expect(detail("Effect")).toHaveTextContent("Masks 2 columns on 2 tables · enforced by 1 engine · 1 person exempt");
+    expect(detail("Effect")).toHaveTextContent("Partly enforced. Not enforced in demo_warehouse — no engine attached.");
+    expect(detail("Effect")).not.toHaveTextContent("Not enforced yet");
+  });
+
   test("says nothing about enforcement while the effect is loading or refused", () => {
     serveRules([maskRule()]);
     serveEffect(undefined);

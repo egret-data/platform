@@ -97,6 +97,30 @@ export function notEnforcedWarning(e: RuleEffect, appliesTo: "tag" | "path" = "t
   return lines.length > 0 ? lines : [`No engine enforces it yet, ${stored}`];
 }
 
+/** The lead words when some engine enforces a rule but some catalog it reaches has none. */
+export const PARTLY_ENFORCED = "Partly enforced";
+
+/**
+ * Where a rule that IS enforced somewhere is not (live check D2): one line per
+ * reason, naming the catalogs it reaches that no engine enforces it in, with
+ * the reason phrase of {@link notEnforcedReason}, e.g. "Not enforced in
+ * demo_warehouse — no engine attached.". `null` when every catalog is
+ * enforced, and when none is (the "Not enforced yet" statements say that).
+ */
+export function partlyEnforcedLines(
+  e: { enforcedBy: number; catalogs?: EffectCatalog[] },
+  appliesTo: "tag" | "path",
+): string[] | null {
+  if (e.enforcedBy === 0) return null;
+  const byReason = new Map<NotEnforced, string[]>();
+  for (const c of e.catalogs ?? []) {
+    if (!c.notEnforced) continue;
+    byReason.set(c.notEnforced, [...(byReason.get(c.notEnforced) ?? []), c.catalogName]);
+  }
+  if (byReason.size === 0) return null;
+  return [...byReason].map(([reason, names]) => `Not enforced in ${listOf(names)} — ${notEnforcedReason(reason, appliesTo)}.`);
+}
+
 /**
  * Why a STORED rule is not enforced, as the short phrase after "Not enforced
  * yet —" (`NotEnforcedBadge`): the reasons of {@link notEnforcedWarning},

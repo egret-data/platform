@@ -12,7 +12,7 @@ import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { TERM } from "@/routes/governance/glossary";
 import { RuleKindLabel } from "@/routes/governance/RuleKindLabel";
-import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
+import { NotEnforcedBadge, PartlyEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { Section, TabError } from "@/routes/governance/tabParts";
@@ -84,6 +84,7 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
                   </Link>
                   <div>
                     <NotEnforcedBadge enforcement={enforcement?.get(r.id)} appliesTo={r.selector.type} />
+                    <PartlyEnforcedBadge enforcement={enforcement?.get(r.id)} appliesTo={r.selector.type} />
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-normal break-words text-sm">

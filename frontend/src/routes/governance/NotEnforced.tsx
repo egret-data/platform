@@ -1,8 +1,8 @@
 import { AlertTriangle } from "lucide-react";
-import type { NotEnforced, RuleEnforcement } from "@/api/generated/model";
+import type { EffectCatalog, NotEnforced, RuleEnforcement } from "@/api/generated/model";
 import { usePermRulesEnforcement } from "@/api/generated/perm/perm";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
-import { notEnforcedReason } from "@/routes/governance/ruleEffect";
+import { notEnforcedReason, PARTLY_ENFORCED, partlyEnforcedLines } from "@/routes/governance/ruleEffect";
 
 export { invalidateRuleEnforcement } from "@/routes/governance/ruleEnforcementCache";
 
@@ -130,4 +130,66 @@ export function NotEnforcedSummary({
       </span>
     </span>
   );
+}
+
+/**
+ * "Partly enforced — Not enforced in demo_warehouse — no engine attached.": a
+ * stored rule some engine enforces in one catalog it reaches while another
+ * has none (live check D2), said beside the rule on a rule-wide surface. The
+ * catalogs come from the server's per-catalog entries. Renders nothing for a
+ * rule enforced everywhere, one enforced nowhere ({@link NotEnforcedBadge}
+ * says that) and an unknown answer.
+ */
+export function PartlyEnforcedBadge({
+  enforcement,
+  appliesTo,
+  className = "",
+}: {
+  enforcement: { enforcedBy: number; catalogs?: EffectCatalog[] } | null | undefined;
+  appliesTo: "tag" | "path";
+  className?: string;
+}) {
+  const lines = enforcement ? partlyEnforcedLines(enforcement, appliesTo) : null;
+  if (!lines) return null;
+  return <PartlyEnforcedLine lead={PARTLY_ENFORCED} lines={lines} className={className} />;
+}
+
+function PartlyEnforcedLine({ lead, lines, className }: { lead: string; lines: string[]; className: string }) {
+  return (
+    <span className={`inline-flex items-start gap-1 text-xs text-foreground ${className}`}>
+      <AlertTriangle aria-hidden className="mt-0.5 size-3 shrink-0" />
+      <span>
+        <span className="font-medium">{lead}</span>
+        {` — ${lines.join(" ")}`}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * {@link PartlyEnforcedBadge} for several stored rules shown together (the
+ * Effect strip's rules fact): nothing while unknown or when none is partly
+ * enforced; the catalogs when the partly enforced rules all miss the same
+ * ones; otherwise the count with a pointer to each rule's page.
+ */
+export function PartlyEnforcedSummary({
+  rules,
+  enforcement,
+  className = "",
+}: {
+  rules: { id: string; appliesTo: "tag" | "path" }[];
+  enforcement: ReadonlyMap<string, RuleEnforcement> | null;
+  className?: string;
+}) {
+  if (enforcement === null) return null;
+  const partly = rules.flatMap((r) => {
+    const e = enforcement.get(r.id);
+    const lines = e ? partlyEnforcedLines(e, r.appliesTo) : null;
+    return lines ? [lines.join(" ")] : [];
+  });
+  if (partly.length === 0) return null;
+  const count = rules.length === 1 ? "" : `${partly.length} of ${rules.length} rules: `;
+  const same = new Set(partly).size === 1;
+  const lines = same ? [`${count}${partly[0]}`] : [`${partly.length} of ${rules.length} rules; each rule's page says where.`];
+  return <PartlyEnforcedLine lead={PARTLY_ENFORCED} lines={lines} className={className} />;
 }

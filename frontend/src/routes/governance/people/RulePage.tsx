@@ -23,7 +23,7 @@ import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governa
 import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
 import { DATA_BASE } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
-import { effectSentence, notEnforcedWarning } from "@/routes/governance/ruleEffect";
+import { effectSentence, notEnforcedWarning, PARTLY_ENFORCED, partlyEnforcedLines } from "@/routes/governance/ruleEffect";
 
 /** What a reader without `policy:update` reads instead of Edit and Delete. Also this module's bundle marker. */
 export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:update permission.";
@@ -225,6 +225,7 @@ function RuleEffectDetail({ rule }: { rule: RuleView }) {
   if (effectQ?.data?.status !== 200) return null;
   const effect = effectQ.data.data;
   const warning = notEnforcedWarning(effect, rule.selector.type);
+  const partly = partlyEnforcedLines(effect, rule.selector.type);
   return (
     <Detail term="Effect">
       <span className="block">{effectSentence(effect)}</span>
@@ -233,6 +234,14 @@ function RuleEffectDetail({ rule }: { rule: RuleView }) {
           <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
           <span>
             <strong>{`${NOT_ENFORCED_YET}.`}</strong> {warning.join(" ")}
+          </span>
+        </span>
+      ) : null}
+      {partly ? (
+        <span role="status" className="mt-1 flex items-start gap-1.5 text-sm">
+          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <span>
+            <strong>{`${PARTLY_ENFORCED}.`}</strong> {partly.join(" ")}
           </span>
         </span>
       ) : null}

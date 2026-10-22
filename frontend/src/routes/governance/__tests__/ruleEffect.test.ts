@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExistingMask, RuleEffect } from "@/api/generated/model";
-import { effectSentence, effectivePerPrincipal, notEnforcedWarning } from "@/routes/governance/ruleEffect";
+import { effectSentence, effectivePerPrincipal, notEnforcedWarning, partlyEnforcedLines } from "@/routes/governance/ruleEffect";
 
 const base: RuleEffect = {
   kind: "mask", catalogs: [], tableCount: 1, columnCount: 1, enforcedBy: 2, exemptMembers: 3, exemptEveryone: false, alreadyMasked: [], truncated: false,
@@ -138,5 +138,32 @@ describe("effectivePerPrincipal (spec C6)", () => {
       { principal: "user zoe", verdict: "undecided", text: "undecided: the engine applies whichever mask it evaluates first" },
       { principal: "Everyone else", verdict: "masked", text: "masked (MASK_ODD)" },
     ]);
+  });
+});
+
+describe("partlyEnforcedLines (live check D2)", () => {
+  const cat = (catalogName: string, notEnforced: RuleEffect["notEnforced"], engines = notEnforced ? [] : [{ id: "e-1", name: "trino-a", engineType: "trino" }]) => ({
+    catalogId: `c-${catalogName}`,
+    catalogName,
+    engines,
+    notEnforced,
+  });
+
+  it("names each catalog not enforced, grouped by the existing reason phrase", () => {
+    expect(
+      partlyEnforcedLines(
+        { enforcedBy: 1, catalogs: [cat("sales", null), cat("demo_warehouse", "no_engine"), cat("lake", "no_engine"), cat("ops", "no_profile")] },
+        "tag",
+      ),
+    ).toEqual([
+      "Not enforced in demo_warehouse and lake — no engine attached.",
+      "Not enforced in ops — its engines have no policy profile.",
+    ]);
+  });
+
+  it("says nothing when every catalog is enforced, or when no catalog is (the Not enforced yet warning says that)", () => {
+    expect(partlyEnforcedLines({ enforcedBy: 1, catalogs: [cat("sales", null)] }, "tag")).toBeNull();
+    expect(partlyEnforcedLines({ enforcedBy: 0, catalogs: [cat("demo_warehouse", "no_engine")] }, "tag")).toBeNull();
+    expect(partlyEnforcedLines({ enforcedBy: 2, catalogs: [] }, "path")).toBeNull();
   });
 });

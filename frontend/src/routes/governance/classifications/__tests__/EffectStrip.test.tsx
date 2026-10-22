@@ -82,6 +82,28 @@ describe("the Effect strip", () => {
     await waitFor(() => expect(strip()).toHaveTextContent("Not enforced yet — no engine attached"), T);
   });
 
+  it("says a rule enforced in one catalog but not another is partly enforced, and where not (live check D2)", async () => {
+    serve({
+      "/tags": ok([PII]),
+      "/classifications/t-pii/usage": ok(USAGE_TWO),
+      "/perm/rules": ok([HASH]),
+      "/perm/rules/enforcement?ids=r1": ok([
+        {
+          ruleId: "r1",
+          enforcedBy: 1,
+          notEnforced: null,
+          catalogs: [
+            { catalogId: "c-a", catalogName: "sales", engines: [{ id: "e-1", name: "trino-a", engineType: "trino" }], notEnforced: null },
+            { catalogId: "c-b", catalogName: "demo_warehouse", engines: [], notEnforced: "no_engine" },
+          ],
+        },
+      ]),
+    });
+    openArea("/governance/classifications/t-pii", ADMIN);
+    await waitFor(() => expect(strip()).toHaveTextContent("Partly enforced — Not enforced in demo_warehouse — no engine attached."), T);
+    expect(strip()).not.toHaveTextContent("Not enforced yet");
+  });
+
   it("says nothing about enforcement for an enforced rule, or while the answer is unknown", async () => {
     serve({
       "/tags": ok([PII]),

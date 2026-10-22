@@ -166,4 +166,38 @@ describe("TagRulesSection: enforcement", () => {
     expect(row("hash email")).not.toHaveTextContent("Not enforced");
     expect(vi.mocked(permApi.usePermRulesEnforcement).mock.calls.at(-1)?.[0]).toEqual({ ids: "r-off,r-on" });
   });
+
+  test("a rule enforced in one catalog but not another says Partly enforced on its row, naming the catalog (live check D2)", async () => {
+    const { AuthContext } = await import("@/auth/useAuth");
+    serveRules([tagRule({ id: "r-part", name: "mask ssn" })]);
+    vi.mocked(permApi.usePermRulesEnforcement).mockReturnValue({
+      data: {
+        status: 200,
+        data: [
+          {
+            ruleId: "r-part",
+            enforcedBy: 1,
+            notEnforced: null,
+            catalogs: [
+              { catalogId: "c-a", catalogName: "sales", engines: [{ id: "e-1", name: "trino-a", engineType: "trino" }], notEnforced: null },
+              { catalogId: "c-b", catalogName: "demo_warehouse", engines: [], notEnforced: "no_engine" },
+            ],
+          },
+        ],
+      },
+    } as unknown as ReturnType<typeof permApi.usePermRulesEnforcement>);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthContext.Provider value={{ me: { user_id: "u", email: "", platform_roles: [], permissions: ["policy:read"] }, isLoading: false }}>
+          <MemoryRouter>
+            <TagRulesSection tag={TAG} tagId="t-eu" />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </QueryClientProvider>,
+    );
+    const row = screen.getByRole("link", { name: "mask ssn" }).closest("tr") as HTMLElement;
+    expect(row).toHaveTextContent("Partly enforced — Not enforced in demo_warehouse — no engine attached.");
+    expect(row).not.toHaveTextContent("Not enforced yet");
+  });
 });

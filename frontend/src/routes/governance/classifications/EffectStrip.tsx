@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useCanManageTags } from "@/routes/governance/classifications/tagParts";
 import { TERM } from "@/routes/governance/glossary";
-import { NotEnforcedSummary, useRuleEnforcement } from "@/routes/governance/NotEnforced";
+import { NotEnforcedSummary, PartlyEnforcedSummary, useRuleEnforcement } from "@/routes/governance/NotEnforced";
 import { setAttachIntent } from "@/routes/governance/attachIntent";
 import { formatRuleKind } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
@@ -125,6 +125,7 @@ export function EffectStrip({ tag }: { tag: Tag }) {
         <dd className="text-sm">{rules.length === 0 ? NO_RULE_YET : rulesText(rules)}</dd>
         <dd>
           <NotEnforcedSummary rules={rules.map((r) => ({ id: r.id, appliesTo: r.selector.type }))} enforcement={enforcement} />
+          <PartlyEnforcedSummary rules={rules.map((r) => ({ id: r.id, appliesTo: r.selector.type }))} enforcement={enforcement} />
         </dd>
       </>
     );
