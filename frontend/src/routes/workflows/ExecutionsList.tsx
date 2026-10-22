@@ -53,6 +53,7 @@ import {
   type ExecutionFilters,
 } from "@/routes/workflows/executionsListModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /** One page as the list shows it: the rows, the whole match's size, and whether the server's worker runs. */
 interface ListPage {
@@ -365,7 +366,7 @@ export function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListI
       {showFlow ? (
         <TableCell>
           {row.flow_id ? (
-            <Link className="font-medium hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_id)}/edit`}>
+            <Link className={ENTITY_LINK_CLASS} to={`${base}/flows/${encodeURIComponent(row.flow_id)}/edit`}>
               {row.flow_key}
             </Link>
           ) : (

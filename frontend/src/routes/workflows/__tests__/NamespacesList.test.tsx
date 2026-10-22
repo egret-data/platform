@@ -98,15 +98,18 @@ describe("NamespacesList: the tree", () => {
     expect([0, 1, 2, 3, 4].map(depth)).toEqual([0, 1, 1, 2, 0]);
   });
 
-  it("mutes a parent-only node and says why, in words as well as colour", async () => {
+  // KI-223: every name in a list is one colour, so a parent-only node is told
+  // apart by its "Parent only" label, not by a muted name.
+  it("says a parent-only node is parent only, in words, and keeps its name the list's name colour", async () => {
     serveNamespaces({ namespaces: ROWS });
     renderList();
     await screen.findByTestId("namespaces-table");
     const [company, data] = bodyRows();
     expect(within(company).getByText("Parent only")).toBeInTheDocument();
-    expect(within(company).getByRole("link")).toHaveClass("text-muted-foreground");
+    expect(within(company).getByRole("link")).toHaveClass("text-foreground");
+    expect(within(company).getByRole("link")).not.toHaveClass("text-muted-foreground");
     expect(within(data).queryByText("Parent only")).toBeNull();
-    expect(within(data).getByRole("link")).not.toHaveClass("text-muted-foreground");
+    expect(within(data).getByRole("link")).toHaveClass("text-foreground");
   });
 
   it("links each node to its detail's Overview, encoding the namespace", async () => {
