@@ -1024,11 +1024,32 @@ pub struct MemberDto {
     pub is_platform_admin: bool,
 }
 
+/// What `POST /ws/{workspace}/members` did.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AddMemberResult {
+    pub ok: bool,
+    /// `true` when the email belongs to nobody yet and was pre-registered
+    /// instead: the membership binds at that SSO user's first sign-in (KI-185).
+    pub invited: bool,
+}
+
+/// A pre-registered email waiting for its SSO user's first sign-in.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct InviteDto {
+    pub id: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by_name: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub fn ws_member_router() -> Router<WorkspaceState> {
     Router::new()
         .route("/{workspace}/impersonate", post(ws_impersonate_start))
         .route("/{workspace}/members", get(list_members).post(add_member))
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
+        .route("/{workspace}/invites", get(list_invites))
+        .route("/{workspace}/invites/{id}", delete(delete_invite))
         .route("/{workspace}/roles", get(list_workspace_roles))
         .route("/{workspace}/shares", get(list_workspace_shares))
         .route(
@@ -1273,7 +1294,8 @@ async fn list_members(
     params(WorkspacePath),
     request_body = AddMember,
     responses(
-        (status = 200, description = "Member added", body = Ack),
+        (status = 200, description = "Member added, or (`invited`) an unknown email pre-registered for its first SSO sign-in", body = AddMemberResult),
+        (status = 400, description = "Unknown principal or role", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing workspace permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1283,7 +1305,7 @@ async fn add_member(
     State(st): State<WorkspaceState>,
     WsContext(ctx): WsContext,
     Json(body): Json<AddMember>,
-) -> Result<Json<serde_json::Value>, AuthError> {
+) -> Result<Json<AddMemberResult>, AuthError> {
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
@@ -1291,17 +1313,26 @@ async fn add_member(
     // member's UUID. Accept a real UUID directly, else resolve email/name -> id.
     let pid: uuid::Uuid = match uuid::Uuid::parse_str(&body.principal_id) {
         Ok(u) => u,
-        Err(_) => st
+        Err(_) => match st
             .members
             .resolve_principal(&body.principal_type, &body.principal_id)
             .await
             .map_err(AuthError)?
-            .ok_or_else(|| {
-                AuthError(egret_core::Error::InvalidInput(format!(
+        {
+            Some(id) => id,
+            // KI-185: with SSO on, an email nobody has signed in with yet is
+            // pre-registered; the membership binds at that user's first
+            // sign-in, on an email the IdP verified.
+            None if body.principal_type == "user" && st.oidc.is_some() => {
+                return invite_member(&st, &ctx, &body).await;
+            }
+            None => {
+                return Err(AuthError(egret_core::Error::InvalidInput(format!(
                     "unknown {}: {}",
                     body.principal_type, body.principal_id
-                )))
-            })?,
+                ))))
+            }
+        },
     };
     // A role change is a replace; demoting the last ws_admin is a last-admin removal.
     if body.role != "ws_admin"
@@ -1344,6 +1375,118 @@ async fn add_member(
             "principal_id": pid,
             "role": body.role,
         }),
+    ));
+    Ok(Json(AddMemberResult {
+        ok: true,
+        invited: false,
+    }))
+}
+
+async fn invite_member(
+    st: &WorkspaceState,
+    ctx: &egret_core::WorkspaceContext,
+    body: &AddMember,
+) -> Result<Json<AddMemberResult>, AuthError> {
+    st.members
+        .invite(
+            ctx.workspace_id,
+            &body.principal_id,
+            &body.role,
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "member:invite",
+        "invite",
+        None,
+        serde_json::json!({ "email": body.principal_id.trim(), "role": body.role }),
+    ));
+    Ok(Json(AddMemberResult {
+        ok: true,
+        invited: true,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/invites",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Emails pre-registered for their first SSO sign-in", body = Vec<InviteDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_invites(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<InviteDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let invites = st
+        .members
+        .list_invites(ctx.workspace_id)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(
+        invites
+            .into_iter()
+            .map(|i| InviteDto {
+                id: i.id.to_string(),
+                email: i.email,
+                role: i.role,
+                invited_by_name: i.invited_by_name,
+                created_at: i.created_at,
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/invites/{id}",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Pre-registration id"),
+    ),
+    responses(
+        (status = 200, description = "Pre-registration withdrawn", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such pre-registration in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_invite(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    if !st
+        .members
+        .delete_invite(ctx.workspace_id, id)
+        .await
+        .map_err(AuthError)?
+    {
+        return Err(AuthError(Error::NotFound("invite".into())));
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "member:uninvite",
+        "invite",
+        Some(id.to_string()),
+        serde_json::json!({}),
     ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1434,7 +1577,11 @@ pub struct WsRoleDto {
     pub name: String,
     pub description: String,
     pub parent_role_id: Option<String>,
+    /// The role's own permissions.
     pub permissions: Vec<WsPermDto>,
+    /// Permissions held through the parent chain and not held directly; a
+    /// holder of the role has them too.
+    pub inherited_permissions: Vec<WsPermDto>,
 }
 impl From<crate::access_views::WsRole> for WsRoleDto {
     fn from(r: crate::access_views::WsRole) -> Self {
@@ -1444,6 +1591,11 @@ impl From<crate::access_views::WsRole> for WsRoleDto {
             description: r.description,
             parent_role_id: r.parent_role_id.map(|p| p.to_string()),
             permissions: r.permissions.into_iter().map(Into::into).collect(),
+            inherited_permissions: r
+                .inherited_permissions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -1783,6 +1935,8 @@ pub struct AdminUserApi;
         list_members,
         add_member,
         remove_member,
+        list_invites,
+        delete_invite,
         list_workspace_roles,
         list_workspace_shares,
         list_workspace_access_requests,
@@ -1793,6 +1947,8 @@ pub struct AdminUserApi;
         StartWsImpersonation,
         MemberDto,
         AddMember,
+        AddMemberResult,
+        InviteDto,
         WsRoleDto,
         WsPermDto,
         ObjectGrantRollupDto,

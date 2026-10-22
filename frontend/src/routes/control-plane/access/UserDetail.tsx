@@ -21,6 +21,16 @@ import { RolesEditor } from "@/components/access/RolesEditor";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
@@ -92,6 +102,7 @@ export default function UserDetail() {
 
   const [resetOpen, setResetOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [disableOpen, setDisableOpen] = useState(false);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: usersQueryKey });
 
@@ -137,9 +148,7 @@ export default function UserDetail() {
     }
   }
 
-  function toggleStatus() {
-    if (!user) return;
-    const next = user.status === "active" ? "disabled" : "active";
+  function setStatus(next: "active" | "disabled") {
     updateMut.mutate(
       { status: next },
       {
@@ -207,7 +216,11 @@ export default function UserDetail() {
         </div>
         {isAdmin && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={toggleStatus}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => (isActive ? setDisableOpen(true) : setStatus("active"))}
+            >
               {isActive ? "Disable" : "Enable"}
             </Button>
             {user.provider === "local" && (
@@ -301,6 +314,28 @@ export default function UserDetail() {
       </section>
 
       <ResetPasswordDialog userId={id} email={user.email} open={resetOpen} onOpenChange={setResetOpen} />
+
+      {/* KI-209: disabling signs the user out at once, so it asks first. */}
+      <AlertDialog open={disableOpen} onOpenChange={setDisableOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disable {user.email}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              They are signed out at once and cannot sign in until the account is enabled again.
+              Their memberships and role grants are kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => setStatus("disabled")}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Disable user
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ConfirmDeleteDialog
         open={deleteOpen}

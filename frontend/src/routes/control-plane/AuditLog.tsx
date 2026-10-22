@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 
-import { listUsers } from "@/api/access";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
 import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 import type { ControlPlaneAuditListAuditParams } from "@/api/generated/model/controlPlaneAuditListAuditParams";
@@ -45,10 +43,14 @@ function toIso(local: string): string | undefined {
  * Every authorization decision and grant change, newest first. Reads the
  * platform-admin-only `GET /control-plane/audit` keyset-paginated feed, with
  * kind / decision / action filters. Changing any filter resets pagination.
+ *
+ * It opens on "Changes and denials" (KI-017): every page view writes an
+ * allowed authorization decision, and those bury the grant changes.
  */
 export default function AuditLog() {
-  // Filters. "all" means "omit the param".
-  const [kind, setKind] = useState("all");
+  // Filters. "all" means "omit the param"; kind "changes" means
+  // `hideAllowed` (mutations, plus decisions that refused).
+  const [kind, setKind] = useState("changes");
   const [decision, setDecision] = useState("all");
   const [action, setAction] = useState("");
   const [from, setFrom] = useState("");
@@ -65,7 +67,8 @@ export default function AuditLog() {
 
   const params: ControlPlaneAuditListAuditParams = useMemo(
     () => ({
-      kind: kind === "all" ? undefined : kind,
+      kind: kind === "all" || kind === "changes" ? undefined : kind,
+      hideAllowed: kind === "changes" ? true : undefined,
       decision: decision === "all" ? undefined : decision,
       action: actionParam,
       from: fromIso,
@@ -74,18 +77,6 @@ export default function AuditLog() {
       limit: PAGE_SIZE,
     }),
     [kind, decision, actionParam, fromIso, toIsoValue, cursor],
-  );
-
-  // Resolve actor UUIDs to emails so the Actor column is readable. Both this
-  // and the audit feed are platform-admin only, so the viewer can list users.
-  const usersQ = useQuery({
-    queryKey: ["control-plane", "access", "users"],
-    queryFn: listUsers,
-    retry: false,
-  });
-  const userEmailById = useMemo(
-    () => new Map((usersQ.data ?? []).map((u) => [u.id, u.email])),
-    [usersQ.data],
   );
 
   const query = useControlPlaneAuditListAudit(params, {
@@ -140,10 +131,11 @@ export default function AuditLog() {
             <div className="space-y-1.5">
               <Label htmlFor="audit-kind">Kind</Label>
               <Select value={kind} onValueChange={setKind}>
-                <SelectTrigger id="audit-kind" className="w-36" aria-label="Kind">
+                <SelectTrigger id="audit-kind" className="w-48" aria-label="Kind">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="changes">Changes and denials</SelectItem>
                   <SelectItem value="all">All</SelectItem>
                   <SelectItem value="decision">Decision</SelectItem>
                   <SelectItem value="mutation">Mutation</SelectItem>
@@ -227,7 +219,7 @@ export default function AuditLog() {
                 </TableHeader>
                 <TableBody>
                   {entries.map((e) => (
-                    <AuditRow key={e.id} entry={e} userEmailById={userEmailById} />
+                    <AuditRow key={e.id} entry={e} />
                   ))}
                   {entries.length === 0 && !query.isError && (
                     <TableRow className="hover:bg-transparent">
@@ -268,13 +260,7 @@ export default function AuditLog() {
   );
 }
 
-function AuditRow({
-  entry,
-  userEmailById,
-}: {
-  entry: AuditEntryDto;
-  userEmailById: Map<string, string>;
-}) {
+function AuditRow({ entry }: { entry: AuditEntryDto }) {
   const detail =
     entry.kind === "decision"
       ? entry.reasons.join(", ")
@@ -282,8 +268,8 @@ function AuditRow({
   const detailTruncated =
     detail.length > 96 ? `${detail.slice(0, 96)}…` : detail;
 
-  // Prefer the resolved email; fall back to a short id when the user is gone.
-  const actorEmail = entry.actorUserId ? userEmailById.get(entry.actorUserId) : undefined;
+  // The API names the actor; a short id remains when the user is gone.
+  const actorEmail = entry.actorEmail ?? undefined;
 
   return (
     <TableRow>

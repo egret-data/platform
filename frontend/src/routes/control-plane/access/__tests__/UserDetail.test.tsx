@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -113,13 +113,30 @@ describe("UserDetail", () => {
     await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u1", { name: "Alice B" }));
   });
 
-  test("Disable toggles the user status", async () => {
+  // KI-209: Disable signs the user out at once, so it asks first.
+  test("Disable asks for confirmation, then disables", async () => {
     const user = userEvent.setup();
     renderDetail("u1");
     await screen.findByRole("heading", { name: "Alice" });
 
     await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/signed out/i);
+    expect(api.updateUser).not.toHaveBeenCalledWith("u1", { status: "disabled" });
+
+    await user.click(within(dialog).getByRole("button", { name: "Disable user" }));
     await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }));
+  });
+
+  test("cancelling the Disable confirmation changes nothing", async () => {
+    vi.mocked(api.updateUser).mockClear();
+    const user = userEvent.setup();
+    renderDetail("u1");
+    await screen.findByRole("heading", { name: "Alice" });
+
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    expect(api.updateUser).not.toHaveBeenCalledWith("u1", { status: "disabled" });
   });
 
   test("a non-admin viewer gets a read-only page", async () => {

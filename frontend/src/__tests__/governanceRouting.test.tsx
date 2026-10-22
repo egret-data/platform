@@ -215,6 +215,9 @@ describe("Governance routing in App", () => {
     openApp("/", me([]));
     expect(await screen.findByText(/No workspaces yet/, {}, TIMEOUT)).toBeInTheDocument();
     expect(currentUrl()).toBe("/");
+    // KI-185: the page names the address an admin adds them by, and has a way out.
+    expect(screen.getByText("u1@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   }, 15_000);
 
   it("does not bounce a member with workspaces to Governance while the workspace list is still loading", async () => {

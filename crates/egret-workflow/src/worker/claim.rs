@@ -6771,11 +6771,19 @@ mod tests {
             claimed_at: held,
             ..c
         };
-        // Renewals every 50 ms and polls every 20 ms, for 400 ms of work.
+        // A renewal every second, and the work ends on an EVENT -- two
+        // renewals by the ticker after the immediate first one -- not after a
+        // fixed sleep. This test once ran 400 ms of work under a 150 ms
+        // `working_timeout` and a 20 ms `kill_poll`: one renewal or one read
+        // slower than that on a loaded runner gave the run up (self-fence, or
+        // the refused leaf renewal's read timing out into `Lost`), and the
+        // verdict measured the database's latency instead of the fence.
+        // `kill_poll` matters only to the leaf below, where it bounds the one
+        // read that tells a kill from a lost lease.
         let timing = WorkerTiming {
-            working_timeout: std::time::Duration::from_millis(150),
+            working_timeout: std::time::Duration::from_secs(3),
             container_default_timeout: super::super::DEFAULT_CONTAINER_TIMEOUT,
-            kill_poll: std::time::Duration::from_millis(20),
+            kill_poll: std::time::Duration::from_secs(3),
         };
         let out = under_lease(
             &pool,
@@ -6786,13 +6794,22 @@ mod tests {
             },
             tokio::time::Instant::now(),
             async {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                7
+                let mut seen = run_row(&pool, c.id).await.3;
+                let mut renewals = 0;
+                while renewals < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    let now = run_row(&pool, c.id).await.3;
+                    if now != seen {
+                        renewals += 1;
+                        seen = now;
+                    }
+                }
+                renewals
             },
         )
         .await;
         let held = match out {
-            Leased::Kept { out: 7, held, .. } => held,
+            Leased::Kept { out: 2, held, .. } => held,
             Leased::Kept { .. } => unreachable!(),
             Leased::Lost => panic!("a discard-only claim lost its lease"),
             Leased::Killed { .. } => panic!("a discard-only claim was taken for a kill"),

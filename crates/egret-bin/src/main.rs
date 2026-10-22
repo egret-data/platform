@@ -1467,6 +1467,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             // J-F3 Task 1b: every login's group sync recompiles the policies
             // the groups it moved reach (`egret_auth::groups`' module doc).
             group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
+            // KI-185: a sign-in with a verified email redeems the workspace
+            // pre-registrations made for it.
+            invites: std::sync::Arc::new(MemberRepo::new(db.clone())),
         }),
         _ => None,
     };

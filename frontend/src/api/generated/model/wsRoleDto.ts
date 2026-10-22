@@ -13,5 +13,11 @@ export interface WsRoleDto {
   description: string;
   /** @nullable */
   parent_role_id?: string | null;
+  /** The role's own permissions. */
   permissions: WsPermDto[];
+  /**
+     * Permissions held through the parent chain and not held directly; a
+     * holder of the role has them too.
+     */
+  inherited_permissions: WsPermDto[];
 }

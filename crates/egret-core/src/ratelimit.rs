@@ -147,9 +147,9 @@ impl RateLimiter {
         self.verdict_at(key, now) == Verdict::Allowed
     }
 
-    /// [`Self::check_at`], saying whether a denial was the first of its lockout.
-    pub fn verdict_at(&self, key: &str, now: Instant) -> Verdict {
-        let mut st = self.inner.lock().unwrap();
+    /// Drop the entries that track nothing, at most once per window. See
+    /// [`Self::check_at`] for why the sweep rides on the request path.
+    fn sweep(&self, st: &mut State, now: Instant) {
         match st.next_sweep_at {
             Some(due) if now >= due => {
                 st.next_sweep_at = Some(now + self.window);
@@ -160,6 +160,12 @@ impl RateLimiter {
             None => st.next_sweep_at = Some(now + self.window),
             _ => {}
         }
+    }
+
+    /// [`Self::check_at`], saying whether a denial was the first of its lockout.
+    pub fn verdict_at(&self, key: &str, now: Instant) -> Verdict {
+        let mut st = self.inner.lock().unwrap();
+        self.sweep(&mut st, now);
 
         let e = st.buckets.entry(Self::digest(key)).or_default();
         if let Some(until) = e.locked_until {
@@ -176,6 +182,59 @@ impl RateLimiter {
         }
         e.attempts.push(now);
         Verdict::Allowed
+    }
+
+    /// How long `key` must still wait, or `None` if it may try now. Records
+    /// nothing: this is the read half of the failure-counting pair used by
+    /// local login, where only a FAILED attempt costs budget (see
+    /// [`Self::record_failure_at`]).
+    ///
+    /// Used where a caller can legitimately succeed several times in a row
+    /// (a person signing in from a few tabs): counting successes there locks
+    /// out the right password, and the budget exists to slow down guessing,
+    /// which only failures are.
+    pub fn retry_after_at(&self, key: &str, now: Instant) -> Option<Duration> {
+        let st = self.inner.lock().unwrap();
+        let until = st.buckets.get(&Self::digest(key))?.locked_until?;
+        (now < until).then(|| until - now)
+    }
+
+    /// Count one failed attempt for `key` at `now`. The `max`-th failure
+    /// inside the window starts the lockout, so the attempt after it is the
+    /// first one [`Self::retry_after_at`] refuses — the same "`max` attempts,
+    /// then wait" budget [`Self::check_at`] gives, counting failures only.
+    pub fn record_failure_at(&self, key: &str, now: Instant) {
+        let mut st = self.inner.lock().unwrap();
+        self.sweep(&mut st, now);
+        let e = st.buckets.entry(Self::digest(key)).or_default();
+        if e.locked_until.is_some_and(|until| now < until) {
+            return;
+        }
+        e.locked_until = None;
+        e.attempts.retain(|t| now.duration_since(*t) < self.window);
+        e.attempts.push(now);
+        if e.attempts.len() as u32 >= self.max {
+            e.locked_until = Some(now + self.lockout);
+            e.attempts.clear();
+        }
+    }
+
+    /// Forget `key`'s failures: a success proves the caller holds the secret,
+    /// so the guesses before it no longer count against them.
+    pub fn clear(&self, key: &str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .buckets
+            .remove(&Self::digest(key));
+    }
+
+    pub fn retry_after(&self, key: &str) -> Option<Duration> {
+        self.retry_after_at(key, Instant::now())
+    }
+
+    pub fn record_failure(&self, key: &str) {
+        self.record_failure_at(key, Instant::now())
     }
 
     pub fn check(&self, key: &str) -> bool {
@@ -386,6 +445,59 @@ mod tests {
         // And the lockout runs its full length, not the window's.
         assert!(!rl.check_at("attacker", t0 + Duration::from_secs(899)));
         assert!(rl.check_at("attacker", t0 + Duration::from_secs(901)));
+    }
+
+    /// KI-144: only failures cost budget. A run of successes never locks the
+    /// caller out, and a success forgives the failures before it.
+    #[test]
+    fn successes_do_not_count_and_clear_forgives_failures() {
+        let rl = RateLimiter::new(5, 300, 300);
+        let t0 = Instant::now();
+        for _ in 0..4 {
+            rl.record_failure_at("ip:a", t0);
+        }
+        assert_eq!(
+            rl.retry_after_at("ip:a", t0),
+            None,
+            "4 failures of 5: may try"
+        );
+        rl.clear("ip:a"); // the 5th attempt succeeded
+        for _ in 0..4 {
+            rl.record_failure_at("ip:a", t0);
+        }
+        assert_eq!(rl.retry_after_at("ip:a", t0), None);
+    }
+
+    /// KI-002: after the fifth failure the caller is told how long to wait;
+    /// attempts refused inside the lockout neither extend it nor count.
+    #[test]
+    fn five_failures_lock_and_report_the_remaining_wait() {
+        let rl = RateLimiter::new(5, 300, 300);
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(rl.retry_after_at("ip:a", t0), None);
+            rl.record_failure_at("ip:a", t0);
+        }
+        assert_eq!(
+            rl.retry_after_at("ip:a", t0),
+            Some(Duration::from_secs(300))
+        );
+        rl.record_failure_at("ip:a", t0 + Duration::from_secs(100));
+        assert_eq!(
+            rl.retry_after_at("ip:a", t0 + Duration::from_secs(100)),
+            Some(Duration::from_secs(200))
+        );
+        assert_eq!(
+            rl.retry_after_at("ip:a", t0 + Duration::from_secs(300)),
+            None,
+            "the lockout ends on time"
+        );
+        rl.record_failure_at("ip:a", t0 + Duration::from_secs(301));
+        assert_eq!(
+            rl.retry_after_at("ip:a", t0 + Duration::from_secs(301)),
+            None,
+            "after the lockout the caller has a fresh budget"
+        );
     }
 
     /// An attacker-supplied key must not buy attacker-chosen permanent memory:

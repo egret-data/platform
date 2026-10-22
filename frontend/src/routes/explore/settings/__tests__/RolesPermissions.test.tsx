@@ -38,6 +38,7 @@ const viewerRole = {
   permissions: [
     { key: "ws:read", description: "View workspace contents", group: "Workspace" },
   ],
+  inherited_permissions: [],
 };
 
 const adminRole = {
@@ -49,6 +50,7 @@ const adminRole = {
     { key: "ws:read", description: "View workspace contents", group: "Workspace" },
     { key: "ws:manage_members", description: "Add or remove workspace members", group: "Workspace" },
   ],
+  inherited_permissions: [],
 };
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -108,5 +110,40 @@ describe("RolesPermissions page", () => {
     renderPage();
 
     expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
+  });
+
+  // KI-127: a role that inherits counts what its holders get, as the Control
+  // Plane role page does, and lists the inherited part under its parent.
+  it("counts and lists a role's inherited permissions", () => {
+    roleCatalogMock.mockReturnValue({
+      data: [
+        viewerRole,
+        {
+          id: "r-fin",
+          name: "finance_reporter",
+          description: "",
+          parent_role_id: "r-viewer",
+          permissions: [
+            { key: "chart:manage", description: "Edit charts", group: "Charts" },
+            { key: "dashboard:manage", description: "Edit dashboards", group: "Dashboards" },
+          ],
+          inherited_permissions: [
+            { key: "ws:read", description: "View workspace contents", group: "Workspace" },
+          ],
+        },
+      ],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderPage();
+
+    const trigger = screen.getByRole("button", { name: /finance_reporter/ });
+    expect(trigger).toHaveTextContent("3 permissions");
+    expect(trigger).toHaveTextContent("1 inherited");
+
+    fireEvent.click(trigger);
+    expect(screen.getByText("Inherited from ws_viewer")).toBeInTheDocument();
+    expect(screen.getAllByText("ws:read").length).toBeGreaterThan(0);
   });
 });

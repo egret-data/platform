@@ -3373,6 +3373,7 @@ async fn a_grant_written_during_a_group_delete_never_stores_a_reference_to_the_d
         &egret_auth::oidc::OidcClaims {
             subject: format!("sub-{tag}"),
             email: format!("{tag}@idp.local"),
+            email_verified: true,
             name: "IdP".into(),
             groups: vec![group.clone()],
         },

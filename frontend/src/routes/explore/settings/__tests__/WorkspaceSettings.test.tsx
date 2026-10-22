@@ -23,6 +23,13 @@ vi.mock("@/api/members", () => ({
   useWorkspaceRoles: () => rolesMock(),
   useAddMember: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
   useRemoveMember: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useWorkspaceInvites: () => ({ data: [], isLoading: false, error: null }),
+  useDeleteInvite: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+vi.mock("@/api/hooks", async () => ({
+  ...(await vi.importActual<typeof import("@/api/hooks")>("@/api/hooks")),
+  useAuthConfig: () => ({ data: { oidc_enabled: false } }),
 }));
 
 vi.mock("@/api/policies", () => ({
