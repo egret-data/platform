@@ -357,6 +357,9 @@ pub const UNGATED: &[&str] = &[
     // Starting an impersonation is a ws_admin support action, not a data module —
     // it stays reachable regardless of which feature modules a workspace has.
     "impersonate",
+    // SSO pre-registrations (KI-185): pending members, managed with them under
+    // `workspace:manage_members`.
+    "invites",
     "members",
     // Per-workspace SMTP. Deliberately NOT claimed by `alerts`, even though
     // alerts are its only consumer today: it is workspace-level configuration
