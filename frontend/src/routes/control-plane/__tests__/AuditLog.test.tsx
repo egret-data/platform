@@ -106,7 +106,7 @@ describe("AuditLog", () => {
     renderPage();
     await screen.findByText("secret:read");
     expect(auditApi.useControlPlaneAuditListAudit).toHaveBeenLastCalledWith(
-      expect.objectContaining({ hide_allowed: true, kind: undefined }),
+      expect.objectContaining({ hideAllowed: true, kind: undefined }),
       expect.anything(),
     );
     expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Changes and denials");
@@ -116,7 +116,7 @@ describe("AuditLog", () => {
 
     await waitFor(() =>
       expect(auditApi.useControlPlaneAuditListAudit).toHaveBeenLastCalledWith(
-        expect.objectContaining({ hide_allowed: undefined, kind: undefined }),
+        expect.objectContaining({ hideAllowed: undefined, kind: undefined }),
         expect.anything(),
       ),
     );

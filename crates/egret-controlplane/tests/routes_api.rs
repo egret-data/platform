@@ -3325,7 +3325,7 @@ async fn a_caller_without_policy_read_gets_only_the_count_in_the_409() {
     );
 }
 
-/// KI-017 / KI-018: `hide_allowed=true` leaves out the authorization decisions
+/// KI-017 / KI-018: `hideAllowed=true` leaves out the authorization decisions
 /// that allowed a call (the page views that flood the log) and keeps changes
 /// and denials; every entry names its actor by email.
 #[tokio::test]
@@ -3375,7 +3375,7 @@ async fn audit_hides_allowed_decisions_and_names_the_actor() {
         .clone()
         .oneshot(req(
             "GET",
-            &format!("/audit?actor={actor}&hide_allowed=true"),
+            &format!("/audit?actor={actor}&hideAllowed=true"),
             &admin,
             None,
         ))

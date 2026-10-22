@@ -49,7 +49,7 @@ function toIso(local: string): string | undefined {
  */
 export default function AuditLog() {
   // Filters. "all" means "omit the param"; kind "changes" means
-  // `hide_allowed` (mutations, plus decisions that refused).
+  // `hideAllowed` (mutations, plus decisions that refused).
   const [kind, setKind] = useState("changes");
   const [decision, setDecision] = useState("all");
   const [action, setAction] = useState("");
@@ -68,7 +68,7 @@ export default function AuditLog() {
   const params: ControlPlaneAuditListAuditParams = useMemo(
     () => ({
       kind: kind === "all" || kind === "changes" ? undefined : kind,
-      hide_allowed: kind === "changes" ? true : undefined,
+      hideAllowed: kind === "changes" ? true : undefined,
       decision: decision === "all" ? undefined : decision,
       action: actionParam,
       from: fromIso,

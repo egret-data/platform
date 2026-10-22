@@ -368,7 +368,7 @@ impl egret_auth::preregistration::PendingMembershipRedeemer for MemberRepo {
         let pending: Vec<(Uuid, Uuid, String, Uuid)> = sqlx::query_as(
             "SELECT i.id, i.workspace_id, r.name, i.invited_by \
              FROM workspace_invites i JOIN roles r ON r.id = i.role_id \
-             WHERE i.email = $1 ORDER BY i.created_at",
+             WHERE i.email = $1::citext ORDER BY i.created_at",
         )
         .bind(email)
         .fetch_all(&self.db.pool)
