@@ -15,6 +15,9 @@ pub struct AuditQueryParams {
     pub action: Option<String>,
     pub kind: Option<String>,
     pub decision: Option<String>,
+    /// `true` leaves out authorization decisions that allowed the call
+    /// (routine reads): what is left is changes and denials.
+    pub hide_allowed: Option<bool>,
     pub workspace: Option<uuid::Uuid>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
     pub to: Option<chrono::DateTime<chrono::Utc>>,
@@ -30,6 +33,8 @@ pub struct AuditEntryDto {
     pub ts: chrono::DateTime<chrono::Utc>,
     pub kind: String,
     pub actor_user_id: Option<uuid::Uuid>,
+    /// The actor's email, when the actor is a user who still exists.
+    pub actor_email: Option<String>,
     pub workspace_id: Option<uuid::Uuid>,
     pub action: String,
     pub resource_type: String,
@@ -84,6 +89,7 @@ async fn list_audit(
         action: q.action,
         kind: q.kind,
         decision: q.decision,
+        hide_allowed: q.hide_allowed.unwrap_or(false),
         workspace: q.workspace,
         from: q.from,
         to: q.to,
@@ -107,6 +113,7 @@ async fn list_audit(
             ts: r.ts,
             kind: r.kind,
             actor_user_id: r.actor_user_id,
+            actor_email: r.actor_email,
             workspace_id: r.workspace_id,
             action: r.action,
             resource_type: r.resource_type,

@@ -51,6 +51,7 @@ const AUDIT_ENTRIES: AuditEntryDto[] = [
     ts: "2026-07-13T10:00:00Z",
     kind: "mutation",
     actorUserId: "user-abc-12345",
+    actorEmail: "alice@egret.local",
     workspaceId: null,
     action: "role.assign",
     resourceType: "role",
@@ -168,6 +169,8 @@ describe("AccessOverview", () => {
 
     expect(await screen.findByText(/recent changes/i)).toBeInTheDocument();
     expect(screen.getByText("role.assign")).toBeInTheDocument();
+    // KI-018: the actor by email, not by an id prefix.
+    expect(screen.getByText("by alice@egret.local")).toBeInTheDocument();
   });
 
   test("hides the Recent changes panel for a non-platform_admin", async () => {

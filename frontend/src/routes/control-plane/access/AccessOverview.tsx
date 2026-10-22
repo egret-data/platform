@@ -434,7 +434,7 @@ function RecentChangesPanel() {
                 <span className="text-muted-foreground">{e.resourceType}</span>
                 {e.actorUserId ? (
                   <span className="text-xs text-muted-foreground" title={e.actorUserId}>
-                    by {e.actorUserId.slice(0, 8)}
+                    by {e.actorEmail ?? e.actorUserId.slice(0, 8)}
                   </span>
                 ) : null}
                 <span className="ml-auto text-xs text-muted-foreground">{timeAgo(e.ts)}</span>
