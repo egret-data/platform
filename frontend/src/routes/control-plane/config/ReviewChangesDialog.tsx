@@ -58,20 +58,27 @@ function ChangeRow({ change }: { change: ConfigChange }) {
 }
 
 /**
- * Read-only modal that diffs the freshly-built `after` config against the
- * engine's stored `before` config (leaf-path `diffConfig`), colour-coded by
- * change kind. No save action lives here — Save stays on the SaveBar.
+ * Modal that diffs the freshly-built `after` config against the engine's
+ * stored `before` config (leaf-path `diffConfig`), colour-coded by change kind,
+ * and confirms the save: saving restarts the engine (`restartNote` says how),
+ * so it is never applied without this step (KI-198).
  */
 export function ReviewChangesDialog({
   before,
   after,
   open,
   onOpenChange,
+  onConfirm,
+  restartNote,
 }: {
   before: unknown;
   after: unknown;
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  /** Applies the changes; the dialog closes first. */
+  onConfirm: () => void;
+  /** What saving does to the running engine. */
+  restartNote: string;
 }) {
   const changes = diffConfig(before, after);
 
@@ -97,9 +104,7 @@ export function ReviewChangesDialog({
           </ScrollArea>
         )}
 
-        <p className="text-xs text-muted-foreground">
-          Saving re-provisions (rolls) the engine pods.
-        </p>
+        <p className="text-xs text-muted-foreground">{restartNote}</p>
 
         <DialogFooter>
           <Button
@@ -107,7 +112,16 @@ export function ReviewChangesDialog({
             variant="outline"
             onClick={() => onOpenChange(false)}
           >
-            Close
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={() => {
+              onOpenChange(false);
+              onConfirm();
+            }}
+          >
+            Save changes
           </Button>
         </DialogFooter>
       </DialogContent>

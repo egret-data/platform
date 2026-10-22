@@ -764,6 +764,12 @@ export interface EngineConfigForm {
   setIngressEnabled: (v: boolean) => void;
   ingressHost: string;
   setIngressHost: (v: string) => void;
+  /**
+   * The ingress is on with no host. An ingress needs a host, and a config built
+   * without one used to drop the ingress silently (KI-200); Save and Create are
+   * blocked while this is set and the host field says why.
+   */
+  ingressHostMissing: boolean;
   ingressClassName: string;
   setIngressClassName: (v: string) => void;
   ingressTlsSecret: string;
@@ -1123,9 +1129,12 @@ export function useEngineConfigForm(
             : {}),
         }
       : undefined;
+    // Omit-empty like every other field: an engine with only JWT has no
+    // password users, and `passwordUsers: []` listed itself in Review changes
+    // as a change nobody made (KI-198).
     if (cleanUsers.length || jwt) {
       trinoConfig.auth = {
-        passwordUsers: cleanUsers,
+        ...(cleanUsers.length ? { passwordUsers: cleanUsers } : {}),
         ...(jwt ? { jwt } : {}),
       };
     }
@@ -1374,6 +1383,7 @@ export function useEngineConfigForm(
     setIngressEnabled,
     ingressHost,
     setIngressHost,
+    ingressHostMissing: ingressEnabled && ingressHost.trim() === "",
     ingressClassName,
     setIngressClassName,
     ingressTlsSecret,

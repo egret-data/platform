@@ -49,6 +49,8 @@ export function EngineSecurity(props: {
   setIngressEnabled: (v: boolean) => void;
   ingressHost: string;
   setIngressHost: (v: string) => void;
+  /** The ingress is on with no host: say so under the field (KI-200). */
+  ingressHostMissing?: boolean;
   ingressClassName: string;
   setIngressClassName: (v: string) => void;
   ingressTlsSecret: string;
@@ -370,7 +372,21 @@ export function EngineSecurity(props: {
                   value={ingressHost}
                   placeholder="trino-demo.example.com"
                   onChange={(e) => setIngressHost(e.target.value)}
+                  aria-invalid={props.ingressHostMissing || undefined}
+                  aria-describedby={
+                    props.ingressHostMissing ? "ced-ing-host-error" : undefined
+                  }
                 />
+                {props.ingressHostMissing && (
+                  <p
+                    id="ced-ing-host-error"
+                    role="alert"
+                    className="mt-1 text-xs text-destructive"
+                  >
+                    Enter the host the ingress serves, or turn off Expose via
+                    ingress.
+                  </p>
+                )}
               </ConfigTableRow>
               <ConfigTableRow
                 label="Ingress class"
