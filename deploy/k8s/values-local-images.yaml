@@ -1,0 +1,17 @@
+# Images built on this machine and `kind load`ed (`just images-build`), instead of the chart's
+# default ghcr.io/egret-data/<image>:<appVersion>. The justfile's kind recipes pass this file;
+# add it to any `helm upgrade --install` of deploy/helm/egret that should run local builds.
+backend:
+  image: { repository: egret-backend, tag: dev, pullPolicy: IfNotPresent }
+frontend:
+  image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
+renderer:
+  image: { repository: egret-renderer, tag: dev, pullPolicy: IfNotPresent }
+apps:
+  pod:
+    image: egret-apps:dev
+workflow:
+  pluginHost:
+    image: egret-plugin-host:dev
+  tasks:
+    helperImage: egret-task-helper:dev

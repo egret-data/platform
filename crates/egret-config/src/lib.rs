@@ -3087,10 +3087,11 @@ values = { allowed-images = [] }
             r#"EGRET_WORKFLOW__CONTAINER_RUNNER: "{{ .Values.workflow.containerRunner }}""#
         ));
         assert!(read("values.yaml").contains("  containerRunner: none\n"));
-        // W5b: the plugin host's three settings, under the runner's block.
+        // W5b: the plugin host's three settings, under the runner's block. The image is never
+        // rendered empty: unset, it is the published image at the chart's appVersion.
         let env = read("templates/configmap-env.yaml");
         for key in [
-            "EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ required",
+            r#"EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ $h.image | default (include "egret.image" (dict "name" "egret-plugin-host" "root" $)) | quote }}"#,
             "EGRET_WORKFLOW__PLUGIN_HOST__JVM_MAX_HEAP: {{ $h.jvmMaxHeap | quote }}",
             "EGRET_WORKFLOW__PLUGIN_HOST__KILL_GRACE_S: {{ $h.killGraceS | quote }}",
         ] {

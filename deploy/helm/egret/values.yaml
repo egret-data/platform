@@ -1,5 +1,9 @@
+# Images: published to GHCR by .github/workflows/images.yml (docs/en/guides/releasing.md). An empty
+# `tag` (or image) means the chart's appVersion: a released chart deploys the images of its own
+# release, the chart in the tree deploys `edge` (the last build of main). For images built
+# locally and `kind load`ed, the justfile's kind recipes add deploy/k8s/values-local-images.yaml.
 backend:
-  image: { repository: egret-backend, tag: dev, pullPolicy: IfNotPresent }
+  image: { repository: ghcr.io/egret-data/egret-backend, tag: "", pullPolicy: IfNotPresent }
   replicas: 1
   # Requests/limits — see backend-deployment.yaml for why each number is what it
   # is. Without them the container is BestEffort QoS.
@@ -51,10 +55,10 @@ sharedStore:
   memoryRequest: 128Mi
   memoryLimit: 512Mi
 frontend:
-  image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
+  image: { repository: ghcr.io/egret-data/egret-frontend, tag: "", pullPolicy: IfNotPresent }
   nodePort: 30080
 renderer:
-  image: { repository: egret-renderer, tag: dev, pullPolicy: IfNotPresent }
+  image: { repository: ghcr.io/egret-data/egret-renderer, tag: "", pullPolicy: IfNotPresent }
   replicas: 1
 ingress:
   enabled: false
@@ -128,11 +132,11 @@ workflow:
   # Running a plugin task also needs the workspace feature
   # `workflow_kestra_plugins` (off by default, requires workflow_containers).
   pluginHost:
-    # REQUIRED whenever containerRunner is not `none`, even with no plugin task:
-    # egret refuses to start without it (W5b release note). `egret-plugin-host:dev`
-    # is published nowhere -- set a pullable image built from
-    # deploy/docker/plugin-host.Dockerfile (or `kind load` it for local use).
-    image: egret-plugin-host:dev
+    # Rendered whenever containerRunner is not `none`, even with no plugin task:
+    # egret refuses to start without it (W5b release note). Empty means
+    # ghcr.io/egret-data/egret-plugin-host:<appVersion>, built from
+    # deploy/docker/plugin-host.Dockerfile.
+    image: ""
     # The JVM's -Xmx, below the pod's default memory limit (512Mi).
     jvmMaxHeap: 384m
     # Seconds between SIGTERM (the host calls the plugin's kill(), which
@@ -142,8 +146,9 @@ workflow:
   tasks:
     namespace: egret-tasks
     # deploy/docker/task-helper.Dockerfile; must be pullable from the task
-    # namespace (or `kind load`ed).
-    helperImage: egret-task-helper:dev
+    # namespace (or `kind load`ed). Empty means
+    # ghcr.io/egret-data/egret-task-helper:<appVersion>.
+    helperImage: ""
     runAsUser: 1000
     # Existing dockerconfigjson Secrets in the task namespace.
     imagePullSecrets: []
@@ -238,7 +243,7 @@ apps:
   pod:
     launcher: none            # "kubernetes" starts one hardened Pod per author per workspace
     namespace: egret-apps     # chart-managed; Pod Security `restricted` is enforced there
-    image: egret-apps:dev
+    image: ""                 # empty = ghcr.io/egret-data/egret-apps:<appVersion>
     imagePullPolicy: IfNotPresent
     resources: { cpuRequest: 250m, memRequest: 512Mi, cpuLimit: 1000m, memLimit: 2Gi }
     readyTimeoutSecs: 60

@@ -28,6 +28,12 @@ demo-up:
     ./deploy/demo/wait.sh
     ./deploy/demo/seed.sh
 
+# Like demo-up, on the images published to GHCR (no build): tag = edge, latest or a version such as 1.2.0
+demo-up-ghcr tag="edge":
+    EGRET_TAG={{tag}} {{demo_compose}} -f deploy/docker-compose.demo.ghcr.yml up -d
+    ./deploy/demo/wait.sh
+    ./deploy/demo/seed.sh
+
 # Stop the demo; removes engine containers egret provisioned (labels egret.managed=true and egret.project=egret-demo); keeps data volumes
 demo-down:
     -{{demo_compose}} stop egret
@@ -421,6 +427,9 @@ k8s-up:
 k8s-down:
     kind delete cluster --name egret
 
+# The chart defaults to the images published on GHCR; the kind recipes deploy the local builds.
+kind_local_images := "deploy/k8s/values-local-images.yaml"
+
 # Build all egret images (backend + frontend + apps + renderer).
 images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
@@ -440,14 +449,14 @@ _kind-refresh:
 
 deploy-kind: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-renderer:dev egret-apps:dev --name egret
-    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
+    helm upgrade --install egret deploy/helm/egret -f {{kind_local_images}} -n egret-system --create-namespace --wait --timeout 10m
     just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
 deploy-kind-oidc: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
-    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
+    helm upgrade --install egret deploy/helm/egret -f {{kind_local_images}} -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set oidc.devRealm=true --set ingress.enabled=true
     just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
@@ -476,7 +485,7 @@ deploy-kind-apps:
     # sits on ImagePullBackOff until the timeout and the post-install hooks never run.
     docker build -t egret-renderer:p4e renderer
     kind load docker-image egret-backend:p4e egret-frontend:p4e egret-apps:p4e egret-renderer:p4e --name egret
-    helm upgrade --install egret-verify deploy/helm/egret -n egret-verify --create-namespace --wait --timeout 10m \
+    helm upgrade --install egret-verify deploy/helm/egret -f {{kind_local_images}} -n egret-verify --create-namespace --wait --timeout 10m \
       --set backend.image.tag=p4e --set frontend.image.tag=p4e --set frontend.nodePort=30081 \
       --set renderer.image.tag=p4e \
       --set ingress.enabled=true --set ingress.host={{apps_host}} --set ingress.tls.enabled=true \
@@ -513,7 +522,7 @@ e2e-kind: deploy-kind-oidc
 # its own Ranger credential, one `{name}-rc-{tag}` Secret per credential.
 deploy-kind-governance: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-apps:dev --name egret
-    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
+    helm upgrade --install egret deploy/helm/egret -f {{kind_local_images}} -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set oidc.devRealm=true --set ingress.enabled=true --set ranger.enabled=true
     just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"

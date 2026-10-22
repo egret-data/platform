@@ -1,0 +1,51 @@
+# Weekly retention for the images `images.yml` publishes.
+#
+# Deletes, per package:
+#   - untagged versions (a `sha-*` or `edge` tag moved away, a publish whose `merge` failed);
+#   - `sha-*` images beyond the newest 20.
+# Never touches `latest`, `edge` or a version tag (any tag with a dot: X.Y.Z, X.Y, X.Y.Z-rc.N),
+# and never the Helm chart (oci://ghcr.io/egret-data/charts/egret).
+#
+# A multi-arch image is an index plus one untagged manifest per platform and its attestations;
+# deleting "untagged versions" naively breaks every image. The cleanup action walks the indexes
+# first and treats those children as part of their parent.
+#
+# `older-than: 2 days` keeps it away from a publish in progress, whose per-platform digests are
+# untagged until `merge` joins them.
+name: ghcr-cleanup
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Monday 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Only log what would be deleted
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.repository == 'egret-data/platform'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      packages: write
+    steps:
+      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          owner: egret-data
+          packages: egret-backend,egret-backend-demo,egret-frontend,egret-renderer,egret-apps,egret-plugin-host,egret-task-helper
+          delete-untagged: true
+          delete-tags: sha-*
+          keep-n-tagged: 20
+          exclude-tags: latest,edge,*.*
+          older-than: 2 days
+          # A scheduled run has no inputs: it deletes. A manual run defaults to a dry run.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}

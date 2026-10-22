@@ -1,0 +1,384 @@
+# Builds egret's container images and its Helm chart, and publishes them to GHCR.
+#
+#   push of a tag `v*`   -> ghcr.io/egret-data/<image>:X.Y.Z, :X.Y, :latest and the chart
+#                           oci://ghcr.io/egret-data/charts/egret, version X.Y.Z
+#   push to main         -> :edge and :sha-<short>
+#   pull_request         -> builds every image (both architectures) and the chart; pushes nothing
+#   workflow_dispatch    -> on main or a tag as the push above, on any other ref build only
+#
+# Each image is built natively per architecture (ubuntu-latest for amd64, ubuntu-24.04-arm for
+# arm64, no QEMU), pushed by digest, and the `merge` job joins the two digests into one manifest
+# list and tags it ("distribute build across multiple runners" in the Docker docs).
+#
+# docs/en/guides/releasing.md is the how-to; it also explains the Trivy threshold and the cache.
+name: images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/images.yml"
+      - "**/Dockerfile"
+      - "**/*.Dockerfile"
+      - "**/.dockerignore"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: images-${{ github.ref }}
+  # A newer push to the same PR replaces the build. Never cancel a publish half-way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_PREFIX: ghcr.io/egret-data
+  # One tag rule set, used by the build legs (for the version label) and by `merge` (for the tags).
+  # `latest` comes from the metadata action's default `flavor: latest=auto`: semver tags that are
+  # not a pre-release only. `sha-*` only on main, never on a tag.
+  IMAGE_TAGS: |
+    type=semver,pattern={{version}}
+    type=semver,pattern={{major}}.{{minor}}
+    type=edge,branch=main
+    type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      push: ${{ steps.plan.outputs.push }}
+    steps:
+      - id: plan
+        # Push only from this repository (not a fork), and only for main or a version tag.
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          push=false
+          if [ "$EVENT" != pull_request ] && [ "$REPO" = egret-data/platform ]; then
+            case "$REF" in
+              refs/heads/main | refs/tags/v*) push=true ;;
+            esac
+          fi
+          echo "push=$push" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: build ${{ matrix.image }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      # Push by digest. The job also runs for pull requests, where it never pushes (`plan`).
+      packages: write
+      # Trivy's SARIF upload to code scanning.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - egret-backend
+          - egret-frontend
+          - egret-renderer
+          - egret-apps
+          - egret-plugin-host
+          - egret-task-helper
+        arch: [amd64, arm64]
+        include:
+          - { arch: amd64, runner: ubuntu-latest, platform: linux/amd64 }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64 }
+          # The Rust image also builds the `demo` stage (egret-backend-demo, for the Docker demo
+          # stack) in the same job, so the second build reuses the compiled builder stage.
+          # cache-mode `min`: the large builder stages are not exported to the 10 GB GHA cache.
+          - { image: egret-backend, context: ".", dockerfile: deploy/docker/backend.Dockerfile, cache-mode: min }
+          - { image: egret-frontend, context: frontend, dockerfile: frontend/Dockerfile, cache-mode: min }
+          - { image: egret-renderer, context: renderer, dockerfile: renderer/Dockerfile, cache-mode: min }
+          - { image: egret-apps, context: apps-image, dockerfile: apps-image/Dockerfile, cache-mode: max }
+          - { image: egret-plugin-host, context: plugin-host, dockerfile: deploy/docker/plugin-host.Dockerfile, cache-mode: max }
+          - { image: egret-task-helper, context: deploy/docker, dockerfile: deploy/docker/task-helper.Dockerfile, cache-mode: max }
+    env:
+      PUSH: ${{ needs.plan.outputs.push }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The release build of the whole workspace does not fit beside the preinstalled toolchains
+      # (see the same step in ci.yml). Nothing removed here is used by this job.
+      - name: Reclaim runner disk
+        if: matrix.image == 'egret-backend'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
+      # The plugin host's build context is plugin-host/ AFTER the Maven build and the jar fetch
+      # (header of deploy/docker/plugin-host.Dockerfile). Maven and Java 25 run in a container so
+      # both runner images behave the same; the jars are architecture-independent.
+      - name: Build the plugin host's jars
+        if: matrix.image == 'egret-plugin-host'
+        run: |
+          docker run --rm -v "$PWD/plugin-host:/w" -w /w maven:3.9.16-eclipse-temurin-25 \
+            bash -c './fetch-plugins.sh target/plugins && mvn -q -B package -DskipTests'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          tags: ${{ env.IMAGE_TAGS }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build ${{ matrix.image }}
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Pushed: by digest only, `merge` tags the manifest list. Not pushed: loaded, for Trivy.
+          outputs: ${{ env.PUSH == 'true' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PREFIX, matrix.image) || format('type=docker,name=egret-ci/{0}:scan', matrix.image) }}
+          provenance: ${{ env.PUSH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUSH == 'true' }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          # Only publishes write the cache: pull requests read main's and keep their own out of it.
+          cache-to: ${{ env.PUSH == 'true' && format('type=gha,scope={0}-{1},mode={2},ignore-error=true', matrix.image, matrix.arch, matrix.cache-mode) || '' }}
+
+      - name: Build egret-backend-demo
+        id: build-demo
+        if: matrix.image == 'egret-backend'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: demo
+          platforms: ${{ matrix.platform }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.title=egret-backend-demo
+          outputs: ${{ env.PUSH == 'true' && format('type=image,name={0}/egret-backend-demo,push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PREFIX) || 'type=cacheonly' }}
+          provenance: ${{ env.PUSH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUSH == 'true' }}
+          cache-from: type=gha,scope=egret-backend-demo-${{ matrix.arch }}
+          cache-to: ${{ env.PUSH == 'true' && format('type=gha,scope=egret-backend-demo-{0},mode=min,ignore-error=true', matrix.arch) || '' }}
+
+      - name: Record the digests
+        if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          DEMO_DIGEST: ${{ steps.build-demo.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests/main" "$RUNNER_TEMP/digests/demo"
+          touch "$RUNNER_TEMP/digests/main/${DIGEST#sha256:}"
+          if [ -n "$DEMO_DIGEST" ]; then touch "$RUNNER_TEMP/digests/demo/${DEMO_DIGEST#sha256:}"; fi
+
+      # `digests-<arch>-<image>`: `merge` downloads `digests-*-<image>`, which cannot also match
+      # egret-backend-demo's artifacts the way `digests-egret-backend-*` would.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.PUSH == 'true'
+        with:
+          name: digests-${{ matrix.arch }}-${{ matrix.image }}
+          path: ${{ runner.temp }}/digests/main/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.PUSH == 'true' && matrix.image == 'egret-backend'
+        with:
+          name: digests-${{ matrix.arch }}-egret-backend-demo
+          path: ${{ runner.temp }}/digests/demo/*
+          if-no-files-found: error
+          retention-days: 1
+
+      # Vulnerability scan, amd64 only (the arm64 image carries the same package versions).
+      # Threshold (docs/en/guides/releasing.md): every CRITICAL and HIGH finding, fixed or not, goes
+      # to code scanning and never fails the job. A CRITICAL finding that HAS a fixed version fails
+      # the job on a version tag, which stops `merge`: no release ships one. On main and pull
+      # requests that step is allowed to fail (shown as a failed step in a green job), so `edge`
+      # keeps publishing while the finding is open.
+      - name: Trivy report (SARIF)
+        if: matrix.arch == 'amd64'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ env.PUSH == 'true' && github.actor || '' }}
+          TRIVY_PASSWORD: ${{ env.PUSH == 'true' && secrets.GITHUB_TOKEN || '' }}
+        with:
+          version: v0.75.0
+          image-ref: ${{ env.PUSH == 'true' && format('{0}/{1}@{2}', env.IMAGE_PREFIX, matrix.image, steps.build.outputs.digest) || format('egret-ci/{0}:scan', matrix.image) }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "0"
+      - name: Upload the Trivy report
+        # A fork's pull request gets a read-only token and cannot write code scanning alerts.
+        if: matrix.arch == 'amd64' && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}
+      - name: Trivy gate (fixable CRITICAL)
+        if: matrix.arch == 'amd64'
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ env.PUSH == 'true' && github.actor || '' }}
+          TRIVY_PASSWORD: ${{ env.PUSH == 'true' && secrets.GITHUB_TOKEN || '' }}
+        with:
+          version: v0.75.0
+          skip-setup-trivy: true
+          image-ref: ${{ env.PUSH == 'true' && format('{0}/{1}@{2}', env.IMAGE_PREFIX, matrix.image, steps.build.outputs.digest) || format('egret-ci/{0}:scan', matrix.image) }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  merge:
+    needs: [plan, build]
+    if: needs.plan.outputs.push == 'true'
+    name: publish ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      # actions/attest-build-provenance: sign, store the attestation, and the storage record
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - egret-backend
+          - egret-backend-demo
+          - egret-frontend
+          - egret-renderer
+          - egret-apps
+          - egret-plugin-host
+          - egret-task-helper
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*-${{ matrix.image }}
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # The manifest list carries the OCI annotations too: GHCR links a multi-arch package to
+          # its repository through `org.opencontainers.image.source` on the index.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          tags: ${{ env.IMAGE_TAGS }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.licenses=Apache-2.0
+          annotations: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Create the manifest list
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+        run: |
+          count=$(find . -maxdepth 1 -type f | wc -l)
+          [ "$count" -eq 2 ] || { echo "::error::expected 2 digests (amd64, arm64), found $count"; ls -la; exit 1; }
+          args=()
+          while IFS= read -r tag; do [ -n "$tag" ] && args+=(-t "$tag"); done \
+            < <(jq -r '.tags[]' <<<"$DOCKER_METADATA_OUTPUT_JSON")
+          while IFS= read -r ann; do [ -n "$ann" ] && args+=(--annotation "$ann"); done \
+            < <(jq -r '.annotations[]' <<<"$DOCKER_METADATA_OUTPUT_JSON")
+          for d in *; do args+=("$IMAGE@sha256:$d"); done
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Inspect
+        id: inspect
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}
+          push-to-registry: true
+
+  chart:
+    needs: [plan, merge]
+    # Lints and packages the chart on every run. Pushes it on a version tag only, and only after
+    # every image of that version is published (a failed `merge` stops it; a skipped one, on a
+    # build-only run, does not).
+    if: ${{ !cancelled() && (needs.plan.outputs.push != 'true' || needs.merge.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUSH_CHART: ${{ needs.plan.outputs.push == 'true' && startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.6
+      - name: Lint and package
+        id: package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # On a tag the chart's version and appVersion are the release's; appVersion is the default
+          # tag of every egret image the chart deploys. Otherwise Chart.yaml's own values.
+          args=()
+          if [ "$PUSH_CHART" = true ]; then
+            version="${TAG#v}"
+            args=(--version "$version" --app-version "$version")
+          fi
+          helm lint deploy/helm/egret
+          helm package deploy/helm/egret "${args[@]}" --destination "$RUNNER_TEMP/chart"
+          echo "tgz=$(ls "$RUNNER_TEMP"/chart/egret-*.tgz)" | tee -a "$GITHUB_OUTPUT"
+      - name: Push oci://ghcr.io/egret-data/charts/egret
+        if: env.PUSH_CHART == 'true'
+        env:
+          TGZ: ${{ steps.package.outputs.tgz }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "$TGZ" oci://ghcr.io/egret-data/charts

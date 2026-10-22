@@ -21,13 +21,38 @@ Deploys the full egret stack into a local **kind** cluster for development.
 just deploy-kind
 ```
 
-This runs `just images-build` (builds `egret-backend:dev` and
-`egret-frontend:dev`), then:
+This runs `just images-build` (builds `egret-backend:dev`, `egret-frontend:dev`,
+`egret-apps:dev` and `egret-renderer:dev`), then:
 
 ```bash
-kind load docker-image egret-backend:dev egret-frontend:dev --name egret
-helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
+kind load docker-image egret-backend:dev egret-frontend:dev egret-renderer:dev egret-apps:dev --name egret
+helm upgrade --install egret deploy/helm/egret -f deploy/k8s/values-local-images.yaml \
+  -n egret-system --create-namespace --wait --timeout 10m
 ```
+
+## Images
+
+Without overrides the chart pulls egret's images from GHCR, at the chart's `appVersion`:
+`ghcr.io/egret-data/egret-backend`, `egret-frontend`, `egret-renderer`, and, when the features
+that use them are on, `egret-apps`, `egret-plugin-host` and `egret-task-helper`. The chart in this
+tree has `appVersion: edge` (the last build of `main`); a released chart
+(`oci://ghcr.io/egret-data/charts/egret`) has the release's version, so it deploys the images of
+that release. An empty `backend.image.tag` (and `frontend`, `renderer`) or an empty
+`apps.pod.image`, `workflow.pluginHost.image`, `workflow.tasks.helperImage` means "the GHCR image
+at `appVersion`"; set them to pin another tag or registry.
+
+The `just` kind recipes add [`deploy/k8s/values-local-images.yaml`](../../k8s/values-local-images.yaml),
+which points every image at the local `:dev` builds that `kind load` put on the node. Pass it
+yourself to any `helm upgrade --install` that should run images built on this machine.
+
+To install a released chart:
+
+```bash
+helm install egret oci://ghcr.io/egret-data/charts/egret --version 1.2.0 \
+  -n egret-system --create-namespace
+```
+
+How releases are cut and what they publish: [`docs/en/guides/releasing.md`](../../../docs/en/guides/releasing.md).
 
 > The backend image is a **full Rust release build** — the first build is slow.
 > Subsequent builds reuse the Docker layer cache and are much faster.

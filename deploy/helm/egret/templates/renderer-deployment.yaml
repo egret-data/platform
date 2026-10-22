@@ -9,7 +9,7 @@ spec:
     spec:
       containers:
         - name: egret-renderer
-          image: "{{ .Values.renderer.image.repository }}:{{ .Values.renderer.image.tag }}"
+          image: "{{ .Values.renderer.image.repository }}:{{ .Values.renderer.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.renderer.image.pullPolicy }}
           ports: [{ containerPort: 8080 }]
           # Chromium's memory (not CPU) is the binding constraint: server.js keeps

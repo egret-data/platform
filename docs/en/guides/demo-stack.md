@@ -27,7 +27,7 @@ The seed creates, in workspace `default`: database `trino-demo`, dataset `orders
 
 - Docker with Compose v2, [`just`](https://github.com/casey/just), `curl` and `python3` (the seed and readiness scripts use them).
 - About 6 to 8 GB of RAM free for Docker, plus about 1.5 to 2 GB for each engine you add (a single-node engine measured 1.5 GB resident with its default 1 GB heap).
-- The first `just demo-up` builds the backend (a Rust compile) and takes 20 to 40 minutes. The first build also pip-installs the Data Apps payload (marimo, duckdb, polars, pyarrow, plotly and more; the backend image is about 1.5 GB). Later runs reuse the cached images.
+- The first `just demo-up` builds the backend (a Rust compile) and takes 20 to 40 minutes (`just demo-up-ghcr` pulls published images instead, see "Images: build or pull"). The first build also pip-installs the Data Apps payload (marimo, duckdb, polars, pyarrow, plotly and more; the backend image is about 1.5 GB). Later runs reuse the cached images.
 - `*.localtest.me` resolves to `127.0.0.1` through public DNS. On an offline machine add this line to `/etc/hosts`:
 
   ```text
@@ -103,6 +103,19 @@ The demo sets these in `deploy/docker-compose.demo.yml`. They live in the `[engi
 | `EGRET_ENGINES__DOCKER__PROJECT` | `egret-demo` | Value of the `egret.project` label. Required with `docker`. Egret never touches a container without `egret.managed=true` or with another project. |
 | `EGRET_ENGINES__DOCKER__CALLBACK_URL` | unset | URL the engines use to reach Egret, when it differs from the default (derived from `catalog.public_url`, here `http://egret:8080`). An empty value is refused. The JWT signing keys are always fetched from `catalog.public_url`. |
 | `EGRET_ENGINES__DOCKER__ALLOWED_IMAGES` | unset (`["trinodb/trino"]`) | Image repositories an engine may use, exact match without the tag, as a JSON array. |
+
+## Images: build or pull
+
+`just demo-up` builds the three egret images of the stack from this checkout (`egret-demo-backend:dev` from the `demo` stage of `deploy/docker/backend.Dockerfile`, `egret-demo-frontend:dev`, `egret-demo-renderer:dev`). That is the path for changing egret, and `docker compose ... up -d --build --no-deps egret` (or `frontend`) rebuilds one service.
+
+To skip the 20 to 40 minute Rust build, run the stack on the images published to GHCR instead:
+
+```bash
+just demo-up-ghcr          # edge: the last build of main
+just demo-up-ghcr 1.2.0    # a release (or `latest`)
+```
+
+It adds `deploy/docker-compose.demo.ghcr.yml`, which replaces the three images with `ghcr.io/egret-data/egret-backend-demo`, `egret-frontend` and `egret-renderer` at that tag and drops their `build:` sections. The configuration files and scripts still come from this checkout, so for a release check out its tag (`git checkout v1.2.0`) first. `just demo-down` and `just demo-reset` work the same for both. How images are published: [`releasing.md`](releasing.md).
 
 ## Stop and reset
 
