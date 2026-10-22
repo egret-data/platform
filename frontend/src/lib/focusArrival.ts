@@ -11,7 +11,7 @@
  * gives up after `timeoutMs`. The `h1` that was on screen when
  * it was called is skipped, so the old page's heading is never the target.
  */
-export function focusHeadingOnArrival(timeoutMs = 3000): void {
+export function focusHeadingOnArrival(timeoutMs = 10000): void {
   const before = document.querySelector("h1");
   const started = Date.now();
   const tick = () => {

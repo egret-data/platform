@@ -44,7 +44,6 @@ const TAGS = JSON.stringify(tagsQueryKey);
 describe("every tag write invalidates the list and the tag's usage", () => {
   it.each([
     ["update", () => useUpdateTag(), { id: "t1", name: "x" }],
-    ["delete", () => useDeleteTag(), "t1"],
     ["set clearance", () => useSetTagAccessPolicy(), { id: "t1", required_roles: ["r"], required_groups: [] }],
     ["clear clearance", () => useClearTagAccessPolicy(), "t1"],
     ["assign to a BI object", () => useAssignTag("w1", "chart", "c1"), "t1"],
@@ -74,7 +73,6 @@ describe("tag writes that change hand-written reach", () => {
     ["assign to a table", () => useAssignResourceTag("wh1"), { schema: "s", table: "t", tag_id: "t1" }, false],
     ["unassign from a table", () => useUnassignResourceTag("wh1"), { schema: "s", table: "t", tag_id: "t1" }, false],
     ["update", () => useUpdateTag(), { id: "t1", name: "x" }, true],
-    ["delete", () => useDeleteTag(), "t1", true],
   ] as const)("%s", async (_what, hook, vars, byName) => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
@@ -95,6 +93,34 @@ describe("tag writes that change hand-written reach", () => {
     expect(pred?.({ queryKey: tagsQueryKey } as never)).toBe(false);
     const keys = filters().map((f) => JSON.stringify(f?.queryKey));
     expect(keys.includes(ROUTE_D_T1)).toBe(byName);
+  });
+});
+
+/**
+ * A delete refreshes the list and route A, and DROPS the deleted tag's own
+ * reads (its usage, its route D): refetched, they would only 404 (live result
+ * §7, Task 13).
+ */
+describe("a tag delete", () => {
+  it("invalidates the list and route A, and removes the tag's own usage and route D without refetching them", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 204 }));
+    const qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const usage = getControlPlaneGovernanceTagUsageQueryKey("t1");
+    const routeD = getControlPlaneGovernanceTagHandwrittenQueryKey("t1");
+    qc.setQueryData(usage, { status: 200, data: {} });
+    qc.setQueryData(routeD, { status: 200, data: {} });
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useDeleteTag(), { wrapper });
+    result.current.mutate("t1");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const filters = spy.mock.calls.map((c) => c[0]);
+    expect(filters.map((f) => JSON.stringify(f?.queryKey))).toContain(JSON.stringify(tagsQueryKey));
+    const routeA = getControlPlaneGovernanceObjectHandwrittenQueryKey("c-any", { schema: "s", table: "t" });
+    expect(filters.some((f) => f?.predicate?.({ queryKey: routeA } as never) === true)).toBe(true);
+    expect(filters.map((f) => JSON.stringify(f?.queryKey))).not.toContain(JSON.stringify(usage));
+    expect(qc.getQueryData(usage)).toBeUndefined();
+    expect(qc.getQueryData(routeD)).toBeUndefined();
   });
 });
 
