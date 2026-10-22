@@ -22,7 +22,7 @@ import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenS
 import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
-import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
+import { NotEnforcedBadge, useRuleEnforcementIn } from "@/routes/governance/NotEnforced";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants and rules.
@@ -378,8 +378,11 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
     }
   }
   selected.sort((a, b) => a.rule.name.localeCompare(b.rule.name));
-  // Whether each rule is enforced: said beside it once the server says so.
-  const enforcement = useRuleEnforcement(selected.map((s) => s.rule.id));
+  // Whether each rule is enforced IN THIS CATALOG: said beside it once the server says so.
+  const enforcement = useRuleEnforcementIn(
+    selected.map((s) => s.rule.id),
+    catalog.id,
+  );
   if (rulesQ.isError) return <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const unchecked =

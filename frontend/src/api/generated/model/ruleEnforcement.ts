@@ -5,11 +5,12 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { EffectCatalog } from './effectCatalog';
 import type { NotEnforced } from './notEnforced';
 
 /**
- * Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced` half of
- * [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).
+ * Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced`/`catalogs`
+ * half of [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).
  */
 export interface RuleEnforcement {
   ruleId: string;
@@ -20,4 +21,10 @@ export interface RuleEnforcement {
      */
   enforcedBy: number;
   notEnforced?: null | NotEnforced;
+  /**
+     * Each catalog the rule reaches and who enforces it THERE, as `catalogs`
+     * in the rule's effect: a page about one catalog reads its entry, since
+     * a rule enforced in one catalog may be enforced in no other.
+     */
+  catalogs: EffectCatalog[];
 }

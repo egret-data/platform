@@ -1111,7 +1111,14 @@ describe("MasksFiltersTab", () => {
     const { permCalls } = serveData(
       fixture({
         rules: ok(ALL_RULES),
-        ruleEnforcement: ok(ALL_RULES.map((r) => ({ ruleId: r.id, enforcedBy: r.name === "us_only" ? 0 : 1, notEnforced: r.name === "us_only" ? "no_profile" : null }))),
+        ruleEnforcement: ok(
+          ALL_RULES.map((r) => {
+            const off = r.name === "us_only";
+            const engines = off ? [] : [{ id: "e1", name: "trino-a", engineType: "trino" }];
+            const notEnforced = off ? "no_profile" : null;
+            return { ruleId: r.id, enforcedBy: engines.length, notEnforced, catalogs: [{ catalogId: "c-ice", catalogName: "ice", engines, notEnforced }] };
+          }),
+        ),
       }),
     );
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
@@ -1119,6 +1126,31 @@ describe("MasksFiltersTab", () => {
     await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — its engines have no policy profile"));
     expect(within(within(panel()).getByRole("table", { name: "Inherited" })).queryByText(/Not enforced/)).not.toBeInTheDocument();
     expect(permCalls.filter((c) => c.call === "GET /perm/rules/enforcement")).toHaveLength(1);
+  });
+
+  it("badges a rule against THIS catalog: enforced elsewhere, no engine here", async () => {
+    const engine = { id: "e1", name: "trino-a", engineType: "trino" };
+    const ice = (engines: (typeof engine)[], notEnforced: "no_engine" | null) => ({ catalogId: "c-ice", catalogName: "ice", engines, notEnforced });
+    serveData(
+      fixture({
+        rules: ok(ALL_RULES),
+        ruleEnforcement: ok(
+          ALL_RULES.map((r) => ({
+            ruleId: r.id,
+            enforcedBy: 1,
+            notEnforced: null,
+            catalogs:
+              r.name === "us_only"
+                ? [ice([], "no_engine"), { catalogId: "c-pg", catalogName: "pg", engines: [engine], notEnforced: null }]
+                : [ice([engine], null)],
+          })),
+        ),
+      }),
+    );
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — no engine attached"));
+    expect(within(panel()).getAllByText(/Not enforced/)).toHaveLength(1);
   });
 
   it("links each rule to its page, with the way back to this Data page", async () => {

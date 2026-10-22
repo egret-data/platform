@@ -8805,8 +8805,19 @@ async fn rule_enforcement_answers_each_known_id_like_the_single_read() {
     );
     let (status, got) = get_json(&f, &reader, &uri).await;
     assert_eq!(status, StatusCode::OK, "{got}");
+    // The per-catalog half is compared with the single read below.
+    let rule_wide: Vec<Value> = got
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let mut e = e.clone();
+            e.as_object_mut().unwrap().remove("catalogs");
+            e
+        })
+        .collect();
     assert_eq!(
-        got,
+        json!(rule_wide),
         json!([
             {"ruleId": not_enforced, "enforcedBy": 0, "notEnforced": "no_engine"},
             {"ruleId": enforced, "enforcedBy": 1, "notEnforced": null},
@@ -8824,11 +8835,65 @@ async fn rule_enforcement_answers_each_known_id_like_the_single_read() {
         assert_eq!(status, StatusCode::OK, "{single}");
         assert_eq!(single["enforcedBy"], entry["enforcedBy"], "{id}");
         assert_eq!(single["notEnforced"], entry["notEnforced"], "{id}");
+        assert_eq!(single["catalogs"], entry["catalogs"], "{id}");
     }
 
     let outsider = session_with_permission(&mut f, "tag:read").await;
     let (status, got) = get_json(&f, &outsider, &uri).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{got}");
+}
+
+/// Per catalog as well as rule-wide: a classification rule enforced in one
+/// catalog (the fixture's, engine bound) is NOT enforced in another it reaches
+/// that has no engine, and the list says so for each catalog — the answer a
+/// Data page shows for the catalog it is on.
+#[tokio::test]
+async fn rule_enforcement_answers_each_catalog_the_rule_reaches() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let admin = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "eff-percat").await;
+    let (key, tag_id) = classification_named(&f, &unique("EffPerCatalog")).await;
+    let table = unique("eff_pc");
+    assign(
+        &f,
+        tag_id,
+        warehouse_of(&f, f.catalog_id).await,
+        &table,
+        "email",
+    )
+    .await;
+    assign(&f, tag_id, warehouse_of(&f, orphan).await, &table, "email").await;
+    let id = store_rule(
+        &f,
+        &admin,
+        mask_rule("eff-percat", json!({"type": "tag", "key": key}), json!([])),
+    )
+    .await;
+
+    let (status, got) = get_json(&f, &admin, &format!("/perm/rules/enforcement?ids={id}")).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let entry = &got[0];
+    assert_eq!(entry["enforcedBy"], 1, "enforced somewhere: {got}");
+    assert!(entry["notEnforced"].is_null(), "{got}");
+    let catalogs = entry["catalogs"].as_array().expect("catalogs");
+    assert_eq!(catalogs.len(), 2, "{got}");
+    let of = |c: Uuid| {
+        catalogs
+            .iter()
+            .find(|e| e["catalogId"] == json!(c))
+            .unwrap_or_else(|| panic!("catalog {c} missing: {got}"))
+    };
+    let here = of(f.catalog_id);
+    assert!(here["notEnforced"].is_null(), "{got}");
+    assert_eq!(here["engines"].as_array().unwrap().len(), 1, "{got}");
+    let there = of(orphan);
+    assert_eq!(there["notEnforced"], "no_engine", "{got}");
+    assert_eq!(there["engines"], json!([]), "{got}");
+
+    // The single read's catalogs are the same computation.
+    let (_, single) = get_json(&f, &admin, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(single["catalogs"], entry["catalogs"], "one computation");
 }
 
 /// Bounded: more than `RULE_ENFORCEMENT_CAP` (100) distinct ids, or an id that

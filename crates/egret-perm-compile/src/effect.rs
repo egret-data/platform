@@ -280,8 +280,8 @@ pub async fn rule_effect(
     })
 }
 
-/// Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced` half of
-/// [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).
+/// Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced`/`catalogs`
+/// half of [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleEnforcement {
@@ -292,6 +292,10 @@ pub struct RuleEnforcement {
     /// `null` when some engine enforces the rule; otherwise why not, as
     /// `notEnforced` in the rule's effect.
     pub not_enforced: Option<NotEnforced>,
+    /// Each catalog the rule reaches and who enforces it THERE, as `catalogs`
+    /// in the rule's effect: a page about one catalog reads its entry, since
+    /// a rule enforced in one catalog may be enforced in no other.
+    pub catalogs: Vec<EffectCatalog>,
 }
 
 /// [`RuleEnforcement`] for each of `rules`, in their order, computed by the
@@ -319,11 +323,12 @@ pub async fn rules_enforcement(
         .iter()
         .zip(&reached)
         .map(|(rule, reached)| {
-            let (_, enforced_by, not_enforced) = enforcement(reached, &attached);
+            let (catalogs, enforced_by, not_enforced) = enforcement(reached, &attached);
             RuleEnforcement {
                 rule_id: rule.id,
                 enforced_by,
                 not_enforced,
+                catalogs,
             }
         })
         .collect())

@@ -34,8 +34,7 @@ import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
 import { TERM } from "@/routes/governance/glossary";
-import { NotEnforcedBadge, useRuleEnforcement } from "@/routes/governance/NotEnforced";
-import type { RuleEnforcement } from "@/api/generated/model";
+import { NotEnforcedBadge, useRuleEnforcementIn, type EnforcementAnswer } from "@/routes/governance/NotEnforced";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -99,7 +98,8 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * on the table's path with Column left empty (every column) and Row filter
  * one click away; on a catalog or schema, a mask on that path. A save or a delete
  * invalidates the rules list, so this tab refetches. A rule no engine enforces
- * says "Not enforced yet — <reason>" on its row (`GET /perm/rules/enforcement`).
+ * in this catalog says "Not enforced yet — <reason>" on its row
+ * (`GET /perm/rules/enforcement`, its entry for this catalog).
  */
 export function MasksFiltersTab({
   path,
@@ -168,8 +168,11 @@ function Rules({
           return row ? [row] : [];
         })
       : [];
-  // Whether each listed rule is enforced: said on its row once the server says so.
-  const enforcement = useRuleEnforcement(rows.map((r) => r.rule.id));
+  // Whether each listed rule is enforced IN THIS CATALOG: said on its row once the server says so.
+  const enforcement = useRuleEnforcementIn(
+    rows.map((r) => r.rule.id),
+    catalog.id,
+  );
 
   if (!canRead) {
     return (
@@ -351,7 +354,7 @@ function RuleTable({
   canWrite: boolean;
   workspaceName: WorkspaceNames;
   /** `null` while unknown: then no row says anything about enforcement. */
-  enforcement: ReadonlyMap<string, RuleEnforcement> | null;
+  enforcement: ReadonlyMap<string, EnforcementAnswer> | null;
   onEdit: (r: RuleView) => void;
   onDelete: (r: RuleView) => void;
 }) {

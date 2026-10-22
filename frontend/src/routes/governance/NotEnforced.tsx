@@ -36,6 +36,39 @@ export function useRuleEnforcement(ids: string[]): ReadonlyMap<string, RuleEnfor
   return new Map(q.data.data.map((e) => [e.ruleId, e]));
 }
 
+/** Whether a rule is enforced, as {@link NotEnforcedBadge} reads it. */
+export type EnforcementAnswer = { enforcedBy: number; notEnforced?: NotEnforced | null };
+
+/**
+ * A rule's enforcement IN ONE CATALOG, for a page about that catalog (the
+ * Data pages): the server's entry for `catalogId` in `catalogs`, since a rule
+ * enforced in catalog A may be enforced by nothing in catalog B. When the
+ * server lists no entry for this catalog, only a rule-wide "not enforced"
+ * holds here too; a rule-wide "enforced" says nothing about this catalog, so
+ * the answer is unknown (`undefined`: no badge, never a guess).
+ */
+export function enforcementIn(e: RuleEnforcement | undefined, catalogId: string): EnforcementAnswer | undefined {
+  if (!e) return undefined;
+  const here = e.catalogs.find((c) => c.catalogId === catalogId);
+  if (here) return { enforcedBy: here.engines.length, notEnforced: here.notEnforced ?? null };
+  return e.enforcedBy === 0 ? { enforcedBy: 0, notEnforced: e.notEnforced ?? null } : undefined;
+}
+
+/**
+ * {@link useRuleEnforcement}, answered for catalog `catalogId`
+ * ({@link enforcementIn}): what a Data page badges. `null` while unknown.
+ */
+export function useRuleEnforcementIn(ids: string[], catalogId: string): ReadonlyMap<string, EnforcementAnswer> | null {
+  const all = useRuleEnforcement(ids);
+  if (all === null) return null;
+  const out = new Map<string, EnforcementAnswer>();
+  for (const [id, e] of all) {
+    const here = enforcementIn(e, catalogId);
+    if (here) out.set(id, here);
+  }
+  return out;
+}
+
 /**
  * "Not enforced yet — no engine attached": a stored rule that no engine
  * enforces, said in words beside the rule (never by colour alone). Renders
@@ -46,7 +79,7 @@ export function NotEnforcedBadge({
   appliesTo,
   className = "",
 }: {
-  enforcement: { enforcedBy: number; notEnforced?: NotEnforced | null } | null | undefined;
+  enforcement: EnforcementAnswer | null | undefined;
   /** What the rule is written on: a reach of nothing reads differently for each. */
   appliesTo: "tag" | "path";
   className?: string;

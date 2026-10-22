@@ -9898,7 +9898,7 @@
         "tags": [
           "perm"
         ],
-        "summary": "Whether each listed STORED rule is enforced — the `enforcedBy` /\n`notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same\nfunctions, for surfaces that list rules. Bounded by\n[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.",
+        "summary": "Whether each listed STORED rule is enforced — the `enforcedBy` /\n`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same\nfunctions, for surfaces that list rules. Bounded by\n[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.",
         "operationId": "rules_enforcement",
         "parameters": [
           {
@@ -9913,7 +9913,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0",
+            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)",
             "content": {
               "application/json": {
                 "schema": {
@@ -51757,10 +51757,11 @@
       },
       "RuleEnforcement": {
         "type": "object",
-        "description": "Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced` half of\n[`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).",
+        "description": "Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced`/`catalogs`\nhalf of [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).",
         "required": [
           "ruleId",
-          "enforcedBy"
+          "enforcedBy",
+          "catalogs"
         ],
         "properties": {
           "ruleId": {
@@ -51783,6 +51784,13 @@
                 "description": "`null` when some engine enforces the rule; otherwise why not, as\n`notEnforced` in the rule's effect."
               }
             ]
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectCatalog"
+            },
+            "description": "Each catalog the rule reaches and who enforces it THERE, as `catalogs`\nin the rule's effect: a page about one catalog reads its entry, since\na rule enforced in one catalog may be enforced in no other."
           }
         }
       },

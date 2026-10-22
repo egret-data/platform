@@ -1952,7 +1952,7 @@ pub struct RuleIdsQuery {
 }
 
 /// Whether each listed STORED rule is enforced — the `enforcedBy` /
-/// `notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same
+/// `notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
 /// functions, for surfaces that list rules. Bounded by
 /// [`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
 #[utoipa::path(
@@ -1961,7 +1961,7 @@ pub struct RuleIdsQuery {
     tag = "perm",
     params(RuleIdsQuery),
     responses(
-        (status = 200, description = "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0", body = Vec<crate::effect::RuleEnforcement>),
+        (status = 200, description = "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)", body = Vec<crate::effect::RuleEnforcement>),
         (status = 400, description = "An id is not a UUID, or more than 100 distinct ids were asked for", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),

@@ -228,7 +228,32 @@ describe("ColumnPanel", () => {
   });
 
   it("says beside a rule that no engine enforces it, and nothing while that is unknown", async () => {
-    serveData({ ...fixture(), ruleEnforcement: ok([{ ruleId: "hash_email", enforcedBy: 0, notEnforced: "no_engine" }]) });
+    serveData({ ...fixture(), ruleEnforcement: ok([{ ruleId: "hash_email", enforcedBy: 0, notEnforced: "no_engine", catalogs: [{ catalogId: "c-ice", catalogName: "ice", engines: [], notEnforced: "no_engine" }] }]) });
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await waitFor(() => expect(within(panel).getByRole("list", { name: "Rules of email" })).toHaveTextContent("Not enforced yet — no engine attached"));
+    const lines = items(panel, "Rules of email");
+    expect(lines.filter((l) => l?.includes("Not enforced"))).toHaveLength(1);
+    expect(lines.find((l) => l?.startsWith("hash_email"))).toContain("Not enforced yet — no engine attached");
+  });
+
+  it("badges a rule against this catalog: enforced in another, no engine on this one", async () => {
+    const engine = { id: "e1", name: "trino-a", engineType: "trino" };
+    serveData({
+      ...fixture(),
+      ruleEnforcement: ok([
+        {
+          ruleId: "hash_email",
+          enforcedBy: 1,
+          notEnforced: null,
+          catalogs: [
+            { catalogId: "c-ice", catalogName: "ice", engines: [], notEnforced: "no_engine" },
+            { catalogId: "c-pg", catalogName: "pg", engines: [engine], notEnforced: null },
+          ],
+        },
+        { ruleId: "redact_pii", enforcedBy: 1, notEnforced: null, catalogs: [{ catalogId: "c-ice", catalogName: "ice", engines: [engine], notEnforced: null }] },
+      ]),
+    });
     renderPage("/governance/data/ice/sales/orders?column=email");
     const panel = await screen.findByRole("dialog", { name: "email" });
     await waitFor(() => expect(within(panel).getByRole("list", { name: "Rules of email" })).toHaveTextContent("Not enforced yet — no engine attached"));

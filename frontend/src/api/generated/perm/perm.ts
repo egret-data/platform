@@ -3492,7 +3492,7 @@ export const getPermRulesEnforcementUrl = (params?: PermRulesEnforcementParams,)
 
 /**
  * @summary Whether each listed STORED rule is enforced — the `enforcedBy` /
-`notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same
+`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
 functions, for surfaces that list rules. Bounded by
 [`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
  */
@@ -3566,7 +3566,7 @@ export function usePermRulesEnforcement<TData = Awaited<ReturnType<typeof permRu
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 /**
  * @summary Whether each listed STORED rule is enforced — the `enforcedBy` /
-`notEnforced` half of `GET /perm/rules/{id}/effect`, computed by the same
+`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
 functions, for surfaces that list rules. Bounded by
 [`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
  */
