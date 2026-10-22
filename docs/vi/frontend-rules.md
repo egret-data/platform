@@ -14,11 +14,11 @@ Các rule mà mọi thay đổi dưới `frontend/` phải theo. File này là c
 ## 1. Khung trang (FE-PAGE)
 
 #### FE-PAGE-1 — Trang danh sách dùng `ListPageShell` · PHẢI
-Trang danh sách dùng `ListPageShell`, và shell này giữ thẻ `h1` duy nhất của trang. Thứ tự: tiêu đề, rồi toolbar (`ListToolbarButton`), rồi `SummaryStrip`, rồi bảng.
+Trang danh sách dùng `ListPageShell`, và shell này giữ thẻ `h1` duy nhất của trang (một `PageTitle`) bên trong một `PageContainer` rộng hết cỡ. Thứ tự: tiêu đề, rồi toolbar (`ListToolbarButton`), rồi `SummaryStrip`, rồi bảng. Trang danh sách nào không dùng được shell (danh sách của Control Plane có dòng tóm tắt dưới tiêu đề) thì dùng trực tiếp `PageContainer` và `PageTitle`.
 **Làm thế này:** `frontend/src/components/explore/ListPageShell.tsx`, `frontend/src/components/explore/ListToolbarButton.tsx`, `frontend/src/components/explore/SummaryStrip.tsx`. **Kiểm bằng:** review. **Vì sao:** [ui-conventions §1](../en/ui-conventions.md#1-the-list-page).
 
 #### FE-PAGE-2 — Phần chi tiết là tab, trạng thái chia sẻ được nằm trong URL · PHẢI
-Trang chi tiết có nhiều phần dùng `ui/tabs`. Tab đang chọn, cùng mọi filter hay lựa chọn mà người dùng muốn chia sẻ, nằm trong URL (`?tab=`, `?q=`). Nút Back đi lùi qua chúng.
+Trang chi tiết có nhiều phần dùng `ui/tabs` (FE-PAGE-9 nói dùng kiểu nào trong hai kiểu). Tab đang chọn, cùng mọi filter hay lựa chọn mà người dùng muốn chia sẻ, nằm trong URL (`?tab=`, `?q=`). Nút Back đi lùi qua chúng.
 **Làm thế này:** `frontend/src/components/ui/tabs.tsx`. **Kiểm bằng:** review.
 
 #### FE-PAGE-3 — Tạo trên trang hay trong dialog tuỳ kích thước · PHẢI
@@ -35,6 +35,30 @@ Danh sách dạng bảng dùng `FilterableTable` hoặc `ui/table`. `<table>` t�
 #### FE-PAGE-5 — Cấu hình là bảng `Setting | Details | Value` · PHẢI
 Phần cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection`, theo dạng `Setting | Details | Value`. Một tập thuộc tính phẳng là một danh sách key/value tìm kiếm được, không làm form riêng cho từng field.
 **Làm thế này:** `frontend/src/components/config/ConfigTable.tsx` (`ConfigTable`, `ConfigTableRow`), `frontend/src/components/form/ConfigSection.tsx`. **Kiểm bằng:** review. **Vì sao:** [ui-conventions §4](../en/ui-conventions.md#4-setting--details--value-tables-and-when-a-card-is-still-right).
+
+#### FE-PAGE-6 — Mọi trang nằm trong `PageContainer`, chung một mép trái · PHẢI
+Phần tử ngoài cùng của một trang có route là `PageContainer` (`p-4` bên trong `main`), nên mọi trang bắt đầu ở cùng một mép trái.
+- `width="full"` (mặc định): danh sách, bảng, trang Control Plane, trang chi tiết, và trang công cụ (SQL Lab, trình sửa chart, dashboard, trình sửa flow, trang chi tiết endpoint).
+- `width="narrow"`: form và trình sửa dạng form (alert hoặc report, mọi trang tạo mới hay đăng ký, Choose a visualization). Nội dung là một cột 960px (`max-w-page`, token `--container-page` trong `frontend/src/index.css`) bắt đầu ở mép trái của danh sách. Không bao giờ căn giữa (`mx-auto`), và không có `max-w-*` cấp trang nào khác.
+- Workspace settings giữ thanh điều hướng các mục ở mép trái và giới hạn khung nội dung bên cạnh ở `max-w-page` (`data-settings-pane`).
+
+**Làm thế này:** `frontend/src/components/layout/PageContainer.tsx`; một trang hẹp: `frontend/src/routes/explore/ScheduleDetail.tsx`. **Kiểm bằng:** trình duyệt (`frontend/tests/e2e/page-frame.spec.ts`). **Vì sao:** KI-215: mép trái ở 248, 256, 264, 384 và 448px làm nội dung xê dịch tới 200px khi chuyển trang.
+
+#### FE-PAGE-7 — Một thang tiêu đề: `PageTitle` · PHẢI
+`h1` của trang là `PageTitle`: `page` (20px, `text-xl`) trên mọi trang danh sách, chi tiết, form và cấu hình; `compact` (16px, `text-base`) chỉ trong thanh tiêu đề của một công cụ chiếm hết chiều cao (SQL Lab, trang chi tiết endpoint, trình xem và trình sửa app). Tiêu đề của trình sửa chart là ô tên của nó, cũng 16px. Không cỡ nào khác là tiêu đề trang, và tiêu đề trang phải nhìn thấy được: `h1` dạng `sr-only` chỉ dành cho nhánh chưa có tiêu đề để hiện (đang tải, lỗi) hoặc tiêu đề là một ô nhập.
+**Làm thế này:** `frontend/src/components/layout/PageTitle.tsx`. **Kiểm bằng:** trình duyệt (`frontend/tests/e2e/page-frame.spec.ts`) và test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Vì sao:** KI-214: tiêu đề có năm cỡ 13, 16, 18, 20 và 24px.
+
+#### FE-PAGE-8 — Trang chi tiết dùng `DetailHeader` · PHẢI
+Phần đầu của trang chi tiết, form hay trình sửa là `DetailHeader`: link quay lại (`BackLink`, một mũi tên và tên danh sách) phía trên tiêu đề, trạng thái cạnh tiêu đề, các nút của trang ở góc trên bên phải, một dòng mô tả, và một hàng thông tin (`DetailFact`) bên dưới. Không có ô icon tô màu. Chỉ bỏ link quay lại khi trang không có danh sách cha (Workspace settings). Phần đầu nào có một thành phần mà `DetailHeader` không chứa được (ô màu, `h1` làm đích focus) thì giữ markup riêng nhưng dùng `PageTitle` và `BackLink`. Thanh tiêu đề của trang công cụ dùng `BackLink` và `PageTitle` dạng `compact`, không bao giờ dùng nút icon mũi tên.
+**Làm thế này:** `frontend/src/components/layout/DetailHeader.tsx` (`DetailHeader`, `BackLink`), `frontend/src/components/layout/DetailFact.tsx`; ví dụ: `frontend/src/routes/control-plane/SecretDetail.tsx`. **Kiểm bằng:** review. **Vì sao:** KI-224: bốn dạng phần đầu, và link quay lại là chữ xám nhỏ.
+
+#### FE-PAGE-9 — Hai kiểu tab: pill cho các phần của trang, gạch chân cho các panel · PHẢI
+`TabsList` có hai variant và không có variant nào khác.
+- `pill` (mặc định): các phần của một trang (Columns / Metrics của dataset, các mục của alert, các tab của catalog, Edit / Revisions / Executions / Triggers của flow).
+- `underline`: các panel bên trong một trình sửa hay công cụ (Data / Display của trình sửa chart, Results / History của SQL Lab, các mục của endpoint, panel thông tin của dashboard).
+
+Dải tab làm bằng link của router dùng `tabsListClass(variant)` và `tabsTriggerClass(variant)`, hai hàm này tô `aria-current="page"` giống một trigger đang chọn. Icon trong trigger được component tự giãn cách; không thêm margin. Các dải tự viết được phép là tab tài liệu mà người dùng mở, đóng, đổi tên hay kéo thả: `DashboardTabBar` (`frontend/src/components/chart/dashboard/DashboardTabBar.tsx`), `PanelTabStrip` (`frontend/src/components/workflows/panels/PanelTabStrip.tsx`) và dải file đang mở trong `NamespaceFiles` (`frontend/src/components/workflows/namespaces/files/NamespaceFiles.tsx`). Bộ chuyển statement của Data API (`frontend/src/routes/explore/dataapi/detail/Query.tsx`) là phần tử `role="tab"` thường để `fieldset` bị vô hiệu hoá không vô hiệu hoá được nó, và dùng `tabsTriggerClass("underline")`.
+**Làm thế này:** `frontend/src/components/ui/tabs.tsx`; tab bằng link router: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Kiểm bằng:** review và test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Vì sao:** KI-216: năm kiểu tab cho cùng một việc.
 
 ## 2. Trạng thái (FE-STATE)
 
@@ -101,6 +125,14 @@ Icon lấy từ `lucide-react`, và mỗi trang có tối đa một điểm nh�
 #### FE-VISUAL-6 — Chart giữ palette Metabase và các dấu hiệu của nó · PHẢI
 Chart giữ palette series của Metabase cùng các dấu hiệu không phụ thuộc màu: kiểu đường và hình marker theo từng series, và phần mô tả dữ liệu `aria`. Decal vẫn tắt, theo quyết định ở chart 05 (#360); `palette.ts` ghi lý do. Giá trị màu cụ thể bên trong code dựng option của chart được phép, vì ECharts cần giá trị cụ thể.
 **Làm thế này:** `frontend/src/components/chart/echarts/palette.ts`. **Kiểm bằng:** review.
+
+#### FE-VISUAL-7 — Tên trong danh sách là `EntityLink` · PHẢI
+Tên của một đối tượng trong danh sách hay bảng là link tới đối tượng đó, tô giống nhau ở mọi nơi (Explore, Governance, Control Plane): màu chữ thường, `font-medium`, gạch chân khi hover. Không bao giờ `text-primary`: màu teal là màu hành động. Tên nằm trong một hàng bấm được lớn hơn dùng `ENTITY_LINK_IN_GROUP_CLASS` với `group` trên hàng. Tên dẫn tới trang khác là link, không phải nút có `onClick`.
+**Làm thế này:** `frontend/src/components/ui/entity-link.tsx` (`EntityLink`, `ENTITY_LINK_CLASS`, `ENTITY_LINK_IN_GROUP_CLASS`). **Kiểm bằng:** review. **Vì sao:** KI-223: tên màu teal ở Control Plane và Governance, màu đen ở Explore.
+
+#### FE-VISUAL-8 — Trạng thái là `StatusBadge` · PHẢI
+Một trạng thái (active, archived, disabled, allow, deny, success, failed, paused, live) hiển thị bằng `StatusBadge`: nền nhạt của một token trạng thái (`success`, `destructive`, `highlight`, `primary`, `neutral`, `inactive`), chữ màu `--foreground`, từ viết hoa kiểu câu (`active` hiện thành *Active*). Không bao giờ tô nền đặc (`backgroundColor: var(--success)`), không chấm kèm chữ trơn, không dùng variant `success`/`warning`/`processing` dùng palette thô của `Badge` cho trạng thái. Loại hay số đếm (`s3`, `trino`, `built-in`, `3`) không phải trạng thái và vẫn là `Badge` thường.
+**Làm thế này:** `frontend/src/components/ui/status-badge.tsx` (`StatusBadge`, `STATUS_TONE`); có kèm glyph: `frontend/src/components/workflows/StateChip.tsx`. **Kiểm bằng:** review và test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`); độ tương phản của chữ đo bằng `frontend/tests/e2e/dataapi-badge-ink.spec.ts` (qua `routes/explore/dataapi/chipTone.ts`, file này đọc `STATUS_TONE`). **Vì sao:** KI-222: *active* nền xanh đặc ở Control Plane, *Active* nền nhạt ở Explore, một chấm ở trang cấu hình.
 
 ## 5. Form (FE-FORM)
 
@@ -243,6 +275,10 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-PAGE-3 — Tạo trên trang khi có nhiều phần hoặc kết quả chỉ đọc một lần, trong dialog khi một đến ba trường; lối vào là link.
 - [ ] FE-PAGE-4 — Danh sách dạng bảng dùng `FilterableTable` hoặc `ui/table`; `<table>` tự viết là grid đặc thù có comment.
 - [ ] FE-PAGE-5 — Cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection` theo dạng `Setting | Details | Value`.
+- [ ] FE-PAGE-6 — Trang nằm trong `PageContainer`: `full` cho danh sách, chi tiết và công cụ, `narrow` (960px, không căn giữa) cho form; không có `max-w-*` cấp trang nào khác.
+- [ ] FE-PAGE-7 — `h1` là một `PageTitle` nhìn thấy được: 20px, hoặc `compact` 16px trong thanh tiêu đề của công cụ.
+- [ ] FE-PAGE-8 — Phần đầu của trang chi tiết, form hay trình sửa là `DetailHeader` (hoặc `PageTitle` + `BackLink`); không ô icon, không nút icon mũi tên.
+- [ ] FE-PAGE-9 — Tab là `pill` cho các phần của trang và `underline` cho panel; tab bằng link router dùng `tabsTriggerClass`.
 - [ ] FE-STATE-1 — Có đủ loading, rỗng và lỗi; kiểm `isError` trước; lỗi không hiển thị thành rỗng.
 - [ ] FE-STATE-2 — Nội dung đang tải là skeleton; spinner chỉ cho nút và thao tác tại chỗ; không có "Loading…" trơn.
 - [ ] FE-STATE-3 — Rỗng là `EmptyState` cho tập chưa lọc; filter không khớp thì nói vậy và cho xoá filter.
@@ -255,6 +291,8 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-VISUAL-4 — Số dùng `tabular-nums`; thay đổi màu đã kiểm ở light và dark trên mọi bề mặt.
 - [ ] FE-VISUAL-5 — (NÊN) Icon từ `lucide-react`; tối đa một `--highlight` mỗi trang; `--accent` không dùng làm điểm nhấn.
 - [ ] FE-VISUAL-6 — Chart giữ palette Metabase, kiểu đường, hình marker và mô tả `aria`; decal vẫn tắt.
+- [ ] FE-VISUAL-7 — Tên trong danh sách là `EntityLink`: màu chữ thường, gạch chân khi hover, không bao giờ `text-primary`.
+- [ ] FE-VISUAL-8 — Trạng thái là `StatusBadge` (nền nhạt, chữ màu foreground, viết hoa kiểu câu); loại và số đếm vẫn là `Badge`.
 - [ ] FE-FORM-1 — State của form bằng `useState` hoặc hook riêng; không thư viện form.
 - [ ] FE-FORM-2 — Mọi input có `Label` với `htmlFor` khớp `id` của nó (lint chỉ kiểm phía label).
 - [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp.
