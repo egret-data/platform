@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Database, HardDrive, Pencil, Trash2 } from "lucide-react";
+import { Boxes, Database, HardDrive, Pencil, Trash2 } from "lucide-react";
 
 import {
   type Storage,
@@ -39,6 +39,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
 const NO_SECRET = "__none__";
 
@@ -85,64 +87,46 @@ export default function StorageDetail() {
     },
   });
 
-  const backLink = (
-    <Link
-      to="/control-plane/storage"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Storage
-    </Link>
-  );
+  const back = { to: "/control-plane/storage", label: "Storage" };
 
   if (connQ.isError) {
     return (
-      <div className="space-y-5">
-        {backLink}
+      <PageContainer className="space-y-5">
+        <BackLink to={back.to}>{back.label}</BackLink>
         <Alert variant="destructive">
           <AlertDescription>
             {connQ.error?.message ?? "Couldn't load this storage connection."}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
   return (
-    <div className="space-y-5">
-      {backLink}
-
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <HardDrive className="h-6 w-6" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-2xl font-semibold leading-tight">
-                {conn?.name ?? "Storage"}
-              </h1>
-              {conn ? (
-                <Badge variant="secondary" className="mt-1">
-                  {conn.provider}
-                </Badge>
-              ) : null}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+    <PageContainer className="space-y-5">
+      <DetailHeader
+        className=""
+        back={back}
+        title={conn?.name ?? "Storage"}
+        titleClassName="min-w-0 truncate"
+        status={conn ? <Badge variant="secondary">{conn.provider}</Badge> : undefined}
+        meta={
+          <>
             <Fact icon={Boxes} label="Bucket" value={conn?.bucket ?? "—"} mono />
             <Fact icon={HardDrive} label="Endpoint" value={conn?.endpoint ?? "AWS default"} />
-          </div>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          className="text-destructive hover:text-destructive"
-          onClick={() => setDeleteOpen(true)}
-        >
-          <Trash2 className="mr-1 h-4 w-4" /> Delete
-        </Button>
-      </div>
+          </>
+        }
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setDeleteOpen(true)}
+          >
+            <Trash2 className="mr-1 h-4 w-4" /> Delete
+          </Button>
+        }
+      />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
@@ -179,7 +163,7 @@ export default function StorageDetail() {
         confirmText="delete"
         onConfirm={() => deleteMut.mutate()}
       />
-    </div>
+    </PageContainer>
   );
 }
 

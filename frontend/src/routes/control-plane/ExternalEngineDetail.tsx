@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, MoreHorizontal, Server, Trash2, Unlink } from "lucide-react";
+import { Loader2, MoreHorizontal, Trash2, Unlink } from "lucide-react";
 import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
@@ -70,6 +70,8 @@ import {
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
 import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -113,29 +115,25 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
   const rotation = useRotationToken(engine.id);
 
   return (
-    <div className="space-y-5">
-      <Link
-        to="/control-plane/engines"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Engines
-      </Link>
-
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Server className="h-6 w-6" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-2xl font-semibold leading-tight">{engine.name}</h1>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Badge variant="secondary">{engine.type}</Badge>
-          <ExternalChip />
-          <OpenInEnginePolicyLink engineId={engine.id} />
-          <ExternalEngineActions engine={engine} />
-        </div>
-      </div>
+    <PageContainer className="space-y-5">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/engines", label: "Engines" }}
+        title={engine.name}
+        titleClassName="min-w-0 truncate"
+        status={
+          <>
+            <Badge variant="secondary">{engine.type}</Badge>
+            <ExternalChip />
+          </>
+        }
+        actions={
+          <>
+            <OpenInEnginePolicyLink engineId={engine.id} />
+            <ExternalEngineActions engine={engine} />
+          </>
+        }
+      />
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-5">
         <TabsList>
@@ -159,7 +157,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
           <ExternalSettings engine={engine} profilesQ={profilesQ} bound={bound} />
         </TabsContent>
       </Tabs>
-    </div>
+    </PageContainer>
   );
 }
 

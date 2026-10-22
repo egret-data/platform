@@ -50,6 +50,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { usersQueryKey } from "@/routes/control-plane/access/UsersPage";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { EntityLink } from "@/components/ui/entity-link";
 
 export const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
@@ -117,13 +120,12 @@ export default function GroupsPage() {
           <div className="flex items-center gap-2.5">
             <UsersRound className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
-              <button
-                type="button"
-                onClick={() => navigate(`/control-plane/groups/${g.id}`)}
-                className="block max-w-full truncate text-left font-medium text-primary hover:underline"
+              <EntityLink
+                to={`/control-plane/groups/${g.id}`}
+                className="block max-w-full truncate"
               >
                 {g.name}
-              </button>
+              </EntityLink>
               <div className="truncate text-xs text-muted-foreground">
                 {isOidc ? "Synced from OIDC" : "Local group"}
               </div>
@@ -242,10 +244,10 @@ export default function GroupsPage() {
   const totalMembers = rows.reduce((sum, g) => sum + g.memberCount, 0);
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold leading-tight">Groups</h1>
+          <PageTitle>Groups</PageTitle>
           <p className="text-sm text-muted-foreground">
             Local and identity-provider groups, their membership, and role
             assignments.
@@ -351,7 +353,7 @@ export default function GroupsPage() {
           setDeleteTarget(null);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }
 

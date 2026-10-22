@@ -20,6 +20,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { timeAgo } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /**
  * egret's access model, top to bottom — the conceptual scaffolding that ties the
@@ -152,9 +154,9 @@ export default function AccessOverview() {
   }
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Access &amp; governance</h1>
+        <PageTitle>Access &amp; governance</PageTitle>
         <p className="text-sm text-muted-foreground">
           Who can access what, through which layer — plus the posture issues worth your
           attention.
@@ -260,7 +262,7 @@ export default function AccessOverview() {
           </ol>
         </div>
       </details>
-    </div>
+    </PageContainer>
   );
 }
 

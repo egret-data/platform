@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import { ApiError } from "@/api/client";
 import { type Profile, listProfiles } from "@/api/policies";
@@ -37,6 +37,8 @@ import {
   useModelledPlugins,
 } from "./externalEngine";
 import { OneTimeCredentialDialog } from "./RangerCredential";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 const OTHER = "__other__";
 const NO_PROFILE = "__none__";
@@ -146,23 +148,19 @@ export default function EngineRegister() {
     setCatalogIds((cur) => (on ? [...cur, id] : cur.filter((c) => c !== id)));
 
   return (
-    <div className="space-y-4">
-      <Link
-        to="/control-plane/engines"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Engines
-      </Link>
-
-      <div className="max-w-3xl">
-        <h1 className="text-2xl font-semibold leading-tight">Register external engine</h1>
-        <p className="text-sm text-muted-foreground">
-          Record a Trino or StarRocks cluster that you run yourself. egret does not provision, restart or monitor
-          it; it holds the record so a policy profile can be bound to the engine and you can read the Ranger plugin
-          configuration to install on it.
-        </p>
-      </div>
+    <PageContainer width="narrow" className="space-y-4">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/engines", label: "Engines" }}
+        title="Register external engine"
+        description={
+          <>
+            Record a Trino or StarRocks cluster that you run yourself. egret does not provision, restart or monitor
+            it; it holds the record so a policy profile can be bound to the engine and you can read the Ranger plugin
+            configuration to install on it.
+          </>
+        }
+      />
 
       {!canCreate ? (
         <Alert>
@@ -403,6 +401,6 @@ export default function EngineRegister() {
           if (id) navigate(`/control-plane/engines/${id}?tab=plugin-config`);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }

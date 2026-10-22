@@ -22,6 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /** The sentence for an engine whose (type, version) pair egret does not model. */
 export const UNMODELLED_SENTENCE =
@@ -194,7 +195,7 @@ export function UnmodelledVersionNote({ testId = "unmodelled-note" }: { testId?:
 /** A profile's name, linked to its Engine & policy page (which redirects to its engine when bound; DG #4a, EP15). */
 export function PolicyProfileLink({ name }: { name: string }) {
   return (
-    <Link to={profileUrl(name)} className="text-primary hover:underline">
+    <Link to={profileUrl(name)} className={ENTITY_LINK_CLASS}>
       {name}
     </Link>
   );

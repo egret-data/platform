@@ -34,11 +34,12 @@ import {
 } from "@/components/ui/table";
 import {
   AttachmentActions,
-  StatusBadge,
+  StatusBadge as AttachmentStatusBadge,
   appliedCell,
   isStarRocksType,
   useAttachmentActions,
 } from "./attachmentUi";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * The engine's OWN lifecycle status, which is a different fact from the
@@ -61,7 +62,7 @@ import {
  * on all FOUR `engine_status` values this badge can receive
  * (`egret-engine-mgmt/src/store.rs`: `provisioning`, `running`, `failed`,
  * `deleting`), so the two pages do not paint the same word two colours. It did
- * not: `phaseVariant` had no `deleting` arm and fell through to `secondary`,
+ * not: `phaseVariant` had no `deleting` arm and fell through to `neutral`,
  * which the whole-branch review (F6) caught and that function now covers. The
  * agreement is only claimed over those four — `phaseVariant` also maps live
  * Kubernetes PHASES (`ready`, `error`, `creating`, …) that never reach an
@@ -77,15 +78,15 @@ function EngineHealthBadge({ status }: { status: string | null }) {
         engine unknown
       </Badge>
     );
-  const v =
+  const tone =
     status.toLowerCase() === "running"
       ? "success"
       : status.toLowerCase() === "failed"
         ? "destructive"
         : status.toLowerCase() === "provisioning" || status.toLowerCase() === "deleting"
-          ? "warning"
-          : "secondary";
-  return <Badge variant={v}>{status}</Badge>;
+          ? "highlight"
+          : "neutral";
+  return <StatusBadge tone={tone}>{status}</StatusBadge>;
 }
 
 type Tone = "ok" | "bad" | "neutral";
@@ -356,7 +357,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                     {a.isPrimary ? <Badge variant="secondary">primary</Badge> : null}
                   </TableCell>
                   <TableCell>
-                    <StatusBadge a={a} />
+                    <AttachmentStatusBadge a={a} />
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {appliedCell(a)}

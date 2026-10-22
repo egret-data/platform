@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArchiveRestore,
-  ArrowLeft,
   Boxes,
   Cpu,
   Pencil,
@@ -77,6 +76,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 const TABS = ["overview", "members", "resources", "features", "requests", "activity"] as const;
 type TabKey = (typeof TABS)[number];
@@ -92,7 +94,6 @@ type TabKey = (typeof TABS)[number];
  */
 export default function WorkspaceDetail() {
   const id = useParams().id!;
-  const navigate = useNavigate();
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -146,46 +147,37 @@ export default function WorkspaceDetail() {
   }
   if (!ws) {
     return (
-      <div className="space-y-4 p-6">
+      <PageContainer className="space-y-4">
+        <BackLink to="/control-plane/workspaces">Workspaces</BackLink>
         <p className="text-sm text-destructive" role="alert">
           Workspace not found.
         </p>
-        <Button variant="outline" size="sm" onClick={() => navigate("/control-plane/workspaces")}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> Back to workspaces
-        </Button>
-      </div>
+      </PageContainer>
     );
   }
 
   const isArchived = ws.status === "archived";
 
   return (
-    <div className="space-y-5">
-      <div>
-        <Link
-          to="/control-plane/workspaces"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="mr-1 h-4 w-4" /> Workspaces
-        </Link>
-        <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-semibold leading-tight">{ws.name}</h1>
+    <PageContainer className="space-y-5">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/workspaces", label: "Workspaces" }}
+        title={ws.name}
+        status={
+          <>
             <code className="rounded bg-muted px-2 py-0.5 font-mono text-sm text-muted-foreground">
               {ws.slug}
             </code>
             {isArchived ? (
-              <Badge variant="secondary">archived</Badge>
+              <StatusBadge tone="inactive">archived</StatusBadge>
             ) : (
-              <Badge
-                className="border-transparent"
-                style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
-              >
-                active
-              </Badge>
+              <StatusBadge tone="success">active</StatusBadge>
             )}
-          </div>
-          <div className="flex items-center gap-2">
+          </>
+        }
+        actions={
+          <>
             <Button size="sm" variant="outline" onClick={() => setRenameOpen(true)}>
               <Pencil className="mr-1 h-4 w-4" /> Rename
             </Button>
@@ -206,9 +198,9 @@ export default function WorkspaceDetail() {
                 <Trash2 className="mr-1 h-4 w-4" /> Archive
               </Button>
             )}
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
@@ -290,7 +282,7 @@ export default function WorkspaceDetail() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -782,17 +774,9 @@ function ActivityTab({ workspaceId }: { workspaceId: string }) {
                 </TableCell>
                 <TableCell>
                   {e.decision === "allow" ? (
-                    <Badge
-                      className="border-transparent"
-                      style={{
-                        backgroundColor: "var(--success)",
-                        color: "var(--success-foreground)",
-                      }}
-                    >
-                      allow
-                    </Badge>
+                    <StatusBadge tone="success">allow</StatusBadge>
                   ) : e.decision === "deny" ? (
-                    <Badge variant="destructive">deny</Badge>
+                    <StatusBadge tone="destructive">deny</StatusBadge>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}

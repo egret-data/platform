@@ -1,27 +1,19 @@
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
 // The Trino `outputStage` JSON is a deep, partially-optional tree — every field
 // is guarded and traversed as `any`. Narrowing it into a full type buys nothing
 // here (we only read a handful of leaf fields for display).
 
-type BadgeVariant =
-  | "default"
-  | "secondary"
-  | "destructive"
-  | "success"
-  | "warning"
-  | "processing"
-  | "outline";
 
 /** Colour a stage/task state like the query-state badges. */
-function stateVariant(state: string): BadgeVariant {
+function stateVariant(state: string): StatusTone {
   switch (String(state).toUpperCase()) {
     case "RUNNING":
-      return "processing";
+      return "primary";
     case "SCHEDULED":
     case "SCHEDULING":
     case "PLANNED":
-      return "warning";
+      return "highlight";
     case "FINISHED":
       return "success";
     case "FAILED":
@@ -29,7 +21,7 @@ function stateVariant(state: string): BadgeVariant {
     case "CANCELED":
       return "destructive";
     default:
-      return "secondary";
+      return "neutral";
   }
 }
 
@@ -82,9 +74,9 @@ export default function StageTree({ stage }: { stage: any }) {
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs font-medium">Stage {String(stageId)}</span>
-        <Badge variant={stateVariant(state)} className="text-[10px]">
+        <StatusBadge tone={stateVariant(state)} className="text-[10px]">
           {String(state)}
-        </Badge>
+        </StatusBadge>
         <span className="text-xs tabular-nums text-muted-foreground">
           {fmtNum(rows)} rows · {fmtNum(bytes)} bytes
         </span>
