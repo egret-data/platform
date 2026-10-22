@@ -15,7 +15,9 @@ import { cn } from "@/lib/utils"
  * The variant is set once on `TabsList` and read by every `TabsTrigger` inside
  * it. A tab strip made of router links (an endpoint's sections) uses the same
  * classes through `tabsListClass` / `tabsTriggerClass`: the trigger classes
- * style `aria-current="page"` exactly like Radix's `data-state="active"`.
+ * style `aria-current="page"` exactly like Radix's `data-state="active"`, and
+ * the underline style also reads `aria-selected="true"`, for a plain
+ * `role="tab"` element (the Data API statement switcher).
  *
  * An icon in a trigger sits `gap-1.5` from its label at `size-4`; it used to
  * touch the label (the alert editor, the catalog detail).
@@ -25,7 +27,7 @@ export type TabsVariant = "pill" | "underline"
 const LIST_CLASS: Record<TabsVariant, string> = {
   pill: "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
   underline:
-    "flex h-auto w-full items-end justify-start gap-1 overflow-x-auto border-b border-border bg-transparent p-0 text-muted-foreground",
+    "flex h-auto w-full items-end justify-start gap-4 overflow-x-auto border-b border-border bg-transparent p-0 text-muted-foreground",
 }
 
 const TRIGGER_BASE =
@@ -34,7 +36,7 @@ const TRIGGER_BASE =
 const TRIGGER_CLASS: Record<TabsVariant, string> = {
   pill: "rounded-sm px-3 py-1.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm aria-[current=page]:bg-background aria-[current=page]:text-foreground aria-[current=page]:shadow-sm",
   underline:
-    "-mb-px shrink-0 rounded-none border-b-2 border-transparent px-3 py-2 hover:border-border hover:text-foreground data-[state=active]:border-primary data-[state=active]:font-semibold data-[state=active]:text-foreground aria-[current=page]:border-primary aria-[current=page]:font-semibold aria-[current=page]:text-foreground",
+    "-mb-px shrink-0 rounded-none border-b-2 border-transparent px-0.5 py-2 hover:border-border hover:text-foreground data-[state=active]:border-primary data-[state=active]:font-semibold data-[state=active]:text-foreground aria-[current=page]:border-primary aria-[current=page]:font-semibold aria-[current=page]:text-foreground aria-selected:border-primary aria-selected:font-semibold aria-selected:text-foreground",
 }
 
 /** The tab list's classes, for a strip that is not a Radix `TabsList`. */

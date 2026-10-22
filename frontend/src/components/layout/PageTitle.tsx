@@ -21,7 +21,12 @@ export const PAGE_TITLE_CLASS: Record<PageTitleSize, string> = {
 export function PageTitle({
   size = "page",
   className,
+  children,
   ...props
 }: ComponentPropsWithoutRef<"h1"> & { size?: PageTitleSize }) {
-  return <h1 data-page-title={size} className={cn(PAGE_TITLE_CLASS[size], className)} {...props} />;
+  return (
+    <h1 data-page-title={size} className={cn(PAGE_TITLE_CLASS[size], className)} {...props}>
+      {children}
+    </h1>
+  );
 }

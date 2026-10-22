@@ -16,7 +16,6 @@ import {
   useMyRequests,
   type AccessRequest,
 } from "@/api/accessRequests";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -36,6 +35,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 const ROLES = ["ws_viewer", "ws_editor"];
 const DEFAULT_ROLE = "ws_viewer";
@@ -43,13 +43,13 @@ const DEFAULT_ROLE = "ws_viewer";
 function statusBadge(status: AccessRequest["status"]) {
   switch (status) {
     case "pending":
-      return <Badge variant="secondary">Pending</Badge>;
+      return <StatusBadge tone="highlight">Pending</StatusBadge>;
     case "approved":
-      return <Badge variant="success">Approved</Badge>;
+      return <StatusBadge tone="success">Approved</StatusBadge>;
     case "denied":
-      return <Badge variant="destructive">Denied</Badge>;
+      return <StatusBadge tone="destructive">Denied</StatusBadge>;
     case "cancelled":
-      return <Badge variant="outline">Cancelled</Badge>;
+      return <StatusBadge tone="inactive">Cancelled</StatusBadge>;
   }
 }
 

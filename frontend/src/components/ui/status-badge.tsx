@@ -26,13 +26,13 @@ export const STATUS_TONE = {
   success: "border-transparent bg-success/15 text-foreground",
   /** Stopped, expired, failing, denied. */
   destructive: "border-transparent bg-destructive/15 text-foreground",
-  /** Behind, stale, paused, worth a look — not broken. */
+  /** Behind, stale, on grace: worth a look, not broken. */
   highlight: "border-transparent bg-highlight/15 text-foreground",
   /** In progress. */
   primary: "border-transparent bg-primary/15 text-foreground",
   /** No state colour: nothing to report, not started yet, a draft. */
   neutral: "border-transparent bg-muted text-foreground",
-  /** Finished or switched off without an outcome: archived, disabled, cancelled. */
+  /** Switched off or finished without an outcome: archived, disabled, paused, cancelled. */
   inactive: "border-transparent bg-muted-foreground/15 text-foreground",
 } as const;
 
