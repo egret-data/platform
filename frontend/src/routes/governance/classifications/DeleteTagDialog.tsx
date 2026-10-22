@@ -155,6 +155,7 @@ export function DeleteTagDialog({
       description={`Deleting ${tag.name} removes the classification and takes it off every table and column it is attached to.`}
       confirmText={tag.name}
       confirmDisabledReason={blockedReason}
+      typeToConfirmReason="Type the classification's name to enable Delete."
       onConfirm={confirm}
       onCloseAutoFocus={(event) => {
         if (leaving.current) {

@@ -37,6 +37,14 @@ interface ConfirmDeleteDialogProps {
    */
   confirmDisabledReason?: React.ReactNode;
   /**
+   * Why the confirm button waits while the typed text does not match yet
+   * (FE-ACTION-4). Given, the button is `aria-disabled` rather than native
+   * `disabled` until it matches: it stays focusable, this reason is shown under
+   * the field as its description, and a click does nothing. Optional; omitted,
+   * the button stays natively disabled as before.
+   */
+  typeToConfirmReason?: string;
+  /**
    * Match `confirmText` exactly, case included. Defaults to `false` (every
    * existing call site types a word whose case does not matter). A
    * classification's key and name can differ only in case (`pii` / `PII`),
@@ -56,14 +64,17 @@ interface ConfirmDeleteDialogProps {
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
   open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete',
-  confirmDisabled = false, confirmDisabledReason, caseSensitive = false, onCloseAutoFocus, onConfirm, children,
+  confirmDisabled = false, confirmDisabledReason, typeToConfirmReason, caseSensitive = false, onCloseAutoFocus, onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
   const reasonId = useId();
+  const typeReasonId = useId();
   const blocked = confirmDisabledReason !== undefined && confirmDisabledReason !== null;
   const matches = caseSensitive
     ? inputValue === confirmText
     : inputValue.toLowerCase() === confirmText.toLowerCase();
+  // Waiting only for the typed text, with a reason to say: aria-disabled, never native disabled.
+  const awaitingText = !blocked && !confirmDisabled && !matches && typeToConfirmReason !== undefined;
 
   const handleConfirm = () => {
     if (confirmDisabled || blocked) return;
@@ -94,6 +105,9 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
               placeholder={confirmText}
               autoFocus
             />
+            {awaitingText && (
+              <p id={typeReasonId} className="text-xs text-muted-foreground">{typeToConfirmReason}</p>
+            )}
           </div>
         )}
         <AlertDialogFooter>
@@ -101,9 +115,9 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
           <Button
             variant="destructive"
             onClick={handleConfirm}
-            disabled={!blocked && (confirmDisabled || !matches)}
-            aria-disabled={blocked ? true : undefined}
-            aria-describedby={blocked ? reasonId : undefined}
+            disabled={!blocked && !awaitingText && (confirmDisabled || !matches)}
+            aria-disabled={blocked || awaitingText ? true : undefined}
+            aria-describedby={blocked ? reasonId : awaitingText ? typeReasonId : undefined}
           >
             {confirmLabel}
           </Button>

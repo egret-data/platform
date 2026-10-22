@@ -97,14 +97,35 @@ describe("Delete a classification (CL14)", () => {
     serve({ "/tags": ok([CARD]), "/classifications/t-card/usage": ok(USED), "/perm/rules": ok([]) });
     openArea("/governance/classifications/t-card", STEWARD);
     const dialog = await openDialog(user);
-    expect(within(dialog).getByText(/Type/)).toHaveTextContent("Type Card numbers to confirm");
+    expect(within(dialog).getByText(/to confirm/)).toHaveTextContent("Type Card numbers to confirm");
     const confirm = within(dialog).getByRole("button", { name: "Delete" });
     const input = within(dialog).getByRole("textbox");
     await user.type(input, "card");
-    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
     await user.clear(input);
     await user.type(input, "card NUMBERS");
-    expect(confirm).toBeEnabled();
+    expect(confirm).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("until the name is typed, Delete is aria-disabled, says why, stays focusable and a click does nothing (live check D4)", async () => {
+    const user = userEvent.setup();
+    const served = open({ "DELETE /tags/t-pii": { status: 204, body: null } });
+    const dialog = await openDialog(user);
+    await waitFor(() => expect(dialog).toHaveTextContent("No rule uses it."));
+    const confirm = within(dialog).getByRole("button", { name: "Delete" });
+    // Not native `disabled`: it stays in the tab order and names its reason (FE-ACTION-4).
+    expect(confirm).not.toHaveAttribute("disabled");
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(confirm).toHaveAccessibleDescription("Type the classification's name to enable Delete.");
+    expect(within(dialog).getByText("Type the classification's name to enable Delete.")).toBeInTheDocument();
+    await user.click(confirm);
+    expect(served.asked).not.toContain("DELETE /tags/t-pii");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(where()).toBe(PAGE);
+
+    await user.type(within(dialog).getByRole("textbox"), "pii");
+    expect(confirm).not.toHaveAttribute("aria-disabled");
+    expect(confirm).not.toHaveAccessibleDescription();
   });
 
   it("while the rules are being read, Delete waits with that reason and nothing to type", async () => {
@@ -124,7 +145,10 @@ describe("Delete a classification (CL14)", () => {
     open({ "/perm/rules": fail(500, "down") });
     const dialog = await openDialog(user);
     expect(await within(dialog).findByRole("textbox", {}, T)).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Delete" })).not.toHaveAttribute("aria-disabled");
+    // Waiting only for the name, not for the rules.
+    expect(within(dialog).getByRole("button", { name: "Delete" })).toHaveAccessibleDescription(
+      "Type the classification's name to enable Delete.",
+    );
   });
 
   it("cannot delete while rules use it: Delete says why and links each rule", async () => {
