@@ -42,6 +42,10 @@ egret-query.workspace = true
 # rather than carrying a fourth private copy of it. Pure leaf crate (egret-core,
 # serde, uuid, utoipa) — no cycle, no runtime weight.
 egret-query-api.workspace = true
+# The engine-token seam (`EngineTokenMinter`): the native monitor signs in to a
+# JWT-delegation Trino engine as the viewer, with the token egret mints for
+# them. Leaf crate (egret-core only); egret-query already depends on it.
+egret-analytics-api.workspace = true
 # OpenAPI emit (E0·P4b-9): `#[utoipa::path]` on the engines + monitor handlers +
 # co-located `#[derive(utoipa::OpenApi)]` doc structs merged into the top-level
 # API doc via `egret_engine_mgmt::openapi()`.

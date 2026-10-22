@@ -14,5 +14,10 @@ export interface ClusterDto {
   queued: number;
   /** @minimum 0 */
   blocked: number;
-  nodes: NodeDto[];
+  /**
+     * `None` when the coordinator would not list its nodes: the count is
+     * unknown, not zero ([`cluster_nodes`]).
+     * @nullable
+     */
+  nodes?: NodeDto[] | null;
 }

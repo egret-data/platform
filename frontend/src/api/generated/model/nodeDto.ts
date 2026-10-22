@@ -8,5 +8,10 @@
 
 export interface NodeDto {
   uri: string;
-  recentFailures: number;
+  /**
+     * The failure detector's recent failure rate. Absent when the node list
+     * came from `system.runtime.nodes`, which does not report it.
+     * @nullable
+     */
+  recentFailures?: number | null;
 }

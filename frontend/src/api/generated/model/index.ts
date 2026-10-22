@@ -250,6 +250,7 @@ export * from './engineNotClearedReason';
 export * from './enginePluginResponse';
 export * from './enginePodDto';
 export * from './engineRef';
+export * from './engineRuntime';
 export * from './engineSpecDto';
 export * from './engineSpecDtoStarrocksConfig';
 export * from './engineSpecDtoTrinoConfig';

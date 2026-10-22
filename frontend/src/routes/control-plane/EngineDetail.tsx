@@ -163,16 +163,16 @@ function statusDescription(
 }
 
 /**
- * Derive the engine's in-cluster `host:port` endpoint. The engine DTO carries no
- * endpoint field, so we synthesise the namespaced Service DNS name by kind:
- *   - Trino     → `{name}-coordinator.{namespace}:8080`
- *   - StarRocks → `{name}-fe-service.{namespace}:9030` (FE query port)
+ * Whether Docker runs the engine (the Docker engine provisioner): its nodes are
+ * containers, not pods, and it has no pod logs or exec (KI-195, KI-196).
  */
-function engineEndpoint(engine: EngineWithStatus): string {
-  const { name, namespace } = engine;
-  return isStarRocksType(engine.type)
-    ? `${name}-fe-service.${namespace}:9030`
-    : `${name}-coordinator.${namespace}:8080`;
+function onDocker(engine: Pick<EngineWithStatus, "runtime">): boolean {
+  return engine.runtime === "docker";
+}
+
+/** What the engine's nodes are called: containers on Docker, pods on Kubernetes. */
+function nodesNoun(engine: Pick<EngineWithStatus, "runtime">): "containers" | "pods" {
+  return onDocker(engine) ? "containers" : "pods";
 }
 
 /** Container image the engine runs (falls back to the raw `imageVersion`). */
@@ -214,12 +214,14 @@ function EngineHeaderMeta({ engine }: { engine: EngineWithStatus }) {
       <span aria-hidden className="text-muted-foreground/50">
         ·
       </span>
-      <span className="truncate font-mono tabular-nums">
-        {engineEndpoint(engine)}
-      </span>
-      <span aria-hidden className="text-muted-foreground/50">
-        ·
-      </span>
+      {engine.endpoint && (
+        <>
+          <span className="truncate font-mono tabular-nums">{engine.endpoint}</span>
+          <span aria-hidden className="text-muted-foreground/50">
+            ·
+          </span>
+        </>
+      )}
       <span className="truncate">{engineAuthLabel(engine)}</span>
       {engine.rangerPluginVersion && (
         <>
@@ -339,8 +341,11 @@ function EngineActions({
           <AlertDialogHeader>
             <AlertDialogTitle>Restart engine?</AlertDialogTitle>
             <AlertDialogDescription>
-              This rolls the coordinator and worker pods; running queries are
-              interrupted.
+              {onDocker(engine)
+                ? "This restarts the coordinator and worker containers; running queries are interrupted."
+                : "This rolls the coordinator and worker pods; running queries are interrupted."}
+              {!isStarRocksType(engine.type) &&
+                ` If the ${nodesNoun(engine)} are gone, they are created again.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -366,7 +371,11 @@ function EngineActions({
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         title={`Delete «${engine.name}»?`}
-        description="This destroys the engine's Kubernetes cluster. It cannot be undone."
+        description={
+          onDocker(engine)
+            ? "This removes the engine's containers. It cannot be undone."
+            : "This destroys the engine's Kubernetes cluster. It cannot be undone."
+        }
         confirmText={engine.name}
         onConfirm={() => deleteMutation.mutate(engine.id)}
       >
@@ -556,7 +565,11 @@ function EngineTabs({
 
       <TabsContent value="overview" className="space-y-4">
         <EngineSummaryStrip engine={engine} />
-        <StatusCard status={engine.status} engineId={engineId} />
+        <StatusCard
+          status={engine.status}
+          engineId={engineId}
+          docker={onDocker(engine)}
+        />
         <RangerCredentialSection engine={engine} />
       </TabsContent>
 
@@ -576,6 +589,7 @@ function EngineTabs({
             cfg={cfg}
             imageVersion={engine.spec.imageVersion}
             engineId={engineId}
+            docker={onDocker(engine)}
           />
         )}
       </TabsContent>
@@ -616,17 +630,24 @@ export interface SaveBarForm {
 /**
  * Shared "Save changes" footer for the Configuration and Security tabs. Both
  * act on the same `useEngineConfigForm` instance passed down as `cfg`.
+ *
+ * With `review` (Trino), **Save changes** opens {@link ReviewChangesDialog},
+ * which lists the changes and saves only on its own **Save changes**: saving
+ * restarts the engine, so it is confirmed first (KI-198).
  */
 export function SaveBar({
   cfg,
   disabled = false,
   review = false,
+  docker = false,
 }: {
   cfg: SaveBarForm;
   /** Extra disable condition (e.g. an invalid raw-JSON override) on top of `!dirty || saving`. */
   disabled?: boolean;
-  /** Show the Review-changes button (diffs built vs stored trinoConfig). */
+  /** Confirm through the Review-changes dialog (diffs built vs stored trinoConfig). */
   review?: boolean;
+  /** Docker runs the engine: saving recreates its containers. */
+  docker?: boolean;
 }) {
   const { error, saved, dirty, saving, save } = cfg;
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -642,26 +663,22 @@ export function SaveBar({
 
       <div className="flex justify-end gap-2">
         {review && (
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setReviewOpen(true)}
-              disabled={!dirty}
-            >
-              Review changes
-            </Button>
-            <ReviewChangesDialog
-              before={cfg.storedTrinoConfig ?? {}}
-              after={cfg.builtTrinoConfig ?? {}}
-              open={reviewOpen}
-              onOpenChange={setReviewOpen}
-            />
-          </>
+          <ReviewChangesDialog
+            before={cfg.storedTrinoConfig ?? {}}
+            after={cfg.builtTrinoConfig ?? {}}
+            open={reviewOpen}
+            onOpenChange={setReviewOpen}
+            onConfirm={save}
+            restartNote={
+              docker
+                ? "Saving recreates the engine's containers; running queries are interrupted."
+                : "Saving re-provisions (rolls) the engine pods; running queries are interrupted."
+            }
+          />
         )}
         <Button
           type="button"
-          onClick={save}
+          onClick={review ? () => setReviewOpen(true) : save}
           disabled={!dirty || saving || disabled}
         >
           {saving && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -715,7 +732,7 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
 
   const items: { label: string; value: string | number }[] = [
     { label: "phase", value: engine.status.phase },
-    { label: "pods", value: `${readyPods}/${pods.length}` },
+    { label: nodesNoun(engine), value: `${readyPods}/${pods.length}` },
     { label: "replicas", value: replicas },
     { label: "catalogs", value: catalogCount },
     { label: "workspaces", value: workspaceCount },
@@ -737,9 +754,12 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
 function StatusEmptyState({
   phase,
   message,
+  docker = false,
 }: {
   phase: string;
   message: string | null;
+  /** Docker runs the engine: containers, no operator. */
+  docker?: boolean;
 }) {
   const variant = phaseVariant(phase);
 
@@ -747,7 +767,9 @@ function StatusEmptyState({
     return (
       <div className="space-y-3 py-1">
         <p className="text-sm text-muted-foreground">
-          Waiting for the operator to create pods…
+          {docker
+            ? "Waiting for the containers to start…"
+            : "Waiting for the operator to create pods…"}
         </p>
         <ListSkeleton rows={3} cols={3} />
       </div>
@@ -766,7 +788,7 @@ function StatusEmptyState({
 
   return (
     <p className="py-6 text-center text-sm text-muted-foreground">
-      No pods reported.
+      {docker ? "No containers reported." : "No pods reported."}
     </p>
   );
 }
@@ -787,9 +809,15 @@ function StatusEmptyState({
 function PodHealthTable({
   pods,
   engineId,
+  docker = false,
 }: {
   pods: EngineStatus["pods"];
   engineId: string;
+  /**
+   * Docker runs the engine: one row per container, and no Logs or Exec (they
+   * need Kubernetes), with a note saying so instead (KI-195).
+   */
+  docker?: boolean;
 }) {
   const [logsPod, setLogsPod] = useState<string | null>(null);
   const [execPod, setExecPod] = useState<string | null>(null);
@@ -801,7 +829,7 @@ function PodHealthTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Pod</TableHead>
+            <TableHead>{docker ? "Container" : "Pod"}</TableHead>
             <TableHead>Phase</TableHead>
             <TableHead>Ready</TableHead>
             <TableHead className="text-right">
@@ -827,26 +855,37 @@ function PodHealthTable({
                 </Badge>
               </TableCell>
               <TableCell className="text-right">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setLogsPod(pod.name)}
-                >
-                  Logs
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setExecConfirmPod(pod.name)}
-                >
-                  Exec
-                </Button>
+                {!docker && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setLogsPod(pod.name)}
+                    >
+                      Logs
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setExecConfirmPod(pod.name)}
+                    >
+                      Exec
+                    </Button>
+                  </>
+                )}
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
       </div>
+      {docker && (
+        <p className="text-xs text-muted-foreground">
+          Logs and a shell are not available here for an engine Docker runs: read
+          a container's log with <span className="font-mono">docker logs</span>{" "}
+          on the Docker host.
+        </p>
+      )}
 
       <PodLogsDialog
         engineId={engineId}
@@ -893,9 +932,11 @@ function PodHealthTable({
 function StatusCard({
   status,
   engineId,
+  docker,
 }: {
   status: EngineStatus;
   engineId: string;
+  docker: boolean;
 }) {
   const d = statusDescription(status.phase, status.message);
   return (
@@ -907,9 +948,13 @@ function StatusCard({
         </p>
       </div>
       {status.pods.length === 0 ? (
-        <StatusEmptyState phase={status.phase} message={status.message} />
+        <StatusEmptyState
+          phase={status.phase}
+          message={status.message}
+          docker={docker}
+        />
       ) : (
-        <PodHealthTable pods={status.pods} engineId={engineId} />
+        <PodHealthTable pods={status.pods} engineId={engineId} docker={docker} />
       )}
     </section>
   );
@@ -1152,10 +1197,12 @@ function ConfigurationTab({
   cfg,
   imageVersion,
   engineId,
+  docker,
 }: {
   cfg: EngineConfigForm;
   imageVersion: string;
   engineId: string;
+  docker: boolean;
 }) {
   // Goes true when any raw-JSON override fails to parse; blocks Save.
   const [rawInvalid, setRawInvalid] = useState(false);
@@ -1166,7 +1213,7 @@ function ConfigurationTab({
         <h2 className="text-base font-semibold">Settings</h2>
         <p className="text-sm text-muted-foreground">
           Cluster-wide, coordinator, and worker Trino config plus security and exposure. Saving
-          re-provisions the engine.
+          {docker ? " recreates the engine's containers." : " re-provisions the engine."}
         </p>
       </div>
       <div className="space-y-4">
@@ -1176,7 +1223,12 @@ function ConfigurationTab({
           onInvalidChange={setRawInvalid}
           engineId={engineId}
         />
-        <SaveBar cfg={cfg} disabled={rawInvalid} review />
+        <SaveBar
+          cfg={cfg}
+          disabled={rawInvalid || cfg.ingressHostMissing}
+          review
+          docker={docker}
+        />
       </div>
     </section>
   );
@@ -1239,6 +1291,7 @@ function SecuritySection({
         setIngressEnabled={setIngressEnabled}
         ingressHost={ingressHost}
         setIngressHost={setIngressHost}
+        ingressHostMissing={cfg.ingressHostMissing}
         ingressClassName={ingressClassName}
         setIngressClassName={setIngressClassName}
         ingressTlsSecret={ingressTlsSecret}

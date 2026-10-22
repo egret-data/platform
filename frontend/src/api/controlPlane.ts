@@ -581,7 +581,21 @@ export interface Engine {
   rangerCredentialPending?: boolean;
   /** The current Ranger credential's id (not a secret); absent when there is none. */
   rangerCredentialId?: string | null;
+  /**
+   * `host:port` clients reach the engine on (what a workspace connection to it
+   * dials). External: the declared address. Absent on older payloads.
+   */
+  endpoint?: string;
+  /**
+   * Provisioned only: what runs the engine. `docker` has no pod logs or exec and
+   * calls its pods containers. Absent for external engines, older payloads, and
+   * when nothing provisions engines.
+   */
+  runtime?: EngineRuntime | null;
 }
+
+/** What runs a provisioned engine (`EngineDto.runtime`). */
+export type EngineRuntime = "kubernetes" | "docker";
 
 /** Live status read back from the operator + pods. */
 export interface EngineStatus {
@@ -786,7 +800,7 @@ export interface TrinoConfig {
   // Client auth: file password users (password held in an egret secret,
   // bcrypted server-side) + optional egret-JWT acceptance.
   auth?: {
-    passwordUsers: { username: string; secretRef: string }[];
+    passwordUsers?: { username: string; secretRef: string }[];
     jwt?: { jwksUri?: string; requiredAudience?: string };
   };
   // Per-user delegation mode for delegated BI queries. Absent = Auto (backend
@@ -1027,12 +1041,13 @@ export type MonitorQueryDetail = MonitorQuery & {
   outputStage?: unknown;
 };
 
-/** Cluster/node stats derived from `/v1/query` + `/v1/node`. */
+/** Cluster/node stats derived from `/v1/query` + the coordinator's node list. */
 export interface ClusterInfo {
   running: number;
   queued: number;
   blocked: number;
-  nodes: { uri: string; recentFailures: number }[];
+  /** `null` when the coordinator would not list its nodes (count unknown, not zero). */
+  nodes: { uri: string; recentFailures?: number | null }[] | null;
 }
 
 export async function listQueries(engineId: string): Promise<MonitorQuery[]> {

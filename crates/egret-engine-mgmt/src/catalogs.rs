@@ -670,7 +670,7 @@ async fn test_registry_catalog(
     if let Some(a) = applied {
         if let Some(engine) = st.engine_mgmt.get_engine(a.engine_id).await? {
             let (ok, message) =
-                crate::engines::show_schemas_verdict(&st, &engine, &row.name).await?;
+                crate::engines::show_schemas_verdict(&st, &engine, p.user_id, &row.name).await?;
             return Ok(Json(CatalogTestResultDto {
                 ok,
                 check: CatalogCheck::Query,

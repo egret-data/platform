@@ -5,6 +5,10 @@ export interface ConfigChange {
   to?: unknown;
 }
 
+function isEmptyArray(v: unknown): boolean {
+  return Array.isArray(v) && v.length === 0;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -35,7 +39,9 @@ function stableStringify(v: unknown): string {
  * the union of their keys; arrays and primitives are leaves compared whole by
  * `JSON.stringify` equality. Paths are dot-joined (`coordinator.replicas`).
  * A key missing in `after` → `removed`, missing in `before` → `added`, present
- * in both but differing → `changed`.
+ * in both but differing → `changed`. A missing key and an empty array are the
+ * same config (the server reads an absent list as empty), so that pair is no
+ * change: the review must list only what the save changes (KI-198).
  */
 export function diffConfig(before: unknown, after: unknown): ConfigChange[] {
   const changes: ConfigChange[] = [];
@@ -52,6 +58,7 @@ export function diffConfig(before: unknown, after: unknown): ConfigChange[] {
     const aMissing = a === undefined;
     const bMissing = b === undefined;
     if (aMissing && bMissing) return;
+    if ((aMissing && isEmptyArray(b)) || (bMissing && isEmptyArray(a))) return;
     if (aMissing) {
       changes.push({ path, kind: "added", to: b });
       return;

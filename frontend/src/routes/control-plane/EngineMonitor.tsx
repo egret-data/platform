@@ -483,7 +483,8 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
 }
 
 /** A compact strip of cluster-wide counters + node count. Shows em-dashes when
- *  the coordinator is unreachable so it doesn't read as a healthy idle cluster. */
+ *  the coordinator is unreachable so it doesn't read as a healthy idle cluster,
+ *  and for the node count when the coordinator would not list its nodes. */
 function ClusterStrip({
   cluster,
   unreachable,
@@ -498,7 +499,10 @@ function ClusterStrip({
         { label: "running", value: v(cluster?.running) },
         { label: "queued", value: v(cluster?.queued) },
         { label: "blocked", value: v(cluster?.blocked) },
-        { label: "nodes", value: v(cluster?.nodes.length) },
+        {
+          label: "nodes",
+          value: cluster?.nodes === null ? "—" : v(cluster?.nodes.length),
+        },
       ]}
     />
   );
