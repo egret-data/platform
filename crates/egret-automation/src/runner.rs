@@ -13,6 +13,7 @@ use egret_analytics_api::engine_token::EngineTokenMinter;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
 use egret_query::DatabaseRepo;
+use futures_util::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::dataapi_metric;
@@ -22,17 +23,29 @@ use crate::deliver::slack;
 use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
 use crate::evaluator::{evaluate, owner_identity, EvalError, Evaluation, QueryRunner};
+use crate::format::{format_rows, NumberStyle};
 use crate::model::report_target;
-use crate::render::client::{RenderRequest, Renderer};
+use crate::render::client::{render_budget, RenderRequest, Renderer};
 use crate::render::token::RenderTokenRepo;
 use crate::repo::{Schedule, ScheduleRepo};
-use crate::scheduler::{claim_due, in_grace, prune_runs, record_run, release};
+use crate::scheduler::{
+    claim_due, in_grace, prune_runs, record_manual_outcome, record_run, release,
+};
 use crate::validator::should_fire;
 use egret_automation_api::{RecipientKind, ReportFormat, ValidatorType};
 
 /// How many schedules one tick will take. A cap, not a target: it bounds how
 /// much work a single replica commits to before the next tick can rebalance.
 const BATCH: i64 = 20;
+
+/// How many claimed schedules one tick runs AT ONCE (KI-173). They used to run
+/// one after another, so one slow PNG/PDF render (20 s and more) delayed every
+/// other alert due in the same minute. Bounded rather than all twenty at once:
+/// the renderer captures two pages at a time (`RENDER_MAX_CONCURRENT`), and
+/// every alert is an engine query — four keeps a burst from queueing far
+/// behind the renderer or flooding the engines while still letting a quick
+/// alert finish next to a slow report.
+const TICK_CONCURRENCY: usize = 4;
 
 /// How long a render token lives (design §5: "about a minute"). Long enough
 /// for the renderer to receive the request and the print page to fetch the
@@ -124,11 +137,12 @@ impl AutomationRunner {
             }
         };
         let n = due.len();
-        for s in due {
-            // One schedule's failure must not abandon the rest of the batch,
-            // and `run_one` already records its own outcome.
-            self.run_one(s).await;
-        }
+        // One schedule's failure must not abandon the rest of the batch, and
+        // `run_one` already records its own outcome — so the batch runs as
+        // independent futures, at most `TICK_CONCURRENCY` at a time.
+        futures_util::stream::iter(due)
+            .for_each_concurrent(TICK_CONCURRENCY, |s| self.run_one(s))
+            .await;
         if let Err(e) = prune_runs(&self.db).await {
             tracing::warn!(error = %e, "automation: pruning run log failed");
         }
@@ -161,13 +175,26 @@ impl AutomationRunner {
     /// a scheduled run can never record the same outcome differently.
     async fn run_and_log(&self, s: &Schedule) -> (String, Option<f64>, Option<String>) {
         let outcome = self.evaluate_and_deliver(s).await;
-        let (state, value, error) = match outcome {
-            Ok(Outcome::Fired { value, delivered }) => ("success", value, delivered.err()),
-            Ok(Outcome::NotFired { value }) => ("noop", value, None),
-            Ok(Outcome::Suppressed { value }) => ("grace", value, None),
-            Err(e) => ("error", None, Some(e.to_string())),
+        let (state, value, error, notified) = match outcome {
+            // A firing is `success` only when EVERY destination took it
+            // (KI-033): a run whose mail or webhook failed is an `error`, so
+            // the list marks it, with every failure in the detail (KI-034).
+            // `notified` — which starts the grace period — is whether anyone
+            // was reached at all; see `scheduler::in_grace`.
+            Ok(Outcome::Fired { value, delivered }) => (
+                if delivered.failures.is_empty() {
+                    "success"
+                } else {
+                    "error"
+                },
+                value,
+                delivered.detail(),
+                delivered.reached_someone(),
+            ),
+            Ok(Outcome::NotFired { value }) => ("noop", value, None, false),
+            Ok(Outcome::Suppressed { value }) => ("grace", value, None, false),
+            Err(e) => ("error", None, Some(e.to_string()), false),
         };
-        let notified = state == "success" && error.is_none();
 
         if let Err(e) = record_run(&self.db, s.id, state, value, error.as_deref(), notified).await {
             tracing::error!(schedule = %s.id, error = %e, "automation: run log write failed");
@@ -208,8 +235,16 @@ impl AutomationRunner {
     /// The `grace` state still lands in the run log, so the UI can show the
     /// user WHY nothing was sent rather than the button silently doing
     /// nothing.
+    ///
+    /// The outcome IS written onto the schedule's `last_state`/`last_value`
+    /// (KI-032) — only `next_run_at` stays untouched — so the list and the
+    /// detail badge agree with the run log. See `record_manual_outcome` for
+    /// why a row the tick is running is left alone.
     pub async fn run_now(&self, s: &Schedule) {
-        self.run_and_log(s).await;
+        let (state, value, _error) = self.run_and_log(s).await;
+        if let Err(e) = record_manual_outcome(&self.db, s.id, &state, value).await {
+            tracing::error!(schedule = %s.id, error = %e, "automation: manual outcome write failed");
+        }
     }
 
     async fn evaluate_and_deliver(&self, s: &Schedule) -> Result<Outcome, EvalError> {
@@ -532,11 +567,18 @@ impl AutomationRunner {
 
         // One token PER object: a render token is bound to a single object by
         // design, so N pages need N of them.
+        //
+        // All N are minted now, but the renderer opens the pages one after
+        // another, so the last page is fetched up to the whole render budget
+        // later. A fixed 60 s lifetime would let the third page of a long
+        // report 404 at the print page (KI-167); the token lives as long as
+        // the request that carries it may, and is still single-use.
+        let ttl = RENDER_TOKEN_TTL.max(render_budget(targets.len()));
         let mut urls = Vec::with_capacity(targets.len());
         for (kind, object_id) in &targets {
             let token = self
                 .render_tokens
-                .mint(kind, *object_id, s.workspace_id, owner, RENDER_TOKEN_TTL)
+                .mint(kind, *object_id, s.workspace_id, owner, ttl)
                 .await
                 .map_err(|e| EvalError::Query(e.to_string()))?;
             urls.push(format!(
@@ -674,8 +716,8 @@ impl AutomationRunner {
 
         match format {
             ReportFormat::Csv => {
-                let rows_json =
-                    serde_json::to_value(&result.rows).unwrap_or(serde_json::Value::Null);
+                let rows = format_rows(&result.columns, &result.rows, NumberStyle::Csv);
+                let rows_json = serde_json::to_value(&rows).unwrap_or(serde_json::Value::Null);
                 let csv = email::rows_to_csv(&columns, &rows_json);
                 Ok(ReportContent {
                     subject,
@@ -695,7 +737,10 @@ impl AutomationRunner {
                 body: format!(
                     "{}\n\n{}",
                     s.name,
-                    rows_to_text_table(&columns, &result.rows)
+                    rows_to_text_table(
+                        &columns,
+                        &format_rows(&result.columns, &result.rows, NumberStyle::Text)
+                    )
                 ),
                 attachment: None,
             }),
@@ -708,13 +753,15 @@ impl AutomationRunner {
     /// numeric `value`), and email where the workspace has SMTP configured.
     /// Mirrors `deliver`'s recipient-collection shape but with report-shaped
     /// content instead of an alert's `Evaluation`.
-    async fn deliver_report(&self, s: &Schedule, content: &ReportContent) -> Result<(), String> {
-        let recipients = self
-            .schedules
-            .recipients_for(s.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut first_error = None;
+    async fn deliver_report(&self, s: &Schedule, content: &ReportContent) -> Delivery {
+        let mut delivery = Delivery::default();
+        let recipients = match self.schedules.recipients_for(s.id).await {
+            Ok(r) => r,
+            Err(e) => {
+                delivery.fail("recipients", e);
+                return delivery;
+            }
+        };
         let mut email_to: Vec<String> = Vec::new();
         for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
@@ -750,23 +797,23 @@ impl AutomationRunner {
             .await
             {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: report webhook failed");
-                first_error.get_or_insert(e.to_string());
+                delivery.fail(&webhook_label(url), e);
+            } else {
+                delivery.sent += 1;
             }
         }
-        if let Some(e) = self.deliver_slack(s, &content.body, &recipients).await {
-            first_error.get_or_insert(e);
-        }
+        self.deliver_slack(s, &content.body, &recipients, &mut delivery)
+            .await;
         if !email_to.is_empty() {
-            if let Err(e) = self.send_report_email(s, content, &email_to).await {
-                tracing::warn!(schedule = %s.id, error = %e, "automation: report email failed");
-                first_error.get_or_insert(e);
+            match self.send_report_email(s, content, &email_to).await {
+                Ok(()) => delivery.sent += 1,
+                Err(e) => {
+                    tracing::warn!(schedule = %s.id, error = %e, "automation: report email failed");
+                    delivery.fail("email", e);
+                }
             }
         }
-
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        delivery
     }
 
     /// One mail to all of this report's email recipients, carrying whatever
@@ -815,24 +862,22 @@ impl AutomationRunner {
         .map_err(|e| e.to_string())
     }
 
-    /// Send to every recipient — webhooks, and email where the workspace has
-    /// SMTP configured.
+    /// Send to every recipient — webhooks, Slack, and email where the
+    /// workspace has SMTP configured.
     ///
-    /// Returns the first failure, if any: the run is still `success` (the alert
-    /// DID fire, and the grace period starts) but the error is recorded so a
-    /// silently-undelivered notification is visible in the run log rather than
-    /// only in a log file nobody is reading.
-    async fn deliver(
-        &self,
-        s: &Schedule,
-        eval: &crate::evaluator::Evaluation,
-    ) -> Result<(), String> {
-        let recipients = self
-            .schedules
-            .recipients_for(s.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut first_error = None;
+    /// Every destination is tried and EVERY failure is kept (KI-034): the run
+    /// is recorded as `error` when any destination failed (KI-033), and the
+    /// grace period starts only if at least one destination was reached — see
+    /// `scheduler::in_grace`.
+    async fn deliver(&self, s: &Schedule, eval: &crate::evaluator::Evaluation) -> Delivery {
+        let mut delivery = Delivery::default();
+        let recipients = match self.schedules.recipients_for(s.id).await {
+            Ok(r) => r,
+            Err(e) => {
+                delivery.fail("recipients", e);
+                return delivery;
+            }
+        };
         let mut email_to: Vec<String> = Vec::new();
         for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
@@ -871,40 +916,41 @@ impl AutomationRunner {
             .await
             {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: webhook failed");
-                first_error.get_or_insert(e.to_string());
+                delivery.fail(&webhook_label(url), e);
+            } else {
+                delivery.sent += 1;
             }
         }
         let value = eval
             .value
             .map(|v| v.to_string())
             .unwrap_or_else(|| "(no value)".into());
-        if let Some(e) = self
-            .deliver_slack(s, &format!("Observed value: {value}"), &recipients)
-            .await
-        {
-            first_error.get_or_insert(e);
-        }
+        self.deliver_slack(
+            s,
+            &format!("Observed value: {value}"),
+            &recipients,
+            &mut delivery,
+        )
+        .await;
         if !email_to.is_empty() {
             match self.send_email(s, eval, &email_to).await {
-                Ok(None) => {}
+                Ok(None) => delivery.sent += 1,
                 // Sent, but with a note for the run log (fix round 1) — e.g.
                 // an alert's attachment was skipped because its target
-                // belongs to another workspace. `state` must stay whatever
-                // the alert's own condition produced; only `error` explains.
+                // belongs to another workspace. A note is not a failed
+                // delivery: `state` stays whatever the alert's own condition
+                // produced; only `error` explains.
                 Ok(Some(note)) => {
-                    first_error.get_or_insert(note);
+                    delivery.sent += 1;
+                    delivery.notes.push(note);
                 }
                 Err(e) => {
                     tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
-                    first_error.get_or_insert(e);
+                    delivery.fail("email", e);
                 }
             }
         }
-
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        delivery
     }
 
     /// Post to every Slack recipient. One message per channel, best-effort in
@@ -915,8 +961,8 @@ impl AutomationRunner {
         s: &Schedule,
         summary: &str,
         recipients: &[crate::repo::Recipient],
-    ) -> Option<String> {
-        let mut first_error: Option<String> = None;
+        delivery: &mut Delivery,
+    ) {
         let url = self.object_url(s, &self.workspace_slug(s.workspace_id).await);
         for r in recipients {
             if RecipientKind::parse(&r.kind) != Some(RecipientKind::Slack) {
@@ -937,17 +983,20 @@ impl AutomationRunner {
                 Some(t) => Some(t),
                 None => self.slack_config.resolve_token(s.workspace_id).await,
             };
+            let label = format!("slack {channel}");
             let Some(token) = token else {
-                first_error.get_or_insert_with(|| slack::SlackError::NoToken.to_string());
+                delivery.fail(&label, slack::SlackError::NoToken);
                 continue;
             };
             let text = slack::message(&s.name, s.message.as_deref(), summary, &url);
-            if let Err(e) = slack::deliver(&token, channel, &text).await {
-                tracing::warn!(schedule = %s.id, error = %e, "automation: slack delivery failed");
-                first_error.get_or_insert(e.to_string());
+            match slack::deliver(&token, channel, &text).await {
+                Ok(_) => delivery.sent += 1,
+                Err(e) => {
+                    tracing::warn!(schedule = %s.id, error = %e, "automation: slack delivery failed");
+                    delivery.fail(&label, e);
+                }
             }
         }
-        first_error
     }
 
     /// The workspace slug, for building a user-facing URL. A schedule always
@@ -991,7 +1040,7 @@ impl AutomationRunner {
     /// `Ok(None)` — silent, as before fix round 1 — because those are
     /// operational, not a tenancy refusal a workspace-1 operator needs
     /// explained. `send_email` threads the `Err` into `deliver`'s
-    /// `first_error` so it reaches `schedule_runs.error` without flipping
+    /// `Delivery::notes` so it reaches `schedule_runs.error` without flipping
     /// `state` away from whatever the alert's own condition produced.
     async fn render_alert_attachment(
         &self,
@@ -1299,7 +1348,7 @@ fn slugify(name: &str) -> String {
 enum Outcome {
     Fired {
         value: Option<f64>,
-        delivered: Result<(), String>,
+        delivered: Delivery,
     },
     NotFired {
         value: Option<f64>,
@@ -1307,6 +1356,57 @@ enum Outcome {
     Suppressed {
         value: Option<f64>,
     },
+}
+
+/// What happened at each destination of one firing.
+///
+/// Every destination is tried and every failure kept, labelled with the
+/// destination it belongs to (KI-034): with an email and a webhook recipient,
+/// the run log used to show only whichever failed first.
+#[derive(Debug, Default)]
+struct Delivery {
+    /// Destinations that took the message.
+    sent: usize,
+    /// `"<destination>: <reason>"`, one per destination that did not.
+    failures: Vec<String>,
+    /// Said about a delivery that DID go out (e.g. an attachment that was
+    /// skipped). Not a failure: it does not make the run an `error`.
+    notes: Vec<String>,
+}
+
+impl Delivery {
+    fn fail(&mut self, destination: &str, reason: impl std::fmt::Display) {
+        self.failures.push(format!("{destination}: {reason}"));
+    }
+
+    /// The run log's `error` text: every failure, then every note.
+    fn detail(&self) -> Option<String> {
+        let all: Vec<&str> = self
+            .failures
+            .iter()
+            .chain(&self.notes)
+            .map(String::as_str)
+            .collect();
+        (!all.is_empty()).then(|| all.join("; "))
+    }
+
+    /// Whether this firing told anyone — what starts the grace period. A
+    /// schedule with no destinations at all has nobody to tell and nothing
+    /// that failed, so it counts as reached, as it always has.
+    fn reached_someone(&self) -> bool {
+        self.sent > 0 || self.failures.is_empty()
+    }
+}
+
+/// A webhook destination as the run log names it: scheme and host only. The
+/// path and query of a webhook URL often carry its secret (Slack-style
+/// incoming hooks do), and the run log is readable by every workspace member
+/// who can see the schedule.
+fn webhook_label(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) => format!("webhook {}", u.host_str().unwrap_or("(no host)")),
+        Err(_) => "webhook".to_string(),
+    }
 }
 
 /// What a completed report run is ready to deliver: an email subject/body
@@ -1322,7 +1422,23 @@ struct ReportContent {
 /// "report" rather than "triggered": a report always delivers, so "triggered"
 /// would misdescribe every send.
 fn report_subject(s: &Schedule) -> String {
-    render_subject(s, &format!("[egret] {} report", s.name))
+    render_subject(s, &default_report_subject(&s.name))
+}
+
+/// `[egret] <name> report`, without the suffix when the name already ends in
+/// the word "report" (KI-157) — "Weekly report" must not mail as
+/// "Weekly report report".
+fn default_report_subject(name: &str) -> String {
+    let ends_in_report = name
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .rsplit(|c: char| !c.is_alphanumeric())
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case("report"));
+    if ends_in_report {
+        format!("[egret] {}", name.trim_end())
+    } else {
+        format!("[egret] {name} report")
+    }
 }
 
 /// `Content-ID` for the picture shown inside the notification body. One value
@@ -1909,5 +2025,63 @@ mod tests {
     fn an_engine_alert_body_still_says_rows_are_attached() {
         let body = alert_email_body("alert", "Orders dropped", "3");
         assert!(body.contains("The triggering rows are attached."));
+    }
+
+    /// KI-157: a report named "… report" mailed as "… report report".
+    #[test]
+    fn a_report_named_report_is_not_mailed_as_report_report() {
+        assert_eq!(
+            default_report_subject("start: first dashboard report"),
+            "[egret] start: first dashboard report"
+        );
+        assert_eq!(
+            default_report_subject("Weekly Report"),
+            "[egret] Weekly Report"
+        );
+        assert_eq!(
+            default_report_subject("Sales (report)"),
+            "[egret] Sales (report)"
+        );
+        // The word, not the letters: "Reports" and "nonreport" still get it.
+        assert_eq!(default_report_subject("Sales"), "[egret] Sales report");
+        assert_eq!(default_report_subject("Reports"), "[egret] Reports report");
+        assert_eq!(
+            default_report_subject("nonreport"),
+            "[egret] nonreport report"
+        );
+    }
+
+    /// KI-034: every destination's failure is kept, each under its own name;
+    /// a note is said but is not a failure.
+    #[test]
+    fn every_failed_destination_is_named_in_the_detail() {
+        let mut d = Delivery::default();
+        d.fail(
+            &webhook_label("http://127.0.0.1:19099/egret?token=s3cret"),
+            "blocked",
+        );
+        d.fail("email", "smtp is not configured for this workspace");
+        d.notes.push("attachment skipped".into());
+        let detail = d.detail().unwrap();
+        assert_eq!(
+            detail,
+            "webhook 127.0.0.1: blocked; email: smtp is not configured for this workspace; \
+             attachment skipped"
+        );
+        assert!(
+            !detail.contains("s3cret"),
+            "a webhook URL's query may be its secret"
+        );
+        assert!(!d.reached_someone(), "nothing went out");
+
+        d.sent += 1;
+        assert!(d.reached_someone(), "one destination took it");
+    }
+
+    #[test]
+    fn a_firing_with_no_destinations_counts_as_reached() {
+        let d = Delivery::default();
+        assert!(d.reached_someone());
+        assert_eq!(d.detail(), None);
     }
 }
