@@ -14,7 +14,6 @@ import {
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FACET_ALL, FacetSelect } from "@/components/explore/FacetSelect";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -35,6 +34,7 @@ import {
 } from "@/routes/governance/people/reach";
 import { appliedText } from "@/routes/governance/people/tabs/OverviewTab";
 import { engineUrl } from "@/routes/governance/engines/engineUrl";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 export const GROUP_TITLE: Record<ReachGroup, string> = {
   direct: "Directly",
@@ -425,7 +425,7 @@ function GrantTable({
                 </ul>
               </TableCell>
               <TableCell data-label="Effect">
-                {g.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
+                {g.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}
               </TableCell>
               {canWrite ? (
                 <TableCell className={`${ACTIONS_CELL} text-right`}>

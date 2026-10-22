@@ -45,6 +45,7 @@ import {
   getPolicyAdminListProfilesQueryKey,
 } from "@/api/generated/policy-admin/policy-admin";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * The engine page's Migrate tab (spec §6.4, EP7): the body of the old
@@ -486,29 +487,26 @@ function OwnerChip({ owner }: { owner: string }) {
   );
 }
 
+/** A row's verdict, as the shared `StatusBadge` (KI-222). */
 function VerdictBadge({ verdict }: { verdict: Verdict }) {
   switch (verdict) {
     case "Migrated":
       return (
-        <Badge variant="secondary">
-          <CheckCircle2 aria-hidden />
+        <StatusBadge tone="success" icon={CheckCircle2}>
           Migrated
-        </Badge>
+        </StatusBadge>
       );
     case "Locked":
       return (
-        <Badge variant="outline">
-          <Lock aria-hidden />
+        <StatusBadge tone="neutral" icon={Lock}>
           Locked
-        </Badge>
+        </StatusBadge>
       );
     case "Migratable":
-      return <Badge variant="default">Migratable</Badge>;
+      return <StatusBadge tone="primary">Migratable</StatusBadge>;
     case "Blocked":
       return (
-        <Badge variant="outline" className="text-muted-foreground">
-          Blocked
-        </Badge>
+        <StatusBadge tone="inactive">Blocked</StatusBadge>
       );
   }
 }

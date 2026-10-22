@@ -38,6 +38,7 @@ import { Section, TabError } from "@/routes/governance/tabParts";
 import { MissingProfileNotice } from "@/routes/governance/engines/MissingProfileNotice";
 import { OriginBadge, TypeBadge } from "@/routes/governance/engines/PageFrame";
 import { engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 export const NO_ENGINE_RECORDED = "No engine is recorded. Engines are created in Control plane.";
 export const EVERY_PROFILE_BOUND = "Every profile is bound to an engine.";
@@ -157,7 +158,7 @@ export default function EnginesIndex() {
       sortable: true,
       value: (r) => r.name,
       cell: (r) => (
-        <Link to={engineUrl(r.id)} className="font-medium text-primary hover:underline">
+        <Link to={engineUrl(r.id)} className={ENTITY_LINK_CLASS}>
           {r.name}
         </Link>
       ),
@@ -317,7 +318,7 @@ function OrphanProfiles({ rows, canDelete }: { rows: ProfileDto[]; canDelete: bo
       sortable: true,
       value: (p) => p.name,
       cell: (p) => (
-        <Link to={profileUrl(p.name)} className="font-medium text-primary hover:underline">
+        <Link to={profileUrl(p.name)} className={ENTITY_LINK_CLASS}>
           {p.name}
         </Link>
       ),

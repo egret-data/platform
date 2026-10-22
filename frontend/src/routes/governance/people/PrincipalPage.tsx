@@ -15,6 +15,7 @@ import { MasksFiltersTab } from "@/routes/governance/people/tabs/MasksFiltersTab
 import { ClearancesTab } from "@/routes/governance/people/tabs/ClearancesTab";
 import { CheckAccessTab } from "@/routes/governance/people/tabs/CheckAccessTab";
 import { TERM } from "@/routes/governance/glossary";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 export type PrincipalTab = "overview" | "permissions" | "masks" | "clearances" | "check";
 
@@ -85,7 +86,7 @@ export default function PrincipalPage({ kind }: { kind: PageKind }) {
   else body = <PrincipalTabs principal={state.principal} onEdit={(existing) => setGrantDialog({ existing })} />;
 
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <PrincipalHeader
         kind={kind}
         keyName={key}
@@ -102,7 +103,7 @@ export default function PrincipalPage({ kind }: { kind: PageKind }) {
         existing={grantDialog?.existing ?? null}
         initialPrincipals={include ?? undefined}
       />
-    </div>
+    </PageContainer>
   );
 }
 

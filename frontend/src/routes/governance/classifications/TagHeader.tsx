@@ -20,6 +20,7 @@ import {
 import { tableTagMaskConflict, tagNameTaken } from "@/routes/governance/apiErrors";
 import { RequiredMark } from "@/routes/governance/tabParts";
 import { TERM } from "@/routes/governance/glossary";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /**
  * A classification's header (spec §5): swatch, name (the page's `h1`), key,
@@ -50,7 +51,7 @@ export function TagHeader({ tag, actions }: { tag: Tag; actions?: ReactNode }) {
             <TagSwatch color={tag.color} size="lg" />
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="break-words text-2xl font-semibold">{tag.name}</h1>
+                <PageTitle className="break-words">{tag.name}</PageTitle>
                 <Badge variant="secondary" className="font-mono text-xs">
                   {tag.key}
                 </Badge>

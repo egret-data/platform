@@ -23,6 +23,8 @@ import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policy
 import { Section, STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 export const ADVANCED_WARNING =
   "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
@@ -194,7 +196,7 @@ function HandWrittenTable({ rows, ctx }: { rows: PolicySummary[]; ctx: TabContex
                   type, so a tag-service policy opens in the By-tag editor. */}
               <Link
                 to={editorUrl(ctx.subject, r.policy_type, r.id)}
-                className="break-all font-medium text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                className={cn(ENTITY_LINK_CLASS, "break-all focus-visible:ring-2 focus-visible:ring-ring")}
               >
                 {r.name}
               </Link>

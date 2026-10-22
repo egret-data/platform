@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
+import { BackLink } from "@/components/layout/DetailHeader";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /*
  * Parts the single-item pages share (`GrantPage`, `RulePage`; spec §2 "Single
@@ -15,9 +16,9 @@ export type ItemBack = { to: string; label: string };
 const PEOPLE_BACK: ItemBack = { to: PEOPLE_BASE, label: "People & groups" };
 
 /**
- * The way back (`back`, else People & groups) as `← label`, named "Back to
- * <label>" for assistive technology (the arrow is hidden), the item's kind
- * above its title, and its actions.
+ * The way back (`back`, else People & groups) as the shared `BackLink`, named
+ * "Back to <label>" for assistive technology, the item's kind above its title
+ * (`PageTitle`), and its actions.
  */
 export function ItemHeader({
   kind,
@@ -32,13 +33,15 @@ export function ItemHeader({
 }) {
   return (
     <header className="space-y-2">
-      <Link to={back.to} aria-label={`Back to ${back.label}`} className="text-sm text-muted-foreground hover:underline">
-        <span aria-hidden>←</span> {back.label}
-      </Link>
+      <div>
+        <BackLink to={back.to}>
+          <span className="sr-only">Back to</span> {back.label}
+        </BackLink>
+      </div>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs uppercase text-muted-foreground">{kind}</p>
-          <h1 className="break-words text-lg font-semibold">{title}</h1>
+          <PageTitle className="break-words">{title}</PageTitle>
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>

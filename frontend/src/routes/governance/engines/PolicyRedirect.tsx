@@ -4,6 +4,7 @@ import type { ProfileDto } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { TabError } from "@/routes/governance/tabParts";
 import { editorUrl, ENGINES_BASE, engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 /**
  * The URLs of the pages Engine & policy replaced (spec §3, EP15, Q3):
@@ -53,16 +54,16 @@ export default function PolicyRedirect({ to }: { to: PolicyRedirectTarget }) {
 
   if (profiles.isError) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <TabError what="list of policy profiles" onRetry={() => void profiles.refetch()} />
-      </div>
+      </PageContainer>
     );
   }
   if (profiles.data?.status !== 200) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <ListSkeleton rows={3} cols={2} />
-      </div>
+      </PageContainer>
     );
   }
 

@@ -7,6 +7,8 @@ import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import type { Principal } from "@/routes/governance/people/principalData";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { TERM } from "@/routes/governance/glossary";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 /** The verbatim sentence for a gate that names only groups (spec §2): the compiler emits nothing for it. */
 export const GROUPS_ONLY_GATE = "Engines do not enforce this gate (it names only groups)";
@@ -117,7 +119,7 @@ export function ClearancesTab({ principal }: { principal: Principal }) {
               {canReadTags ? (
                 <Link
                   to={tagUrl(f.tagId, "clearance")}
-                  className="text-sm font-medium text-primary hover:underline"
+                  className={cn(ENTITY_LINK_CLASS, "text-sm")}
                 >
                   {f.tagName}
                 </Link>
