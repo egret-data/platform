@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Tag as TagIcon, UserSearch } from "lucide-react";
+import { Plus, Tag as TagIcon, UserSearch } from "lucide-react";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -10,14 +10,19 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatPrincipals, formatRuleKind, grantSentence } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { ClassificationChip, useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification } from "@/routes/governance/RemoveClassificationDialog";
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
-import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
+import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
+import { RuleDialog } from "@/routes/governance/RuleDialog";
+import { NotEnforcedBadge, useRuleEnforcementIn } from "@/routes/governance/NotEnforced";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants and rules.
@@ -42,16 +47,23 @@ type ColumnPath = ObjectPath & { schema: string; object: string; column: string 
  * page's heading.
  *
  * It lists, for this one column:
- * - **Tags**: its own, then its table's marked "from table" (a table's tag
- *   reaches its columns, `tagNamesOn`); only an egret catalog carries tags (F9).
- * - **Masking rules** that select it, by path or by a tag it carries, with
- *   their exemptions (`ruleSelects`).
+ * - **Classifications**: its own, then its table's marked "from table" (a
+ *   table's classification reaches its columns, `tagNamesOn`); only an egret
+ *   catalog carries them (F9).
+ * - **Rules** (masks; a row filter never applies to a column) that apply to
+ *   it, by path or by a classification it carries, with their exemptions
+ *   (`ruleSelects`).
  * - **Grants** set on it (column level, by name or by a pattern that matches
  *   it, `grantCoverage` "here"); the grants on the table and above are the
  *   Permissions tab's.
  *
  * F10: these are lists of what selects the column, never who sees what. Who
  * can read it is explain's answer, from "Who can read this column?".
+ *
+ * Add rule (`policy:update`, spec C8.3) opens `RuleDialog` on a mask of the
+ * column's own classification when it has one (Task 13), else of the column's
+ * path; each other classification it carries, and the column alone, is one
+ * click away ("Or apply it to …").
  */
 export function ColumnPanel({
   path,
@@ -165,14 +177,25 @@ function checkColumn(browse: BrowseResult, asked: string): ColumnCheck {
 function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const can = usePolicyPermissions();
   const canRead = can("policy:read");
+  const canWriteRule = can("policy:update");
   const canTag = can("catalog_registry:update");
   const egret = catalog.warehouseId != null;
   const assignments = egret ? assignmentsOf(tags) : null;
   const [whoCanRead, setWhoCanRead] = useState(false);
+  const [addRule, setAddRule] = useState(false);
   const [addTag, setAddTag] = useState<TagTarget | null>(null);
+  const canRemoveTag = useCanEditCatalogTags();
+  // After a remove, focus lands on the panel's Add classification (removing needs the same permission, so it is there).
+  const addTagButton = useRef<HTMLButtonElement>(null);
+  const removal = useRemoveClassification(() => addTagButton.current);
 
   const own = (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, path.column));
   const fromTable = (assignments ?? []).filter((a) => a.column === "");
+  // What a rule on a classification would reach this column through: its own and its table's, once each.
+  const carried = [
+    ...own.map((a) => ({ key: a.tag.key, name: a.tag.name })),
+    ...fromTable.map((a) => ({ key: a.tag.key, name: a.tag.name, wholeTable: true })),
+  ].filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i);
 
   return (
     <div className="space-y-6">
@@ -183,12 +206,20 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
             Who can read this column?
           </Button>
         ) : null}
+        {canWriteRule ? (
+          <Button variant="outline" size="sm" onClick={() => setAddRule(true)}>
+            <Plus aria-hidden />
+            {TERM.addRule}
+          </Button>
+        ) : null}
         {canTag ? (
           <div className="space-y-1">
             <Button
+              ref={addTagButton}
               variant="outline"
               size="sm"
-              disabled={!egret}
+              // Focusable while blocked, with its reason tied (N22); the click below does nothing then.
+              aria-disabled={!egret ? true : undefined}
               aria-describedby={egret ? undefined : "column-add-tag-reason"}
               onClick={() =>
                 egret &&
@@ -204,7 +235,7 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
               }
             >
               <TagIcon aria-hidden />
-              Add tag
+              {TERM.addClassification}
             </Button>
             {egret ? null : (
               <p id="column-add-tag-reason" className="text-xs text-muted-foreground">
@@ -216,22 +247,46 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
       </div>
 
       {egret ? (
-        <Section title="Tags">
+        <Section title={TERM.classifications}>
           {tags.isError ? (
-            <TabError what="tags" onRetry={() => void tags.refetch()} />
+            <TabError what="classifications" onRetry={() => void tags.refetch()} />
           ) : assignments === undefined ? (
             <ListSkeleton rows={1} cols={2} />
           ) : assignments === null ? null : own.length + fromTable.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No tag on this column</p>
+            <p className="text-sm text-muted-foreground">No classification on this column</p>
           ) : (
-            <TagList column={path.column} own={own} fromTable={fromTable} />
+            <TagList
+              column={path.column}
+              own={own}
+              fromTable={fromTable}
+              label={fullPath(path)}
+              table={{
+                href: pathToUrl({ catalog: path.catalog, schema: path.schema, object: path.object }),
+                label: fullPath({ catalog: path.catalog, schema: path.schema, object: path.object }),
+              }}
+              onRemove={
+                canRemoveTag && catalog.warehouseId != null
+                  ? (a) =>
+                      removal.ask({
+                        tag: a.tag,
+                        target: {
+                          warehouseId: catalog.warehouseId!,
+                          schema: a.schema,
+                          table: a.table,
+                          column: a.column,
+                          label: fullPath(path),
+                        },
+                      })
+                  : undefined
+              }
+            />
           )}
         </Section>
       ) : null}
 
       {canRead ? (
         <>
-          <Section title="Masking rules">
+          <Section title={TERM.rules}>
             <Masks path={path} catalog={catalog} tags={tags} />
           </Section>
           <Section title="Grants">
@@ -251,6 +306,19 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
       )}
 
       <WhoCanReadDialog open={whoCanRead} onOpenChange={setWhoCanRead} path={path} catalogId={catalog.id} />
+      <RuleDialog
+        open={addRule}
+        onOpenChange={setAddRule}
+        entry={{
+          kind: "column",
+          catalogId: catalog.id,
+          schema: path.schema,
+          table: path.object,
+          column: path.column,
+          classifications: carried,
+        }}
+      />
+      {removal.dialog}
       <AddTagDialog
         target={addTag}
         onOpenChange={(open) => {
@@ -261,66 +329,86 @@ function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: Governa
   );
 }
 
-function TagList({ column, own, fromTable }: { column: string; own: ResourceTagDto[]; fromTable: ResourceTagDto[] }) {
+function TagList({
+  column,
+  own,
+  fromTable,
+  label,
+  onRemove,
+  table,
+}: {
+  column: string;
+  own: ResourceTagDto[];
+  fromTable: ResourceTagDto[];
+  /** The column as the chips name it: `ice.sales.orders.email`. */
+  label: string;
+  /** Offers Remove on the column's own classifications (spec C4). */
+  onRemove?: (a: ResourceTagDto) => void;
+  /** The table the inherited ones come from: "from table" links to its page, which closes this panel. */
+  table: { href: string; label: string };
+}) {
   return (
-    <ul aria-label={`Tags of ${column}`} className="flex flex-wrap gap-1">
+    <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
-          <Badge variant="secondary" title={a.tag.key}>
-            {a.tag.name}
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} onRemove={onRemove ? () => onRemove(a) : undefined} />
         </li>
       ))}
       {fromTable.map((a) => (
         <li key={`table-${a.tag.id}`}>
-          <Badge variant="outline" title={a.tag.key}>
-            {a.tag.name}
-            <span className="font-normal text-muted-foreground">{" from table"}</span>
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} inherited inheritedFrom={table} />
         </li>
       ))}
     </ul>
   );
 }
 
-/** The mask rules that select the column, by path or by a tag it carries (its own or its table's). */
+/** The mask rules that apply to the column, by path or by a classification it carries (its own or its table's). */
 function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
-  if (rulesQ.isError) return <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />;
   const reach = tagReach(path, catalog, tags);
-  if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const names = reach.status === "ok" ? tagNamesOn(reach.assignments, path) : [];
   const selected: { rule: RuleView; by: "path" | "tag" }[] = [];
-  for (const r of rulesQ.data.data) {
-    if (r.kind.type !== "mask") continue;
-    const by = ruleSelects(r, path, catalog.id, names);
-    if (by) selected.push({ rule: r, by });
+  if (rulesQ.data?.status === 200 && reach.status !== "loading") {
+    for (const r of rulesQ.data.data) {
+      if (r.kind.type !== "mask") continue;
+      const by = ruleSelects(r, path, catalog.id, names);
+      if (by) selected.push({ rule: r, by });
+    }
   }
   selected.sort((a, b) => a.rule.name.localeCompare(b.rule.name));
+  // Whether each rule is enforced IN THIS CATALOG: said beside it once the server says so.
+  const enforcement = useRuleEnforcementIn(
+    selected.map((s) => s.rule.id),
+    catalog.id,
+  );
+  if (rulesQ.isError) return <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
+  if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
   const unchecked =
     reach.status === "error" && rulesQ.data.data.some((r) => r.kind.type === "mask" && r.selector.type === "tag") ? (
-      <p className="text-xs text-muted-foreground">Tag rules not checked: the tags could not be loaded.</p>
+      <p className="text-xs text-muted-foreground">Rules on classifications not checked: the classifications could not be loaded.</p>
     ) : null;
   if (selected.length === 0) {
     return (
       <>
-        <p className="text-sm text-muted-foreground">No masking rule selects this column</p>
+        <p className="text-sm text-muted-foreground">No rule applies to this column.</p>
         {unchecked}
       </>
     );
   }
   return (
     <div className="space-y-1">
-      <ul aria-label={`Masking rules of ${path.column}`} className="space-y-1">
+      <ul aria-label={`${TERM.rules} of ${path.column}`} className="space-y-1">
         {selected.map(({ rule, by }) => (
           <li key={rule.id} className="text-sm break-words">
             {rule.name}
             <span className="text-xs text-muted-foreground">
               {` ${formatRuleKind(rule)} · `}
-              {by === "path" ? "by path" : `by tag ${rule.tag_name ?? ""}`}
+              {by === "path" ? "by path" : `by classification ${rule.tag_name ?? ""}`}
               {rule.exempt.include.length > 0 ? ` · except ${formatPrincipals(rule.exempt.include, workspaceName)}` : ""}
             </span>
+            <NotEnforcedBadge enforcement={enforcement?.get(rule.id)} appliesTo={rule.selector.type} className="ml-1" />
           </li>
         ))}
       </ul>
@@ -348,7 +436,7 @@ function Grants({ path, catalogId, canExplain }: { path: ColumnPath; catalogId: 
   if (onColumn.length === 0) {
     return (
       <>
-        <p className="text-sm text-muted-foreground">No egret grant is set on this column</p>
+        <p className="text-sm text-muted-foreground">No grant is set on this column</p>
         {note}
       </>
     );

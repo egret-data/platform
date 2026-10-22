@@ -3,10 +3,12 @@ import type { TagDto } from "@/api/generated/model";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ClassificationChip } from "@/routes/governance/ClassificationChip";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { dottedPath, KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { engineTypeLabel, type EngineInfo } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { TERM } from "@/routes/governance/glossary";
 
 /** What the header's tag section shows; `null` for an object that cannot carry tags (no section at all). */
 export type HeaderTags = null | { state: "loading" } | { state: "error" } | { state: "ok"; tags: TagDto[] };
@@ -15,7 +17,7 @@ export type HeaderTags = null | { state: "loading" } | { state: "error" } | { st
  * What the header says when the tags could not be read. Also this module's
  * bundle marker (`scripts/assert-governance-data-lazy.mjs`).
  */
-export const TAGS_FAILED = "Tags could not be loaded.";
+export const TAGS_FAILED = "Classifications could not be loaded.";
 
 /** The kind of an object its schema's listing could not tell. */
 export const KIND_UNKNOWN = "Kind unknown";
@@ -36,8 +38,8 @@ export type HeaderKind = NodeKind | "loading" | "unknown";
  */
 const ACTIONS = [
   { key: "onGrant", permission: "policy:update", label: "Grant access", icon: KeyRound },
-  { key: "onAddTag", permission: "catalog_registry:update", label: "Add tag", icon: TagIcon },
-  { key: "onWhoCanRead", permission: "policy:read", label: "Who can read?", icon: UserSearch },
+  { key: "onAddTag", permission: "catalog_registry:update", label: TERM.addClassification, icon: TagIcon },
+  { key: "onWhoCanRead", permission: "policy:read", label: TERM.whoCanRead, icon: UserSearch },
 ] as const;
 
 type ActionKey = (typeof ACTIONS)[number]["key"];
@@ -49,7 +51,8 @@ type ActionKey = (typeof ACTIONS)[number]["key"];
  * **Tags.** Only tables and columns carry tags (migration 0177), so a
  * catalog or schema header has no tag section, and neither has an object in a
  * catalog that is not egret's (F9). A table's header shows the tags on the
- * table itself; a column's own tags and the ones it inherits from its table
+ * table itself (`ClassificationChip`, with Remove when `onRemoveTag` is
+ * passed); a column's own tags and the ones it inherits from its table
  * are on the column's row.
  *
  * **Actions.** Each shows only when its handler is wired AND the viewer holds
@@ -66,6 +69,7 @@ export function ObjectHeader({
   onGrant,
   onAddTag,
   onWhoCanRead,
+  onRemoveTag,
   disabledReasons = {},
 }: {
   path: ObjectPath;
@@ -75,6 +79,11 @@ export function ObjectHeader({
   onGrant?: () => void;
   onAddTag?: () => void;
   onWhoCanRead?: () => void;
+  /**
+   * Offers Remove on each of the object's own classifications (spec C4); the
+   * page passes it only to a viewer who may remove (`useCanEditCatalogTags`).
+   */
+  onRemoveTag?: (tag: TagDto) => void;
   /**
    * An action shown but disabled, with the reason said beside it
    * (FE-ACTION-4): Add tag on an object outside egret's catalogs (F9). It
@@ -121,10 +130,12 @@ export function ObjectHeader({
                 return (
                   <Button
                     key={a.key}
+                    data-object-action={a.key}
                     variant="outline"
                     size="sm"
-                    onClick={handlers[a.key]}
-                    disabled={reason !== undefined}
+                    // Focusable while blocked, with its reason tied (N22); a click then does nothing.
+                    onClick={reason !== undefined ? undefined : handlers[a.key]}
+                    aria-disabled={reason !== undefined ? true : undefined}
                     aria-describedby={reason !== undefined ? `object-action-${a.key}-reason` : undefined}
                   >
                     <a.icon aria-hidden />
@@ -161,23 +172,25 @@ export function ObjectHeader({
 
       {tags ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-xs text-muted-foreground">Tags</span>
+          <span className="text-xs text-muted-foreground">{TERM.classifications}</span>
           {tags.state === "loading" ? (
             <>
               <Skeleton className="h-5 w-24" />
-              <span className="sr-only">Loading tags</span>
+              <span className="sr-only">Loading classifications</span>
             </>
           ) : tags.state === "error" ? (
             <span className="text-xs text-destructive">{TAGS_FAILED}</span>
           ) : tags.tags.length === 0 ? (
             <span className="text-xs text-muted-foreground">None on this object</span>
           ) : (
-            <ul aria-label="Tags" className="flex flex-wrap gap-1">
+            <ul aria-label={TERM.classifications} className="flex flex-wrap gap-1">
               {tags.tags.map((t) => (
                 <li key={t.id}>
-                  <Badge variant="secondary" title={t.key}>
-                    {t.name}
-                  </Badge>
+                  <ClassificationChip
+                    tag={t}
+                    objectLabel={dottedPath(path)}
+                    onRemove={onRemoveTag ? () => onRemoveTag(t) : undefined}
+                  />
                 </li>
               ))}
             </ul>

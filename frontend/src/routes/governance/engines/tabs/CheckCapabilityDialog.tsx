@@ -297,7 +297,7 @@ function CheckAnswer({
               </Link>
             ) : (
               <span>
-                {source.kind === "seeded" ? "egret-seeded" : source.kind === "compiled" ? "egret-compiled" : "hand-written"}
+                {source.kind === "seeded" ? "egret-seeded" : source.kind === "compiled" ? "egret-compiled" : "manual"}
               </span>
             )}
             {")."}

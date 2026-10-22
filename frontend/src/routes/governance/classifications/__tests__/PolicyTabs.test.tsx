@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ItemSummary, TagHandWritten, TagPolicyRow } from "@/api/generated/model";
-import { fail, ok, openArea, serve, STEWARD, tag, TAG_POLICY_READER, TAG_READER, type Answer } from "./harness";
+import { ADMIN, fail, ok, openArea, serve, STEWARD, tag, TAG_POLICY_READER, TAG_READER, type Answer } from "./harness";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -17,11 +17,40 @@ function open(tab: string, as = STEWARD, extra: Record<string, Answer> = {}) {
   return served;
 }
 
-describe("Mask & filter tab", () => {
-  it("lists the rules on this tag for a policy:read holder", async () => {
+describe("Rules tab", () => {
+  it("lists the rules on this classification for a policy:read holder", async () => {
     open("rules", TAG_POLICY_READER, { "/perm/rules": ok([]) });
-    expect(await screen.findByRole("heading", { name: "Mask and filter rules" }, T)).toBeInTheDocument();
-    expect(await screen.findByText("No egret rule selects this tag.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Rules" }, T)).toBeInTheDocument();
+    const rules = screen.getByRole("region", { name: "Rules" });
+    expect(await within(rules).findByText("No rule uses this classification yet.", {}, T)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Mask and filter rules" })).not.toBeInTheDocument();
+    expect(within(rules).getAllByText("Adding a rule needs the policy:update permission.")).toHaveLength(1);
+    expect(within(rules).queryByRole("button", { name: "Add rule" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/egret rule/)).not.toBeInTheDocument();
+  });
+
+  it("offers Add rule in the toolbar once rules exist", async () => {
+    open("rules", ADMIN, {
+      "/perm/rules": ok([
+        { id: "r1", name: "Hash email", kind: { type: "mask", mask_type: "MASK_HASH" }, selector: { type: "tag", key: "pii" }, exempt: { include: [], exclude: [] }, tag_name: "PII" },
+      ]),
+    });
+    const rules = await screen.findByRole("region", { name: "Rules" }, T);
+    await within(rules).findByRole("link", { name: "Hash email" }, T);
+    expect(within(rules).getAllByRole("button", { name: "Add rule" })).toHaveLength(1);
+  });
+
+  it("offers Add rule in the empty state with policy:update, on this classification", async () => {
+    const user = userEvent.setup();
+    open("rules", ADMIN, { "/perm/rules": ok([]), "/governance/catalogs": ok([]) });
+    const rules = await screen.findByRole("region", { name: "Rules" }, T);
+    await within(rules).findByText("No rule uses this classification yet.", {}, T);
+    // While the list is empty, the empty state carries the one Add rule (no toolbar duplicate).
+    const adds = within(rules).getAllByRole("button", { name: "Add rule" });
+    expect(adds).toHaveLength(1);
+    await user.click(adds[0]);
+    const dialog = await screen.findByRole("dialog", { name: "New rule" });
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
   });
 
   it("explains, and asks for no rules, without policy:read", async () => {
@@ -37,7 +66,7 @@ describe("Mask & filter tab", () => {
   });
 });
 
-describe("View exposure tab", () => {
+describe("Views tab", () => {
   it("shows the materialized views section", async () => {
     open("views", TAG_READER, { "/classifications/t-pii/view-exposure": ok({ starrocksMaterializedViews: [], enginesNotChecked: [] }) });
     expect(await screen.findByRole("heading", { name: "Existing materialized views" }, T)).toBeInTheDocument();
@@ -75,7 +104,7 @@ function handwritten(over: Partial<TagHandWritten> = {}): TagHandWritten {
 
 const rowOf = (name: string) => screen.getByRole("link", { name }).closest("tr") as HTMLElement;
 
-describe("Hand-written tab (route D)", () => {
+describe("Manual policies tab (route D)", () => {
   it("lists each policy with its editor link, engines, type and items", async () => {
     open("handwritten", STEWARD, {
       [HW]: ok(
@@ -171,11 +200,11 @@ describe("Hand-written tab (route D)", () => {
       [HW]: ok(handwritten({ policies: [row({ id: 1, name: "p1" })], sameName: [{ id: "t-2", key: "pii2" }] })),
     });
     const line = await screen.findByText(
-      (_c, el) => el?.tagName === "P" && /^Tag pii2 has this name too/.test(el.textContent ?? ""),
+      (_c, el) => el?.tagName === "P" && /^Classification pii2 has this name too/.test(el.textContent ?? ""),
       {},
       T,
     );
-    expect(line).toHaveTextContent("Tag pii2 has this name too; engine tag policies on this name apply to both.");
+    expect(line).toHaveTextContent("Classification pii2 has this name too; engine tag policies on this name apply to both.");
     expect(within(line).getByRole("link", { name: "pii2" })).toHaveAttribute("href", "/governance/classifications/t-2");
   });
 
@@ -198,15 +227,15 @@ describe("Hand-written tab (route D)", () => {
       ),
     });
     const note = await screen.findByRole("region", { name: "Could not be read" }, T);
-    expect(note).toHaveTextContent("1 hand-written tag policy could not be read, so this list may be incomplete.");
+    expect(note).toHaveTextContent("1 manual tag policy could not be read, so this list may be incomplete.");
     expect(within(note).getByRole("link", { name: "broken" })).toHaveAttribute(
       "href",
       "/governance/engines/e-1/advanced/policies/masking/51?scope=tag",
     );
     expect(note).toHaveTextContent("invalid type: string");
     // Not "none": the unreadable policy may name this classification.
-    expect(screen.queryByText("No hand-written tag policy names this classification.")).not.toBeInTheDocument();
-    expect(screen.getByText("No readable hand-written tag policy names this classification.")).toBeInTheDocument();
+    expect(screen.queryByText("No manual tag policy names this classification.")).not.toBeInTheDocument();
+    expect(screen.getByText("No readable manual tag policy names this classification.")).toBeInTheDocument();
   });
 
   it("says when no profile has a tag service", async () => {
@@ -214,19 +243,20 @@ describe("Hand-written tab (route D)", () => {
     expect(
       await screen.findByText("No engine profile has a tag service, so no engine downloads tag policies.", {}, T),
     ).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written tag policy names this classification.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No manual tag policy names this classification.")).not.toBeInTheDocument();
   });
 
-  it("says so when no hand-written tag policy names it", async () => {
+  it("says so when no manual tag policy names it", async () => {
     open("handwritten", STEWARD, { [HW]: ok(handwritten()) });
-    expect(await screen.findByText("No hand-written tag policy names this classification.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("No manual tag policy names this classification.", {}, T)).toBeInTheDocument();
+    expect(screen.queryByText(/hand-written/i)).not.toBeInTheDocument();
   });
 
   it("explains, and asks nothing, without policy:read", async () => {
     const served = open("handwritten", TAG_READER);
     expect(
       await screen.findByText(
-        "Hand-written tag policies are read with the policy:read permission, which this account does not have.",
+        "Manual tag policies are read with the policy:read permission, which this account does not have.",
         {},
         T,
       ),
@@ -238,10 +268,10 @@ describe("Hand-written tab (route D)", () => {
     const user = userEvent.setup();
     const served = open("handwritten", STEWARD, { [HW]: fail(500) });
     expect(
-      await screen.findByText(/The hand-written tag policies could not be loaded/, {}, T),
+      await screen.findByText(/The manual tag policies could not be loaded/, {}, T),
     ).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written tag policy names this classification.")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.queryByText("No manual tag policy names this classification.")).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${HW}`)).toHaveLength(2));
   });
 });

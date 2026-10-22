@@ -40,6 +40,8 @@ type Fake = {
   explain?: Answer | (() => Promise<Answer>);
   explainPrincipal?: Answer | (() => Promise<Answer>);
   people?: Answer;
+  /** `GET …/perm/people?username=`; absent: one user with that username. */
+  userLookup?: Answer;
   principals?: Answer;
 };
 
@@ -55,7 +57,14 @@ function serve(fake: Fake) {
       const answer = (a: Answer | (() => Promise<Answer>) | undefined) => (typeof a === "function" ? a().then(reply) : reply(a));
       const m = /^\/api\/control-plane\/perm\/people\/(users|groups|roles)\/([^/]+)$/.exec(url.pathname);
       if (m) return reply(fake.principal?.[`${m[1]}/${decodeURIComponent(m[2])}`]);
-      if (url.pathname === "/api/control-plane/perm/people") return reply(fake.people ?? ok({ items: [], total: 0 }));
+      if (url.pathname === "/api/control-plane/perm/people") {
+        // A typed user's exact-username lookup: by default every username is a known user.
+        const username = url.searchParams.get("username");
+        if (username !== null) {
+          return reply(fake.userLookup ?? ok({ items: [{ kind: "user", key: `u-${username}`, label: username, username, serviceAccount: false }], total: 1 }));
+        }
+        return reply(fake.people ?? ok({ items: [], total: 0 }));
+      }
       if (url.pathname === "/api/control-plane/principals") return reply(fake.principals ?? ok([]));
       if (method === "POST" && url.pathname === "/api/control-plane/perm/explain") {
         posts.push({ call: "explain", body: JSON.parse(String(init?.body)) });
@@ -164,7 +173,7 @@ describe("Check access for a user", () => {
     const posts = serve({ principal: { "users/u-ana": ok(ANA) }, explain: ok(explainOf(ALLOWED)) });
     open("/governance/people/users/u-ana?tab=check");
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByRole("button", { name: "Explain" })).toBeDisabled();
+    expect(await within(panel).findByRole("button", { name: "Explain" })).toHaveAttribute("aria-disabled", "true");
     expect(within(panel).getByText("Explain needs a target catalog.")).toBeInTheDocument();
 
     await ask(panel);
@@ -195,7 +204,7 @@ describe("Check access for a user", () => {
     // The target changes while the answer is on its way.
     await user.click(within(panel).getByRole("button", { name: "set-other-scope" }));
     answer(ok(explainOf(ALLOWED)));
-    await waitFor(() => expect(within(panel).getByRole("button", { name: "Explain" })).toBeEnabled());
+    await waitFor(() => expect(within(panel).getByRole("button", { name: "Explain" })).not.toHaveAttribute("aria-disabled"));
     expect(within(panel).queryByTestId("explain-result")).not.toBeInTheDocument();
   });
 });
@@ -610,14 +619,14 @@ describe("the index's Check access dialog", () => {
     open("/governance/people");
     await user.click(await screen.findByRole("button", { name: "Check access" }));
     const dialog = await screen.findByRole("dialog", { name: "Check access" });
-    expect(within(dialog).getByRole("button", { name: "Explain" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Explain" })).toHaveAttribute("aria-disabled", "true");
     expect(within(dialog).getByText("Explain needs a user and a target catalog.")).toBeInTheDocument();
 
     await user.type(within(dialog).getByLabelText("User"), "ana");
     expect(within(dialog).getByText("Explain needs a target catalog.")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
-    expect(within(dialog).getByRole("button", { name: "Explain" })).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "Explain" })).not.toHaveAttribute("aria-disabled");
     expect(within(dialog).queryByText(/^Explain needs/)).not.toBeInTheDocument();
   });
 

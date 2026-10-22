@@ -216,7 +216,7 @@ export default function EnginesIndex() {
     },
     {
       key: "handwritten",
-      label: "Hand-written policies",
+      label: "Manual policies",
       className: "tabular-nums",
       cell: (r) =>
         r.profile === undefined ? "…" : r.profile ? r.profile.policy_counts.operator : <span aria-hidden>—</span>,
@@ -262,7 +262,7 @@ export default function EnginesIndex() {
           { label: "engines", singular: "engine", value: engineRows.length },
           { label: "profiles without an engine", singular: "profile without an engine", value: orphans.length },
           ...(handWritten !== null
-            ? [{ label: "hand-written policies", singular: "hand-written policy", value: handWritten }]
+            ? [{ label: "manual policies", singular: "manual policy", value: handWritten }]
             : []),
         ]
       : null;

@@ -56,6 +56,9 @@ pub struct UsageTag {
 pub struct TableUsage {
     pub catalog_id: Uuid,
     pub catalog_name: String,
+    /// The warehouse the assignment is stored under (the catalog's
+    /// `warehouse_id`): what a write to this table's classification names.
+    pub warehouse_id: Uuid,
     pub schema: String,
     pub table: String,
     /// The tag is on the table itself.
@@ -116,7 +119,7 @@ pub struct TagUsage {
 }
 
 /// A catalog assignment and the catalog naming its warehouse, if any.
-type AssignmentRow = (Option<Uuid>, Option<String>, String, String, String);
+type AssignmentRow = (Option<Uuid>, Option<String>, Uuid, String, String, String);
 
 fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
     move |e| {
@@ -165,7 +168,7 @@ async fn tag_usage(
 
     // ── Data ──
     let rows: Vec<AssignmentRow> = sqlx::query_as(
-        "SELECT c.id, c.name, a.schema_name, a.table_name, a.column_name \
+        "SELECT c.id, c.name, a.warehouse_id, a.schema_name, a.table_name, a.column_name \
            FROM catalog_tag_assignments a \
            LEFT JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
           WHERE a.tag_id = $1",
@@ -176,7 +179,7 @@ async fn tag_usage(
     .map_err(db("read the catalog assignments"))?;
     let mut tables: BTreeMap<(String, Uuid, String, String), TableUsage> = BTreeMap::new();
     let (mut table_count, mut column_count, mut orphaned) = (0i64, 0i64, 0i64);
-    for (cid, cname, schema, table, column) in rows {
+    for (cid, cname, warehouse_id, schema, table, column) in rows {
         let (Some(cid), Some(cname)) = (cid, cname) else {
             orphaned += 1;
             continue;
@@ -186,6 +189,7 @@ async fn tag_usage(
             .or_insert_with(|| TableUsage {
                 catalog_id: cid,
                 catalog_name: cname,
+                warehouse_id,
                 schema,
                 table,
                 on_table: false,

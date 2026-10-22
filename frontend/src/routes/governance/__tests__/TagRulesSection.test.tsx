@@ -4,8 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 /**
- * A tag's "Mask and filter rules" (DG redesign #2, P9): every egret rule a
- * tag-selected mask or row filter reaches this tag through. Engines match a
+ * A classification's "Rules" (DG redesign #2, P9; renamed from "Mask and
+ * filter rules" by the classification UX glossary): every rule a
+ * classification-selected mask or row filter reaches it through. Engines match a
  * tag rule by the tag's NAME (case-sensitively, `*`/`?` glob), so a rule
  * written on another tag of the same name is listed too, and says so.
  */
@@ -48,13 +49,13 @@ function renderSection() {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <TagRulesSection tag={TAG} />
+        <TagRulesSection tag={TAG} tagId="t-eu" />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-const region = () => screen.getByRole("region", { name: "Mask and filter rules" });
+const region = () => screen.getByRole("region", { name: "Rules" });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -84,23 +85,43 @@ describe("TagRulesSection", () => {
     const rows = within(region()).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["hash all P", "mask ssn", "null email"]);
 
-    expect(within(region()).getByRole("link", { name: "mask ssn" })).toHaveAttribute("href", "/governance/rules/r-own");
-    expect(within(region()).getByRole("link", { name: "null email" })).toHaveAttribute("href", "/governance/rules/r-us");
-    expect(rows[1]).toHaveTextContent("This tag");
-    expect(rows[1]).toHaveTextContent("mask · MASK_HASH");
+    expect(within(region()).getByRole("link", { name: "mask ssn" })).toHaveAttribute(
+      "href",
+      "/governance/rules/r-own?from=classification:t-eu",
+    );
+    expect(within(region()).getByRole("link", { name: "null email" })).toHaveAttribute(
+      "href",
+      "/governance/rules/r-us?from=classification:t-eu",
+    );
+    expect(rows[1]).toHaveTextContent("This classification");
+    expect(rows[1]).toHaveTextContent("Mask · Hash");
     expect(within(rows[1]).getByRole("link", { name: "auditor" })).toHaveAttribute("href", "/governance/people/roles/auditor");
-    expect(rows[2]).toHaveTextContent("Written on tag pii_us, which has this tag's name too");
-    expect(rows[2]).toHaveTextContent("row filter · region = 'eu'");
-    expect(rows[0]).toHaveTextContent("Written on tag p, whose name “P*” matches this tag's name");
+    expect(rows[2]).toHaveTextContent("Classification pii_us, which has the same name");
+    expect(rows[2]).toHaveTextContent("Row filter · region = 'eu'");
+    // The label is words; only the expression is code.
+    expect(within(rows[2]).getByText("region = 'eu'").tagName).toBe("CODE");
+    expect(within(rows[1]).queryByRole("code")).not.toBeInTheDocument();
+    expect(within(rows[1]).getAllByRole("cell")[1].className).not.toMatch(/font-mono/);
+    expect(rows[0]).toHaveTextContent("Classification p, whose name “P*” matches this one's");
     expect(region()).not.toHaveTextContent("lowercase");
     expect(region()).not.toHaveTextContent("orphan");
     expect(region()).not.toHaveTextContent("path rule");
+    for (const retired of ["Reaches this tag", "This tag", "Written on tag"]) expect(region()).not.toHaveTextContent(retired);
+    expect(within(region()).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Rule",
+      "Kind",
+      "Applies through",
+      "Exempt",
+    ]);
+    expect(region()).toHaveTextContent(
+      "Rules that mask or filter data carrying this classification. Engines match a rule by the classification's name, so a rule written on another classification with the same name applies here too.",
+    );
   });
 
   test("says when no rule reaches the tag", () => {
     serveRules([tagRule({ tag_name: "Finance", key: "fin" })]);
     renderSection();
-    expect(within(region()).getByText("No egret rule selects this tag.")).toBeInTheDocument();
+    expect(within(region()).getByText("No rule uses this classification yet.")).toBeInTheDocument();
   });
 
   test("a failed read shows its error with a retry, never the empty state", () => {
@@ -113,6 +134,70 @@ describe("TagRulesSection", () => {
     } as unknown as ReturnType<typeof permApi.usePermListRules>);
     renderSection();
     expect(within(region()).getByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(region()).queryByText("No egret rule selects this tag.")).not.toBeInTheDocument();
+    expect(within(region()).queryByText("No rule uses this classification yet.")).not.toBeInTheDocument();
+  });
+});
+
+describe("TagRulesSection: enforcement", () => {
+  test("a rule no engine enforces says so on its row; an enforced one says nothing", async () => {
+    const { AuthContext } = await import("@/auth/useAuth");
+    serveRules([tagRule({ id: "r-off", name: "mask ssn" }), tagRule({ id: "r-on", name: "hash email" })]);
+    vi.mocked(permApi.usePermRulesEnforcement).mockReturnValue({
+      data: {
+        status: 200,
+        data: [
+          { ruleId: "r-off", enforcedBy: 0, notEnforced: "no_engine" },
+          { ruleId: "r-on", enforcedBy: 1, notEnforced: null },
+        ],
+      },
+    } as unknown as ReturnType<typeof permApi.usePermRulesEnforcement>);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthContext.Provider value={{ me: { user_id: "u", email: "", platform_roles: [], permissions: ["policy:read"] }, isLoading: false }}>
+          <MemoryRouter>
+            <TagRulesSection tag={TAG} tagId="t-eu" />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </QueryClientProvider>,
+    );
+    const row = (name: string) => screen.getByRole("link", { name }).closest("tr") as HTMLElement;
+    expect(row("mask ssn")).toHaveTextContent("Not enforced yet — no engine attached");
+    expect(row("hash email")).not.toHaveTextContent("Not enforced");
+    expect(vi.mocked(permApi.usePermRulesEnforcement).mock.calls.at(-1)?.[0]).toEqual({ ids: "r-off,r-on" });
+  });
+
+  test("a rule enforced in one catalog but not another says Partly enforced on its row, naming the catalog (live check D2)", async () => {
+    const { AuthContext } = await import("@/auth/useAuth");
+    serveRules([tagRule({ id: "r-part", name: "mask ssn" })]);
+    vi.mocked(permApi.usePermRulesEnforcement).mockReturnValue({
+      data: {
+        status: 200,
+        data: [
+          {
+            ruleId: "r-part",
+            enforcedBy: 1,
+            notEnforced: null,
+            catalogs: [
+              { catalogId: "c-a", catalogName: "sales", engines: [{ id: "e-1", name: "trino-a", engineType: "trino" }], notEnforced: null },
+              { catalogId: "c-b", catalogName: "demo_warehouse", engines: [], notEnforced: "no_engine" },
+            ],
+          },
+        ],
+      },
+    } as unknown as ReturnType<typeof permApi.usePermRulesEnforcement>);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthContext.Provider value={{ me: { user_id: "u", email: "", platform_roles: [], permissions: ["policy:read"] }, isLoading: false }}>
+          <MemoryRouter>
+            <TagRulesSection tag={TAG} tagId="t-eu" />
+          </MemoryRouter>
+        </AuthContext.Provider>
+      </QueryClientProvider>,
+    );
+    const row = screen.getByRole("link", { name: "mask ssn" }).closest("tr") as HTMLElement;
+    expect(row).toHaveTextContent("Partly enforced. Not enforced in demo_warehouse — no engine attached.");
+    expect(row).not.toHaveTextContent("Not enforced yet");
   });
 });

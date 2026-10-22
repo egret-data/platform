@@ -1,4 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
+import { clearAllRuleDrafts } from "@/routes/governance/ruleDraft";
+import { clearAttachIntent } from "@/routes/governance/attachIntent";
 
 /**
  * The single app-wide QueryClient instance. Pulled out of `App.tsx` so that
@@ -23,4 +25,7 @@ export const queryClient = new QueryClient({
  */
 export function clearUserScopedCache(qc: QueryClient) {
   qc.removeQueries({ predicate: (query) => query.queryKey[0] !== "me" });
+  // The rule dialog's unsaved drafts are the previous identity's too (spec C8.4).
+  clearAllRuleDrafts();
+  clearAttachIntent();
 }

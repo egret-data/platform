@@ -1,15 +1,17 @@
 import type { ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TERM } from "@/routes/governance/glossary";
 
 export type TabId = "overview" | "permissions" | "masks" | "lineage" | "details";
 
 export type ObjectLevel = "catalog" | "schema" | "object";
 
+/** The tab ids stay (`?tab=masks` links keep working); the labels follow the glossary. */
 const LABELS: Record<TabId, string> = {
   overview: "Overview",
   permissions: "Permissions",
-  masks: "Masks & filters",
+  masks: TERM.rules,
   lineage: "Lineage",
   details: "Details",
 };
@@ -47,7 +49,7 @@ export function ObjectTabs({ level, panels }: { level: ObjectLevel; panels: Reco
   return (
     <Tabs value={value} onValueChange={select} className="min-w-0">
       {/* Wraps, so every tab is in view at 390 px (D10); a scrolled list hid Lineage and Details. */}
-      <TabsList className="h-auto max-w-full flex-wrap justify-start">
+      <TabsList aria-label="Object tabs" className="h-auto max-w-full flex-wrap justify-start">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t}>
             {LABELS[t]}

@@ -30,7 +30,7 @@ function editHref(p: UnreadablePolicy): string | null {
 export function UnreadablePolicies({ policies, what }: { policies: UnreadablePolicy[]; what: "policy" | "tag policy" }) {
   if (policies.length === 0) return null;
   const n = policies.length;
-  const noun = n === 1 ? `hand-written ${what}` : `hand-written ${what === "policy" ? "policies" : "tag policies"}`;
+  const noun = n === 1 ? `manual ${what}` : `manual ${what === "policy" ? "policies" : "tag policies"}`;
   return (
     <Section title="Could not be read">
       <p className="text-sm">{`${n} ${noun} could not be read, so this list may be incomplete.`}</p>

@@ -58,7 +58,7 @@ export function RequirePermission({ perm, children }: { perm: string | string[];
   const { me } = useAuth();
   const keys = Array.isArray(perm) ? perm : [perm];
   const ok = !!me && (me.platform_roles.includes("platform_admin") || keys.some((k) => me.permissions.includes(k)));
-  if (!ok) return <Forbidden />;
+  if (!ok) return <Forbidden reason={`This page needs the ${keys.join(" or ")} permission.`} />;
   return <>{children}</>;
 }
 
@@ -83,6 +83,8 @@ export function RequireControlPlaneAccess({ children }: { children: ReactNode })
   return <Forbidden />;
 }
 
+const GOVERNANCE_REFUSAL = "Governance needs a governance permission such as tag:read or policy:read.";
+
 /**
  * Outer gate for the whole `/governance/*` area: `platform_admin` OR any
  * Governance read permission (`GOVERNANCE_PERMS`) may enter. Per-route guards
@@ -90,7 +92,7 @@ export function RequireControlPlaneAccess({ children }: { children: ReactNode })
  */
 export function RequireGovernanceAccess({ children }: { children: ReactNode }) {
   const { me } = useAuth();
-  if (!canEnterGovernance(me)) return <Forbidden />;
+  if (!canEnterGovernance(me)) return <Forbidden reason={GOVERNANCE_REFUSAL} />;
   return <>{children}</>;
 }
 

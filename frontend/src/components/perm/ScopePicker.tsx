@@ -35,6 +35,15 @@ export interface ScopePickerProps {
    */
   onApply?: (scope: Scope) => void;
   disabled?: boolean;
+  /**
+   * Marks Catalog required, in its label ("(required)") and as
+   * `aria-required`: the rule dialog's path selector cannot do without it
+   * (spec 2026-10-21-classification-ux C8.1). Off by default, so every other
+   * caller reads as before.
+   */
+  catalogRequired?: boolean;
+  /** The id of a caller's help about the Column field, tied to it as its description. */
+  columnDescribedBy?: string;
 }
 
 /**
@@ -57,6 +66,8 @@ export function ScopePicker({
   rowFilterMode = false,
   onApply,
   disabled = false,
+  catalogRequired = false,
+  columnDescribedBy,
 }: ScopePickerProps) {
   const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
@@ -90,7 +101,10 @@ export function ScopePicker({
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
-        <Label htmlFor="scope-catalog">Catalog</Label>
+        <Label htmlFor="scope-catalog">
+          Catalog
+          {catalogRequired ? <span className="font-normal text-muted-foreground"> (required)</span> : null}
+        </Label>
         <Select
           value={value.catalog_id || undefined}
           onValueChange={(v) => onChange({ catalog_id: v })}
@@ -99,6 +113,7 @@ export function ScopePicker({
           <SelectTrigger
             id="scope-catalog"
             className="w-full"
+            aria-required={catalogRequired || undefined}
             aria-describedby={nothingToPick ? "scope-catalog-unavailable" : undefined}
           >
             <SelectValue placeholder="Select a catalog" />
@@ -168,6 +183,7 @@ export function ScopePicker({
           <Label htmlFor="scope-column">Column</Label>
           <Input
             id="scope-column"
+            aria-describedby={columnDescribedBy}
             value={value.column ?? ""}
             onChange={(e) => patch({ column: e.target.value || undefined })}
             disabled={disabled || !canPickColumn}

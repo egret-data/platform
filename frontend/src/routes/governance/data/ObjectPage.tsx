@@ -5,10 +5,12 @@ import {
   useControlPlaneGovernanceListCatalogs,
   useControlPlaneGovernanceObjectTags,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
-import type { GrantView } from "@/api/generated/model";
+import type { GrantView, TagDto } from "@/api/generated/model";
 import { GrantDialog } from "@/routes/governance/GrantDialog";
+import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification } from "@/routes/governance/RemoveClassificationDialog";
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
-import type { NodeKind } from "@/routes/governance/data/CatalogTree";
+import { dottedPath, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { ColumnPanel } from "@/routes/governance/data/ColumnPanel";
 import { ObjectHeader, type HeaderKind, type HeaderTags } from "@/routes/governance/data/ObjectHeader";
 import { ObjectTabs, type ObjectLevel } from "@/routes/governance/data/ObjectTabs";
@@ -117,6 +119,25 @@ export default function ObjectPage() {
             // Written with the source's spelling, as the column panel writes a column's.
             table: item?.name ?? path.object,
             assigned: (assignmentsOf(tags) ?? []).filter((a) => a.column === "").map((a) => a.tag.id),
+            // For "Attach to columns instead" (spec C5): the columns as the source lists them.
+            columns: browse.data?.status === 200 ? (browse.data.data.columns ?? []).map((c) => c.name) : undefined,
+          });
+        }
+      : undefined;
+
+  // Remove on the header's own classifications (spec C4), with the coordinate as stored.
+  const canEditTags = useCanEditCatalogTags();
+  // After a remove, focus lands on the header's Add classification: the removed chip's button is gone.
+  const removal = useRemoveClassification(() => document.querySelector<HTMLElement>('[data-object-action="onAddTag"]'));
+  const warehouseId = found?.warehouseId;
+  const onRemoveTag =
+    canEditTags && warehouseId != null && level === "object"
+      ? (tag: TagDto) => {
+          const a = (assignmentsOf(tags) ?? []).find((x) => x.column === "" && x.tag.id === tag.id);
+          if (!a) return;
+          removal.ask({
+            tag,
+            target: { warehouseId, schema: a.schema, table: a.table, label: dottedPath(path) },
           });
         }
       : undefined;
@@ -140,6 +161,7 @@ export default function ObjectPage() {
         onGrant={onGrant}
         onAddTag={onAddTag}
         onWhoCanRead={onWhoCanRead}
+        onRemoveTag={onRemoveTag}
         disabledReasons={found && found.warehouseId == null ? { onAddTag: TAGS_EGRET_ONLY } : undefined}
       />
       <ObjectTabs
@@ -168,6 +190,7 @@ export default function ObjectPage() {
         initialScope={found ? scopeOf(path, found.id) : undefined}
       />
       <WhoCanReadDialog open={whoCanRead} onOpenChange={setWhoCanRead} path={objectPath} catalogId={catalogId} />
+      {removal.dialog}
       <AddTagDialog
         target={addTag}
         onOpenChange={(open) => {

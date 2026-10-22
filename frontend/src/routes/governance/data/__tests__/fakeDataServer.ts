@@ -9,7 +9,7 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`), and the rule
  * routes the Masks & filters tab and `RuleDialog` call (`…/perm/rules`, `…/perm/rules/{id}`), explain
  * (`…/perm/explain`) and the principal search its user field calls (`…/principals`), the tag
- * catalogue (`…/tags`) and the tag write (`PUT …/warehouses/{id}/resource-tags`). Answers go
+ * catalogue (`…/tags`) and the tag writes (`PUT`/`DELETE …/warehouses/{id}/resource-tags`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -60,19 +60,25 @@ export interface FakeData {
   grantWrite?: Answer;
   /** `GET …/perm/rules`. A list is answered in order, its last answer repeating; none is a 404. */
   rules?: Answer | Answer[];
+  /** `GET …/perm/rules/enforcement?ids=`; none is a 404 (so nothing is said about enforcement). */
+  ruleEnforcement?: Answer;
   /** Every rule write (`POST …/perm/rules`, `PATCH`/`DELETE …/perm/rules/{id}`); default 200 `{}`. */
   ruleWrite?: Answer;
   /** `POST …/perm/explain`; none is a 404. A function answers each call when the promise it returns settles. */
   explain?: Answer | (() => Promise<Answer>);
   /** `POST …/perm/explain/principal`; none is a 404. */
   explainPrincipal?: Answer;
-  /** `GET …/perm/people` (a group or role subject's search); default 200 with no items. */
+  /**
+   * `GET …/perm/people` (a group or role subject's search, a typed user's
+   * username lookup); default 200 with no items, except a username lookup,
+   * which by default finds one user with that username.
+   */
   people?: Answer;
   /** `GET …/principals`; default 200 `[]`. */
   principals?: Answer;
   /** `GET …/tags`, the tag catalogue; none is a 404. */
   tagCatalogue?: Answer;
-  /** `PUT …/warehouses/{id}/resource-tags`; default 200 `{}`. */
+  /** `PUT` and `DELETE …/warehouses/{id}/resource-tags`; default 200 `{}`. */
   tagWrite?: Answer;
   /**
    * `GET …/governance/objects/{catalog_id}/handwritten` (route A), keyed
@@ -88,8 +94,8 @@ export interface DataCalls {
   lineageCalls: string[];
   /** `METHOD /perm/...`, with each body that was sent. */
   permCalls: { call: string; body?: unknown }[];
-  /** Each tag write: the warehouse id from the path and the body. */
-  tagWrites: { warehouseId: string; body: unknown }[];
+  /** Each tag write (`PUT` attaches, `DELETE` removes): the method, the warehouse id from the path and the body. */
+  tagWrites: { method: string; warehouseId: string; body: unknown }[];
   /** Each route A read, keyed as {@link FakeData.handwritten}. */
   handwrittenCalls: string[];
 }
@@ -117,8 +123,9 @@ export function serveData(data: FakeData): DataCalls {
       if (url.pathname === "/api/control-plane/principals") return reply(data.principals ?? { status: 200, body: [] });
       if (url.pathname === "/api/control-plane/tags") return reply(data.tagCatalogue);
       const w = /^\/api\/control-plane\/warehouses\/([^/]+)\/resource-tags$/.exec(url.pathname);
-      if (w && (init?.method ?? "GET").toUpperCase() === "PUT") {
-        tagWrites.push({ warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
+      if (w && ["PUT", "DELETE"].includes((init?.method ?? "GET").toUpperCase())) {
+        const method = (init?.method ?? "GET").toUpperCase();
+        tagWrites.push({ method, warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
         return reply(data.tagWrite ?? { status: 200, body: {} });
       }
       const hw = /^\/api\/control-plane\/governance\/objects\/([^/]+)\/handwritten$/.exec(url.pathname);
@@ -166,7 +173,17 @@ export function serveData(data: FakeData): DataCalls {
         const method = (init?.method ?? "GET").toUpperCase();
         const call = `${method} ${perm[1]}`;
         permCalls.push({ call, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
-        if (call === "GET /perm/people") return reply(data.people ?? { status: 200, body: { items: [], total: 0 } });
+        if (call === "GET /perm/people") {
+          // A typed user's exact-username lookup (Who can read?): by default every username is a known user.
+          const username = url.searchParams.get("username");
+          if (username !== null && !data.people) {
+            return reply({
+              status: 200,
+              body: { items: [{ kind: "user", key: `u-${username}`, label: username, username, serviceAccount: false }], total: 1 },
+            });
+          }
+          return reply(data.people ?? { status: 200, body: { items: [], total: 0 } });
+        }
         if (call === "POST /perm/explain/principal") return reply(data.explainPrincipal);
         if (call === "GET /perm/grants") {
           const asked = permCalls.filter((c) => c.call === call).length - 1;
@@ -178,6 +195,7 @@ export function serveData(data: FakeData): DataCalls {
           const a = data.rules;
           return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
         }
+        if (call === "GET /perm/rules/enforcement") return reply(data.ruleEnforcement);
         if (call === "POST /perm/preview") return reply(data.preview);
         if (call === "POST /perm/explain") {
           const e = data.explain;

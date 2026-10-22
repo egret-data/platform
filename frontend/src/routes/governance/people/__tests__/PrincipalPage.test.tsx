@@ -187,10 +187,10 @@ const STEWARD_ROLE: RolePrincipal = {
 
 describe("principal page: tabs per kind", () => {
   it.each<[string, string, Record<string, Answer>, string[]]>([
-    ["user", "/governance/people/users/u-ana", { "users/u-ana": { status: 200, body: ANA } }, ["Overview", "Permissions", "Masks & filters", "Clearances", "Check access"]],
-    ["group", "/governance/people/groups/eu%2Fanalysts", { "groups/eu/analysts": { status: 200, body: ANALYSTS } }, ["Overview", "Permissions", "Masks & filters", "Clearances", "Check access"]],
+    ["user", "/governance/people/users/u-ana", { "users/u-ana": { status: 200, body: ANA } }, ["Overview", "Permissions", "Rules", "Clearances", "Check access"]],
+    ["group", "/governance/people/groups/eu%2Fanalysts", { "groups/eu/analysts": { status: 200, body: ANALYSTS } }, ["Overview", "Permissions", "Rules", "Clearances", "Check access"]],
     ["role", "/governance/people/roles/steward", { "roles/steward": { status: 200, body: STEWARD_ROLE } }, ["Overview", "Permissions", "Clearances", "Check access"]],
-    ["public", "/governance/people/groups/public", { "groups/public": { status: 200, body: PUBLIC } }, ["Permissions", "Masks & filters"]],
+    ["public", "/governance/people/groups/public", { "groups/public": { status: 200, body: PUBLIC } }, ["Permissions", "Rules"]],
   ])("a %s has the tabs of spec §2", async (_kind, url, answers, tabs) => {
     serve(answers);
     open(url);

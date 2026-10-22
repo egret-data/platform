@@ -149,7 +149,91 @@ describe("Recent changes", () => {
     expect(screen.queryByRole("button", { name: "Show older" })).not.toBeInTheDocument();
   });
 
-  it("says how long changes are kept, and that role and tag events are best effort", async () => {
+  it("says a classification was attached or removed, with no trailing dot on a table (N18, finding 6)", async () => {
+    serve(attentionOk, () => ({
+      status: 200,
+      body: page([
+        // The server's sentence for a table-level assignment: the column is "".
+        entry(20, {
+          action: "tag:assign",
+          sentence: "Ana tagged demo_warehouse.analytics.orders. with uxwalk-tbl",
+          detail: { tag_id: "t-1" },
+        }),
+        entry(21, {
+          action: "tag:unassign",
+          sentence: "Admin as Ana removed uxwalk-pii from demo_warehouse.analytics.customers.email",
+          impersonator: { userId: "u-admin", label: "Admin" },
+          detail: { tag_id: "t-2" },
+        }),
+        entry(22, {
+          action: "tag:unassign",
+          sentence: "Ana removed a deleted classification from demo_warehouse.analytics.orders.",
+          detail: { tag_id: "t-3" },
+        }),
+      ]),
+    }));
+    openOverview();
+    const t = await table();
+    expect(within(t).getByText("Ana attached classification uxwalk-tbl to demo_warehouse.analytics.orders")).toBeInTheDocument();
+    expect(
+      within(t).getByText("Admin as Ana removed classification uxwalk-pii from demo_warehouse.analytics.customers.email"),
+    ).toBeInTheDocument();
+    expect(within(t).getByText("Ana removed a deleted classification from demo_warehouse.analytics.orders")).toBeInTheDocument();
+    expect(t).not.toHaveTextContent(/tagged/);
+  });
+
+  it("says what a rule does with the glossary's mask label and a classification or path, never MASK_* or tag: (N18)", async () => {
+    serve(attentionOk, () => ({
+      status: 200,
+      body: page([
+        entry(30, {
+          action: "perm_rule:create",
+          sentence: "Ana created rule Mask uxwalk-pii: mask MASK on tag:uxwalk-pii",
+          target: { type: "rule", id: "r-1" },
+          detail: {
+            before: null,
+            after: { name: "Mask uxwalk-pii", kind: "mask", selector: "tag:uxwalk-pii", function: "MASK", exempt: [], exempt_exclude: [] },
+          },
+        }),
+        entry(31, {
+          action: "perm_rule:delete",
+          sentence: "Ana deleted rule EU only: row filter region = 'EU' on ice.sales.orders",
+          target: { type: "rule", id: "r-2" },
+          detail: {
+            before: { name: "EU only", kind: "row_filter", selector: "ice.sales.orders", function: "region = 'EU'", exempt: [], exempt_exclude: [] },
+            after: null,
+          },
+        }),
+        entry(32, {
+          action: "perm_rule:update",
+          sentence: "Ana changed rule Hash it: mask MASK_HASH on ice.sales.orders.email",
+          target: { type: "rule", id: "r-3" },
+          detail: {
+            before: { name: "Hash it", kind: "mask", selector: "ice.sales.orders.email", function: "MASK", exempt: [], exempt_exclude: [] },
+            after: { name: "Hash it", kind: "mask", selector: "ice.sales.orders.email", function: "MASK_HASH", exempt: [], exempt_exclude: [] },
+          },
+        }),
+      ]),
+    }));
+    openOverview();
+    const t = await table();
+    expect(within(t).getByText("Ana created rule Mask uxwalk-pii: Redact mask on classification uxwalk-pii")).toBeInTheDocument();
+    expect(within(t).getByText("Ana deleted rule EU only: row filter region = 'EU' on path ice.sales.orders")).toBeInTheDocument();
+    expect(within(t).getByText("Ana changed rule Hash it: Hash mask on path ice.sales.orders.email")).toBeInTheDocument();
+    expect(t).not.toHaveTextContent(/MASK|tag:/);
+  });
+
+  it("keeps the server's sentence for a change too large to record its details", async () => {
+    const sentence = "Ana created a rule; the change was too large to record its details.";
+    serve(attentionOk, () => ({
+      status: 200,
+      body: page([entry(40, { action: "perm_rule:create", sentence, target: { type: "rule", id: "r-4" }, detail: { truncated: true, size: 20000 } })]),
+    }));
+    openOverview();
+    expect(within(await table()).getByText(sentence)).toBeInTheDocument();
+  });
+
+  it("says how long changes are kept, and that role and classification events are best effort", async () => {
     serve(attentionOk, () => ({ status: 200, body: page([entry(6)], null, 90) }));
     openOverview();
     expect(await screen.findByText(/Changes older than 90 days are pruned\./)).toBeInTheDocument();
@@ -159,7 +243,7 @@ describe("Recent changes", () => {
     expect(screen.queryByText(/Recorded since/)).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "Role assignments and catalog tags are recorded after they commit and can be missing if the audit writer was overloaded.",
+        "Role assignments and classifications attached to data are recorded after they commit and can be missing if the audit writer was overloaded.",
       ),
     ).toBeInTheDocument();
   });

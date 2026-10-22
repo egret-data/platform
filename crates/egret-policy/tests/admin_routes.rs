@@ -1557,6 +1557,14 @@ async fn a_tag_masking_policy_is_refused_when_its_tag_is_on_a_whole_table() {
             && msg.contains("so it addresses sales.orders by path"),
         "the refusal must carry all THREE remedies; got {msg}"
     );
+    // The same coded body every other surface refusing this pair answers
+    // (`UnreadableTableMask::refusal_body`), so the UI can offer the remedy.
+    assert_eq!(body["code"], "table_tag_mask_conflict", "body={body}");
+    assert_eq!(body["tagId"], serde_json::json!(tag_id), "body={body}");
+    assert_eq!(body["schema"], "sales", "body={body}");
+    assert_eq!(body["table"], "orders", "body={body}");
+    assert_eq!(body["mask"], policy_name.as_str(), "body={body}");
+    assert_eq!(body["maskOrigin"], "policy", "body={body}");
     assert_eq!(
         f.store
             .enabled_policies_for_service(tag_svc.id)

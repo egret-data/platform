@@ -87,7 +87,7 @@ export function DataIndex() {
       <EmptyState
         icon={Database}
         title="Pick a catalog"
-        description="Open a catalog, schema or table from the tree to see who can read it, its tags and its rules. Go to path opens a known catalog.schema.table directly."
+        description="Open a catalog, schema or table from the tree to see who can read it, its classifications and its rules. Go to path opens a known catalog.schema.table directly."
       />
     </div>
   );

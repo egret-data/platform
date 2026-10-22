@@ -96,11 +96,48 @@ function SelectLabel({
   );
 }
 
+// One literal for both item shapes: `focusIndicatorContrast.test.ts` sweeps it as one guarded element.
+const itemClassName =
+  "focus:bg-accent focus:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4";
+
+/**
+ * `description`, when given, is a secondary line under the item's text: it
+ * stays out of `ItemText`, so the item's accessible name, its typeahead text
+ * and what the trigger shows once it is chosen are `children` alone, and it is
+ * tied to the option as its description (`aria-describedby`).
+ */
 function SelectItem({
   className,
   children,
+  description,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Item>) {
+}: React.ComponentProps<typeof SelectPrimitive.Item> & { description?: React.ReactNode }) {
+  const descriptionId = React.useId();
+  if (description !== undefined) {
+    return (
+      <SelectPrimitive.Item
+        data-slot="select-item"
+        aria-describedby={descriptionId}
+        // No last-span rule here: the last child is the two-line `div`, laid out by its own classes.
+        className={cn(itemClassName, className)}
+        {...props}
+      >
+        <span className="absolute right-2 flex size-3.5 items-center justify-center">
+          <SelectPrimitive.ItemIndicator>
+            <CheckIcon className="size-4" />
+          </SelectPrimitive.ItemIndicator>
+        </span>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <SelectPrimitive.ItemText>
+            <span className="flex items-center gap-2">{children}</span>
+          </SelectPrimitive.ItemText>
+          <div id={descriptionId} className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+            {description}
+          </div>
+        </div>
+      </SelectPrimitive.Item>
+    );
+  }
   return (
     <SelectPrimitive.Item
       data-slot="select-item"
@@ -113,7 +150,8 @@ function SelectItem({
       // `overflow-x-hidden overflow-y-auto`, which clips on both axes as far as
       // an outset ring is concerned, so inset is not a stylistic preference.
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        itemClassName,
+        "*:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className,
       )}
       {...props}

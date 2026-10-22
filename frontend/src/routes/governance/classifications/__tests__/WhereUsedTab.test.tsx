@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TagUsage } from "@/api/generated/model";
-import { fail, ok, openArea, serve, tag, TAG_READER } from "./harness";
+import { ADMIN, fail, ok, openArea, serve, tag, TAG_READER } from "./harness";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -21,18 +21,18 @@ function usage(over: { data?: Partial<TagUsage["data"]>; bi?: Partial<TagUsage["
 
 /** Not in display order: catalogs, schemas and tables all arrive shuffled. */
 const TABLES: TagUsage["data"]["tables"] = [
-  { catalogId: "c-z", catalogName: "zeta", schema: "s", table: "t9", onTable: true, columns: [] },
-  { catalogId: "c-i", catalogName: "ice", schema: "sales", table: "orders", onTable: false, columns: ["phone", "email"] },
-  { catalogId: "c-i", catalogName: "ice", schema: "crm", table: "people", onTable: true, columns: ["email"] },
-  { catalogId: "c-i", catalogName: "ice", schema: "crm", table: "accounts", onTable: true, columns: [] },
+  { catalogId: "c-z", catalogName: "zeta", warehouseId: "w-z", schema: "s", table: "t9", onTable: true, columns: [] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "sales", table: "orders", onTable: false, columns: ["phone", "email"] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "crm", table: "people", onTable: true, columns: ["email"] },
+  { catalogId: "c-i", catalogName: "ice", warehouseId: "w-i", schema: "crm", table: "accounts", onTable: true, columns: [] },
 ];
 
-const open = (u: TagUsage | "error" | "never") => {
+const open = (u: TagUsage | "error" | "never", as = TAG_READER) => {
   const served = serve({
     "/tags": ok([PII]),
     [USAGE]: u === "error" ? fail(500, "database unavailable") : u === "never" ? "never" : ok(u),
   });
-  openArea(URL_PII, TAG_READER);
+  openArea(URL_PII, as);
   return served;
 };
 const data = () => screen.getByRole("region", { name: "Data" });
@@ -45,6 +45,8 @@ describe("Where used: Data", () => {
     const groups = within(data()).getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
     expect(groups).toEqual(["ice.crm", "ice.sales", "zeta.s"]);
     const crm = within(data()).getByRole("table", { name: "ice.crm" });
+    expect(within(crm).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Table", "Attached to"]);
+    expect(within(data()).queryByRole("columnheader", { name: "Carries it" })).not.toBeInTheDocument();
     expect(within(crm).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
       "accounts",
       "people",
@@ -70,9 +72,20 @@ describe("Where used: Data", () => {
     expect(await screen.findByText("2 assignments are in a warehouse no catalog names.", {}, T)).toBeInTheDocument();
   });
 
-  it("says so when no table or column carries it", async () => {
+  it("says so when no table or column carries it, and where to attach it", async () => {
+    open(usage(), ADMIN);
+    expect(await screen.findByText("No table or column carries this classification.", {}, T)).toBeInTheDocument();
+    expect(within(data()).getByRole("link", { name: "Attach in Data" })).toHaveAttribute("href", "/governance/data");
+    expect(within(data()).getByText("Open a table or a column and use Add classification.")).toBeInTheDocument();
+  });
+
+  it("without catalog_registry:update, promises no Add classification and says what attaching needs", async () => {
     open(usage());
     expect(await screen.findByText("No table or column carries this classification.", {}, T)).toBeInTheDocument();
+    expect(within(data()).getByText("Attaching needs the catalog_registry:update permission.")).toBeInTheDocument();
+    expect(within(data()).queryByText(/use Add classification/)).not.toBeInTheDocument();
+    expect(within(data()).queryByRole("link", { name: "Attach in Data" })).not.toBeInTheDocument();
+    expect(within(data()).getByRole("link", { name: "Open Data" })).toHaveAttribute("href", "/governance/data");
   });
 });
 
@@ -144,11 +157,59 @@ describe("Where used: states", () => {
   it("shows a failure with Retry and neither empty sentence", async () => {
     const user = userEvent.setup();
     const served = open("error");
-    expect(await screen.findByText(/The classification's usage could not be loaded/, {}, T)).toBeInTheDocument();
-    expect(screen.getByText(/database unavailable/)).toBeInTheDocument();
+    const panel = await screen.findByRole("tabpanel", {}, T);
+    expect(await within(panel).findByText(/The classification's usage could not be loaded/, {}, T)).toBeInTheDocument();
+    expect(within(panel).getByText(/database unavailable/)).toBeInTheDocument();
     expect(screen.queryByText("No table or column carries this classification.")).not.toBeInTheDocument();
     expect(screen.queryByText("No BI object carries this classification.")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(within(panel).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`)).toHaveLength(2));
+  });
+});
+
+describe("Where used: Remove", () => {
+  const ORDERS = { catalogId: "c1", catalogName: "ice", warehouseId: "wh-1", schema: "sales", table: "orders", onTable: false, columns: ["email"] };
+
+  it("removes a column's assignment through the row's warehouse after a confirm", async () => {
+    const served = serve({
+      "/tags": ok([PII]),
+      "/perm/rules": ok([]),
+      [USAGE]: ok(usage({ data: { tables: [ORDERS], tableCount: 1, columnCount: 1 } })),
+      "DELETE /warehouses/wh-1/resource-tags": ok({}),
+    });
+    openArea(URL_PII, ADMIN);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Remove PII from ice.sales.orders.email" }, T));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(served.bodies["DELETE /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "email", tag_id: "t-pii" }]),
+    );
+    // Where used is read again.
+    await waitFor(() => expect(served.asked.filter((a) => a === `GET ${USAGE}`).length).toBeGreaterThan(1));    // The removed row's button is gone: focus lands on the Data heading, never on <body>.
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "Data" })).toHaveFocus());
+  });
+
+  it("removes a table-level assignment with an empty column", async () => {
+    const served = serve({
+      "/tags": ok([PII]),
+      "/perm/rules": ok([]),
+      [USAGE]: ok(usage({ data: { tables: [{ ...ORDERS, onTable: true, columns: [] }], tableCount: 1 } })),
+      "DELETE /warehouses/wh-1/resource-tags": ok({}),
+    });
+    openArea(URL_PII, ADMIN);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Remove PII from ice.sales.orders" }, T));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(served.bodies["DELETE /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "", tag_id: "t-pii" }]),
+    );
+  });
+
+  it("offers no Remove without catalog_registry:update", async () => {
+    open(usage({ data: { tables: [ORDERS], tableCount: 1, columnCount: 1 } }));
+    await screen.findByRole("link", { name: "orders" }, T);
+    expect(screen.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
   });
 });

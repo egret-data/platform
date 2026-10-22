@@ -14,13 +14,14 @@ import { PermissionsTab } from "@/routes/governance/people/tabs/PermissionsTab";
 import { MasksFiltersTab } from "@/routes/governance/people/tabs/MasksFiltersTab";
 import { ClearancesTab } from "@/routes/governance/people/tabs/ClearancesTab";
 import { CheckAccessTab } from "@/routes/governance/people/tabs/CheckAccessTab";
+import { TERM } from "@/routes/governance/glossary";
 
 export type PrincipalTab = "overview" | "permissions" | "masks" | "clearances" | "check";
 
 const LABELS: Record<PrincipalTab, string> = {
   overview: "Overview",
   permissions: "Permissions",
-  masks: "Masks & filters",
+  masks: TERM.rules,
   clearances: "Clearances",
   check: "Check access",
 };

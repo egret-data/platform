@@ -1,4 +1,5 @@
 import type { Action, GrantView, PermPrincipal, Rule, RuleView, Scope } from "@/api/generated/model";
+import { MASK_TYPE_LABEL, TERM } from "@/routes/governance/glossary";
 
 /**
  * Shared formatting for the pages that show grants and rules (the Data and
@@ -153,17 +154,22 @@ export function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames):
  * not imply.
  */
 export function formatSelector(r: RuleView): string {
-  if (r.selector.type === "tag") return `tag ${r.tag_name || r.selector.key}`;
+  if (r.selector.type === "tag") return `${TERM.classification} ${r.tag_name || r.selector.key}`;
   return formatScope(r.selector, r.catalog_name);
 }
 
 /** The rule's kind, actions notwithstanding — mirrors `RuleKind`'s own two
- * shapes so a list column can print it without repeating the branch. */
+ * shapes so a list column can print it without repeating the branch. A mask
+ * reads by its glossary label (`Mask · Hash`); a type the glossary does not
+ * list is shown as stored, never dropped. */
 export function formatRuleKind(rule: Rule): string {
   if (rule.kind.type === "mask") {
     return rule.kind.mask_type === "CUSTOM"
-      ? `mask · custom (${rule.kind.value_expr ?? ""})`
-      : `mask · ${rule.kind.mask_type}`;
+      ? `${TERM.mask} · ${MASK_TYPE_LABEL.CUSTOM} (${rule.kind.value_expr ?? ""})`
+      : `${TERM.mask} · ${MASK_TYPE_LABEL[rule.kind.mask_type] ?? rule.kind.mask_type}`;
   }
-  return `row filter · ${rule.kind.filter_expr}`;
+  return `${TERM.rowFilter} · ${rule.kind.filter_expr}`;
 }
+
+/** A rule delete's consequence, in words (no "profile" or "recompile" jargon). */
+export const RULE_DELETE_DESCRIPTION = "This rule is permanently removed, and the engines that enforce it stop applying it.";

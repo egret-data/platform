@@ -39,7 +39,7 @@ export const HAND_WRITTEN_SENTENCE = "Not managed by egret";
 const SOURCE_LABEL: Record<PolicySource, string> = {
   compiler: "egret-compiled",
   infra: "egret-seeded",
-  operator: "hand-written",
+  operator: "manual",
 };
 const SOURCES: PolicySource[] = ["compiler", "infra", "operator"];
 
@@ -305,7 +305,7 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
       />
       {total > 0 && !policies.isError ? (
         <p className="text-sm text-muted-foreground tabular-nums">
-          {`${total} ${total === 1 ? "policy" : "policies"}: ${counts.compiler} egret-compiled · ${counts.infra} egret-seeded · ${counts.operator} hand-written`}
+          {`${total} ${total === 1 ? "policy" : "policies"}: ${counts.compiler} egret-compiled · ${counts.infra} egret-seeded · ${counts.operator} manual`}
         </p>
       ) : null}
       <div className="flex flex-wrap items-end gap-3">
@@ -365,7 +365,7 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
           if (!open) setDeleting(null);
         }}
         title={deleting ? `Delete "${deleting.name}"?` : "Delete policy?"}
-        description="The hand-written policy is removed from the profile; the engine drops it at its next plugin download."
+        description="The manual policy is removed from the profile; the engine drops it at its next plugin download."
         onConfirm={() => {
           if (deleting) del.mutate({ id: deleting.id });
           setDeleting(null);

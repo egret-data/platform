@@ -524,6 +524,11 @@ export type controlPlaneTagsDeleteTagResponse403 = {
   status: 403
 }
 
+export type controlPlaneTagsDeleteTagResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneTagsDeleteTagResponse500 = {
   data: ErrorBody
   status: 500
@@ -532,7 +537,7 @@ export type controlPlaneTagsDeleteTagResponse500 = {
 export type controlPlaneTagsDeleteTagResponseSuccess = (controlPlaneTagsDeleteTagResponse204) & {
   headers: Headers;
 };
-export type controlPlaneTagsDeleteTagResponseError = (controlPlaneTagsDeleteTagResponse401 | controlPlaneTagsDeleteTagResponse403 | controlPlaneTagsDeleteTagResponse500) & {
+export type controlPlaneTagsDeleteTagResponseError = (controlPlaneTagsDeleteTagResponse401 | controlPlaneTagsDeleteTagResponse403 | controlPlaneTagsDeleteTagResponse409 | controlPlaneTagsDeleteTagResponse500) & {
   headers: Headers;
 };
 
@@ -627,6 +632,11 @@ export type controlPlaneTagsUpdateTagResponse404 = {
   status: 404
 }
 
+export type controlPlaneTagsUpdateTagResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneTagsUpdateTagResponse500 = {
   data: ErrorBody
   status: 500
@@ -635,7 +645,7 @@ export type controlPlaneTagsUpdateTagResponse500 = {
 export type controlPlaneTagsUpdateTagResponseSuccess = (controlPlaneTagsUpdateTagResponse200) & {
   headers: Headers;
 };
-export type controlPlaneTagsUpdateTagResponseError = (controlPlaneTagsUpdateTagResponse400 | controlPlaneTagsUpdateTagResponse401 | controlPlaneTagsUpdateTagResponse403 | controlPlaneTagsUpdateTagResponse404 | controlPlaneTagsUpdateTagResponse500) & {
+export type controlPlaneTagsUpdateTagResponseError = (controlPlaneTagsUpdateTagResponse400 | controlPlaneTagsUpdateTagResponse401 | controlPlaneTagsUpdateTagResponse403 | controlPlaneTagsUpdateTagResponse404 | controlPlaneTagsUpdateTagResponse409 | controlPlaneTagsUpdateTagResponse500) & {
   headers: Headers;
 };
 

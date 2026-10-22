@@ -612,15 +612,15 @@ fn label(name: &str, email: &str) -> String {
     }
 }
 
-/// Members or holders `ids` as rows, sorted by label.
-async fn member_refs_via(
+/// The identity rows of users `ids`, unordered.
+async fn user_rows_via(
     conn: &mut sqlx::PgConnection,
     ids: &[Uuid],
-) -> Result<Vec<MemberRef>, CompileError> {
+) -> Result<Vec<UserRow>, CompileError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<UserRow> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT id, name, email::text AS email, username::text AS username, status, \
                 provider = 'service' AS service_account \
            FROM users WHERE id = ANY($1)",
@@ -628,7 +628,15 @@ async fn member_refs_via(
     .bind(ids)
     .fetch_all(&mut *conn)
     .await
-    .map_err(db)?;
+    .map_err(db)
+}
+
+/// Members or holders `ids` as rows, sorted by label.
+async fn member_refs_via(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<MemberRef>, CompileError> {
+    let rows = user_rows_via(conn, ids).await?;
     let mut out: Vec<MemberRef> = rows
         .into_iter()
         .map(|u| {
@@ -1397,4 +1405,302 @@ pub(crate) async fn principal_members_via(
     };
     let ids: Vec<Uuid> = ids.into_iter().collect();
     member_refs_via(conn, &ids).await.map(Some)
+}
+
+// ---------------------------------------------------------------------------
+// Who a clearance admits (classification UX Task 4, spec C9)
+// ---------------------------------------------------------------------------
+
+/// At most this many people are listed by [`cleared_people_via`];
+/// [`ClearedPeople::count`] still counts every one.
+pub const CLEARED_PEOPLE_LIMIT: usize = 200;
+
+/// How a person comes to be listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClearedViaKind {
+    /// Holds one of the gate's `required_roles`, directly or through a group.
+    Role,
+    /// Is a direct member of one of the gate's `required_groups`.
+    Group,
+}
+
+/// The scope of a role grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClearedScope {
+    /// Egret clears on every object.
+    Platform,
+    /// Egret clears only on the objects of workspace `scopeId`.
+    Workspace,
+    /// Egret clears only on object `scopeId` (and what a folder grant
+    /// cascades to).
+    Object,
+}
+
+impl ClearedScope {
+    fn parse(scope_type: &str) -> Self {
+        match scope_type {
+            "platform" => Self::Platform,
+            "workspace" => Self::Workspace,
+            _ => Self::Object,
+        }
+    }
+}
+
+/// One required role or group a person is listed through.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedVia {
+    pub kind: ClearedViaKind,
+    /// The role's or group's name.
+    pub name: String,
+    /// A role grant's scope; null for a group membership. Engines ignore it
+    /// (a column read carries no workspace), egret clears only within it.
+    pub scope: Option<ClearedScope>,
+    /// The workspace or object id of a `workspace` or `object` scope; null
+    /// otherwise.
+    pub scope_id: Option<Uuid>,
+    /// A role held by this group the person is a direct member of, not by
+    /// the person: egret clears them, engines refuse them. Null for a role
+    /// held directly and for a group membership.
+    pub through_group: Option<String>,
+}
+
+/// One person listed for a clearance.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedPerson {
+    pub user_id: Uuid,
+    /// Name, else email.
+    pub label: String,
+    /// The stored engine username; null when none is allocated yet.
+    pub username: Option<String>,
+    /// The account's status (`active` or `disabled`). A disabled account is
+    /// listed: its grants still stand.
+    pub status: String,
+    /// A Data API service account (migration `0119`).
+    pub service_account: bool,
+    /// Every way they are listed: role grants (direct, then through a group)
+    /// before group memberships, each sorted by name, scope, scope id.
+    pub via: Vec<ClearedVia>,
+    /// Whether the compiled engine deny excepts them: they hold a required
+    /// role DIRECTLY (any scope), unexpired, and have a username. Never
+    /// through a group or a group membership. A direct holder with no
+    /// username is named once a compile mints one.
+    pub on_engines: bool,
+}
+
+/// The people listed for a classification's clearance, and what each
+/// population means. A person is listed once whatever the number of ways.
+///
+/// - **Role held directly** (`via.kind = role`, `throughGroup` null): a live,
+///   `allow` grant of a required role to the user
+///   ([`crate::members::role_holders_via`], the compiler's read). Cleared in
+///   egret and, with a username, on engines (`onEngines`).
+/// - **Role held through a group** (`throughGroup` set): a live `allow` grant
+///   of a required role to a group the user is a direct member of. Egret's
+///   object check clears them (`egret_auth::grants`, `user_groups`); engines
+///   refuse them (the compiler expands only user holders).
+/// - **Group member, gate names no role** (`enginesEnforce` false): egret
+///   clears them; engines withhold the data from NOBODY, since a group-only
+///   gate compiles to nothing on engines.
+/// - **Group member, gate also names a role**: egret clears them; engines
+///   refuse them (a Ranger group matches nobody; only role holders are
+///   excepted).
+/// - **Scoped grant** (`via.scope` workspace or object): egret clears them
+///   only within that workspace or object; engines everywhere (a column read
+///   carries no scope).
+/// - **Platform admins** are always cleared by egret (a scope-correct
+///   exemption) and are NOT listed unless they are also listed by a rule
+///   above; engines give them no bypass.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedPeople {
+    /// Every person listed by the rules above (not only the first 200). It
+    /// is not everyone egret clears: platform admins are cleared and not
+    /// listed (see the type doc).
+    pub count: u32,
+    /// The first [`CLEARED_PEOPLE_LIMIT`] (200) of them, sorted by label.
+    pub people: Vec<ClearedPerson>,
+    /// More people are listed than `people` carries.
+    pub truncated: bool,
+    /// Whether engines enforce the clearance at all: true when it names at
+    /// least one required role. False means anyone with SQL access reads the
+    /// data on engines.
+    pub engines_enforce: bool,
+    /// How many of `count` are `onEngines`, independent of the 200 cap.
+    pub on_engines_count: u32,
+}
+
+/// A live `allow` grant of a role to a group, and one direct member of the
+/// group: egret's own authoriser clears that member through it
+/// (`egret_auth::grants::AccessGrantStore::grants_for`), engines do not.
+#[derive(sqlx::FromRow)]
+struct GroupRoleHolderRow {
+    role_name: String,
+    group_name: String,
+    user_id: Uuid,
+    scope_type: String,
+    scope_id: Option<Uuid>,
+}
+
+/// The members of groups holding any role NAME in `roles`, by a live `allow`
+/// grant. Egret-only: the compiler deliberately leaves this population out
+/// (`members.rs` module doc, narrowing 1), so it is read here, not there.
+async fn group_role_holders_via(
+    conn: &mut sqlx::PgConnection,
+    roles: &[String],
+) -> Result<Vec<GroupRoleHolderRow>, CompileError> {
+    if roles.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT r.name AS role_name, g.name AS group_name, ug.user_id, \
+                ag.scope_type, ag.scope_id \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           JOIN groups g ON g.id = ag.principal_id \
+           JOIN user_groups ug ON ug.group_id = g.id \
+          WHERE ag.principal_type = 'group' \
+            AND r.name = ANY($1) \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(roles)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)
+}
+
+/// Who the clearance of tag `tag_id` lists ([`ClearedPeople`] says who and
+/// what each population means). `None` when no tag has this id. A tag with
+/// no clearance, or one whose lists are both empty (no gate), lists nobody:
+/// it gates nothing.
+///
+/// Direct role holders and group members come from the compiler's own reads
+/// ([`role_holders_via`], [`group_members_via`]), never a predicate written
+/// here, so the people marked `on_engines` are exactly those a compile
+/// excepts from the deny (`crate::clearance`, which reads
+/// [`crate::members::role_usernames`] over the same [`role_holders_via`]).
+pub async fn cleared_people_via(
+    conn: &mut sqlx::PgConnection,
+    tag_id: Uuid,
+) -> Result<Option<ClearedPeople>, CompileError> {
+    let gate: Option<(Vec<String>, Vec<Uuid>)> = sqlx::query_as(
+        "SELECT required_roles, required_groups FROM classification_policies WHERE tag_id = $1",
+    )
+    .bind(tag_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db)?;
+    let Some((roles, group_ids)) = gate else {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tags WHERE id = $1)")
+            .bind(tag_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db)?;
+        return Ok(exists.then(|| ClearedPeople {
+            count: 0,
+            people: Vec::new(),
+            truncated: false,
+            engines_enforce: false,
+            on_engines_count: 0,
+        }));
+    };
+    let roles: Vec<String> = roles
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // `crate::clearance`: a gate with no required role compiles to nothing
+    // on engines.
+    let engines_enforce = !roles.is_empty();
+    // A gate stores group ids; membership is read by name, the key the
+    // compiler expands. An id no group has any more admits nobody.
+    let groups: Vec<String> = if group_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar("SELECT name FROM groups WHERE id = ANY($1)")
+            .bind(&group_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db)?
+    };
+
+    #[derive(Default)]
+    struct Listed {
+        via: BTreeSet<ClearedVia>,
+        on_engines: bool,
+    }
+    let scoped = |scope_type: &str, scope_id: Option<Uuid>| {
+        let scope = ClearedScope::parse(scope_type);
+        let scope_id = (scope != ClearedScope::Platform)
+            .then_some(scope_id)
+            .flatten();
+        (Some(scope), scope_id)
+    };
+    let mut listed: BTreeMap<Uuid, Listed> = BTreeMap::new();
+    for h in role_holders_via(conn, &roles).await? {
+        let (scope, scope_id) = scoped(&h.scope_type, h.scope_id);
+        let l = listed.entry(h.user_id).or_default();
+        l.via.insert(ClearedVia {
+            kind: ClearedViaKind::Role,
+            name: h.role_name,
+            scope,
+            scope_id,
+            through_group: None,
+        });
+        l.on_engines |= h.username.is_some();
+    }
+    for h in group_role_holders_via(conn, &roles).await? {
+        let (scope, scope_id) = scoped(&h.scope_type, h.scope_id);
+        listed.entry(h.user_id).or_default().via.insert(ClearedVia {
+            kind: ClearedViaKind::Role,
+            name: h.role_name,
+            scope,
+            scope_id,
+            through_group: Some(h.group_name),
+        });
+    }
+    for m in group_members_via(conn, &groups).await? {
+        listed.entry(m.user_id).or_default().via.insert(ClearedVia {
+            kind: ClearedViaKind::Group,
+            name: m.group_name,
+            scope: None,
+            scope_id: None,
+            through_group: None,
+        });
+    }
+
+    let count = u32::try_from(listed.len()).unwrap_or(u32::MAX);
+    let on_engines_count =
+        u32::try_from(listed.values().filter(|l| l.on_engines).count()).unwrap_or(u32::MAX);
+    let truncated = listed.len() > CLEARED_PEOPLE_LIMIT;
+    let ids: Vec<Uuid> = listed.keys().copied().collect();
+    let mut rows = user_rows_via(conn, &ids).await?;
+    rows.sort_by_cached_key(|u| (label(&u.name, &u.email).to_lowercase(), u.id));
+    rows.truncate(CLEARED_PEOPLE_LIMIT);
+    let people = rows
+        .into_iter()
+        .map(|u| {
+            let l = listed.remove(&u.id).unwrap_or_default();
+            ClearedPerson {
+                user_id: u.id,
+                label: label(&u.name, &u.email),
+                username: u.username,
+                status: u.status,
+                service_account: u.service_account,
+                via: l.via.into_iter().collect(),
+                on_engines: l.on_engines,
+            }
+        })
+        .collect();
+    Ok(Some(ClearedPeople {
+        count,
+        people,
+        truncated,
+        engines_enforce,
+        on_engines_count,
+    }))
 }

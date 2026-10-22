@@ -19,6 +19,8 @@ import {
   getControlPlaneGovernanceTagHandwrittenQueryKey,
   getControlPlaneGovernanceTagUsageQueryKey,
 } from "./generated/control-plane-governance/control-plane-governance";
+import { getControlPlaneTagsListTagsQueryKey } from "./generated/control-plane-tags/control-plane-tags";
+import { invalidateRuleEnforcement } from "@/routes/governance/ruleEnforcementCache";
 
 export interface Tag {
   id: string;
@@ -77,12 +79,53 @@ export function invalidateObjectHandwritten(queryClient: QueryClient) {
   });
 }
 
+/** Route `GET /governance/tags/{catalog_id}` (an object's tags), any catalog and params. */
+const OBJECT_TAGS = /^\/api\/control-plane\/governance\/tags\/[^/]+$/;
+
+/**
+ * What attaching tag `tagId` to, or removing it from, a table or column of
+ * egret's warehouse `warehouseId` changes (`PUT`/`DELETE …/resource-tags`):
+ * every object's tags (the Data header, the Overview's columns, the column
+ * panel and the rules that select by classification read them), the
+ * catalogue under both keys it is cached by (the generated `GET /tags` key
+ * and `tagsQueryKey`: counts), the tag's Where used (CL16), the hand-written
+ * sections (route A matches tag policies through the object's tags),
+ * Control Plane's Browse tags for that warehouse, and every stored rule's
+ * enforcement and effect (what a classification rule reaches).
+ */
+export function invalidateTagAssignment(queryClient: QueryClient, tagId: string, warehouseId: string) {
+  void queryClient.invalidateQueries({
+    predicate: (q) => typeof q.queryKey[0] === "string" && OBJECT_TAGS.test(q.queryKey[0]),
+  });
+  void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
+  invalidateTag(queryClient, tagId);
+  invalidateObjectHandwritten(queryClient);
+  void queryClient.invalidateQueries({ queryKey: ["control-plane", "warehouses", warehouseId, "resource-tags"] });
+  // What a classification rule reaches, so whether it is enforced (`NotEnforcedBadge`).
+  invalidateRuleEnforcement(queryClient);
+}
+
+/**
+ * A rename or a delete changes what every chip says: each object's tags (Data's
+ * `GET /governance/tags/{catalog}`, any catalog, and a BI object's tags) and the
+ * catalogue under its generated key (`AddTagDialog`), besides `["tags"]`.
+ */
+function invalidateTagChips(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({
+    predicate: (q) =>
+      (typeof q.queryKey[0] === "string" && OBJECT_TAGS.test(q.queryKey[0])) ||
+      (q.queryKey[0] === "ws" && q.queryKey[2] === "object-tags"),
+  });
+  void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
+}
+
 /**
  * A rename or a delete of tag `tagId` changes what matches its name: route A
- * everywhere and the tag's own Hand-written tab (route D).
+ * everywhere, the tag's own Hand-written tab (route D) and every chip.
  */
 function invalidateTagName(queryClient: QueryClient, tagId: string) {
   invalidateObjectHandwritten(queryClient);
+  invalidateTagChips(queryClient);
   void queryClient.invalidateQueries({ queryKey: getControlPlaneGovernanceTagHandwrittenQueryKey(tagId) });
 }
 
@@ -92,11 +135,17 @@ export function objectTagsQueryKey(ws: string, kind: string, id: string) {
 
 // ── Catalog (control-plane) ─────────────────────────────────────────────────
 
-export function useTags() {
+/**
+ * The catalogue (`GET /control-plane/tags`, `tag:read`). `enabled: false`
+ * skips the read, for a caller that knows the viewer would be refused
+ * (a 403 is not cached as data, so every mount would ask again).
+ */
+export function useTags(opts?: { enabled?: boolean }) {
   return useQuery<Tag[]>({
     queryKey: tagsQueryKey,
     queryFn: () => apiJson<Tag[]>("/control-plane/tags"),
     retry: false,
+    enabled: opts?.enabled ?? true,
   });
 }
 
@@ -141,8 +190,16 @@ export function useDeleteTag() {
       await apiFetch(`/control-plane/tags/${id}`, { method: "DELETE" });
     },
     onSuccess: (_data, id) => {
-      invalidateTag(queryClient, id);
-      invalidateTagName(queryClient, id);
+      // The list changes; the deleted tag's own reads (its usage, its Manual
+      // policies) are dropped, never refetched: they would only 404 (live result §7).
+      void queryClient.invalidateQueries({ queryKey: tagsQueryKey });
+      for (const queryKey of [getControlPlaneGovernanceTagUsageQueryKey(id), getControlPlaneGovernanceTagHandwrittenQueryKey(id)]) {
+        void queryClient.cancelQueries({ queryKey });
+        queryClient.removeQueries({ queryKey });
+      }
+      invalidateObjectHandwritten(queryClient);
+      // Its chips go from every object, and the generated catalogue loses it.
+      invalidateTagChips(queryClient);
     },
   });
 }

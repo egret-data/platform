@@ -28,7 +28,7 @@ const MARKERS = [
   // The qualified empty state.
   ["src/routes/governance/overview/AttentionSection.tsx", "Nothing needs attention among the checks you can run."],
   // The footnote on best-effort events.
-  ["src/routes/governance/overview/RecentChanges.tsx", "Role assignments and catalog tags are recorded after they commit"],
+  ["src/routes/governance/overview/RecentChanges.tsx", " attached to data are recorded after they commit"],
   // The strip's test id.
   ["src/routes/governance/overview/CountsStrip.tsx", "overview-counts"],
 ];

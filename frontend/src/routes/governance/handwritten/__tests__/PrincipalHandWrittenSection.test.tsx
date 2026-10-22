@@ -83,7 +83,8 @@ describe("PrincipalHandWrittenSection (route B)", () => {
         }),
       ),
     );
-    expect(await screen.findByRole("region", { name: "Hand-written policies (3)" }, T)).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Manual policies (3)" }, T)).toBeInTheDocument();
+    expect(screen.queryByText(/hand-written/i)).not.toBeInTheDocument();
     expect(within(group("Direct")).getByRole("link", { name: "direct-deny" })).toHaveAttribute(
       "href",
       "/governance/engines/e-tr/advanced/policies/access/1",
@@ -98,7 +99,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
       "Names role r1, which this user holds. Engines resolve no roles, so on the engine it reaches nobody.",
     );
     const everyone = group("Applies to everyone");
-    expect(everyone).toHaveTextContent("1 hand-written policy names everyone.");
+    expect(everyone).toHaveTextContent("1 manual policy names everyone.");
     expect(within(everyone).queryByText("all-read")).not.toBeInTheDocument();
     await user.click(within(everyone).getByRole("button", { name: "Show them" }));
     expect(within(everyone).getByText("all-read")).toBeInTheDocument();
@@ -133,7 +134,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
 
   it("a role's page asks route B by the role's name", async () => {
     const served = open(ok(answer({ principal: { kind: "role", id: "r1", label: "r1", username: null } })), { kind: "role", id: "r1" }, "access", READER, "GET /governance/principals/role/r1/handwritten");
-    await screen.findByText("No hand-written policy names this principal.", {}, T);
+    await screen.findByText("No manual policy names this principal.", {}, T);
     expect(served.asked).toEqual(["GET /governance/principals/role/r1/handwritten"]);
   });
 
@@ -149,9 +150,9 @@ describe("PrincipalHandWrittenSection (route B)", () => {
   it("a user without a username: no item can name them; only everyone is counted", async () => {
     open(ok(answer({ state: "no_username", principal: { kind: "user", id: "u-ana", label: "Ana", username: null }, everyone: { count: 1, policies: [{ id: 9, name: "all-read", service: "lake-tr", bucket: "allow" }] } })));
     expect(
-      await screen.findByText("This user has no username, so no hand-written policy item can name them on an engine.", {}, T),
+      await screen.findByText("This user has no username, so no manual policy item can name them on an engine.", {}, T),
     ).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Applies to everyone" })).toHaveTextContent("1 hand-written policy names everyone.");
+    expect(screen.getByRole("region", { name: "Applies to everyone" })).toHaveTextContent("1 manual policy names everyone.");
     expect(screen.queryByRole("region", { name: "Direct" })).not.toBeInTheDocument();
   });
 
@@ -167,7 +168,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     });
     open(ok(answer({ unreadable: [unreadable(7, "broken-a", "access"), unreadable(8, "broken-b", "access", []), unreadable(9, "broken-m", "masking")] })));
     const note = await screen.findByRole("region", { name: "Could not be read" }, T);
-    expect(note).toHaveTextContent("2 hand-written policies could not be read, so this list may be incomplete.");
+    expect(note).toHaveTextContent("2 manual policies could not be read, so this list may be incomplete.");
     expect(within(note).getByRole("link", { name: "broken-a" })).toHaveAttribute("href", "/governance/engines/e-tr/advanced/policies/access/7");
     // No engine: the profile's own editor, as a readable row.
     expect(within(note).getByRole("link", { name: "broken-b" })).toHaveAttribute(
@@ -177,10 +178,10 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     expect(note).toHaveTextContent("bad body 7");
     expect(within(note).queryByText("broken-m")).not.toBeInTheDocument();
     // Not "none": two policies could not be read and may name this principal.
-    expect(screen.queryByText("No hand-written policy names this principal.")).not.toBeInTheDocument();
-    expect(screen.getByText("No readable hand-written policy names this principal.")).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Hand-written policies (0)" })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Hand-written policies (0 readable, 2 unreadable)" })).toBeInTheDocument();
+    expect(screen.queryByText("No manual policy names this principal.")).not.toBeInTheDocument();
+    expect(screen.getByText("No readable manual policy names this principal.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Manual policies (0)" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Manual policies (0 readable, 2 unreadable)" })).toBeInTheDocument();
   });
 
   it("states unreadable policies for a user without a username too", async () => {
@@ -194,7 +195,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
       ),
     );
     expect(await screen.findByRole("region", { name: "Could not be read" }, T)).toHaveTextContent(
-      "1 hand-written policy could not be read, so this list may be incomplete.",
+      "1 manual policy could not be read, so this list may be incomplete.",
     );
   });
 
@@ -202,7 +203,7 @@ describe("PrincipalHandWrittenSection (route B)", () => {
     const served = open(ok(answer()), USER, "access", me(["tag:read"]));
     expect(
       await screen.findByText(
-        "Hand-written policies are read with the policy:read permission, which this account does not have.",
+        "Manual policies are read with the policy:read permission, which this account does not have.",
         {},
         T,
       ),
@@ -213,8 +214,8 @@ describe("PrincipalHandWrittenSection (route B)", () => {
   it("shows a failure with Retry, never none", async () => {
     const user = userEvent.setup();
     const served = open(fail(500));
-    expect(await screen.findByText(/The hand-written policies could not be loaded/, {}, T)).toBeInTheDocument();
-    expect(screen.queryByText("No hand-written policy names this principal.")).not.toBeInTheDocument();
+    expect(await screen.findByText(/The manual policies could not be loaded/, {}, T)).toBeInTheDocument();
+    expect(screen.queryByText("No manual policy names this principal.")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.asked.filter((a) => a === KEY)).toHaveLength(2));
   });

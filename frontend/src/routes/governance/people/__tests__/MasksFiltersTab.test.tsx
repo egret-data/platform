@@ -74,7 +74,7 @@ afterEach(() => {
   hwAsked.length = 0;
 });
 /** egret's own sections: the hand-written one (#4b) is tested on its own. */
-const notHandWritten = (t: string | null) => !t?.startsWith("Hand-written") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
+const notHandWritten = (t: string | null) => !t?.startsWith("Manual") && !["Direct", "Through a group or role", "Applies to everyone"].includes(t ?? "");
 
 
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
@@ -161,7 +161,7 @@ const rowsOf = (name: string) =>
     .getAllByRole("row")
     .slice(1);
 
-describe("a principal's Masks & filters tab", () => {
+describe("a principal's Rules tab", () => {
   it("lists the rules that exempt the principal, grouped by how the exemption reaches", async () => {
     serve({ "users/u-ana": ok(ANA) }, ok(RULES));
     open("/governance/people/users/u-ana?tab=masks");
@@ -171,12 +171,12 @@ describe("a principal's Masks & filters tab", () => {
 
     const [direct] = rowsOf("Directly");
     expect(within(direct).getByRole("link", { name: "salary mask" })).toHaveAttribute("href", "/governance/rules/r-direct");
-    expect(direct).toHaveTextContent("mask · MASK_NULL");
+    expect(direct).toHaveTextContent("Mask · Nullify");
     expect(direct).toHaveTextContent("Directly · applied on engines");
 
     const [group] = rowsOf("Through a group");
     expect(within(group).getByRole("link", { name: "pii mask" })).toHaveAttribute("href", "/governance/rules/r-group");
-    expect(group).toHaveTextContent("tag PII");
+    expect(group).toHaveTextContent("Classification PII");
     expect(group).toHaveTextContent("Through group analysts · applied on engines");
 
     const [excluded] = rowsOf("Excluded from the exemption");
@@ -203,7 +203,7 @@ describe("a principal's Masks & filters tab", () => {
 
     expect(
       await within(await screen.findByRole("tabpanel")).findByText(
-        "4 other rules apply to everyone they do not exempt; each object's Masks & filters tab lists them.",
+        "4 other rules apply to everyone they do not exempt; each object's Rules tab lists them.",
       ),
     ).toBeInTheDocument();
   });
@@ -214,12 +214,12 @@ describe("a principal's Masks & filters tab", () => {
 
     expect(
       await within(await screen.findByRole("tabpanel")).findByText(
-        "1 other rule applies to everyone it does not exempt; each object's Masks & filters tab lists it.",
+        "1 other rule applies to everyone it does not exempt; each object's Rules tab lists it.",
       ),
     ).toBeInTheDocument();
   });
 
-  it("links a path rule to its object's Masks & filters tab in Data, and not a tag rule", async () => {
+  it("links a path rule to its object's Rules tab in Data, and not a tag rule", async () => {
     serve({ "users/u-ana": ok(ANA) }, ok(RULES));
     open("/governance/people/users/u-ana?tab=masks");
 
@@ -232,12 +232,12 @@ describe("a principal's Masks & filters tab", () => {
     expect(within(group).queryByRole("link", { name: /Open in Data/ })).not.toBeInTheDocument();
   });
 
-  it("says egret rules only, and points at Check access", async () => {
+  it("says rules only, and points at Check access", async () => {
     serve({ "users/u-ana": ok(ANA) }, ok(RULES));
     open("/governance/people/users/u-ana?tab=masks");
 
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByText(/^egret rules are above; hand-written policies below\./)).toBeInTheDocument();
+    expect(await within(panel).findByText(/^Rules are above; manual policies below\./)).toBeInTheDocument();
     expect(within(panel).getByRole("link", { name: "Check access" })).toHaveAttribute(
       "href",
       "/governance/people/users/u-ana?tab=check",
@@ -251,9 +251,9 @@ describe("a principal's Masks & filters tab", () => {
     open("/governance/people/users/u-ana?tab=masks");
 
     const panel = await screen.findByRole("tabpanel");
-    expect(await within(panel).findByText("No egret rule exempts Ana Silva")).toBeInTheDocument();
+    expect(await within(panel).findByText("No rule exempts Ana Silva")).toBeInTheDocument();
     expect(
-      within(panel).getByText("2 other rules apply to everyone they do not exempt; each object's Masks & filters tab lists them."),
+      within(panel).getByText("2 other rules apply to everyone they do not exempt; each object's Rules tab lists them."),
     ).toBeInTheDocument();
   });
 
@@ -263,7 +263,7 @@ describe("a principal's Masks & filters tab", () => {
 
     const panel = await screen.findByRole("tabpanel");
     expect(await within(panel).findByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(panel).queryByText(/No egret rule exempts/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/No rule exempts/)).not.toBeInTheDocument();
     await userEvent.click(within(panel).getByRole("button", { name: "Retry" }));
     expect(await within(panel).findByRole("table", { name: "Directly" })).toBeInTheDocument();
   });
@@ -312,13 +312,13 @@ describe("a principal's Masks & filters tab", () => {
     expect(sections()).toEqual(["Directly"]);
     expect(within(panel).getByRole("link", { name: "analysts but not ana" })).toBeInTheDocument();
     expect(
-      within(panel).getByText("7 other rules apply to everyone they do not exempt; each object's Masks & filters tab lists them."),
+      within(panel).getByText("7 other rules apply to everyone they do not exempt; each object's Rules tab lists them."),
     ).toBeInTheDocument();
   });
 });
 
 /** #4b spec §6: the hand-written masking and row-filter policies naming the principal (route B). */
-describe("hand-written policies on a People page's Masks & filters tab", () => {
+describe("manual policies on a People page's Rules tab", () => {
   it("lists the masking and row-filter rows, not the access ones", async () => {
     const row = (id: number, name: string, policyType: string, bucket: string) => ({
       id,
@@ -344,7 +344,7 @@ describe("hand-written policies on a People page's Masks & filters tab", () => {
     };
     serve({ "users/u-ana": ok(ANA) }, ok([]));
     open("/governance/people/users/u-ana?tab=masks");
-    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Hand-written policies (2)" });
+    const section = await within(await screen.findByRole("tabpanel")).findByRole("region", { name: "Manual policies (2)" });
     expect(within(section).getByText("hw-mask")).toBeInTheDocument();
     expect(within(section).getByText("hw-filter")).toBeInTheDocument();
     expect(within(section).queryByText("hw-access")).not.toBeInTheDocument();

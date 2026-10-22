@@ -19,6 +19,11 @@ pub enum PolicyHttpError {
     AlreadyExists(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A 400 with a structured body served as is — a refusal whose body carries
+    /// a `code` and the fields a UI acts on beside `error` (e.g.
+    /// `UnreadableTableMask::refusal_body`, code `table_tag_mask_conflict`).
+    #[error("bad request")]
+    BadRequestBody { body: serde_json::Value },
     #[error("conflict: {0}")]
     Conflict(String),
     /// A mask/row-filter overlap (SP4d-4 Task 3 fix round 1, M1): 409 with the
@@ -82,6 +87,9 @@ impl IntoResponse for PolicyHttpError {
             PolicyHttpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             PolicyHttpError::Overlap { body } => {
                 return (StatusCode::CONFLICT, Json(body.clone())).into_response()
+            }
+            PolicyHttpError::BadRequestBody { body } => {
+                return (StatusCode::BAD_REQUEST, Json(body.clone())).into_response()
             }
             PolicyHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,

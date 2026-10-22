@@ -28,9 +28,9 @@ const MARKERS = [
   // `NO_READERS`.
   ["src/routes/governance/data/tabs/LineageTab.tsx", "No view or materialized view reads this table"],
   // `TAGS_FAILED`.
-  ["src/routes/governance/data/ObjectHeader.tsx", "Tags could not be loaded."],
-  // The Masks & filters tab's label.
-  ["src/routes/governance/data/ObjectTabs.tsx", "Masks & filters"],
+  ["src/routes/governance/data/ObjectHeader.tsx", "Classifications could not be loaded."],
+  // The tab list's name (the tab labels come from the glossary, which is not the area's own).
+  ["src/routes/governance/data/ObjectTabs.tsx", "Object tabs"],
   // What a view without recorded facts says.
   ["src/routes/governance/data/tabs/OverviewTab.tsx", "egret has no security mode or lineage recorded for this object."],
   // A catalog with no warehouse.
@@ -44,7 +44,7 @@ const MARKERS = [
   // `WHO_CAN_READ_INTRO`.
   ["src/routes/governance/data/WhoCanReadDialog.tsx", "Whether a user, or each member of a group or role, can read this"],
   // `TAGS_EGRET_ONLY`.
-  ["src/routes/governance/data/AddTagDialog.tsx", "Tags can be added to egret-managed catalogs only"],
+  ["src/routes/governance/data/AddTagDialog.tsx", "Classifications can be attached to egret-managed catalogs only"],
 ];
 
 const entry = entryChunkName(DIST);

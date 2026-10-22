@@ -7,6 +7,7 @@
  */
 import type { AffectedProfile } from './affectedProfile';
 import type { CompileResponse } from './compileResponse';
+import type { RuleEffect } from './ruleEffect';
 
 /**
  * What the write WOULD have done. `compile` is the same summary the write
@@ -16,4 +17,5 @@ import type { CompileResponse } from './compileResponse';
 export interface PreviewResponse {
   affected: AffectedProfile[];
   compile: CompileResponse;
+  effect?: null | RuleEffect;
 }

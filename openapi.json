@@ -7797,6 +7797,78 @@
         }
       }
     },
+    "/api/control-plane/perm/clearances/{tag_id}/people": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "cleared_people",
+        "parameters": [
+          {
+            "name": "tag_id",
+            "in": "path",
+            "description": "The classification's (tag's) id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The people listed for the classification's clearance, each once with every way they are listed: direct holders of a required role (live, allow, any scope; the compiler's read), holders of a required role through a group they are a direct member of (`throughGroup`; egret clears them, engines refuse them) and direct members of a required group. Role grants carry their scope: egret clears only within a workspace or object scope, engines everywhere. `onEngines` is true only for a direct required-role holder with a username, whom the compiled engine deny excepts; `onEnginesCount` counts them all. `enginesEnforce` is false when the clearance names no required role: engines then withhold the data from nobody. Platform admins are always cleared by egret and are not listed. `count` counts everyone listed; `people` is the first 200 sorted by label, and `truncated` says more exist. A tag with no clearance lists no one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearedPeople"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No classification has this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/compile/{service_id}": {
       "post": {
         "tags": [
@@ -9666,7 +9738,7 @@
             }
           },
           "400": {
-            "description": "The same refusal the write itself would have returned",
+            "description": "The same refusal the write itself would have returned (including code `table_tag_mask_conflict` for a tag-addressed mask over a table-level attachment)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9801,7 +9873,7 @@
             "description": "Rule created AND the profiles it affects recompiled, in one transaction"
           },
           "400": {
-            "description": "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects",
+            "description": "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects",
             "content": {
               "application/json": {
                 "schema": {
@@ -9832,6 +9904,81 @@
           },
           "409": {
             "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/rules/enforcement": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Whether each listed STORED rule is enforced — the `enforcedBy` /\n`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same\nfunctions, for surfaces that list rules. Bounded by\n[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.",
+        "operationId": "rules_enforcement",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Comma-separated rule ids, at most 100 distinct.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`, `no_tag_service`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RuleEnforcement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An id is not a UUID, or more than 100 distinct ids were asked for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9968,7 +10115,7 @@
             }
           },
           "400": {
-            "description": "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects",
+            "description": "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects",
             "content": {
               "application/json": {
                 "schema": {
@@ -10009,6 +10156,79 @@
           },
           "409": {
             "description": "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/rules/{id}/effect": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview\nreturns, from the same [`crate::effect::rule_effect`], so a surface showing\na stored rule can say \"Not enforced yet\" with the preview's reason.",
+        "operationId": "rule_effect",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored rule's effect: reach, the engines that enforce it (or why none does), exemptions and the other masks on its columns. The same computation, and the same shape, as `effect` on `POST /perm/preview`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleEffect"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule",
             "content": {
               "application/json": {
                 "schema": {
@@ -10259,7 +10479,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11004,7 +11224,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12449,7 +12669,7 @@
             }
           },
           "400": {
-            "description": "Invalid tag key",
+            "description": "Invalid tag key: `code` is `tag_key_invalid`",
             "content": {
               "application/json": {
                 "schema": {
@@ -12479,7 +12699,7 @@
             }
           },
           "409": {
-            "description": "A tag with that key already exists",
+            "description": "`code` is `tag_key_taken` (the key exists) or `tag_name_taken` (another classification has that name, ignoring case); `existing` names the holder",
             "content": {
               "application/json": {
                 "schema": {
@@ -12535,6 +12755,16 @@
           },
           "403": {
             "description": "Missing tag:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code` is `tag_in_use`: `rules` lists the rules that still select this classification",
             "content": {
               "application/json": {
                 "schema": {
@@ -12625,6 +12855,16 @@
           },
           "404": {
             "description": "No such tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code` is `tag_name_taken`: another classification has that name, ignoring case; `existing` names the holder",
             "content": {
               "application/json": {
                 "schema": {
@@ -15263,7 +15503,7 @@
             }
           },
           "400": {
-            "description": "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked",
+            "description": "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)",
             "content": {
               "application/json": {
                 "schema": {
@@ -40038,6 +40278,154 @@
           }
         }
       },
+      "ClearedPeople": {
+        "type": "object",
+        "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`); engines\n  refuse them (the compiler expands only user holders).\n- **Group member, gate names no role** (`enginesEnforce` false): egret\n  clears them; engines withhold the data from NOBODY, since a group-only\n  gate compiles to nothing on engines.\n- **Group member, gate also names a role**: egret clears them; engines\n  refuse them (a Ranger group matches nobody; only role holders are\n  excepted).\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.",
+        "required": [
+          "count",
+          "people",
+          "truncated",
+          "enginesEnforce",
+          "onEnginesCount"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Every person listed by the rules above (not only the first 200). It\nis not everyone egret clears: platform admins are cleared and not\nlisted (see the type doc).",
+            "minimum": 0
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearedPerson"
+            },
+            "description": "The first [`CLEARED_PEOPLE_LIMIT`] (200) of them, sorted by label."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More people are listed than `people` carries."
+          },
+          "enginesEnforce": {
+            "type": "boolean",
+            "description": "Whether engines enforce the clearance at all: true when it names at\nleast one required role. False means anyone with SQL access reads the\ndata on engines."
+          },
+          "onEnginesCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many of `count` are `onEngines`, independent of the 200 cap.",
+            "minimum": 0
+          }
+        }
+      },
+      "ClearedPerson": {
+        "type": "object",
+        "description": "One person listed for a clearance.",
+        "required": [
+          "userId",
+          "label",
+          "status",
+          "serviceAccount",
+          "via",
+          "onEngines"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string",
+            "description": "Name, else email."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stored engine username; null when none is allocated yet."
+          },
+          "status": {
+            "type": "string",
+            "description": "The account's status (`active` or `disabled`). A disabled account is\nlisted: its grants still stand."
+          },
+          "serviceAccount": {
+            "type": "boolean",
+            "description": "A Data API service account (migration `0119`)."
+          },
+          "via": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearedVia"
+            },
+            "description": "Every way they are listed: role grants (direct, then through a group)\nbefore group memberships, each sorted by name, scope, scope id."
+          },
+          "onEngines": {
+            "type": "boolean",
+            "description": "Whether the compiled engine deny excepts them: they hold a required\nrole DIRECTLY (any scope), unexpired, and have a username. Never\nthrough a group or a group membership. A direct holder with no\nusername is named once a compile mints one."
+          }
+        }
+      },
+      "ClearedScope": {
+        "type": "string",
+        "description": "The scope of a role grant.",
+        "enum": [
+          "platform",
+          "workspace",
+          "object"
+        ]
+      },
+      "ClearedVia": {
+        "type": "object",
+        "description": "One required role or group a person is listed through.",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ClearedViaKind"
+          },
+          "name": {
+            "type": "string",
+            "description": "The role's or group's name."
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClearedScope",
+                "description": "A role grant's scope; null for a group membership. Engines ignore it\n(a column read carries no workspace), egret clears only within it."
+              }
+            ]
+          },
+          "scopeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace or object id of a `workspace` or `object` scope; null\notherwise."
+          },
+          "throughGroup": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A role held by this group the person is a direct member of, not by\nthe person: egret clears them, engines refuse them. Null for a role\nheld directly and for a group membership."
+          }
+        }
+      },
+      "ClearedViaKind": {
+        "type": "string",
+        "description": "How a person comes to be listed.",
+        "enum": [
+          "role",
+          "group"
+        ]
+      },
       "ClientDto": {
         "type": "object",
         "required": [
@@ -43054,6 +43442,72 @@
           "deny"
         ]
       },
+      "EffectCatalog": {
+        "type": "object",
+        "description": "One catalog a rule reaches, and who enforces it there.",
+        "required": [
+          "catalogId",
+          "catalogName",
+          "engines"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "catalogName": {
+            "type": "string"
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectEngine"
+            },
+            "description": "Attached engines that enforce the rule here, by name: bound to a policy\nprofile, and for a classification rule on a Trino profile, one whose\n`tagService` names an existing profile."
+          },
+          "notEnforced": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule here; otherwise `no_engine`\n(nothing attached), `no_profile` (engines attached, none bound) or\n`no_tag_service` (bound, but a classification rule cannot compile for\nany of their profiles: Trino without a usable tag service)."
+              }
+            ]
+          }
+        }
+      },
+      "EffectEngine": {
+        "type": "object",
+        "description": "An engine that enforces a rule on a catalog.",
+        "required": [
+          "id",
+          "name",
+          "engineType"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "engineType": {
+            "type": "string",
+            "description": "`trino` | `starrocks` | …."
+          }
+        }
+      },
+      "EffectKind": {
+        "type": "string",
+        "description": "`mask` or `row_filter`.",
+        "enum": [
+          "mask",
+          "row_filter"
+        ]
+      },
       "EffectiveAccess": {
         "type": "object",
         "required": [
@@ -44261,6 +44715,36 @@
           "worker_enabled": {
             "type": "boolean",
             "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
+          }
+        }
+      },
+      "ExistingMask": {
+        "type": "object",
+        "description": "Another mask rule that already reaches a column this rule reaches.",
+        "required": [
+          "ruleId",
+          "ruleName",
+          "maskType",
+          "coordinate",
+          "exempt"
+        ],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ruleName": {
+            "type": "string"
+          },
+          "maskType": {
+            "type": "string"
+          },
+          "coordinate": {
+            "type": "string",
+            "description": "`catalog.schema.table.column`; the column is the pattern, or `*`, when\nthe overlap is on a pattern or a whole table."
+          },
+          "exempt": {
+            "$ref": "#/components/schemas/PrincipalSet"
           }
         }
       },
@@ -48157,6 +48641,16 @@
           "catalog_not_in_profile"
         ]
       },
+      "NotEnforced": {
+        "type": "string",
+        "description": "Why no query is affected by the rule yet.",
+        "enum": [
+          "no_assignment",
+          "no_engine",
+          "no_profile",
+          "no_tag_service"
+        ]
+      },
       "NotEvaluatedReason": {
         "type": "string",
         "description": "Why a member was not evaluated.",
@@ -49410,6 +49904,17 @@
           },
           "compile": {
             "$ref": "#/components/schemas/CompileResponse"
+          },
+          "effect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RuleEffect",
+                "description": "A rule preview only: what the rule will do — the tables and columns it\nreaches, the engines that enforce it (or why none does), how many\npeople it exempts and the other masks already on its columns. Computed\nfrom the model (`crate::effect`), so it answers on a catalog no engine\nserves. Absent on a grant preview."
+              }
+            ]
           }
         }
       },
@@ -51478,6 +51983,126 @@
           },
           "exempt": {
             "$ref": "#/components/schemas/PrincipalSet"
+          }
+        }
+      },
+      "RuleEffect": {
+        "type": "object",
+        "description": "The rule's effect: reach, enforcement, exemptions and overlapping masks.",
+        "required": [
+          "kind",
+          "catalogs",
+          "enforcedBy",
+          "exemptMembers",
+          "exemptEveryone",
+          "alreadyMasked",
+          "truncated"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/EffectKind"
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectCatalog"
+            },
+            "description": "Every registry catalog the rule reaches, by name."
+          },
+          "tableCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Distinct tables reached; `null` when a path level is a pattern (or absent).",
+            "minimum": 0
+          },
+          "columnCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Masks only; `null` for a pattern, for \"every column\" (a path mask\nwithout a column, or a tag on a whole table) and for row filters.",
+            "minimum": 0
+          },
+          "enforcedBy": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct engines, bound to a profile, attached to a reached catalog.",
+            "minimum": 0
+          },
+          "notEnforced": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule (`enforcedBy > 0`); otherwise\nwhy not: `no_assignment` (nothing reached), `no_tag_service` (a\nclassification rule, and some reached catalog's bound engines are all\non Trino profiles with no usable tag service), `no_profile` (some\nreached catalog has engines, none bound) or `no_engine`."
+              }
+            ]
+          },
+          "exemptMembers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct users in `exempt.include`, groups, roles and workspaces expanded.",
+            "minimum": 0
+          },
+          "exemptEveryone": {
+            "type": "boolean",
+            "description": "`exempt.include` names the `public` group: nobody is masked."
+          },
+          "alreadyMasked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExistingMask"
+            },
+            "description": "Other mask rules that reach a column this rule reaches (at most 20)."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`alreadyMasked` may be incomplete: a cap cut the columns examined\n(50), the classifications read (1000) or the entries listed (20)."
+          }
+        }
+      },
+      "RuleEnforcement": {
+        "type": "object",
+        "description": "Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced`/`catalogs`\nhalf of [`RuleEffect`], for lists of rules (`GET /perm/rules/enforcement`).",
+        "required": [
+          "ruleId",
+          "enforcedBy",
+          "catalogs"
+        ],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "enforcedBy": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct engines, bound to a profile, attached to a catalog the rule\nreaches (as `enforcedBy` in the rule's effect).",
+            "minimum": 0
+          },
+          "notEnforced": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotEnforced",
+                "description": "`null` when some engine enforces the rule; otherwise why not, as\n`notEnforced` in the rule's effect."
+              }
+            ]
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectCatalog"
+            },
+            "description": "Each catalog the rule reaches and who enforces it THERE, as `catalogs`\nin the rule's effect: a page about one catalog reads its entry, since\na rule enforced in one catalog may be enforced in no other."
           }
         }
       },
@@ -53785,6 +54410,7 @@
         "required": [
           "catalogId",
           "catalogName",
+          "warehouseId",
           "schema",
           "table",
           "onTable",
@@ -53797,6 +54423,11 @@
           },
           "catalogName": {
             "type": "string"
+          },
+          "warehouseId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The warehouse the assignment is stored under (the catalog's\n`warehouse_id`): what a write to this table's classification names."
           },
           "schema": {
             "type": "string"

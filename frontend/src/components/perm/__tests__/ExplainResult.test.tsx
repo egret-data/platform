@@ -183,7 +183,11 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     const result = await screen.findByTestId("explain-result");
     const state = within(result).getByTestId("no-profile-state");
     expect(state).toHaveTextContent(/nothing is enforcing/i);
-    expect(state).toHaveTextContent(/not a denial/i);
+    // C12: the state's own sentence is the short one ("this is not a refusal");
+    // the long "not a denial" paragraph moved, unchanged, under the folded
+    // internals of the limits block. Both still say it is not a refusal.
+    expect(state).toHaveTextContent(/not a refusal/i);
+    expect(within(result).getByTestId("honest-limits")).toHaveTextContent(/not a denial/i);
 
     // It must not borrow a denial's vocabulary or its colour.
     expect(screen.queryAllByTestId("explain-profile")).toHaveLength(0);
@@ -2071,5 +2075,60 @@ describe("ExplainResultView — an engine grant (F11)", () => {
     expect(screen.getByText(`Engine grant ${id}`)).toBeInTheDocument();
     expect(screen.getByText(`perm-engine-${id}`)).toBeInTheDocument();
     expect(screen.queryByTestId("clearance-attribution")).toBeNull();
+  });
+});
+
+/**
+ * Classification UX C12: the verdict comes first, one visible line keeps the
+ * limit that changes what *Allowed* means, and the engine internals fold under
+ * a closed disclosure — still in the DOM and one click away, text unchanged.
+ */
+describe("ExplainResultView — verdict first, internals folded (C12)", () => {
+  test("leads with the verdict, keeps one visible limit line, and folds the rest", () => {
+    wrap(<ExplainResultView result={TWO_PROFILES} />);
+    const line = screen.getByText(/Masks on Trino and row filters are not shown here/);
+    expect(line).toBeVisible();
+    expect(line).toHaveTextContent(/so Allowed can still return masked values or filtered rows/);
+    // A Denied verdict's caveat is visible too, and says what the folded roles
+    // paragraph says: a manual role/group policy matches nobody, here OR on the
+    // engines — never "may still be allowed", which would be false.
+    expect(line).toHaveTextContent(
+      /a manual policy that names a role or a group other than public matches nobody, here or on the engines\./,
+    );
+    expect(line).not.toHaveTextContent(/may still be allowed/i);
+    // The verdicts precede the limits block in document order.
+    const result = screen.getByTestId("explain-result");
+    const firstProfile = within(result).getAllByTestId("explain-profile")[0];
+    const limits = within(result).getByTestId("honest-limits");
+    expect(firstProfile.compareDocumentPosition(limits) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const details = screen.getByText("How this answer was worked out").closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    const internals = within(details as HTMLElement).getByText(/egret serves no roles download and runs no usersync/);
+    expect(internals).not.toBeVisible();
+    expect(within(details as HTMLElement).getByText(/Each plugin polls for its policy set/)).toBeInTheDocument();
+  });
+
+  test("opening the disclosure shows the internals", async () => {
+    wrap(<ExplainResultView result={TWO_PROFILES} />);
+    await userEvent.click(screen.getByText("How this answer was worked out"));
+    expect(screen.getByText(/egret serves no roles download and runs no usersync/)).toBeVisible();
+  });
+
+  test("says nothing is enforced in one short paragraph, the long one folded", () => {
+    wrap(<ExplainResultView result={{ outcome: "no_profile_serves_the_catalog", profiles: [] }} />);
+    expect(
+      within(screen.getByTestId("no-profile-state")).getByText(
+        "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
+      ),
+    ).toBeVisible();
+    const details = screen.getByText("How this answer was worked out").closest("details") as HTMLElement;
+    expect(within(details).getByText(/no policy set egret compiles\s+covers it/)).toBeInTheDocument();
+    // There are no verdicts, so the visible limit names none: no "Allowed", no
+    // role/group caveat about a verdict that does not exist.
+    const line = screen.getByText("Masks on Trino and row filters are not shown here.");
+    expect(line).toBeVisible();
+    expect(line.closest("details")).toBeNull();
+    expect(screen.queryByText(/Allowed/)).not.toBeVisible();
   });
 });

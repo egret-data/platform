@@ -8,6 +8,8 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { ClassificationChip, useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification } from "@/routes/governance/RemoveClassificationDialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatPrincipals, formatRuleKind, type WorkspaceNames } from "@/routes/governance/permFormat";
@@ -19,6 +21,7 @@ import {
   capitalise,
   engineTypeLabel,
   enginesOf,
+  fullPath,
   tagReach,
   type BrowseResult,
   type CatalogState,
@@ -27,7 +30,8 @@ import {
 } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { Section, TabError } from "@/routes/governance/tabParts";
+import { Section, STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
+import { TERM } from "@/routes/governance/glossary";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
@@ -254,7 +258,7 @@ function ObjectList({
  * catalog cannot carry tags (`taggable` false: not an egret catalog, whose
  * tags the page never asks for), and says so when the tags could not be read.
  *
- * The Masking rules column (shown with `policy:read`, which `GET /perm/rules`
+ * The Rules column (shown with `policy:read`, which `GET /perm/rules`
  * needs) lists each column's mask rules by name and kind: those whose path
  * selects the column, and those whose tag the column carries itself or
  * through its table (`ruleSelects`, `tagNamesOn`), each with its exemptions
@@ -279,6 +283,27 @@ function Columns({
   const canReadRules = usePolicyPermissions()("policy:read");
   const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
+  const canEditTags = useCanEditCatalogTags();
+  // After a remove, focus lands on the column's name in this table: the removed chip's button is gone.
+  const removal = useRemoveClassification((r) =>
+    [...document.querySelectorAll<HTMLElement>("[data-column-link]")].find((a) => sameName(a.dataset.columnLink ?? "", r.target.column ?? "")),
+  );
+  const warehouseId = catalog.warehouseId;
+  // Remove names the coordinate as stored (the server matches it exactly) and the column as the source spells it.
+  const removeFrom =
+    canEditTags && warehouseId != null
+      ? (a: ResourceTagDto) =>
+          removal.ask({
+            tag: a.tag,
+            target: {
+              warehouseId,
+              schema: a.schema,
+              table: a.table,
+              column: a.column,
+              label: fullPath({ ...path, column: columns.find((c) => sameName(c.name, a.column))?.name ?? a.column }),
+            },
+          })
+      : undefined;
   if (columns.length === 0) {
     const empty = emptyLevel(source, "columns");
     return <EmptyState icon={Columns3} title={empty.detail ? empty.title : "No columns returned"} description={empty.detail} />;
@@ -293,17 +318,20 @@ function Columns({
   const reach = tagReach(path, catalog, tags);
   return (
     <div className="space-y-2">
-      {showTags && tags.isError ? <TabError what="tags" onRetry={() => void tags.refetch()} /> : null}
+      {showTags && tags.isError ? <TabError what="classifications" onRetry={() => void tags.refetch()} /> : null}
       {canReadRules && rulesQ.isError ? (
-        <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />
+        <TabError what="rules" onRetry={() => void rulesQ.refetch()} />
       ) : null}
-      <Table aria-label="Columns">
+      {/* Below sm the rows stack into cards, each fact labelled by its cell's
+          data-label, so a column's classifications and rules are on screen at
+          390 px without the page scrolling sideways (C13.2). */}
+      <Table aria-label="Columns" className={STACKED_TABLE}>
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Type</TableHead>
-            {showTags ? <TableHead>Tags</TableHead> : null}
-            {canReadRules ? <TableHead>Masking rules</TableHead> : null}
+            {showTags ? <TableHead>{TERM.classifications}</TableHead> : null}
+            {canReadRules ? <TableHead>{TERM.rules}</TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -318,26 +346,32 @@ function Columns({
                   {col.name}
                 </Link>
               </TableCell>
-              <TableCell className="font-mono text-xs">{col.type}</TableCell>
+              <TableCell data-label="Type" className="font-mono text-xs">{col.type}</TableCell>
               {showTags ? (
-                <TableCell>
+                <TableCell data-label={TERM.classifications}>
                   {assignments === undefined ? (
                     tags.isError ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
-                      <span className="sr-only">Loading tags</span>
+                      <span className="sr-only">Loading classifications</span>
                     )
                   ) : (
-                    <ColumnTags column={col.name} own={onColumn(col.name)} inherited={onTable} />
+                    <ColumnTags
+                      column={col.name}
+                      own={onColumn(col.name)}
+                      inherited={onTable}
+                      label={fullPath({ ...path, column: col.name })}
+                      onRemove={removeFrom}
+                    />
                   )}
                 </TableCell>
               ) : null}
               {canReadRules ? (
-                <TableCell className="whitespace-normal">
+                <TableCell data-label={TERM.rules} className="whitespace-normal">
                   {rulesQ.isError ? (
                     <span className="text-muted-foreground">—</span>
                   ) : masks === undefined || reach.status === "loading" ? (
-                    <span className="sr-only">Loading masking rules</span>
+                    <span className="sr-only">Loading rules</span>
                   ) : (
                     <ColumnMasks
                       column={col.name}
@@ -352,27 +386,37 @@ function Columns({
           ))}
         </TableBody>
       </Table>
+      {removal.dialog}
     </div>
   );
 }
 
-function ColumnTags({ column, own, inherited }: { column: string; own: ResourceTagDto[]; inherited: ResourceTagDto[] }) {
+function ColumnTags({
+  column,
+  own,
+  inherited,
+  label,
+  onRemove,
+}: {
+  column: string;
+  own: ResourceTagDto[];
+  inherited: ResourceTagDto[];
+  /** The column as the chips name it: `ice.sales.orders.email`. */
+  label: string;
+  /** Offers Remove on the column's own classifications (spec C4). */
+  onRemove?: (a: ResourceTagDto) => void;
+}) {
   if (own.length === 0 && inherited.length === 0) return <span className="text-muted-foreground">—</span>;
   return (
-    <ul aria-label={`Tags of ${column}`} className="flex flex-wrap gap-1">
+    <ul aria-label={`${TERM.classifications} of ${column}`} className="flex flex-wrap gap-1">
       {own.map((a) => (
         <li key={`own-${a.tag.id}`}>
-          <Badge variant="secondary" title={a.tag.key}>
-            {a.tag.name}
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} onRemove={onRemove ? () => onRemove(a) : undefined} />
         </li>
       ))}
       {inherited.map((a) => (
         <li key={`table-${a.tag.id}`}>
-          <Badge variant="outline" title={a.tag.key}>
-            {a.tag.name}
-            <span className="font-normal text-muted-foreground">{" from table"}</span>
-          </Badge>
+          <ClassificationChip tag={a.tag} objectLabel={label} inherited />
         </li>
       ))}
     </ul>
@@ -396,12 +440,12 @@ function ColumnMasks({
   tagRulesUnknown: boolean;
   workspaceName: WorkspaceNames;
 }) {
-  const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Tag rules not checked</span> : null;
+  const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Rules on classifications not checked</span> : null;
   if (rules.length === 0) return unknown ?? <span className="text-muted-foreground">—</span>;
   const sorted = [...rules].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <div className="space-y-1">
-      <ul aria-label={`Masking rules of ${column}`} className="space-y-0.5">
+      <ul aria-label={`${TERM.rules} of ${column}`} className="space-y-0.5">
         {sorted.map((r) => (
           <li key={r.id} className="text-sm break-words">
             {r.name}

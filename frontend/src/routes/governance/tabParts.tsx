@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useId, type ReactNode, type Ref } from "react";
 import { Link } from "react-router-dom";
 import { RotateCw } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -13,6 +13,11 @@ import { Button } from "@/components/ui/button";
 /** `The <what> could not be loaded. Retry, or reload the page.` */
 export function failedText(what: string): string {
   return `The ${what} could not be loaded. Retry, or reload the page.`;
+}
+
+/** "(required)" after a label's text (spec C8.1); the field itself carries `aria-required`. */
+export function RequiredMark() {
+  return <span className="font-normal text-muted-foreground"> (required)</span>;
 }
 
 /** A tab's (or a section's) error: what failed, and a retry. Never an empty state. */
@@ -30,12 +35,21 @@ export function TabError({ what, onRetry, detail }: { what: string; onRetry: () 
   );
 }
 
-/** A section of a tab: a heading and its content, named by the heading (a `region`). */
-export function Section({ title, children }: { title: string; children: ReactNode }) {
+/**
+ * A section of a tab: a heading and its content, named by the heading (a
+ * `region`). With `headingRef` the heading can take focus from script (a
+ * place to land when the control that had focus is gone), never from Tab.
+ */
+export function Section({ title, children, headingRef }: { title: string; children: ReactNode; headingRef?: Ref<HTMLHeadingElement> }) {
   const headingId = useId();
   return (
     <section aria-labelledby={headingId} className="space-y-2">
-      <h2 id={headingId} className="text-base font-semibold">
+      <h2
+        id={headingId}
+        ref={headingRef}
+        tabIndex={headingRef ? -1 : undefined}
+        className="text-base font-semibold outline-none"
+      >
         {title}
       </h2>
       {children}
@@ -81,12 +95,12 @@ export function HandWrittenPointer({
 }: {
   explainLabel: string | null;
   explainTo?: string;
-  /** What is listed above: `egret grants` (the default) or `egret rules`. */
+  /** What is listed above: `egret grants` (the default) or `Rules`. */
   subject?: string;
   /** The sentence before the control's name. */
   lead?: string;
 }) {
-  const first = `${subject} are above; hand-written policies below.`;
+  const first = `${subject} are above; manual policies below.`;
   if (!explainLabel) return <p className="text-xs text-muted-foreground">{first}</p>;
   const end = explainLabel.endsWith("?") ? "" : ".";
   return (

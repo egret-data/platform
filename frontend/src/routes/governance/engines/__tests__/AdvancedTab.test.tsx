@@ -28,9 +28,9 @@ const T = { timeout: 3000 };
 const WRITER = me(["policy:read", "policy:create", "policy:update", "policy:delete", "policy:seed"]);
 
 const WARNING =
-  "Hand-written policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them hand-written. Prefer Engine permissions or grants on Data.";
+  "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
 const GENERATED_SENTENCE =
-  "egret compiles this profile, so new hand-written policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
+  "egret compiles this profile, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
 
 /** Not pre-sorted; one row of each source, the hand-written ones in the profile and in its tag service. */
 const ROWS = [
@@ -74,11 +74,11 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(await within(await panel()).findByText(WARNING, {}, T)).toBeInTheDocument();
   });
 
-  it("lists only the hand-written policies, each linking to its editor", async () => {
+  it("lists only the manual policies, each linking to its editor", async () => {
     serve(answers({ tagService: "lake-tr-tag" }));
     open();
     const p = await panel();
-    const list = await within(p).findByRole("table", { name: "Hand-written policies" }, T);
+    const list = await within(p).findByRole("table", { name: "Manual policies" }, T);
     const names = within(list)
       .getAllByRole("link")
       .map((a) => a.textContent);
@@ -92,10 +92,11 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(within(list).getByText("Disabled")).toBeInTheDocument();
   });
 
-  it("says when the profile has no hand-written policy", async () => {
+  it("says when the profile has no manual policy", async () => {
     serve(answers({}, { "/policies?service=lake-tr": ok([policy(3, "compiler")]) }));
     open();
-    expect(await within(await panel()).findByText("This profile has no hand-written policy.", {}, T)).toBeInTheDocument();
+    expect(await within(await panel()).findByText("This profile has no manual policy.", {}, T)).toBeInTheDocument();
+    expect(within(await panel()).queryByText(/hand-written/i)).not.toBeInTheDocument();
   });
 
   it("offers Create policy on a manual profile: Access, Masking, Row filter, as links to the editor", async () => {

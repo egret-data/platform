@@ -1,14 +1,17 @@
-import { Fragment, type ComponentType, type ReactNode } from "react";
+import { Fragment, useRef, type ComponentType, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { AppWindow, BarChart3, Database, FileCode2, Folder, LayoutDashboard, Table2 } from "lucide-react";
+import { AppWindow, BarChart3, Database, FileCode2, Folder, LayoutDashboard, Table2, X } from "lucide-react";
 import type { ApiError } from "@/api/client";
 import type { BiObject, TableUsage } from "@/api/generated/model";
 import { useControlPlaneGovernanceTagUsage } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { IconButton } from "@/components/ui/icon-button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
+import { useRemoveClassification, type RemoveTarget } from "@/routes/governance/RemoveClassificationDialog";
 import { pathToUrl } from "@/routes/governance/data/objectPath";
-import { Section, TabError } from "@/routes/governance/tabParts";
+import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
@@ -78,6 +81,38 @@ function Carries({ t }: { t: TableUsage }) {
   );
 }
 
+/**
+ * One Remove per assignment on the row (spec C4): "Table", then each column,
+ * as Attached to lists them. Each line names what it removes; the button's
+ * label names the classification and the whole path.
+ */
+function Removes({
+  t,
+  tagName,
+  onRemove,
+}: {
+  t: TableUsage;
+  tagName: string;
+  onRemove: (column: string | undefined, label: string) => void;
+}) {
+  const base = `${t.catalogName}.${t.schema}.${t.table}`;
+  const items: { key: string; column?: string; text: string; label: string }[] = [];
+  if (t.onTable) items.push({ key: "", text: "Table", label: base });
+  for (const c of [...t.columns].sort(byText)) items.push({ key: c, column: c, text: c, label: `${base}.${c}` });
+  return (
+    <ul className="space-y-0.5">
+      {items.map((i) => (
+        <li key={i.key} className="flex items-center justify-end gap-1">
+          <span className={i.column === undefined ? "text-xs" : "font-mono text-xs"}>{i.text}</span>
+          <IconButton aria-label={`Remove ${tagName} from ${i.label}`} onClick={() => onRemove(i.column, i.label)}>
+            <X aria-hidden className="size-3.5" />
+          </IconButton>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-sm text-muted-foreground">{children}</p>;
 }
@@ -102,9 +137,17 @@ function BiName({ o }: { o: BiObject }) {
  * the server could not place (orphaned warehouse, deleted object) and objects
  * past the check cap are each stated, never dropped (CL11, CL12). A failed
  * read is an error with Retry, never an empty sentence.
+ *
+ * A viewer who may edit catalog tags (`catalog_registry:update`, or platform
+ * admin: `useCanEditCatalogTags`) gets a pinned actions column with one
+ * Remove per assignment (spec C4), sent to the row's own `warehouseId`.
  */
 export function WhereUsedTab({ tagId }: { tagId: string }) {
   const q = useControlPlaneGovernanceTagUsage(tagId, { query: { retry: false } });
+  const canRemove = useCanEditCatalogTags();
+  // After a remove, focus lands on the Data heading: the removed row's button, or the whole row, is gone.
+  const dataHeading = useRef<HTMLHeadingElement>(null);
+  const removal = useRemoveClassification(() => dataHeading.current);
 
   if (q.isError) {
     const message = (q.error as unknown as ApiError | null)?.message;
@@ -122,16 +165,34 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
       </div>
     );
   }
-  const { data, bi } = q.data.data;
+  const { tag, data, bi } = q.data.data;
+  const remove = (t: TableUsage, column: string | undefined, label: string) => {
+    const target: RemoveTarget = { warehouseId: t.warehouseId, schema: t.schema, table: t.table, column, label };
+    removal.ask({ tag, target });
+  };
   const groups = groupTables(data.tables);
   const readable = [...bi.readable];
   const nothingBi = readable.length === 0 && bi.unreadable.count === 0 && bi.remaining === 0;
 
   return (
     <div className="space-y-6">
-      <Section title="Data">
+      <Section title="Data" headingRef={dataHeading}>
         {groups.length === 0 ? (
-          <EmptyState icon={Table2} title="No table or column carries this classification." />
+          // The Data page offers Add classification only with catalog_registry:update (FE-ACTION-4).
+          <EmptyState
+            icon={Table2}
+            title="No table or column carries this classification."
+            description={
+              canRemove
+                ? "Open a table or a column and use Add classification."
+                : "Attaching needs the catalog_registry:update permission."
+            }
+            action={
+              <Link to="/governance/data" className="text-sm font-medium text-primary hover:underline">
+                {canRemove ? "Attach in Data" : "Open Data"}
+              </Link>
+            }
+          />
         ) : (
           groups.map((g) => (
             <div key={g.label} className="space-y-1">
@@ -141,7 +202,12 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Table</TableHead>
-                      <TableHead>Carries it</TableHead>
+                      <TableHead>Attached to</TableHead>
+                      {canRemove ? (
+                        <TableHead className={ACTIONS_CELL}>
+                          <span className="sr-only">Actions</span>
+                        </TableHead>
+                      ) : null}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -158,6 +224,11 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                         <TableCell className="whitespace-normal">
                           <Carries t={t} />
                         </TableCell>
+                        {canRemove ? (
+                          <TableCell className={`${ACTIONS_CELL} w-auto`}>
+                            <Removes t={t} tagName={tag.name} onRemove={(column, label) => remove(t, column, label)} />
+                          </TableCell>
+                        ) : null}
                       </TableRow>
                     ))}
                   </TableBody>
@@ -166,6 +237,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
             </div>
           ))
         )}
+        {removal.dialog}
         {data.orphaned > 0 ? (
           <Note>
             {`${data.orphaned} ${plural(data.orphaned, "assignment is", "assignments are")} in a warehouse no catalog names.`}

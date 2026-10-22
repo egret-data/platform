@@ -102,6 +102,19 @@ test("RequirePermission denies a user missing the required permission", () => {
   expect(screen.getByText(/Forbidden/i)).toBeInTheDocument();
 });
 
+test("RequirePermission names every permission it accepts, and links home", () => {
+  render(
+    <QueryClientProvider client={qc()}>
+      <AuthContext.Provider value={{ me: { user_id: "1", email: "a@b.c", platform_roles: [], permissions: ["engine:read"] }, isLoading: false }}>
+        <MemoryRouter><RequirePermission perm={["policy:read", "tag:read"]}><span>policies</span></RequirePermission></MemoryRouter>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
+  );
+  expect(screen.getByRole("heading", { level: 1, name: "You don't have access to this page." })).toBeInTheDocument();
+  expect(screen.getByText("This page needs the policy:read or tag:read permission.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Go to the home page" })).toHaveAttribute("href", "/");
+});
+
 test("RequireControlPlaneAccess allows a user holding any control-plane permission", () => {
   render(
     <QueryClientProvider client={qc()}>

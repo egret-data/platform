@@ -1,31 +1,42 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2, Tag as TagIcon } from "lucide-react";
+import { Columns3, Loader2, Lock, Tag as TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import { invalidateObjectHandwritten, invalidateTag } from "@/api/tags";
 import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
-import { getControlPlaneGovernanceObjectTagsQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
-import { getControlPlaneTagsListTagsQueryKey, useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
+import { useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
+import type { RuleView } from "@/api/generated/model";
+import { usePermListRules } from "@/api/generated/perm/perm";
+import { invalidateTagAssignment, type Tag } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { refusalMessage } from "@/routes/governance/policyWrites";
+import { tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
+import { DEFAULT_COLOR } from "@/routes/governance/classifications/tagParts";
+import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { fullPath } from "@/routes/governance/data/objectData";
 import { failedText } from "@/routes/governance/tabParts";
+import { TERM } from "@/routes/governance/glossary";
+import { attachIntent, clearAttachIntent } from "@/routes/governance/attachIntent";
 
 /**
- * Why Add tag is disabled on an object outside egret's catalogs (F9: the tag
+ * Why Add classification is disabled on an object outside egret's catalogs (F9: the tag
  * API is keyed by egret's warehouse, so only an egret catalog can carry a
  * tag). Also this module's bundle marker (`scripts/assert-governance-data-lazy.mjs`).
  */
-export const TAGS_EGRET_ONLY = "Tags can be added to egret-managed catalogs only";
+export const TAGS_EGRET_ONLY = "Classifications can be attached to egret-managed catalogs only";
 
 /** What the tag picker says when `GET /tags` is refused (it needs `tag:read`, which writing a tag does not imply). */
-const TAG_LIST_NEEDS_TAG_READ = "Reading the tag list needs the tag:read permission.";
+const TAG_LIST_NEEDS_TAG_READ = "Reading the classification list needs the tag:read permission.";
+
+/** Spec C5: what a classification on a whole table does, shown when no mask is known to select it. */
+const TABLE_LEVEL_NOTE =
+  "On a whole table, this classification counts for clearance on every column. A rule that masks by classification needs it on columns, not on the table.";
 
 /** The table or column a tag is added to. */
 export type TagTarget = {
@@ -38,23 +49,48 @@ export type TagTarget = {
   column?: string;
   /** The ids of the tags already on this table or column, which are not offered again. */
   assigned: string[];
+  /**
+   * The table's columns as its source lists them, for "Attach to columns
+   * instead" (spec C5); absent when they could not be listed or for a column.
+   */
+  columns?: string[];
 };
+
+/** The conflict sentence (spec C5): one mask, the classification and the table. */
+function conflictSentence(mask: string, tag: string, schema: string, table: string): string {
+  return `${mask} masks by ${tag}, so ${tag} on the whole table ${schema}.${table} would make it unreadable.`;
+}
+
+const columnsWord = (n: number) => `${n} ${n === 1 ? "column" : "columns"}`;
 
 /**
  * Add one tag to a table or a column (spec §2.2, F9) through the existing
  * resource-tags write, `PUT /warehouses/{warehouse_id}/resource-tags`, gated
  * on `catalog_registry:update` (`crates/egret-bi/src/catalog_tags.rs`,
  * `WAREHOUSE_WRITE`). The picker offers the tag catalogue (`GET /tags`,
- * `tag:read`) less the tags already on the target.
+ * `tag:read`) less the tags already on the target; each option shows its
+ * swatch, key, the first line of its description, "Clearance" when gated and,
+ * with `policy:read`, how many rules select it (spec C4).
  *
- * On success it refetches the object's tags (the header, the Overview's
- * columns, the column panel and the tag rules all read them) and the tag
- * catalogue (its assignment counts) under both keys it is cached by, the
- * generated `GET /tags` key and `tagsQueryKey` (`api/tags.ts`), closes and
- * toasts. On failure the
- * server's sentence shows beside the field and the choice is kept: a 409
- * names the two rules the tag would make overlap, a 400 the level a
- * coordinate cannot be stored at.
+ * **A whole table (spec C5).** A mask that selects by a classification
+ * type-checks against every column, so the classification on a whole table
+ * makes the table unreadable, and the server refuses the pair
+ * (`table_tag_mask_conflict`). With `policy:read` the dialog knows before
+ * submit: when a mask rule selects the picked classification (`rulesOnTag`),
+ * it says so, Add is `aria-disabled` with that sentence as its reason, and
+ * **Attach to columns instead** switches to a checkbox list of the table's
+ * columns, one `PUT` per ticked column in the table's order, stopping at the
+ * first failure with the ticks kept. Without `policy:read` (or with no such
+ * mask) it shows a short note, and the server decides: its coded refusal is
+ * shown as the same sentence, with the same way out. While the rules are
+ * still loading, Add waits ("Checking rules…"); when they could not be read,
+ * it says so and the server decides. The dialog does not close while a write
+ * is in flight.
+ *
+ * On success it refetches what an attach changes (`invalidateTagAssignment`),
+ * closes and toasts. On failure the server's sentence shows beside the field
+ * and the choice is kept: a 409 names the two rules the tag would make
+ * overlap, a 400 the level a coordinate cannot be stored at.
  */
 export function AddTagDialog({
   target,
@@ -64,49 +100,127 @@ export function AddTagDialog({
   target: TagTarget | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  // A write in flight (one column of several, or the whole table) keeps the dialog open:
+  // closing would drop the run's outcome and the remaining columns silently.
+  const [busy, setBusy] = useState(false);
   return (
-    <Dialog open={target !== null} onOpenChange={onOpenChange}>
+    <Dialog
+      open={target !== null}
+      onOpenChange={(open) => {
+        if (!open && busy) return;
+        onOpenChange(open);
+      }}
+    >
       <DialogContent className="sm:max-w-md">
-        {target ? <AddTagForm target={target} onDone={() => onOpenChange(false)} /> : null}
+        {target ? <AddTagForm target={target} onDone={() => onOpenChange(false)} onBusyChange={setBusy} /> : null}
       </DialogContent>
     </Dialog>
   );
 }
 
-function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void }) {
+function AddTagForm({
+  target,
+  onDone,
+  onBusyChange,
+}: {
+  target: TagTarget;
+  onDone: () => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
   const [tagId, setTagId] = useState("");
+  const [mode, setMode] = useState<"whole" | "columns">("whole");
+  const [ticked, setTicked] = useState<string[]>([]);
+  const [columnsError, setColumnsError] = useState<unknown>(null);
+  const [columnsPending, setColumnsPending] = useState(false);
   const tagsQ = useControlPlaneTagsListTags({ query: { retry: false } });
+  const canReadRules = usePolicyPermissions()("policy:read");
+  const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
   const queryClient = useQueryClient();
-  const assign = useControlPlaneCatalogAssignResourceTag<ApiError>({
-    mutation: {
-      onSuccess: (_data, vars) => {
-        void queryClient.invalidateQueries({ queryKey: [getControlPlaneGovernanceObjectTagsQueryKey(target.catalogId)[0]] });
-        void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
-        // The Classification pages, RuleDialog and the rule lists read the catalogue under `["tags"]`;
-        // the tag's Where used reads route C (CL16).
-        invalidateTag(queryClient, vars.data.tag_id);
-        // The Hand-written sections match tag policies through the object's tags (route A).
-        invalidateObjectHandwritten(queryClient);
-        toast.success("Tag added.");
-        onDone();
-      },
-    },
-  });
+  const assign = useControlPlaneCatalogAssignResourceTag<ApiError>();
 
   const path = fullPath({ catalog: target.catalog, schema: target.schema, object: target.table, column: target.column });
   const assigned = new Set(target.assigned);
-  const offered =
-    tagsQ.data?.status === 200
-      ? tagsQ.data.data.filter((t) => !assigned.has(t.id)).sort((a, b) => a.name.localeCompare(b.name))
-      : undefined;
-  const noun = target.column === undefined ? "table" : "column";
+  // The control-plane route answers `Tag` (with clearance); the generated `TagDto` is egret-bi's narrower schema (`api/tags.ts`).
+  const catalogue = tagsQ.data?.status === 200 ? (tagsQ.data.data as unknown as Tag[]) : undefined;
+  const offered = catalogue?.filter((t) => !assigned.has(t.id)).sort((a, b) => a.name.localeCompare(b.name));
+  // The classification "Attach in Data" brought the user here for, chosen once it is offered.
+  const [intentApplied, setIntentApplied] = useState(false);
+  if (!intentApplied && offered !== undefined) {
+    setIntentApplied(true);
+    const wanted = attachIntent();
+    if (!tagId && wanted && offered.some((t) => t.id === wanted)) setTagId(wanted);
+  }
+  const rules: RuleView[] | undefined = canReadRules && rulesQ.data?.status === 200 ? rulesQ.data.data : undefined;
+  // With policy:read, a whole-table attach waits for the rules: until they answer, the mask check cannot be made.
+  const rulesLoading = canReadRules && !rulesQ.isError && rulesQ.data?.status !== 200;
+  const picked = offered?.find((t) => t.id === tagId);
+  const onTable = target.column === undefined;
+  const noun = onTable ? "table" : "column";
 
-  let picker;
+  // Known before submit (spec C5): a mask rule selects the picked classification and the target is a whole table.
+  const masks = onTable && picked && rules ? rulesOnTag(rules, picked).filter((r) => r.kind.type === "mask") : [];
+  const preConflict =
+    masks.length > 0 && picked ? conflictSentence(masks[0].name, picked.name, target.schema, target.table) : null;
+  // What the server said, when it refused the pair.
+  const serverConflict = tableTagMaskConflict(assign.error);
+
+  const succeed = (message: string) => {
+    if (attachIntent() === picked?.id) clearAttachIntent();
+    toast.success(message);
+    onDone();
+  };
+
+  const attachWhole = () => {
+    if (!picked || preConflict || assign.isPending) return;
+    assign
+      .mutateAsync({
+        warehouseId: target.warehouseId,
+        data: { schema: target.schema, table: target.table, column: target.column ?? "", tag_id: picked.id },
+      })
+      .then(
+        () => {
+          invalidateTagAssignment(queryClient, picked.id, target.warehouseId);
+          succeed("Classification attached.");
+        },
+        () => {
+          // Shown beside the field from `assign.error`; the choice is kept.
+        },
+      );
+  };
+
+  const attachColumns = async () => {
+    if (!picked || columnsPending) return;
+    // In the table's order, whatever order they were ticked in.
+    const order = (target.columns ?? []).filter((c) => ticked.includes(c));
+    if (order.length === 0) return;
+    setColumnsPending(true);
+    setColumnsError(null);
+    let done = 0;
+    try {
+      for (const column of order) {
+        await assign.mutateAsync({
+          warehouseId: target.warehouseId,
+          data: { schema: target.schema, table: target.table, column, tag_id: picked.id },
+        });
+        done++;
+      }
+    } catch (e) {
+      setColumnsError(e);
+    } finally {
+      setColumnsPending(false);
+      if (done > 0) invalidateTagAssignment(queryClient, picked.id, target.warehouseId);
+    }
+    if (done === order.length) succeed(`Classification attached to ${columnsWord(done)}.`);
+    // A partial run keeps the remaining ticks: the attached ones are on their columns now.
+    else if (done > 0) setTicked((prev) => prev.filter((c) => !order.slice(0, done).includes(c)));
+  };
+
+  let picker: ReactNode;
   if (tagsQ.isError) {
     const refused = tagsQ.error instanceof ApiError && tagsQ.error.status === 403;
     picker = (
       <Alert variant="destructive">
-        <AlertDescription>{refused ? TAG_LIST_NEEDS_TAG_READ : failedText("tag list")}</AlertDescription>
+        <AlertDescription>{refused ? TAG_LIST_NEEDS_TAG_READ : failedText("classification list")}</AlertDescription>
       </Alert>
     );
   } else if (offered === undefined) {
@@ -114,70 +228,247 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
   } else if (offered.length === 0) {
     picker = (
       <p className="text-sm text-muted-foreground">
-        {assigned.size > 0 && tagsQ.data?.status === 200 && tagsQ.data.data.length > 0
-          ? `Every tag is already on this ${noun}.`
-          : "No tags are defined yet."}
+        {assigned.size > 0 && catalogue && catalogue.length > 0
+          ? `Every classification is already on this ${noun}.`
+          : "No classifications are defined yet."}
       </p>
     );
   } else {
+    const wholeError = mode === "whole" && assign.isError && !serverConflict;
     picker = (
       <div className="space-y-1.5">
-        <Label htmlFor="add-tag-tag">Tag</Label>
-        <Select value={tagId} onValueChange={setTagId}>
-          <SelectTrigger id="add-tag-tag" className="w-full" aria-describedby={assign.isError ? "add-tag-error" : undefined}>
-            <SelectValue placeholder="Pick a tag" />
+        <Label htmlFor="add-tag-tag">{TERM.classification}</Label>
+        <Select
+          value={tagId}
+          onValueChange={(v) => {
+            setTagId(v);
+            setMode("whole");
+            setTicked([]);
+            setColumnsError(null);
+            assign.reset();
+          }}
+        >
+          <SelectTrigger id="add-tag-tag" className="w-full" aria-describedby={wholeError ? "add-tag-error" : undefined}>
+            <SelectValue placeholder="Choose a classification" />
           </SelectTrigger>
           <SelectContent>
             {offered.map((t) => (
-              <SelectItem key={t.id} value={t.id}>
+              <SelectItem key={t.id} value={t.id} textValue={t.name} description={<OptionDetails tag={t} rules={rules} />}>
+                <span
+                  aria-hidden="true"
+                  className="inline-block size-2.5 shrink-0 rounded-full border border-border"
+                  style={{ backgroundColor: t.color || DEFAULT_COLOR }}
+                />
                 {t.name}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        {assign.isError ? (
+        {wholeError ? (
           <p id="add-tag-error" role="alert" className="text-sm text-destructive">
-            {refusalMessage(assign.error, "catalog_registry:update", "The tag could not be added. Try again.")}
+            {refusalMessage(assign.error, "catalog_registry:update", "The classification could not be attached. Try again.")}
           </p>
         ) : null}
       </div>
     );
   }
 
+  const canColumns = onTable && (target.columns?.length ?? 0) > 0;
+  const toColumns = () => {
+    setMode("columns");
+    assign.reset();
+  };
+
+  let tableNotes: ReactNode = null;
+  if (onTable && picked && mode === "whole") {
+    if (preConflict) {
+      tableNotes = (
+        <ConflictAlert title={`On the whole table, ${picked.name} would make ${target.schema}.${target.table} unreadable.`}>
+          <p id="add-tag-conflict">{preConflict}</p>
+          <ColumnsWayOut canColumns={canColumns} onColumns={toColumns} />
+        </ConflictAlert>
+      );
+    } else if (serverConflict) {
+      tableNotes = <ServerConflict conflict={serverConflict} canColumns={canColumns} onColumns={toColumns} />;
+    } else if (rulesLoading) {
+      tableNotes = (
+        <p id="add-tag-checking" className="text-xs text-muted-foreground">
+          Checking rules…
+        </p>
+      );
+    } else {
+      tableNotes = (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          {canReadRules && rulesQ.isError ? (
+            <p>The rules could not be read, so whether a mask uses this classification is not checked here; egret checks it when you add.</p>
+          ) : null}
+          <p>{TABLE_LEVEL_NOTE}</p>
+        </div>
+      );
+    }
+  }
+
+  const columnsForm =
+    onTable && picked && mode === "columns" ? (
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium">{`Columns of ${target.schema}.${target.table} to attach ${picked.name} to`}</legend>
+        <ul className="max-h-48 space-y-1 overflow-y-auto">
+          {(target.columns ?? []).map((c) => {
+            const id = `add-tag-col-${c}`;
+            return (
+              <li key={c} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={ticked.includes(c)}
+                  onCheckedChange={(v) => setTicked((prev) => (v === true ? [...prev, c] : prev.filter((x) => x !== c)))}
+                />
+                <Label htmlFor={id} className="font-mono text-xs font-normal">
+                  {c}
+                </Label>
+              </li>
+            );
+          })}
+        </ul>
+        {columnsError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {tableTagMaskConflict(columnsError)?.error ??
+              refusalMessage(columnsError, "catalog_registry:update", "The classification could not be attached. Try again.")}
+          </p>
+        ) : null}
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0"
+          onClick={() => {
+            setMode("whole");
+            setColumnsError(null);
+            assign.reset();
+          }}
+        >
+          Attach to the whole table instead
+        </Button>
+      </fieldset>
+    ) : null;
+
+  // Why the submit does nothing, when it does nothing (FE-ACTION-4, spec N22: aria-disabled with the reason tied).
+  let blockedBy: string | undefined;
+  if (offered && offered.length > 0 && !tagId) blockedBy = "add-tag-needs";
+  else if (mode === "whole" && preConflict) blockedBy = "add-tag-conflict";
+  else if (mode === "whole" && onTable && picked && rulesLoading && !serverConflict) blockedBy = "add-tag-checking";
+  else if (mode === "columns" && ticked.length === 0) blockedBy = "add-tag-tick";
+  const pending = assign.isPending || columnsPending;
+  useEffect(() => {
+    onBusyChange(pending);
+    return () => onBusyChange(false);
+  }, [pending, onBusyChange]);
+
   return (
     <form
       className="grid gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!tagId) return;
-        assign.mutate({
-          warehouseId: target.warehouseId,
-          data: { schema: target.schema, table: target.table, column: target.column ?? "", tag_id: tagId },
-        });
+        if (blockedBy || pending) return;
+        if (mode === "columns") void attachColumns();
+        else attachWhole();
       }}
     >
       <DialogHeader>
-        <DialogTitle>Add tag</DialogTitle>
+        <DialogTitle>{TERM.addClassification}</DialogTitle>
         <DialogDescription>
           <span className="font-mono text-xs break-all">{path}</span>
         </DialogDescription>
       </DialogHeader>
       {picker}
+      {tableNotes}
+      {columnsForm}
       <DialogFooter className="items-center">
-        {offered && offered.length > 0 && !tagId ? (
+        {blockedBy === "add-tag-needs" ? (
           <p id="add-tag-needs" className="text-xs text-muted-foreground">
-            Pick a tag to add.
+            Choose a classification to attach.
+          </p>
+        ) : blockedBy === "add-tag-tick" ? (
+          <p id="add-tag-tick" className="text-xs text-muted-foreground">
+            Tick the columns to attach it to.
           </p>
         ) : null}
-        <Button
-          type="submit"
-          disabled={!tagId || assign.isPending}
-          aria-describedby={offered && offered.length > 0 && !tagId ? "add-tag-needs" : undefined}
-        >
-          {assign.isPending ? <Loader2 aria-hidden className="animate-spin" /> : <TagIcon aria-hidden />}
-          Add tag
+        <Button type="submit" aria-disabled={blockedBy || pending ? true : undefined} aria-describedby={blockedBy}>
+          {pending ? <Loader2 aria-hidden className="animate-spin" /> : mode === "columns" ? <Columns3 aria-hidden /> : <TagIcon aria-hidden />}
+          {mode === "columns" ? `Attach to ${columnsWord(ticked.length)}` : TERM.addClassification}
         </Button>
       </DialogFooter>
     </form>
+  );
+}
+
+/** An option's secondary line: key, the description's first line, clearance and, with `policy:read`, its rules. */
+function OptionDetails({ tag, rules }: { tag: Tag; rules: RuleView[] | undefined }) {
+  const firstLine = tag.description.split("\n")[0]?.trim();
+  const gated = (tag.required_roles?.length ?? 0) + (tag.required_groups?.length ?? 0) > 0;
+  const ruleCount = rules ? rulesOnTag(rules, tag).length : 0;
+  return (
+    <>
+      <span className="font-mono text-xs">{tag.key}</span>
+      {firstLine ? <span className="truncate">{firstLine}</span> : null}
+      {gated ? (
+        <span className="inline-flex items-center gap-1">
+          <Lock aria-hidden className="size-3" />
+          {TERM.clearance}
+        </span>
+      ) : null}
+      {ruleCount > 0 ? <span className="tabular-nums">{`${ruleCount} ${ruleCount === 1 ? "rule" : "rules"}`}</span> : null}
+    </>
+  );
+}
+
+function ConflictAlert({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Alert>
+      <AlertTitle className="whitespace-normal">{title}</AlertTitle>
+      <AlertDescription className="space-y-2">{children}</AlertDescription>
+    </Alert>
+  );
+}
+
+function ColumnsWayOut({ canColumns, onColumns }: { canColumns: boolean; onColumns: () => void }) {
+  if (!canColumns) {
+    return <p className="text-xs">The table's columns could not be listed: attach it from each column's panel.</p>;
+  }
+  return (
+    <Button type="button" variant="outline" size="sm" onClick={onColumns}>
+      <Columns3 aria-hidden />
+      Attach to columns instead
+    </Button>
+  );
+}
+
+/**
+ * The server's `table_tag_mask_conflict` (spec C5), as the same short
+ * sentence, with the same way out (the columns). On an attach the conflict is
+ * the write itself (the body's `warehouseId` is `null`: nothing is stored to
+ * remove), so there is no "Remove from table" here; the rule dialog's has one.
+ * Only the sentence is the alert; the actions and details are not announced.
+ */
+function ServerConflict({
+  conflict,
+  canColumns,
+  onColumns,
+}: {
+  conflict: TableTagMaskConflict;
+  canColumns: boolean;
+  onColumns: () => void;
+}) {
+  return (
+    <div className="space-y-2 rounded-md border border-destructive/50 p-3 text-sm">
+      <p role="alert" className="text-destructive">
+        {conflictSentence(conflict.mask, conflict.tag, conflict.schema, conflict.table)}
+        {conflict.moreTables ? " Other tables carry it too." : ""}
+      </p>
+      <ColumnsWayOut canColumns={canColumns} onColumns={onColumns} />
+      <details className="text-xs text-muted-foreground">
+        <summary>Details</summary>
+        {conflict.error}
+      </details>
+    </div>
   );
 }

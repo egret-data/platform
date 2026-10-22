@@ -38,12 +38,14 @@ const MARKERS = [
   ["src/routes/governance/classifications/DeleteTagDialog.tsx", "Rules: needs policy:read to count."],
   // Where used's Data empty sentence (spec §5.1).
   ["src/routes/governance/classifications/tabs/WhereUsedTab.tsx", "No table or column carries this classification."],
+  // The Effect strip's missing-permission line for clearance (spec C2).
+  ["src/routes/governance/classifications/EffectStrip.tsx", "Setting clearance needs the tag:manage permission."],
   // The Clearance tab's compile line (spec §5.2).
   ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
-  // The Mask & filter tab without policy:read (spec §5.3).
+  // The Rules tab without policy:read (spec §5.3).
   ["src/routes/governance/classifications/tabs/RulesTab.tsx", "Rules are read with the policy:read permission"],
-  // The Hand-written tab's empty state (spec §5.5).
-  ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No hand-written tag policy names this classification."],
+  // The Manual policies tab's empty state (spec §5.5).
+  ["src/routes/governance/classifications/tabs/HandWrittenTagTab.tsx", "No manual tag policy names this classification."],
 ];
 
 /**
@@ -56,13 +58,13 @@ const MARKERS = [
 const AREA_ANCHORS = {
   Data: "Reading grants needs the policy:read permission, which this account does not have.",
   People: "Users, groups and roles, and the egret grants and rules that reach each one.",
-  Classification: "No hand-written tag policy names this classification.",
+  Classification: "No manual tag policy names this classification.",
 };
 const HANDWRITTEN = [
   // Route A's section (Data).
-  ["src/routes/governance/handwritten/HandWrittenSection.tsx", "No hand-written policy reaches this object.", ["Data"]],
+  ["src/routes/governance/handwritten/HandWrittenSection.tsx", "No manual policy reaches this object.", ["Data"]],
   // Route B's section (People).
-  ["src/routes/governance/handwritten/PrincipalHandWrittenSection.tsx", "No hand-written policy names this principal.", ["People"]],
+  ["src/routes/governance/handwritten/PrincipalHandWrittenSection.tsx", "No manual policy names this principal.", ["People"]],
   // The shared words: Q1's sentence.
   ["src/routes/governance/handwritten/handwrittenText.ts", "Engines resolve no groups, so on the engine it reaches nobody.", ["Data", "People", "Classification"]],
   // The item summary's empty item.
@@ -135,4 +137,4 @@ for (const [module, marker, areas] of HANDWRITTEN) {
 }
 
 if (failed) process.exit(1);
-console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks; the hand-written views load with Data, People and Classification.`);
+console.log(`✓ Classification stays out of the entry chunk (${entry}) and its preloads; markers found in lazy chunks; the manual-policy views load with Data, People and Classification.`);

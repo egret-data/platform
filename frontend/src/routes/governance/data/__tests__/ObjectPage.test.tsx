@@ -225,9 +225,10 @@ describe("ObjectHeader", () => {
         "trino-1 · Trino",
       ]),
     );
-    const tags = await within(header()).findByRole("list", { name: "Tags" });
-    // The table's own tag only; a column's tag is not the table's.
+    const tags = await within(header()).findByRole("list", { name: "Classifications" });
+    // The table's own classification only; a column's is not the table's.
     expect(within(tags).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["CONFIDENTIAL"]);
+    expect(within(header()).queryByRole("list", { name: "Tags" })).not.toBeInTheDocument();
   });
 
   it("takes an object's kind from its schema's listing", async () => {
@@ -240,8 +241,8 @@ describe("ObjectHeader", () => {
     const { tagCalls } = serveData(fixture());
     renderPage("/governance/data/ice/sales");
     expect(await within(header()).findByText("Schema")).toBeInTheDocument();
-    expect(within(header()).queryByRole("list", { name: "Tags" })).not.toBeInTheDocument();
-    expect(within(header()).queryByText(/tag/i)).not.toBeInTheDocument();
+    expect(within(header()).queryByRole("list", { name: "Classifications" })).not.toBeInTheDocument();
+    expect(within(header()).queryByText(/tag|classification/i)).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
   });
 
@@ -254,12 +255,12 @@ describe("ObjectHeader", () => {
     renderPage("/governance/data/pg/s/t");
     expect(await within(header()).findByText("Table")).toBeInTheDocument();
     await screen.findByRole("cell", { name: "amount" });
-    expect(within(header()).queryByRole("list", { name: "Tags" })).not.toBeInTheDocument();
-    expect(within(header()).queryByText(/tag/i)).not.toBeInTheDocument();
+    expect(within(header()).queryByRole("list", { name: "Classifications" })).not.toBeInTheDocument();
+    expect(within(header()).queryByText(/tag|classification/i)).not.toBeInTheDocument();
     // The Overview's columns carry no Tags column either, and nothing says "loading".
     const columns = within(panel()).getByRole("table", { name: "Columns" });
-    expect(within(columns).queryByRole("columnheader", { name: "Tags" })).not.toBeInTheDocument();
-    expect(within(panel()).queryByText("Loading tags")).not.toBeInTheDocument();
+    expect(within(columns).queryByRole("columnheader", { name: "Classifications" })).not.toBeInTheDocument();
+    expect(within(panel()).queryByText("Loading classifications")).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
   });
 
@@ -292,7 +293,7 @@ describe("ObjectHeader", () => {
   it("says when the tags could not be loaded, and keeps the rest of the header", async () => {
     serveData(fixture({ tags: { "c-ice|sales|orders": boom } }));
     renderPage("/governance/data/ice/sales/orders");
-    expect(await within(header()).findByText("Tags could not be loaded.")).toBeInTheDocument();
+    expect(await within(header()).findByText("Classifications could not be loaded.")).toBeInTheDocument();
     expect(within(header()).getByRole("heading", { level: 1, name: "orders" })).toBeInTheDocument();
     expect(within(header()).getByText("Table")).toBeInTheDocument();
   });
@@ -324,7 +325,7 @@ describe("ObjectHeader", () => {
 
     it("shows each action only with its permission", () => {
       renderHeader({ ...STEWARD, permissions: ["policy:update", "catalog_registry:update", "policy:read"] }, all);
-      expect(buttons()).toEqual(["Grant access", "Add tag", "Who can read?"]);
+      expect(buttons()).toEqual(["Grant access", "Add classification", "Who can read?"]);
     });
 
     // `POST /perm/grants` requires `policy:update`, not `policy:create`.
@@ -338,14 +339,14 @@ describe("ObjectHeader", () => {
       expect(buttons()).toEqual(["Who can read?"]);
     });
 
-    it("hides Add tag without catalog_registry:update, even with tag permissions", () => {
+    it("hides Add classification without catalog_registry:update, even with tag permissions", () => {
       renderHeader({ ...STEWARD, permissions: ["policy:update", "tag:read", "tag:manage"] }, all);
       expect(buttons()).toEqual(["Grant access"]);
     });
 
     it("gives a platform admin every action", () => {
       renderHeader({ ...STEWARD, platform_roles: ["platform_admin"], permissions: [] }, all);
-      expect(buttons()).toEqual(["Grant access", "Add tag", "Who can read?"]);
+      expect(buttons()).toEqual(["Grant access", "Add classification", "Who can read?"]);
     });
 
     it("hides an action no handler is wired for", () => {
@@ -366,19 +367,19 @@ describe("ObjectTabs", () => {
   it("gives each level the tabs of spec §2.2", async () => {
     serveData(fixture());
     const { unmount } = renderPage("/governance/data/ice");
-    expect(tabNames()).toEqual(["Overview", "Permissions", "Masks & filters", "Details"]);
+    expect(tabNames()).toEqual(["Overview", "Permissions", "Rules", "Details"]);
     unmount();
     renderPage("/governance/data/ice/sales");
-    expect(tabNames()).toEqual(["Overview", "Permissions", "Masks & filters"]);
+    expect(tabNames()).toEqual(["Overview", "Permissions", "Rules"]);
   });
 
   it("gives a table and a view the same tabs", async () => {
     serveData(fixture());
     const { unmount } = renderPage("/governance/data/ice/sales/orders");
-    expect(tabNames()).toEqual(["Overview", "Permissions", "Masks & filters", "Lineage", "Details"]);
+    expect(tabNames()).toEqual(["Overview", "Permissions", "Rules", "Lineage", "Details"]);
     unmount();
     renderPage("/governance/data/ice/sales/v_orders");
-    expect(tabNames()).toEqual(["Overview", "Permissions", "Masks & filters", "Lineage", "Details"]);
+    expect(tabNames()).toEqual(["Overview", "Permissions", "Rules", "Lineage", "Details"]);
   });
 
   it("selects the tab ?tab= names", async () => {
@@ -426,6 +427,19 @@ describe("ObjectTabs", () => {
 });
 
 describe("OverviewTab", () => {
+  it("stacks the columns table into labelled cards on a narrow screen", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    expect(columns.className).toContain("max-sm:block");
+    const email = within(columns).getByRole("link", { name: "email" }).closest("tr") as HTMLElement;
+    expect([...email.querySelectorAll("td[data-label]")].map((td) => td.getAttribute("data-label"))).toEqual([
+      "Type",
+      "Classifications",
+      "Rules",
+    ]);
+  });
+
   it("shows a catalog's schemas, attached engines and workspaces", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice");
@@ -471,9 +485,9 @@ describe("OverviewTab", () => {
     const rows = within(columns).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["id", "amount", "email"]);
     expect(within(rows[1]).getByText("decimal(10,2)")).toBeInTheDocument();
-    const emailTags = within(within(rows[2]).getByRole("list", { name: "Tags of email" })).getAllByRole("listitem");
+    const emailTags = within(within(rows[2]).getByRole("list", { name: "Classifications of email" })).getAllByRole("listitem");
     expect(emailTags.map((li) => li.textContent)).toEqual(["PII", "CONFIDENTIAL from table"]);
-    const idTags = within(within(rows[0]).getByRole("list", { name: "Tags of id" })).getAllByRole("listitem");
+    const idTags = within(within(rows[0]).getByRole("list", { name: "Classifications of id" })).getAllByRole("listitem");
     expect(idTags.map((li) => li.textContent)).toEqual(["CONFIDENTIAL from table"]);
   });
 
@@ -485,21 +499,27 @@ describe("OverviewTab", () => {
     serveData(fixture({ rules: ok(ALL_RULES.map((r) => (r === R.colPath ? exempted : r))) }));
     renderPage("/governance/data/ice/sales/orders");
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
-    const email = await within(columns).findByRole("list", { name: "Masking rules of email" });
+    const email = await within(columns).findByRole("list", { name: "Rules of email" });
     const items = (list: HTMLElement) => within(list).getAllByRole("listitem").map((li) => li.textContent);
+    expect(within(columns).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Name",
+      "Type",
+      "Classifications",
+      "Rules",
+    ]);
     // By name; a row filter never shows on a column; nothing from another table, catalog or tag.
     expect(items(email)).toEqual([
-      "hash_email mask · MASK_HASH · except user bob, members of workspace Sales",
-      "null_sales mask · MASK_NULL",
-      "redact_confidential mask · MASK",
-      "redact_pii mask · MASK",
-      "star_orders mask · MASK",
+      "hash_email Mask · Hash · except user bob, members of workspace Sales",
+      "null_sales Mask · Nullify",
+      "redact_confidential Mask · Redact",
+      "redact_pii Mask · Redact",
+      "star_orders Mask · Redact",
     ]);
     // `id` carries only the table's tag, which reaches it.
-    expect(items(within(columns).getByRole("list", { name: "Masking rules of id" }))).toEqual([
-      "null_sales mask · MASK_NULL",
-      "redact_confidential mask · MASK",
-      "star_orders mask · MASK",
+    expect(items(within(columns).getByRole("list", { name: "Rules of id" }))).toEqual([
+      "null_sales Mask · Nullify",
+      "redact_confidential Mask · Redact",
+      "star_orders Mask · Redact",
     ]);
     expect(within(panel()).queryByText(/sees|can see|masked for/i)).not.toBeInTheDocument();
   });
@@ -513,15 +533,15 @@ describe("OverviewTab", () => {
     );
     renderPage("/governance/data/pg/public/orders");
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
-    const email = await within(columns).findByRole("list", { name: "Masking rules of email" });
-    expect(within(email).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["pg_mask mask · MASK_HASH"]);
+    const email = await within(columns).findByRole("list", { name: "Rules of email" });
+    expect(within(email).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["pg_mask Mask · Hash"]);
     expect(tagCalls).toEqual([]);
   });
 
   it("says the masking rules could not be loaded, and keeps the columns", async () => {
     serveData(fixture({ rules: boom }));
     renderPage("/governance/data/ice/sales/orders");
-    expect(await within(panel()).findByText("The masking rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(await within(panel()).findByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
     expect(within(panel()).getByRole("table", { name: "Columns" })).toBeInTheDocument();
   });
 
@@ -529,7 +549,7 @@ describe("OverviewTab", () => {
     const { permCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
     renderPage("/governance/data/ice/sales/orders", { ...STEWARD, permissions: ["tag:read"] });
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
-    expect(within(columns).queryByRole("columnheader", { name: "Masking rules" })).not.toBeInTheDocument();
+    expect(within(columns).queryByRole("columnheader", { name: "Rules" })).not.toBeInTheDocument();
     expect(permCalls).toEqual([]);
   });
 
@@ -538,10 +558,10 @@ describe("OverviewTab", () => {
     serveData(fixture({ tags: { ...fixture().tags, "c-ice|sales|orders": ok(tags) }, rules: ok([R.tagOnColumn]) }));
     renderPage("/governance/data/ice/sales/orders");
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
-    const tagList = await within(columns).findByRole("list", { name: "Tags of email" });
+    const tagList = await within(columns).findByRole("list", { name: "Classifications of email" });
     expect(within(tagList).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["PII"]);
-    const rules = await within(columns).findByRole("list", { name: "Masking rules of email" });
-    expect(within(rules).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["redact_pii mask · MASK"]);
+    const rules = await within(columns).findByRole("list", { name: "Rules of email" });
+    expect(within(rules).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["redact_pii Mask · Redact"]);
   });
 
   it("shows a view's security mode, whether its owner is cleared, and its lineage state", async () => {
@@ -721,7 +741,7 @@ describe("PermissionsTab", () => {
 
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
@@ -802,7 +822,7 @@ describe("PermissionsTab", () => {
     await within(panel()).findByRole("table", { name: "Here" });
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
@@ -833,16 +853,16 @@ describe("PermissionsTab", () => {
   });
 
   const EGRET_ONLY =
-    "egret grants are above; hand-written policies below. To see who can actually read, use Who can read?";
+    "egret grants are above; manual policies below. To see who can actually read, use Who can read?";
 
-  it("says no egret grant reaches the object, and points at the hand-written policies below", async () => {
+  it("says no egret grant reaches the object, and points at the manual policies below", async () => {
     serveData(fixture({ grants: ok(UNRELATED) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     expect(await within(panel()).findByText("No egret grant reaches this table")).toBeInTheDocument();
     expect(within(panel()).getByText(EGRET_ONLY)).toBeInTheDocument();
   });
 
-  it("says, below the grants it lists, that hand-written policies follow", async () => {
+  it("says, below the grants it lists, that manual policies follow", async () => {
     serveData(fixture({ grants: ok([ON_TABLE]) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     await within(panel()).findByRole("table", { name: "Here" });
@@ -1057,48 +1077,106 @@ describe("MasksFiltersTab", () => {
 
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inherited",
       "On columns",
-      "By tag",
+      "By classification",
       "Matching a pattern",
     ]);
     // Each row names its exemptions ("—" for none).
-    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "group auditors, user alice", ""]]);
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "Row filter · region = 'us'", "group auditors, user alice", ""]]);
     const here = within(panel()).getByRole("table", { name: "Here" });
     expect(within(here).getByRole("link", { name: "auditors" })).toHaveAttribute("href", "/governance/people/groups/auditors");
     expect(within(here).getByRole("link", { name: "alice" })).toHaveAttribute("href", "/governance/people/users/by-name/alice");
     // Masks before row filters; then catalog before schema.
     expect(rowsOf("Inherited")).toEqual([
-      ["null_salesice.sales.*", "mask · MASK_NULL", "Schema", "—", ""],
-      ["ice_filterice.*", "row filter · region = 'us'", "Catalog", "—", ""],
+      ["null_salesice.sales.*", "Mask · Nullify", "Schema", "—", ""],
+      ["ice_filterice.*", "Row filter · region = 'us'", "Catalog", "—", ""],
     ]);
-    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "mask · MASK_HASH", "email", "—", ""]]);
+    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "Mask · Hash", "email", "—", ""]]);
     // A tag on the table reaches the table; a mask by a column's tag reaches that column; a row filter by it reaches nothing.
-    expect(rowsOf("By tag")).toEqual([
-      ["redact_confidentialtag CONFIDENTIAL", "mask · MASK", "On the table", "—", ""],
-      ["redact_piitag PII", "mask · MASK", "On column email", "—", ""],
+    expect(rowsOf("By classification")).toEqual([
+      ["redact_confidentialClassification CONFIDENTIAL", "Mask · Redact", "On the table", "—", ""],
+      ["redact_piiClassification PII", "Mask · Redact", "On column email", "—", ""],
     ]);
-    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "mask · MASK", "table “ord*”", "—", ""]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "Mask · Redact", "table “ord*”", "—", ""]]);
     expect(within(panel()).queryByText(/pii_filter|hash_customers|pg_mask|redact_secret/)).not.toBeInTheDocument();
-    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules"]);
+    // The rules, then whether the listed ones are enforced (one request for every row).
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "GET /perm/rules/enforcement"]);
+  });
+
+  it("says on a rule's row that no engine enforces it, once the server says so", async () => {
+    const { permCalls } = serveData(
+      fixture({
+        rules: ok(ALL_RULES),
+        ruleEnforcement: ok(
+          ALL_RULES.map((r) => {
+            const off = r.name === "us_only";
+            const engines = off ? [] : [{ id: "e1", name: "trino-a", engineType: "trino" }];
+            const notEnforced = off ? "no_profile" : null;
+            return { ruleId: r.id, enforcedBy: engines.length, notEnforced, catalogs: [{ catalogId: "c-ice", catalogName: "ice", engines, notEnforced }] };
+          }),
+        ),
+      }),
+    );
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — its engines have no policy profile"));
+    expect(within(within(panel()).getByRole("table", { name: "Inherited" })).queryByText(/Not enforced/)).not.toBeInTheDocument();
+    expect(permCalls.filter((c) => c.call === "GET /perm/rules/enforcement")).toHaveLength(1);
+  });
+
+  it("badges a rule against THIS catalog: enforced elsewhere, no engine here", async () => {
+    const engine = { id: "e1", name: "trino-a", engineType: "trino" };
+    const ice = (engines: (typeof engine)[], notEnforced: "no_engine" | null) => ({ catalogId: "c-ice", catalogName: "ice", engines, notEnforced });
+    serveData(
+      fixture({
+        rules: ok(ALL_RULES),
+        ruleEnforcement: ok(
+          ALL_RULES.map((r) => ({
+            ruleId: r.id,
+            enforcedBy: 1,
+            notEnforced: null,
+            catalogs:
+              r.name === "us_only"
+                ? [ice([], "no_engine"), { catalogId: "c-pg", catalogName: "pg", engines: [engine], notEnforced: null }]
+                : [ice([engine], null)],
+          })),
+        ),
+      }),
+    );
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — no engine attached"));
+    expect(within(panel()).getAllByText(/Not enforced/)).toHaveLength(1);
+  });
+
+  it("links each rule to its page, with the way back to this Data page", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    const link = within(here).getByRole("link", { name: "us_only" });
+    const href = link.getAttribute("href") ?? "";
+    expect(href.startsWith("/governance/rules/")).toBe(true);
+    const from = new URLSearchParams(href.split("?")[1]).get("from");
+    expect(from).toBe(`data:${encodeURIComponent("/governance/data/ice/sales/orders?tab=masks")}`);
   });
 
   it("lists a rule on another tag that shares the tag's name, since the engine matches names", async () => {
     // The rule selects key `pii_eu`, also named PII; `email` carries key `pii`, named PII.
     serveData(fixture({ rules: ok([tagRule("redact_pii_eu", "pii_eu", REDACT, "PII")]) }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
-    await within(panel()).findByRole("table", { name: "By tag" });
-    expect(rowsOf("By tag")).toEqual([["redact_pii_eutag PII", "mask · MASK", "On column email", "—"]]);
+    await within(panel()).findByRole("table", { name: "By classification" });
+    expect(rowsOf("By classification")).toEqual([["redact_pii_euClassification PII", "Mask · Redact", "On column email", "—"]]);
   });
 
   it("names a tag rule whose tag no longer exists, rather than dropping it silently", async () => {
     serveData(fixture({ rules: ok([tagRule("orphan", "pii", REDACT, null), R.tableFilter]) }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
-    expect(await within(panel()).findByText("Rule orphan selects a tag that no longer exists, so it selects nothing.")).toBeInTheDocument();
-    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
+    expect(await within(panel()).findByText("Rule orphan uses a classification that no longer exists, so it applies to nothing.")).toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "By classification" })).not.toBeInTheDocument();
   });
 
   it("lists the rules on a catalog, then those inside it and on a pattern below it, and no tag rule", async () => {
@@ -1108,7 +1186,7 @@ describe("MasksFiltersTab", () => {
     expect(rowsOf("Here").map((r) => r[0])).toEqual(["ice_filterice.*"]);
     // The hand-written section (#4b) comes last; its count is the section's own concern.
     const headings = within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent ?? "");
-    expect(headings.at(-1)).toMatch(/^Hand-written policies/);
+    expect(headings.at(-1)).toMatch(/^Manual policies/);
     expect(headings.slice(0, -1)).toEqual([
       "Here",
       "Inside this catalog",
@@ -1125,7 +1203,7 @@ describe("MasksFiltersTab", () => {
     expect(within(panel()).queryByText(/pg_mask|redact_/)).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
     // M1: and says where the tag rules are.
-    expect(within(panel()).getByText("Tag-based rules are listed on each table's page.")).toBeInTheDocument();
+    expect(within(panel()).getByText("Rules on classifications are listed on each table's page.")).toBeInTheDocument();
   });
 
   it("lists on a schema the rules on its tables and columns", async () => {
@@ -1137,7 +1215,7 @@ describe("MasksFiltersTab", () => {
       ["hash_emailice.sales.orders.email", "orders.email"],
       ["us_onlyice.sales.orders", "orders"],
     ]);
-    expect(within(panel()).getByText("Tag-based rules are listed on each table's page.")).toBeInTheDocument();
+    expect(within(panel()).getByText("Rules on classifications are listed on each table's page.")).toBeInTheDocument();
   });
 
   it("names a workspace exemption by the workspace's name", async () => {
@@ -1145,10 +1223,11 @@ describe("MasksFiltersTab", () => {
     serveData(fixture({ rules: ok([exempted]) }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
     await within(panel()).findByRole("table", { name: "Here" });
-    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "members of workspace Finance"]]);
-    expect(within(within(panel()).getByRole("table", { name: "Here" })).queryByRole("link")).not.toBeInTheDocument();
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "Row filter · region = 'us'", "members of workspace Finance"]]);
+    // The workspace is named, not linked; the only link is the rule's own page.
+    expect(within(within(panel()).getByRole("table", { name: "Here" })).getAllByRole("link").map((a) => a.textContent)).toEqual(["us_only"]);
     // A table page lists its tag rules itself, so it does not point elsewhere.
-    expect(within(panel()).queryByText("Tag-based rules are listed on each table's page.")).not.toBeInTheDocument();
+    expect(within(panel()).queryByText("Rules on classifications are listed on each table's page.")).not.toBeInTheDocument();
   });
 
   it("lists no tag rule on a table of a catalog that is not egret's, and never asks for its tags", async () => {
@@ -1161,29 +1240,29 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/pg/public/orders?tab=masks", EDITOR);
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here").map((r) => r[0])).toEqual(["pg_filterpg.public.orders"]);
-    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "By classification" })).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
   });
 
   it("says no rule selects the object", async () => {
     serveData(fixture({ rules: ok([R.otherTable, R.otherCatalog, R.otherTag]) }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
-    expect(await within(panel()).findByText("No mask or row filter selects this table")).toBeInTheDocument();
+    expect(await within(panel()).findByText("No rule applies to this table.")).toBeInTheDocument();
   });
 
   it("says the rules could not be loaded, never that there are none", async () => {
     serveData(fixture({ rules: boom }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
     expect(await within(panel()).findByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
-    expect(within(panel()).queryByText(/No mask or row filter/)).not.toBeInTheDocument();
+    expect(within(panel()).queryByText(/No rule applies/)).not.toBeInTheDocument();
   });
 
   it("says the tags could not be loaded, and still lists the path rules", async () => {
     serveData(fixture({ rules: ok(ALL_RULES), tags: { "c-ice|sales|orders": boom } }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
-    expect(await within(panel()).findByText("The tags could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(await within(panel()).findByText("The classifications could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
     expect(within(panel()).getByRole("table", { name: "Here" })).toBeInTheDocument();
-    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "By classification" })).not.toBeInTheDocument();
   });
 
   it("tells a viewer without policy:read why, and never asks for the rules", async () => {
@@ -1202,20 +1281,27 @@ describe("MasksFiltersTab", () => {
     expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("opens Add rule in RuleDialog with a path selector for this object", async () => {
+  it("opens Add rule in RuleDialog on a classification its columns carry, the table's path one click away (spec C8.3, Task 13)", async () => {
     serveData(fixture({ rules: ok([]) }));
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "New rule" })).toBeInTheDocument();
-    // A table's path completes a row filter; a mask would need a column.
-    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Filter rows");
-    expect(within(dialog).getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Path");
-    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
+    // `email` carries PII: the rule starts on it. The table's whole-table classification is never offered.
+    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Classification");
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("Mask PII");
+    expect(within(dialog).queryByRole("button", { name: /CONFIDENTIAL/ })).not.toBeInTheDocument();
+    // The table alone: a mask on its path, its Column left empty, which masks every column.
+    await user.click(within(dialog).getByRole("button", { name: "Or apply it to table orders only" }));
+    expect(within(dialog).getByRole("combobox", { name: "Applies to" })).toHaveTextContent("Path");
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: /^Catalog/ })).toHaveTextContent("ice"));
     expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
     expect(within(dialog).getByLabelText(/^Table/)).toHaveValue("orders");
-    expect(within(dialog).getByText("Selects ice.sales.orders")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Column")).toHaveValue("");
+    expect(within(dialog).getByLabelText("Column")).toHaveAccessibleDescription("Leave Column empty to mask every column of the table.");
+    expect(within(dialog).getByText("Applies to ice.sales.orders")).toBeInTheDocument();
   });
 
   it("opens Add rule on a schema as a mask, with only the schema set", async () => {
@@ -1236,7 +1322,7 @@ describe("MasksFiltersTab", () => {
     await user.click(await within(panel()).findByRole("button", { name: "Edit us_only" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "Edit rule" })).toBeInTheDocument();
-    expect(within(dialog).getByLabelText("Name")).toHaveValue("us_only");
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue("us_only");
   });
 
   it("deletes a rule after confirmation, then refetches the tab and confirms", async () => {
@@ -1245,12 +1331,18 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.type(within(dialog).getByRole("textbox"), "delete");
+    // A rule's delete asks for its name (spec C11, the one delete convention).
+    await user.type(within(dialog).getByRole("textbox"), "us_only");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
-    expect(await within(panel()).findByText("No mask or row filter selects this table")).toBeInTheDocument();
-    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "DELETE /perm/rules/us_only", "GET /perm/rules"]);
-    expect(toast.success).toHaveBeenCalledWith("Rule deleted.");
+    expect(await within(panel()).findByText("No rule applies to this table.")).toBeInTheDocument();
+    // Enforcement reads (`GET /perm/rules/enforcement`) follow the list; this test is about the writes and the list.
+    expect(permCalls.map((c) => c.call).filter((c) => c !== "GET /perm/rules/enforcement")).toEqual([
+      "GET /perm/rules",
+      "DELETE /perm/rules/us_only",
+      "GET /perm/rules",
+    ]);
+    expect(toast.success).toHaveBeenCalledWith("Rule us_only deleted.");
   });
 
   it("says how far a pattern rule reaches before deleting it", async () => {
@@ -1259,7 +1351,10 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete star_orders" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toBeInTheDocument();
+    expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toHaveTextContent(
+      "This rule selects every table matching “ord*”, not one object. It is permanently removed, and the engines that enforce it stop applying it.",
+    );
+    expect(dialog).not.toHaveTextContent(/profile|recompile/);
   });
 
   it("shows a refused delete's reason and keeps the rule", async () => {
@@ -1268,7 +1363,8 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.type(within(dialog).getByRole("textbox"), "delete");
+    // A rule's delete asks for its name (spec C11, the one delete convention).
+    await user.type(within(dialog).getByRole("textbox"), "us_only");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("This account cannot do that: it needs the policy:update permission."),
@@ -1278,9 +1374,9 @@ describe("MasksFiltersTab", () => {
 });
 
 /** #4b spec §6 (F12): the hand-written policies on the Data pages, from route A. */
-describe("hand-written policies on an object's tabs", () => {
+describe("manual policies on an object's tabs", () => {
   const HW = { "c-ice|sales|orders|": handwrittenAnswer("c-ice") };
-  const hwSection = () => within(panel()).getByRole("region", { name: /^Hand-written policies/ });
+  const hwSection = () => within(panel()).getByRole("region", { name: /^Manual policies/ });
 
   it("Permissions lists the access rows only, below the grants", async () => {
     const calls = serveData(fixture({ grants: ok([]), handwritten: HW }));
@@ -1291,7 +1387,7 @@ describe("hand-written policies on an object's tabs", () => {
     expect(calls.handwrittenCalls).toContain("c-ice|sales|orders|");
   });
 
-  it("Masks & filters lists the masking and row-filter rows only", async () => {
+  it("Rules lists the masking and row-filter rows only", async () => {
     serveData(fixture({ rules: ok([]), handwritten: HW }));
     renderPage("/governance/data/ice/sales/orders?tab=masks");
     expect(await within(panel()).findByRole("link", { name: "hw-mask" })).toBeInTheDocument();
@@ -1302,7 +1398,133 @@ describe("hand-written policies on an object's tabs", () => {
   it("shows a failing read as an error, never as none", async () => {
     serveData(fixture({ grants: ok([]), handwritten: { "c-ice|sales|orders|": { status: 500, body: { error: "boom" } } } }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
-    expect(await within(panel()).findByText(/The hand-written policies could not be loaded/)).toBeInTheDocument();
-    expect(within(panel()).queryByText("No hand-written policy reaches this object.")).not.toBeInTheDocument();
+    expect(await within(panel()).findByText(/The manual policies could not be loaded/)).toBeInTheDocument();
+    expect(within(panel()).queryByText("No manual policy reaches this object.")).not.toBeInTheDocument();
   });
 });
+
+describe("Remove a classification in place", () => {
+  const EDITOR: Me = { ...STEWARD, permissions: ["policy:read", "tag:read", "catalog_registry:update"] };
+
+  it("removes a column's own classification after a confirm, and refetches", async () => {
+    const user = userEvent.setup();
+    const { tagWrites, tagCalls } = serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    const before = tagCalls.length;
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(tagWrites).toEqual([
+        { method: "DELETE", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "email", tag_id: "t-pii" } },
+      ]),
+    );
+    await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
+    expect(toast.success).toHaveBeenCalledWith("Removed PII from ice.sales.orders.email.");
+  });
+
+  it("offers no Remove without catalog_registry:update", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await within(columns).findByText("PII");
+    expect(within(columns).queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
+    expect(within(header()).queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
+  });
+
+  it("never offers Remove on a chip a column inherits from its table", async () => {
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" });
+    expect(within(columns).queryByRole("button", { name: /^Remove CONFIDENTIAL/ })).not.toBeInTheDocument();
+  });
+
+  it("a remove with no rule on the classification says so once, without promising rules stop applying", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), rules: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    expect(await within(dialog).findByText("No rule uses CONFIDENTIAL, so no mask or filter changes here.")).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/stop applying|selects it/);
+  });
+
+  it("removes the table's classification from the header, naming the rules that stop applying and the columns", async () => {
+    const user = userEvent.setup();
+    const { tagWrites } = serveData(fixture({ tagCatalogue: ok([]), rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    expect(await within(dialog).findByText("These rules on CONFIDENTIAL stop applying here:")).toBeInTheDocument();
+    expect(await within(dialog).findByText("redact_confidential")).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/No rule/);
+    expect(within(dialog).getByText("Its columns stop inheriting it.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(tagWrites).toEqual([
+        { method: "DELETE", warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-confidential" } },
+      ]),
+    );
+  });
+
+  it("keeps the dialog open with the server's sentence when the remove fails", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), tagWrite: { status: 403, body: { error: "forbidden" } } }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(await within(dialog).findByText("This account cannot do that: it needs the catalog_registry:update permission.")).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" })).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("moves focus to the header's Add classification after removing the table's classification", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Remove CONFIDENTIAL from ice.sales.orders" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove CONFIDENTIAL from ice.sales.orders?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(header()).getByRole("button", { name: "Add classification" })).toHaveFocus());
+  });
+
+  it("moves focus to the column's name after removing its classification in the columns table", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(columns).getByRole("link", { name: "email" })).toHaveFocus());
+  });
+
+  it("keeps focus in the dialog when the remove fails", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]), tagWrite: { status: 500, body: { error: "internal error" } } }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    await user.click(await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(await within(dialog).findByText("internal error")).toBeInTheDocument();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("returns focus to the Remove button on Cancel", async () => {
+    const user = userEvent.setup();
+    serveData(fixture({ tagCatalogue: ok([]) }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    const opener = await within(columns).findByRole("button", { name: "Remove PII from ice.sales.orders.email" });
+    await user.click(opener);
+    const dialog = await screen.findByRole("alertdialog", { name: "Remove PII from ice.sales.orders.email?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+});
+

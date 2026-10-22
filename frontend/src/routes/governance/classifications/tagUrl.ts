@@ -18,3 +18,8 @@ export function tagUrl(id: string, tab?: TagTab): string {
   const path = `${CLASSIFICATIONS_BASE}/${encodeURIComponent(id)}`;
   return tab ? `${path}?tab=${tab}` : path;
 }
+
+/** A rule's page opened from classification `tagId`, so the rule page's way back returns to its Rules tab (`?from=`, spec C1). */
+export function classificationRuleUrl(ruleId: string, tagId: string): string {
+  return `/governance/rules/${encodeURIComponent(ruleId)}?from=classification:${encodeURIComponent(tagId)}`;
+}

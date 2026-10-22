@@ -274,7 +274,7 @@ describe("GrantPage: states", () => {
     serveGrants([grant()]);
     renderPage("g-gone");
     expect(screen.getByText("No grant has this id; it may have been deleted.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
+    expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 
   test("a failed read shows its error with a retry, never the missing state", () => {

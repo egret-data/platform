@@ -56,6 +56,10 @@ describe("the Classification index", () => {
     openArea(INDEX, TAG_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "Classifications" }, T)).toBeInTheDocument();
     await screen.findByRole("link", { name: "PII" }, T);
+    expect(
+      screen.getByText("Classifications label data and BI objects, and set the clearance each one requires."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Tags that classify/)).not.toBeInTheDocument();
     const names = screen.getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent);
     expect(names).toEqual(["Columns only", "Finance", "Internal", "PII"]);
   });
@@ -95,6 +99,21 @@ describe("the Classification index", () => {
     expect(within(rowOf("Columns only")).getAllByRole("cell")[3]).toHaveTextContent("0 tables · 2 columns");
     expect(within(rowOf("Columns only")).getAllByRole("cell")[5]).toHaveTextContent("1 role · 1 group");
     expect(within(rowOf("Finance")).getAllByRole("cell")[5]).toHaveTextContent("2 groups");
+  });
+
+  it("drops Key, Description and BI objects below md, keeping Name, Data and Clearance", async () => {
+    serve({ "/tags": ok(TAGS) });
+    openArea(INDEX, STEWARD);
+    await screen.findByRole("link", { name: "PII" }, T);
+    const table = screen.getByRole("table");
+    for (const name of ["Key", "Description", "BI objects"]) {
+      expect(within(table).getByRole("columnheader", { name: new RegExp(name) })).toHaveClass("hidden", "md:table-cell");
+    }
+    // The cells follow their header, so a hidden column leaves no orphan cell.
+    expect(within(rowOf("PII")).getByText("pii").closest("td")).toHaveClass("hidden", "md:table-cell");
+    for (const name of ["Name", "Data", "Clearance"]) {
+      expect(within(table).getByRole("columnheader", { name: new RegExp(name) })).not.toHaveClass("hidden");
+    }
   });
 
   it("marks a clearance with a lock icon beside the words, never colour alone", async () => {
@@ -146,12 +165,12 @@ describe("the Classification index", () => {
     serve({ "/tags": ok(TAGS) });
     openArea(INDEX, STEWARD);
     await user.click(await screen.findByRole("button", { name: "New classification" }, T));
-    await user.type(screen.getByLabelText("Name"), "Personally Identifiable Info");
-    expect(screen.getByLabelText("Key")).toHaveValue("personally-identifiable-info");
-    await user.clear(screen.getByLabelText("Key"));
-    await user.type(screen.getByLabelText("Key"), "pi");
-    await user.type(screen.getByLabelText("Name"), " v2");
-    expect(screen.getByLabelText("Key")).toHaveValue("pi");
+    await user.type(screen.getByLabelText(/^Name/), "Personally Identifiable Info");
+    expect(screen.getByLabelText(/^Key/)).toHaveValue("personally-identifiable-info");
+    await user.clear(screen.getByLabelText(/^Key/));
+    await user.type(screen.getByLabelText(/^Key/), "pi");
+    await user.type(screen.getByLabelText(/^Name/), " v2");
+    expect(screen.getByLabelText(/^Key/)).toHaveValue("pi");
   });
 
   it("creates with the entered fields and opens the new classification's page (201 is success)", async () => {
@@ -162,7 +181,7 @@ describe("the Classification index", () => {
     });
     openArea(INDEX, STEWARD);
     await user.click(await screen.findByRole("button", { name: "New classification" }, T));
-    await user.type(screen.getByLabelText("Name"), "Confidential");
+    await user.type(screen.getByLabelText(/^Name/), "Confidential");
     await user.type(screen.getByLabelText("Description"), "Highly sensitive");
     await user.click(screen.getByRole("button", { name: "Create classification" }));
     await waitFor(() => expect(where()).toBe("/governance/classifications/t-new"), T);
@@ -171,21 +190,17 @@ describe("the Classification index", () => {
     ]);
   });
 
-  it("shows a 409 beside Key with the dialog open and every input kept", async () => {
+  it("an uncoded refusal shows the server's message over the form, every input kept", async () => {
     const user = userEvent.setup();
-    serve({ "/tags": ok(TAGS), "POST /tags": fail(409, "tag key 'pii' already exists") });
+    serve({ "/tags": ok(TAGS), "POST /tags": fail(409, "something else went wrong") });
     openArea(INDEX, STEWARD);
     await user.click(await screen.findByRole("button", { name: "New classification" }, T));
-    await user.type(screen.getByLabelText("Name"), "PII");
+    await user.type(screen.getByLabelText(/^Name/), "Secret");
     await user.type(screen.getByLabelText("Description"), "dup");
     await user.click(screen.getByRole("button", { name: "Create classification" }));
-    const message = await screen.findByText("tag key 'pii' already exists", {}, T);
-    // Beside Key: the Key input names it as its description, not a banner over the form.
-    expect(message.id).not.toBe("");
-    expect(screen.getByLabelText("Key").getAttribute("aria-describedby")?.split(" ")).toContain(message.id);
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Name")).toHaveValue("PII");
-    expect(screen.getByLabelText("Key")).toHaveValue("pii");
+    expect(await screen.findByText("something else went wrong", {}, T)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Secret");
+    expect(screen.getByLabelText(/^Key/)).toHaveValue("secret");
     expect(screen.getByLabelText("Description")).toHaveValue("dup");
     expect(where()).toBe(INDEX);
   });
@@ -216,6 +231,36 @@ describe("the Classification index", () => {
     expect(screen.getAllByRole("button", { name: "New classification" })).toHaveLength(2);
   });
 
+  it("explains the three steps when there is no classification yet", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, STEWARD);
+    const steps = await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(within(steps).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "Create a classification.",
+      "Attach it to tables or columns in Data.",
+      "Add a rule (mask or row filter) or set clearance on the classification's page.",
+    ]);
+    expect(within(steps).getByRole("link", { name: "Data" })).toHaveAttribute("href", "/governance/data");
+    expect(screen.queryByText("Creating needs the tag:manage permission.")).not.toBeInTheDocument();
+    // The steward cannot attach in Data, and is told so.
+    expect(screen.getByText("Attaching needs the catalog_registry:update permission.")).toBeInTheDocument();
+  });
+
+  it("says nothing of a missing permission to a platform admin", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, ADMIN);
+    await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(screen.queryByText(/needs the/)).not.toBeInTheDocument();
+  });
+
+  it("without tag:manage, the steps say what creating needs", async () => {
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, TAG_READER);
+    await screen.findByRole("list", { name: "How classification works" }, T);
+    expect(screen.getByText("Creating needs the tag:manage permission.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New classification" })).not.toBeInTheDocument();
+  });
+
   it("says when the search matches nothing, and clears it", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok(TAGS) });
@@ -235,5 +280,132 @@ describe("the Classification index", () => {
     await screen.findByRole("link", { name: "Finance" }, T);
     expect(screen.queryByRole("link", { name: "PII" })).not.toBeInTheDocument();
     expect(screen.getByRole("searchbox", { name: "Search classifications" })).toHaveValue("fin");
+  });
+});
+
+describe("New classification: rules said inline (C10)", () => {
+  it("slugs without underscores and flags a key the server would refuse as you type", async () => {
+    const user = userEvent.setup();
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    await user.type(screen.getByLabelText(/^Name/), "Card_no data");
+    expect(screen.getByLabelText(/^Key/)).toHaveValue("card-no-data");
+    expect(screen.getByLabelText(/^Key/)).not.toHaveAttribute("aria-invalid");
+    await user.clear(screen.getByLabelText(/^Key/));
+    await user.type(screen.getByLabelText(/^Key/), "a_b");
+    expect(screen.getByLabelText(/^Key/)).toHaveAttribute("aria-invalid", "true");
+    // The error names what is wrong; the hint, read after it, says what is allowed. Neither repeats the other.
+    expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(
+      "Not allowed in a key: _. Fixed once created. Follows the name until you edit it. Lowercase letters, digits, - and :.",
+    );
+    expect(screen.getByRole("button", { name: "Create classification" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("-", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText(":", { selector: "code" })).toBeInTheDocument();
+    expect(screen.queryByText("_", { selector: "code" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^Key/), " C");
+    expect(screen.getByText(/^Not allowed in a key/)).toHaveTextContent("Not allowed in a key: _, space, C.");
+  });
+
+  it("marks Name and Key required, and says why Create waits while they are empty", async () => {
+    const user = userEvent.setup();
+    const served = serve({ "/tags": ok([]) });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    const create = screen.getByRole("button", { name: "Create classification" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    expect(create).toHaveAccessibleDescription("Enter a name and a key.");
+    await user.click(create);
+    expect(served.asked).not.toContain("POST /tags");
+    await user.type(screen.getByLabelText(/^Name/), "Secret");
+    expect(create).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("warns about a duplicate name before submit, case-insensitively, with a link to it", async () => {
+    const user = userEvent.setup();
+    const served = serve({ "/tags": ok([tag({ id: "t-pub", key: "public", name: "Public" })]) });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    await user.type(screen.getByLabelText(/^Name/), " public ");
+    expect(screen.getByText(/A classification named/)).toHaveTextContent("A classification named Public already exists.");
+    expect(screen.getByRole("link", { name: "Public" })).toHaveAttribute("href", "/governance/classifications/t-pub");
+    expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Name/)).toHaveAccessibleDescription(/A classification named Public already exists\./);
+    const create = screen.getByRole("button", { name: "Create classification" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    await user.click(create);
+    expect(served.asked).not.toContain("POST /tags");
+  });
+
+  it("puts each server code beside its own field", async () => {
+    const user = userEvent.setup();
+    serve({
+      "/tags": ok([]),
+      "POST /tags": {
+        status: 409,
+        body: { error: 'A classification with the key "pii" already exists (PII).', code: "tag_key_taken", key: "pii", existing: { id: "t1", name: "PII" } },
+      },
+    });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    await user.type(screen.getByLabelText(/^Name/), "pii");
+    await user.click(screen.getByRole("button", { name: "Create classification" }));
+    const message = await screen.findByText(/is taken by/, {}, T);
+    expect(message).toHaveTextContent("Key pii is taken by PII.");
+    expect(within(message).getByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t1");
+    expect(screen.getByLabelText(/^Key/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(/Key pii is taken by PII\./);
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("pii");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("a tag_name_taken refusal (a name the list did not have) sits under Name with a link", async () => {
+    const user = userEvent.setup();
+    serve({
+      "/tags": ok([]),
+      "POST /tags": {
+        status: 409,
+        body: {
+          error: 'A classification named "Public" already exists (key public).',
+          code: "tag_name_taken",
+          name: "Public",
+          existing: { id: "t-pub", key: "public", name: "Public" },
+        },
+      },
+    });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    await user.type(screen.getByLabelText(/^Name/), "public");
+    await user.click(screen.getByRole("button", { name: "Create classification" }));
+    expect(await screen.findByRole("link", { name: "Public" }, T)).toHaveAttribute("href", "/governance/classifications/t-pub");
+    expect(screen.getByLabelText(/^Name/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Name/)).toHaveAccessibleDescription(/A classification named Public already exists\./);
+  });
+
+  it("a tag_key_invalid refusal sits under Key in the server's words", async () => {
+    const user = userEvent.setup();
+    serve({
+      "/tags": ok([]),
+      "POST /tags": {
+        status: 400,
+        body: { error: "A classification key may hold lowercase letters, digits, ':' and '-' only: \"x\"", code: "tag_key_invalid", key: "x", allowed: "a-z 0-9 : -" },
+      },
+    });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    await user.type(screen.getByLabelText(/^Name/), "x");
+    await user.click(screen.getByRole("button", { name: "Create classification" }));
+    await waitFor(() => expect(screen.getByLabelText(/^Key/)).toHaveAttribute("aria-invalid", "true"), T);
+    expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(/may hold lowercase letters, digits, ':' and '-' only/);
+  });
+
+  it("labels the colour and states its value as text", async () => {
+    const user = userEvent.setup();
+    serve({ "/tags": ok([]) });
+    openArea(INDEX, STEWARD);
+    await user.click(await screen.findByRole("button", { name: "New classification" }, T));
+    const colour = screen.getByLabelText("Colour");
+    expect(colour).toHaveAttribute("type", "color");
+    expect(colour).toHaveAccessibleDescription(/Colour of the swatch shown next to the name\. #6366f1/);
   });
 });

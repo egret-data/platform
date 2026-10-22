@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,8 @@ pub fn perm_router() -> Router<PermState> {
             axum::routing::patch(patch_grant).delete(delete_grant),
         )
         .route("/perm/rules", get(list_rules).post(create_rule))
+        .route("/perm/rules/enforcement", get(rules_enforcement))
+        .route("/perm/rules/{id}/effect", get(rule_effect))
         .route(
             "/perm/rules/{id}",
             axum::routing::patch(patch_rule).delete(delete_rule),
@@ -161,6 +163,10 @@ pub fn perm_router() -> Router<PermState> {
         )
         .route("/perm/people/groups/{name}", get(people::read_group))
         .route("/perm/people/roles/{name}", get(people::read_role))
+        .route(
+            "/perm/clearances/{tag_id}/people",
+            get(people::cleared_people),
+        )
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route(
@@ -203,6 +209,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         patch_grant,
         delete_grant,
         list_rules,
+        rule_effect,
+        rules_enforcement,
         create_rule,
         patch_rule,
         delete_rule,
@@ -220,6 +228,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         people::allocate_username,
         people::read_group,
         people::read_role,
+        people::cleared_people,
         people::explain_principal,
         preview,
         explain,
@@ -272,6 +281,11 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::people::EngineClearance,
         crate::people::EgretClearance,
         crate::people::EngineNotClearedReason,
+        crate::people::ClearedPeople,
+        crate::people::ClearedPerson,
+        crate::people::ClearedVia,
+        crate::people::ClearedViaKind,
+        crate::people::ClearedScope,
         people::ExplainPrincipalRequest,
         people::ExplainPrincipalRef,
         people::ExplainPrincipalResponse,
@@ -283,6 +297,13 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         PreviewRequest,
         PreviewResponse,
         AffectedProfile,
+        crate::effect::RuleEffect,
+        crate::effect::EffectCatalog,
+        crate::effect::EffectEngine,
+        crate::effect::ExistingMask,
+        crate::effect::EffectKind,
+        crate::effect::NotEnforced,
+        crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,
@@ -962,6 +983,13 @@ pub struct AffectedProfile {
 pub struct PreviewResponse {
     pub affected: Vec<AffectedProfile>,
     pub compile: CompileResponse,
+    /// A rule preview only: what the rule will do — the tables and columns it
+    /// reaches, the engines that enforce it (or why none does), how many
+    /// people it exempts and the other masks already on its columns. Computed
+    /// from the model (`crate::effect`), so it answers on a catalog no engine
+    /// serves. Absent on a grant preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<crate::effect::RuleEffect>,
 }
 
 /// A grant, a rule, or a tag's classification clearance that a recompile could
@@ -1486,7 +1514,10 @@ pub(crate) async fn write_rule(
         .await
         .map_err(PermHttpError::db)?
         {
-            return Err(PermHttpError::BadRequest(pair.refusal()));
+            return Err(PermHttpError::Coded {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                body: pair.refusal_body(),
+            });
         }
     }
 
@@ -1868,6 +1899,120 @@ async fn list_rules(
     ))
 }
 
+/// What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview
+/// returns, from the same [`crate::effect::rule_effect`], so a surface showing
+/// a stored rule can say "Not enforced yet" with the preview's reason.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/rules/{id}/effect",
+    tag = "perm",
+    params(("id" = Uuid, Path, description = "Rule id")),
+    responses(
+        (status = 200, description = "The stored rule's effect: reach, the engines that enforce it (or why none does), exemptions and the other masks on its columns. The same computation, and the same shape, as `effect` on `POST /perm/preview`", body = crate::effect::RuleEffect),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such rule", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rule_effect(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::effect::RuleEffect>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot, as `list_overlaps`.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let Some(r) = get_rule_via(&mut tx, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    let rule = NewRule {
+        name: r.name,
+        kind: r.kind,
+        selector: r.selector,
+        exempt: r.exempt,
+    };
+    // `editing = id`: the rule is not "already masked" by itself.
+    let effect = crate::effect::rule_effect(&mut tx, Some(id), &rule).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(effect))
+}
+
+/// `?ids=` of [`rules_enforcement`]: comma-separated rule ids.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RuleIdsQuery {
+    /// Comma-separated rule ids, at most 100 distinct.
+    #[serde(default)]
+    pub ids: String,
+}
+
+/// Whether each listed STORED rule is enforced — the `enforcedBy` /
+/// `notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
+/// functions, for surfaces that list rules. Bounded by
+/// [`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/rules/enforcement",
+    tag = "perm",
+    params(RuleIdsQuery),
+    responses(
+        (status = 200, description = "One entry per known id, in the order asked (a repeated id once, an unknown id left out): the number of engines bound to a policy profile that enforce the rule, and why none does (`no_assignment`, `no_engine`, `no_profile`, `no_tag_service`) when that number is 0; plus `catalogs`, the same answer for each catalog the rule reaches (its enforcing engines, or why none enforces it there)", body = Vec<crate::effect::RuleEnforcement>),
+        (status = 400, description = "An id is not a UUID, or more than 100 distinct ids were asked for", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rules_enforcement(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Query(q): Query<RuleIdsQuery>,
+) -> Result<Json<Vec<crate::effect::RuleEnforcement>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // Distinct ids in the order asked; the cap is checked as each new id is
+    // seen, so an oversized list is refused without parsing the rest of it.
+    let mut ids: Vec<Uuid> = Vec::new();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id = raw
+            .parse::<Uuid>()
+            .map_err(|_| PermHttpError::BadRequest(format!("`{raw}` is not a rule id")))?;
+        if seen.insert(id) {
+            if seen.len() > crate::effect::RULE_ENFORCEMENT_CAP {
+                return Err(PermHttpError::BadRequest(format!(
+                    "at most {} rule ids per request",
+                    crate::effect::RULE_ENFORCEMENT_CAP
+                )));
+            }
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let mut stored: std::collections::HashMap<Uuid, egret_perm::model::Rule> =
+        list_rules_via(&mut tx)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r))
+            .collect();
+    let rules: Vec<egret_perm::model::Rule> =
+        ids.iter().filter_map(|id| stored.remove(id)).collect();
+    let answer = crate::effect::rules_enforcement(&mut tx, &rules).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(answer))
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/perm/rules",
@@ -1879,7 +2024,7 @@ async fn list_rules(
     request_body = NewRule,
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
-        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -1923,7 +2068,7 @@ async fn create_rule(
                    at all.",
     responses(
         (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
@@ -2050,7 +2195,7 @@ async fn name_profiles(
                    from what the write would do.",
     responses(
         (status = 200, description = "The profiles the write would touch, and what its recompile would do", body = PreviewResponse),
-        (status = 400, description = "The same refusal the write itself would have returned", body = ErrorBody),
+        (status = 400, description = "The same refusal the write itself would have returned (including code `table_tag_mask_conflict` for a tag-addressed mask over a table-level attachment)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
@@ -2069,6 +2214,12 @@ async fn preview(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Every exit from here rolls back: the explicit `rollback()` on success, and
     // dropping `tx` on any `?`. Nothing below commits.
+    // The rule's effect is read from the model BEFORE the write, so the stored
+    // rows it compares against are the ones the write would join.
+    let effect = match (&grant, &rule) {
+        (None, Some(r)) => Some(crate::effect::rule_effect(&mut tx, id, r).await?),
+        _ => None,
+    };
     let outcome = match (grant, rule) {
         (Some(g), None) => write_grant(&mut tx, id, g, &p).await?,
         (None, Some(r)) => write_rule(&mut tx, id, r, &p).await?,
@@ -2082,7 +2233,11 @@ async fn preview(
     let (_, compile) = outcome.into_compile_response();
     tx.rollback().await.map_err(PermHttpError::db)?;
 
-    Ok(Json(PreviewResponse { affected, compile }))
+    Ok(Json(PreviewResponse {
+        affected,
+        compile,
+        effect,
+    }))
 }
 
 // ---------------------------------------------------------------------------

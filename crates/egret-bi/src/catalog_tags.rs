@@ -132,7 +132,11 @@ impl CatalogTagRepo {
         .await
         .map_err(crate::error::BiError::from)?
         {
-            return Err(crate::error::BiError::BadRequest(pair.refusal()).into());
+            return Err(crate::error::BiError::Coded {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                body: pair.refusal_body(),
+            }
+            .into());
         }
         // **SP4d-4 Task 3 (user ruling): an assignment that makes two mask (or
         // row-filter) policies decide one column differently is refused** —
@@ -655,7 +659,7 @@ async fn list_resource_tags(
     request_body = ResourceTagBody,
     responses(
         (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
-        (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = egret_core::http::ErrorBody),

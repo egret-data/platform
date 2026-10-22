@@ -9,7 +9,7 @@ import type { ObjectPath } from "@/routes/governance/data/objectPath";
  * (`scripts/assert-governance-data-lazy.mjs`).
  */
 export const WHO_CAN_READ_INTRO =
-  "Whether a user, or each member of a group or role, can read this, per policy profile, as each engine would decide it.";
+  "Whether a user, or each member of a group or role, can read this, as each engine that serves its catalog would decide it.";
 
 /** The explain target for `path`: exactly this object, and its column when the path names one. */
 function targetOf(path: ObjectPath, catalogId: string): Scope {

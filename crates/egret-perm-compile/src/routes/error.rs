@@ -43,6 +43,14 @@ pub enum PermHttpError {
     /// already stored. `body` is `{error, refs}`, served as is.
     #[error("stale user refs: {body}")]
     StaleUserRefs { body: serde_json::Value },
+    /// A refusal with a stable `code` for the UI (classification UX spec C5),
+    /// e.g. `table_tag_mask_conflict`. `body` is `{error, code, ...fields}`,
+    /// served as is with `status`; `error` is always the full sentence.
+    #[error("{}", .body["error"].as_str().unwrap_or("refused"))]
+    Coded {
+        status: StatusCode,
+        body: serde_json::Value,
+    },
     #[error("internal error")]
     Internal,
 }
@@ -155,6 +163,7 @@ impl IntoResponse for PermHttpError {
             // The structured body, served as is: its `error` is the sentence.
             PermHttpError::Overlap { body } => (StatusCode::CONFLICT, body),
             PermHttpError::StaleUserRefs { body } => (StatusCode::CONFLICT, body),
+            PermHttpError::Coded { status, body } => (status, body),
             PermHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 error_body("internal error"),

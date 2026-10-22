@@ -48,7 +48,7 @@ const MARKERS = [
   // `GROUPS_ONLY_GATE`.
   ["src/routes/governance/people/tabs/ClearancesTab.tsx", "Engines do not enforce this gate (it names only groups)"],
   // `CHECK_ACCESS_INTRO`.
-  ["src/routes/governance/people/CheckAccessDialog.tsx", "can reach a target, per policy profile"],
+  ["src/routes/governance/people/CheckAccessDialog.tsx", "can reach a target, as each engine that serves it"],
   // The prefix a uuid ref may carry.
   ["src/routes/governance/people/reach.ts", "urn:uuid:"],
   // `ASSIGNMENT_READ_ONLY`. GrantPage and RulePage are lazy imports of their own

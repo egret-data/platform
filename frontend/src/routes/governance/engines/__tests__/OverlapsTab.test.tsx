@@ -100,7 +100,7 @@ describe("the Overlaps tab (spec §6.3)", () => {
     expect(within(first).getByText("two mask policies would be served at policyPriority 0")).toBeInTheDocument();
   });
 
-  it("a hand-written member opens the Advanced editor, and Switch off links there; no API route is shown", async () => {
+  it("a manual member opens the Advanced editor, and Switch off links there; no API route is shown", async () => {
     serve(answers(ok([HAND])));
     open();
     const [item] = await pairs();

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -11,8 +12,9 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
+import type { RuleEntry } from "@/routes/governance/ruleDraft";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
-import { formatRuleKind, formatSelector, type WorkspaceNames } from "@/routes/governance/permFormat";
+import { formatRuleKind, formatSelector, RULE_DELETE_DESCRIPTION, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
@@ -25,12 +27,14 @@ import {
   tagNamesOn,
   type PatternLevel,
 } from "@/routes/governance/data/coverage";
-import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
+import { tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
+import { TERM } from "@/routes/governance/glossary";
+import { NotEnforcedBadge, useRuleEnforcementIn, type EnforcementAnswer } from "@/routes/governance/NotEnforced";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -39,7 +43,7 @@ import { tagUnresolved } from "@/routes/governance/ruleMatch";
 export const RULES_NEED_POLICY_READ = "Reading rules needs the policy:read permission, which this account does not have.";
 
 /** M1: what a schema or catalog page says, since it never lists a tag rule (see {@link MasksFiltersTab}). */
-export const TAG_RULES_ON_TABLES = "Tag-based rules are listed on each table's page.";
+export const TAG_RULES_ON_TABLES = "Rules on classifications are listed on each table's page.";
 
 const LEVEL_LABEL = { catalog: "Catalog", schema: "Schema", table: "Table" } as const;
 
@@ -53,12 +57,12 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
   { id: "inherited", title: "Inherited", head: "From" },
   // Titled for the page's level by `insideGroup`.
   { id: "inside", title: "On columns", head: "Column", mono: true },
-  { id: "tag", title: "By tag", head: "Tagged" },
+  { id: "tag", title: "By classification", head: TERM.classification },
   { id: "pattern", title: "Matching a pattern", head: "Pattern" },
 ];
 
 /**
- * An object's Masks & filters tab (spec §2.2): the mask and row-filter rules
+ * An object's Rules tab (spec §2.2; "Masks & filters" before the glossary): the mask and row-filter rules
  * that select the object, grouped by how they reach it: set here, inherited
  * from an ancestor (the level named), set on something inside it (a table's
  * columns; a schema's or a catalog's tables and columns, each named), by a
@@ -90,10 +94,12 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * §2.3, "Not new"). Add rule, Edit and Delete each need `policy:update`, the
  * permission every rule write requires (`crates/egret-perm-compile/src/routes.rs`,
  * `create_rule`, `patch_rule`, `delete_rule` and `preview`). Add rule opens
- * `RuleDialog` with a path selector naming this object; on a table it starts
- * as a row filter, which that selector completes (a mask needs a column,
- * picked in the dialog). A save or a delete
- * invalidates the rules list, so this tab refetches.
+ * `RuleDialog` from this object's entry point (spec C8.3): on a table, a mask
+ * on the table's path with Column left empty (every column) and Row filter
+ * one click away; on a catalog or schema, a mask on that path. A save or a delete
+ * invalidates the rules list, so this tab refetches. A rule no engine enforces
+ * in this catalog says "Not enforced yet — <reason>" on its row
+ * (`GET /perm/rules/enforcement`, its entry for this catalog).
  */
 export function MasksFiltersTab({
   path,
@@ -137,18 +143,36 @@ function Rules({
   const rulesQ = usePermListRules({ query: { enabled: canRead, retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
 
-  const [dialog, setDialog] = useState<{ existing: RuleView | null } | null>(null);
+  const [dialog, setDialog] = useState<RuleEntry | null>(null);
   const [deleting, setDeleting] = useState<RuleView | null>(null);
   const queryClient = useQueryClient();
   const deleteRule = usePermDeleteRule({
     mutation: {
-      onSuccess: () => {
+      onSuccess: (_data, { id }) => {
         void queryClient.invalidateQueries({ queryKey: getPermListRulesQueryKey() });
-        toast.success("Rule deleted.");
+        const name = rulesQ.data?.status === 200 ? rulesQ.data.data.find((r) => r.id === id)?.name : undefined;
+        toast.success(name ? `${TERM.rule} ${name} deleted.` : `${TERM.rule} deleted.`);
       },
       onError: (e) => toast.error(refusalMessage(e, "policy:update", "The rule could not be deleted.")),
     },
   });
+
+  // The object itself: the column panel's `?column=` is not this tab's subject.
+  const target: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
+  const reach = tagReach(target, catalog, tags);
+  const assignments = reach.status === "ok" ? reach.assignments : null;
+  const rows =
+    rulesQ.data?.status === 200 && reach.status !== "loading"
+      ? rulesQ.data.data.flatMap((r) => {
+          const row = rowOf(r, target, catalog.id, assignments);
+          return row ? [row] : [];
+        })
+      : [];
+  // Whether each listed rule is enforced IN THIS CATALOG: said on its row once the server says so.
+  const enforcement = useRuleEnforcementIn(
+    rows.map((r) => r.rule.id),
+    catalog.id,
+  );
 
   if (!canRead) {
     return (
@@ -158,26 +182,17 @@ function Rules({
     );
   }
 
-  // The object itself: the column panel's `?column=` is not this tab's subject.
-  const target: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
-  const reach = tagReach(target, catalog, tags);
-
   let body;
   if (rulesQ.isError) {
     body = <TabError what="rules" onRetry={() => void rulesQ.refetch()} />;
   } else if (rulesQ.data?.status !== 200 || reach.status === "loading") {
     body = <ListSkeleton rows={4} cols={3} />;
   } else {
-    const assignments = reach.status === "ok" ? reach.assignments : null;
-    const rows = rulesQ.data.data.flatMap((r) => {
-      const row = rowOf(r, target, catalog.id, assignments);
-      return row ? [row] : [];
-    });
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     const unresolved = assignments === null ? [] : rulesQ.data.data.filter(tagUnresolved).map((r) => r.name).sort();
     body = (
       <div className="space-y-6">
-        {reach.status === "error" ? <TabError what="tags" onRetry={reach.retry} /> : null}
+        {reach.status === "error" ? <TabError what="classifications" onRetry={reach.retry} /> : null}
         {target.object === undefined ? (
           <p className="text-xs text-muted-foreground">{TAG_RULES_ON_TABLES}</p>
         ) : null}
@@ -185,13 +200,13 @@ function Rules({
           <Alert>
             <AlertDescription>
               {unresolved.length === 1
-                ? `Rule ${unresolved[0]} selects a tag that no longer exists, so it selects nothing.`
-                : `Rules ${unresolved.join(", ")} select tags that no longer exist, so they select nothing.`}
+                ? `Rule ${unresolved[0]} uses a classification that no longer exists, so it applies to nothing.`
+                : `Rules ${unresolved.join(", ")} use classifications that no longer exist, so they apply to nothing.`}
             </AlertDescription>
           </Alert>
         ) : null}
         {rows.length === 0 ? (
-          reach.status === "error" ? null : <EmptyState icon={EyeOff} title={`No mask or row filter selects this ${noun}`} />
+          reach.status === "error" ? null : <EmptyState icon={EyeOff} title={`No rule applies to this ${noun}.`} />
         ) : (
           GROUPS.map((g) => {
             const inGroup = rows
@@ -213,7 +228,8 @@ function Rules({
                   extra={head ? { head, mono: g.mono } : undefined}
                   canWrite={canWrite}
                   workspaceName={workspaceName}
-                  onEdit={(rule) => setDialog({ existing: rule })}
+                  enforcement={enforcement}
+                  onEdit={(rule) => setDialog({ kind: "edit", rule })}
                   onDelete={setDeleting}
                 />
               </Section>
@@ -228,7 +244,7 @@ function Rules({
     <div className="space-y-4">
       {canWrite ? (
         <div className="flex justify-end">
-          <Button size="sm" onClick={() => setDialog({ existing: null })}>
+          <Button size="sm" onClick={() => setDialog(newRuleEntry(target, catalog.id, assignments))}>
             <Plus aria-hidden />
             Add rule
           </Button>
@@ -241,9 +257,7 @@ function Rules({
         onOpenChange={(open) => {
           if (!open) setDialog(null);
         }}
-        existing={dialog?.existing ?? null}
-        initialSelector={{ type: "path", ...scopeOf(target, catalog.id) }}
-        initialKind={target.object !== undefined ? "row_filter" : undefined}
+        entry={dialog ?? newRuleEntry(target, catalog.id, assignments)}
       />
       <ConfirmDeleteDialog
         open={deleting !== null}
@@ -252,6 +266,8 @@ function Rules({
         }}
         title={deleting ? `Delete "${deleting.name}"?` : "Delete rule?"}
         description={deleteDescription(deleting)}
+        confirmText={deleting?.name ?? "delete"}
+        confirmLabel={TERM.delete}
         onConfirm={() => {
           if (deleting) deleteRule.mutate({ id: deleting.id });
           setDeleting(null);
@@ -307,14 +323,19 @@ function patternText(p: PatternLevel): string {
 
 /** The delete confirmation's text; a rule that reaches more than this object says how far. */
 function deleteDescription(r: RuleView | null): string {
-  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const removed = "It is permanently removed, and the engines that enforce it stop applying it.";
   if (r?.selector.type === "tag") {
-    return `This rule selects everything tagged “${r.tag_name || r.selector.key}”, in every catalog, not one object. ${removed}`;
+    return `This rule applies to everything carrying the classification “${r.tag_name || r.selector.key}”, in every catalog, not one object. ${removed}`;
   }
   const patterns = r ? patternLevels(r.selector) : [];
-  if (patterns.length === 0) return "This rule is permanently removed and every profile it reaches recompiles.";
+  if (patterns.length === 0) return RULE_DELETE_DESCRIPTION;
   const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
   return `This rule selects ${reach}, not one object. ${removed}`;
+}
+
+/** A rule's page, opened from this Data page, so its way back returns here (`?from=data:`, spec C1). */
+function ruleHref(ruleId: string, back: string): string {
+  return `/governance/rules/${encodeURIComponent(ruleId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
 }
 
 function RuleTable({
@@ -323,6 +344,7 @@ function RuleTable({
   extra,
   canWrite,
   workspaceName,
+  enforcement,
   onEdit,
   onDelete,
 }: {
@@ -331,17 +353,21 @@ function RuleTable({
   extra?: { head: string; mono?: boolean };
   canWrite: boolean;
   workspaceName: WorkspaceNames;
+  /** `null` while unknown: then no row says anything about enforcement. */
+  enforcement: ReadonlyMap<string, EnforcementAnswer> | null;
   onEdit: (r: RuleView) => void;
   onDelete: (r: RuleView) => void;
 }) {
+  const location = useLocation();
+  const back = location.pathname + location.search;
   return (
     <Table aria-label={label}>
       <TableHeader>
         <TableRow>
-          <TableHead>Rule</TableHead>
-          <TableHead>Kind</TableHead>
+          <TableHead>{TERM.rule}</TableHead>
+          <TableHead>{TERM.kind}</TableHead>
           {extra ? <TableHead>{extra.head}</TableHead> : null}
-          <TableHead>Exempt</TableHead>
+          <TableHead>{TERM.exempt}</TableHead>
           {canWrite ? (
             <TableHead className={ACTIONS_CELL}>
               <span className="sr-only">Actions</span>
@@ -354,8 +380,13 @@ function RuleTable({
           <TableRow key={rule.id}>
             <TableCell className="whitespace-normal">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium break-words">{rule.name}</p>
+                <p className="text-sm font-medium break-words">
+                  <Link to={ruleHref(rule.id, back)} className="text-primary hover:underline">
+                    {rule.name}
+                  </Link>
+                </p>
                 <p className="text-xs break-words text-muted-foreground">{formatSelector(rule)}</p>
+                <NotEnforcedBadge enforcement={enforcement?.get(rule.id)} appliesTo={rule.selector.type} />
               </div>
             </TableCell>
             <TableCell className="whitespace-normal break-words">{formatRuleKind(rule)}</TableCell>
@@ -390,4 +421,22 @@ function RuleTable({
       </TableBody>
     </Table>
   );
+}
+
+/**
+ * The rule dialog's entry point for a new rule on `p` (spec C8.3): a table, or
+ * a catalog or schema. A table offers the classifications on its columns
+ * (`assignments`), the first preselected (Task 13); one on the whole table is
+ * left out, since a mask on it makes the table unreadable and is refused.
+ */
+function newRuleEntry(p: ObjectPath, catalogId: string, assignments: ResourceTagDto[] | null = null): RuleEntry {
+  if (p.schema !== undefined && p.object !== undefined) {
+    const classifications = (assignments ?? [])
+      .filter((a) => a.column !== "")
+      .map((a) => ({ key: a.tag.key, name: a.tag.name }))
+      .filter((c, i, all) => all.findIndex((o) => o.key === c.key) === i)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return { kind: "table", catalogId, schema: p.schema, table: p.object, classifications };
+  }
+  return { kind: "scope", catalogId, schema: p.schema };
 }

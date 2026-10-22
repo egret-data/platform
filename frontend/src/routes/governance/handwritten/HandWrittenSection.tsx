@@ -101,7 +101,7 @@ export function HandWrittenSection({
   const canRead = usePolicyPermissions()("policy:read");
   if (!canRead) {
     return (
-      <Section title="Hand-written policies">
+      <Section title="Manual policies">
         <p className="text-sm text-muted-foreground">{NEEDS_POLICY_READ}</p>
       </Section>
     );
@@ -132,14 +132,14 @@ function Body({
   if (q.isError) {
     const message = (q.error as unknown as ApiError | null)?.message;
     return (
-      <Section title="Hand-written policies">
-        <TabError what="hand-written policies" onRetry={() => void q.refetch()} detail={message} />
+      <Section title="Manual policies">
+        <TabError what="manual policies" onRetry={() => void q.refetch()} detail={message} />
       </Section>
     );
   }
   if (q.data?.status !== 200) {
     return (
-      <Section title="Hand-written policies">
+      <Section title="Manual policies">
         <ListSkeleton rows={2} cols={4} />
       </Section>
     );
@@ -147,9 +147,9 @@ function Body({
   const d = q.data.data;
   if (d.state === "not_determined") {
     return (
-      <Section title="Hand-written policies">
+      <Section title="Manual policies">
         <p className="text-sm text-muted-foreground">
-          {d.reason ? NOT_DETERMINED[d.reason] : "Which hand-written policies reach this object could not be determined."}
+          {d.reason ? NOT_DETERMINED[d.reason] : "Which manual policies reach this object could not be determined."}
         </p>
       </Section>
     );
@@ -167,12 +167,12 @@ function Body({
   const seededTotal = seeded.reduce((n, s) => n + s.count, 0);
 
   return (
-    <Section title={`Hand-written policies (${rows.length})`}>
+    <Section title={`Manual policies (${rows.length})`}>
       {rows.length === 0 ? (
-        <EmptyState icon={FileCode2} title="No hand-written policy reaches this object." />
+        <EmptyState icon={FileCode2} title="No manual policy reaches this object." />
       ) : (
         <div className="overflow-x-auto rounded-md border">
-          <Table aria-label="Hand-written policies" className={STACKED_TABLE}>
+          <Table aria-label="Manual policies" className={STACKED_TABLE}>
             <TableHeader>
               <TableRow>
                 <TableHead>Policy</TableHead>
@@ -230,7 +230,7 @@ function PolicyRow({ p, profiles, target }: { p: HandWrittenPolicy; profiles: Ha
           ) : (
             <span className="break-all font-medium">{p.name}</span>
           )}
-          <Badge variant="outline">Hand-written</Badge>
+          <Badge variant="outline">Manual</Badge>
         </span>
         <span className="block text-xs text-muted-foreground">
           {policyTypeWord(p.policyType)} · {p.service}

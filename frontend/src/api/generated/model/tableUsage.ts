@@ -13,6 +13,11 @@
 export interface TableUsage {
   catalogId: string;
   catalogName: string;
+  /**
+     * The warehouse the assignment is stored under (the catalog's
+     * `warehouse_id`): what a write to this table's classification names.
+     */
+  warehouseId: string;
   schema: string;
   table: string;
   /** The tag is on the table itself. */

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { TERM } from "@/routes/governance/glossary";
 
 /**
  * The kinds this picker ever offers. `PrincipalKind` (the generated TS union)
@@ -128,11 +129,13 @@ export function PrincipalPicker({
   return (
     <div className="space-y-4">
       <PrincipalListEditor
-        label="Include"
+        label={exempt ? TERM.exempt : "Include"}
         principals={value.include}
         onChange={(include) => onChange({ ...value, include })}
         kinds={kinds}
         disabled={disabled}
+        listInFlow={exempt}
+        searchAll={exempt}
       />
       {!exempt && !includeOnly && (
         <PrincipalListEditor
@@ -153,12 +156,27 @@ function PrincipalListEditor({
   onChange,
   kinds,
   disabled,
+  listInFlow = false,
+  searchAll = false,
 }: {
   label: string;
   principals: PermPrincipal[];
   onChange: (next: PermPrincipal[]) => void;
   kinds: OfferableKind[];
   disabled?: boolean;
+  /**
+   * A rule's exemptions (Task 13): no kind switch. One field searches users
+   * and groups at once and each result says its kind, so a group is one
+   * search and one pick, not a switch of kind first.
+   */
+  searchAll?: boolean;
+  /**
+   * N26 (spec 2026-10-21-classification-ux C8.5), a rule's exemptions only:
+   * the help line sits under the search field and the suggestions follow it
+   * in the flow, instead of a popup floating over the line that explains the
+   * choice.
+   */
+  listInFlow?: boolean;
 }) {
   const [kind, setKind] = useState<OfferableKind>(kinds[0]);
   const effectiveKind = kinds.includes(kind) ? kind : kinds[0];
@@ -174,9 +192,27 @@ function PrincipalListEditor({
     onChange(principals.filter((_, idx) => idx !== i));
   }
 
+  // J-F3 Task 1b (design R8). SP4a D7 measured that no engine egret
+  // provisions sees a group (no group provider, no usersync), so this
+  // used to warn "not enforced". The compiler now names the group's
+  // MEMBERS in the engine policy instead, and every membership change
+  // recompiles — so the fact to show at the point of choice is that
+  // the grant follows the membership, not that it does nothing.
+  // (`public`, the one group engines resolve themselves, stays a
+  // group; the sentence is still true of it in effect.)
+  const groupHelp =
+    effectiveKind === "group" || searchAll ? (
+      <Badge variant="outline" className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal">
+        <Users className="mt-0.5 h-3 w-3 shrink-0" />
+        {searchAll ? "A group applies to its current members" : "Applies to the group’s current members"}: engines see no
+        groups, so each member is named in the policy, and adding or removing a member updates it.
+      </Badge>
+    ) : null;
+
   return (
     <div className="space-y-2">
-      <Label className="text-xs font-medium text-muted-foreground">{label}</Label>
+      {/* With one field for every kind, the field's own label names the list (the form's label above it). */}
+      {searchAll ? null : <Label className="text-xs font-medium text-muted-foreground">{label}</Label>}
 
       <div className="flex flex-wrap items-center gap-1.5">
         {principals.map((p, i) => (
@@ -203,6 +239,17 @@ function PrincipalListEditor({
       {!disabled && (
         <div className="space-y-1.5">
           <div className="flex gap-2">
+            {searchAll ? (
+              <PrincipalSearchField
+                kind="any"
+                label={label}
+                principals={principals}
+                onAdd={add}
+                help={groupHelp}
+                listInFlow={listInFlow}
+              />
+            ) : (
+            <>
             <Select
               value={effectiveKind}
               onValueChange={(v) => setKind(v as OfferableKind)}
@@ -245,28 +292,15 @@ function PrincipalListEditor({
                 label={label}
                 principals={principals}
                 onAdd={add}
+                help={listInFlow ? groupHelp : undefined}
+                listInFlow={listInFlow}
               />
+            )}
+            </>
             )}
           </div>
 
-          {effectiveKind === "group" && (
-            // J-F3 Task 1b (design R8). SP4a D7 measured that no engine egret
-            // provisions sees a group (no group provider, no usersync), so this
-            // used to warn "not enforced". The compiler now names the group's
-            // MEMBERS in the engine policy instead, and every membership change
-            // recompiles — so the fact to show at the point of choice is that
-            // the grant follows the membership, not that it does nothing.
-            // (`public`, the one group engines resolve themselves, stays a
-            // group; the sentence is still true of it in effect.)
-            <Badge
-              variant="outline"
-              className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
-            >
-              <Users className="mt-0.5 h-3 w-3 shrink-0" />
-              Applies to the group&apos;s current members: engines see no groups, so each member
-              is named in the policy, and adding or removing a member updates it.
-            </Badge>
-          )}
+          {listInFlow ? null : groupHelp}
         </div>
       )}
     </div>
@@ -340,11 +374,17 @@ function PrincipalSearchField({
   label,
   principals,
   onAdd,
+  help,
+  listInFlow = false,
 }: {
-  kind: "user" | "group";
+  /** `any`: users and groups at once, each result naming its kind (a rule's exemptions). */
+  kind: "user" | "group" | "any";
   label: string;
   principals: PermPrincipal[];
   onAdd: (p: PermPrincipal) => void;
+  /** Rendered under the field and before the suggestions (see `listInFlow` on `PrincipalListEditor`). */
+  help?: ReactNode;
+  listInFlow?: boolean;
 }) {
   const noticeId = `${useId()}-notice`;
   const [q, setQ] = useState("");
@@ -354,14 +394,17 @@ function PrincipalSearchField({
   const [confirming, setConfirming] = useState<Principal | null>(null);
   const [notice, setNotice] = useState<AllocationNotice | null>(null);
   const can = usePolicyPermissions();
-  const canAllocate = kind === "user" && can("policy:update");
+  const canAllocate = kind !== "group" && can("policy:update");
   const queryClient = useQueryClient();
 
   const suggestions = useQuery({
     queryKey: ["perm-principals", kind, sent],
     queryFn: async () => {
-      const res = await policyAdminListPrincipals({ q: sent, kind });
-      return res.status === 200 ? res.data : [];
+      // No `kind` asks for users and groups (`list_principals`).
+      const res = await policyAdminListPrincipals(kind === "any" ? { q: sent } : { q: sent, kind });
+      const rows = res.status === 200 ? res.data : [];
+      // Only the kinds a human may pick: never anything else the server may add.
+      return kind === "any" ? rows.filter((p) => p.kind === "user" || p.kind === "group") : rows;
     },
     enabled,
     retry: false,
@@ -371,12 +414,14 @@ function PrincipalSearchField({
   const rows = suggestions.data ?? [];
   // A `user` principal with no allocated `username` has no `ref` the engine
   // can ever see: it is never offered as a pick (see `refFor`), only for allocation.
+  const kindOf = (principal: Principal): "user" | "group" =>
+    kind === "any" ? (principal.kind === "group" ? "group" : "user") : kind;
   const pickable = rows.flatMap((principal) => {
-    const ref = refFor(kind, principal);
-    return ref ? [{ principal, ref }] : [];
+    const ref = refFor(kindOf(principal), principal);
+    return ref ? [{ principal, ref, kind: kindOf(principal) }] : [];
   });
-  const unallocated = rows.filter((principal) => !refFor(kind, principal));
-  const isAdded = (ref: string) => principals.some((p) => p.kind === kind && p.ref === ref);
+  const unallocated = rows.filter((principal) => !refFor(kindOf(principal), principal));
+  const isAdded = (k: "user" | "group", ref: string) => principals.some((p) => p.kind === k && p.ref === ref);
 
   // The shared keyboard and focus behaviour (Escape closes only the list, even
   // in the grant and rule dialogs). Focus moving between the field and the
@@ -389,7 +434,7 @@ function PrincipalSearchField({
     boxRef,
     inputRef,
     onPick: (i) => {
-      onAdd({ kind, ref: pickable[i].ref });
+      onAdd({ kind: pickable[i].kind, ref: pickable[i].ref });
       setNotice(null);
     },
   });
@@ -430,11 +475,11 @@ function PrincipalSearchField({
 
   return (
     <div className="flex-1 space-y-1.5">
-      <div ref={boxRef} className="relative">
+      <div ref={boxRef} className={listInFlow ? "space-y-1.5" : "relative"}>
         <Input
           {...combo.inputProps}
           ref={inputRef}
-          aria-label={`${label} ${kind} search`}
+          aria-label={kind === "any" ? `${label} search` : `${label} ${kind} search`}
           aria-describedby={notice ? noticeId : undefined}
           onFocus={() => {
             setEnabled(true);
@@ -446,24 +491,28 @@ function PrincipalSearchField({
             setQ(e.target.value);
             combo.typed();
           }}
-          placeholder={kind === "user" ? "Search users…" : "Search groups…"}
+          placeholder={kind === "any" ? "Search users and groups…" : kind === "user" ? "Search users…" : "Search groups…"}
         />
+        {help}
         {combo.open ? (
           <div
-            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            className={`${listInFlow ? "" : "absolute z-10 mt-1 shadow-md "}max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1`}
             {...combo.popupProps}
           >
             <ul
               id={combo.listId}
               role="listbox"
               aria-multiselectable="true"
-              aria-label={`${label} ${kind} suggestions`}
+              aria-label={kind === "any" ? `${label} suggestions` : `${label} ${kind} suggestions`}
             >
-              {pickable.map(({ principal, ref }, i) => {
-                const added = isAdded(ref);
+              {pickable.map(({ principal, ref, kind: rowKind }, i) => {
+                const added = isAdded(rowKind, ref);
+                const stored = added ? `added, stored as ${ref}` : rowKind === "user" ? `stored as ${ref}` : null;
+                // With every kind listed, each row says which kind it is.
+                const kindText = kind === "any" ? (rowKind === "group" ? "Group" : "User") : null;
                 return (
                   <li
-                    key={principal.name}
+                    key={`${rowKind}:${principal.name}`}
                     id={combo.optionId(i)}
                     role="option"
                     aria-selected={added}
@@ -484,7 +533,7 @@ function PrincipalSearchField({
                       {principal.label}
                     </span>
                     <span className="shrink-0 text-xs text-muted-foreground">
-                      {added ? `added, stored as ${ref}` : kind === "user" ? `stored as ${ref}` : null}
+                      {[kindText, stored].filter(Boolean).join(" · ")}
                     </span>
                   </li>
                 );

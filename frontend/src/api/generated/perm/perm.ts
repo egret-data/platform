@@ -27,6 +27,7 @@ import type {
 import type {
   AllocatedUsername,
   ClassifiedPolicy,
+  ClearedPeople,
   CompileResponse,
   EngineCapabilitiesResponse,
   EngineGrantView,
@@ -48,10 +49,13 @@ import type {
   NewRule,
   PeoplePage,
   PermListPeopleParams,
+  PermRulesEnforcementParams,
   PreviewRequest,
   PreviewResponse,
   ProfileWarnings,
   RolePrincipal,
+  RuleEffect,
+  RuleEnforcement,
   RuleView,
   StaleUserRefsConflict,
   StoredOverlap,
@@ -82,6 +86,134 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type permClearedPeopleResponse200 = {
+  data: ClearedPeople
+  status: 200
+}
+
+export type permClearedPeopleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permClearedPeopleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permClearedPeopleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permClearedPeopleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permClearedPeopleResponseSuccess = (permClearedPeopleResponse200) & {
+  headers: Headers;
+};
+export type permClearedPeopleResponseError = (permClearedPeopleResponse401 | permClearedPeopleResponse403 | permClearedPeopleResponse404 | permClearedPeopleResponse500) & {
+  headers: Headers;
+};
+
+export type permClearedPeopleResponse = (permClearedPeopleResponseSuccess | permClearedPeopleResponseError)
+
+export const getPermClearedPeopleUrl = (tagId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/clearances/${encodeURIComponent(tagId)}/people`
+}
+
+export const permClearedPeople = async (tagId: string, options?: Parameters<typeof customInstance>[1]): Promise<permClearedPeopleResponse> => {
+
+  return customInstance<permClearedPeopleResponse>(getPermClearedPeopleUrl(tagId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermClearedPeopleQueryKey = (tagId: string,) => {
+    return [
+    `/api/control-plane/perm/clearances/${encodeURIComponent(tagId)}/people`
+    ] as const;
+    }
+
+
+export const getPermClearedPeopleQueryOptions = <TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermClearedPeopleQueryKey(tagId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permClearedPeople>>> = ({ signal }) => permClearedPeople(tagId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: tagId !== null && tagId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermClearedPeopleQueryResult = NonNullable<Awaited<ReturnType<typeof permClearedPeople>>>
+export type PermClearedPeopleQueryError = ErrorBody
+
+
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClearedPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permClearedPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClearedPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permClearedPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermClearedPeople<TData = Awaited<ReturnType<typeof permClearedPeople>>, TError = ErrorBody>(
+ tagId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClearedPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermClearedPeopleQueryOptions(tagId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type permCompileResponse200 = {
   data: CompileResponse
@@ -3309,7 +3441,154 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getPermCreateRuleMutationOptions(options), queryClient);
     }
-    export type permDeleteRuleResponse200 = {
+    export type permRulesEnforcementResponse200 = {
+  data: RuleEnforcement[]
+  status: 200
+}
+
+export type permRulesEnforcementResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permRulesEnforcementResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permRulesEnforcementResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permRulesEnforcementResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permRulesEnforcementResponseSuccess = (permRulesEnforcementResponse200) & {
+  headers: Headers;
+};
+export type permRulesEnforcementResponseError = (permRulesEnforcementResponse400 | permRulesEnforcementResponse401 | permRulesEnforcementResponse403 | permRulesEnforcementResponse500) & {
+  headers: Headers;
+};
+
+export type permRulesEnforcementResponse = (permRulesEnforcementResponseSuccess | permRulesEnforcementResponseError)
+
+export const getPermRulesEnforcementUrl = (params?: PermRulesEnforcementParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/perm/rules/enforcement?${stringifiedParams}` : `/api/control-plane/perm/rules/enforcement`
+}
+
+/**
+ * @summary Whether each listed STORED rule is enforced — the `enforcedBy` /
+`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
+functions, for surfaces that list rules. Bounded by
+[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
+ */
+export const permRulesEnforcement = async (params?: PermRulesEnforcementParams, options?: Parameters<typeof customInstance>[1]): Promise<permRulesEnforcementResponse> => {
+
+  return customInstance<permRulesEnforcementResponse>(getPermRulesEnforcementUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermRulesEnforcementQueryKey = (params?: PermRulesEnforcementParams,) => {
+    return [
+    `/api/control-plane/perm/rules/enforcement`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getPermRulesEnforcementQueryOptions = <TData = Awaited<ReturnType<typeof permRulesEnforcement>>, TError = ErrorBody>(params?: PermRulesEnforcementParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermRulesEnforcementQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permRulesEnforcement>>> = ({ signal }) => permRulesEnforcement(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermRulesEnforcementQueryResult = NonNullable<Awaited<ReturnType<typeof permRulesEnforcement>>>
+export type PermRulesEnforcementQueryError = ErrorBody
+
+
+export function usePermRulesEnforcement<TData = Awaited<ReturnType<typeof permRulesEnforcement>>, TError = ErrorBody>(
+ params: undefined |  PermRulesEnforcementParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permRulesEnforcement>>,
+          TError,
+          Awaited<ReturnType<typeof permRulesEnforcement>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermRulesEnforcement<TData = Awaited<ReturnType<typeof permRulesEnforcement>>, TError = ErrorBody>(
+ params?: PermRulesEnforcementParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permRulesEnforcement>>,
+          TError,
+          Awaited<ReturnType<typeof permRulesEnforcement>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermRulesEnforcement<TData = Awaited<ReturnType<typeof permRulesEnforcement>>, TError = ErrorBody>(
+ params?: PermRulesEnforcementParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Whether each listed STORED rule is enforced — the `enforcedBy` /
+`notEnforced` / `catalogs` half of `GET /perm/rules/{id}/effect`, computed by the same
+functions, for surfaces that list rules. Bounded by
+[`crate::effect::RULE_ENFORCEMENT_CAP`] ids per request.
+ */
+
+export function usePermRulesEnforcement<TData = Awaited<ReturnType<typeof permRulesEnforcement>>, TError = ErrorBody>(
+ params?: PermRulesEnforcementParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRulesEnforcement>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermRulesEnforcementQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permDeleteRuleResponse200 = {
   data: void
   status: 200
 }
@@ -3534,7 +3813,145 @@ export const usePermPatchRule = <TError = ErrorBody,
       > => {
       return useMutation(getPermPatchRuleMutationOptions(options), queryClient);
     }
-    export type permListUnresolvedPrincipalsResponse200 = {
+    export type permRuleEffectResponse200 = {
+  data: RuleEffect
+  status: 200
+}
+
+export type permRuleEffectResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permRuleEffectResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permRuleEffectResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permRuleEffectResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permRuleEffectResponseSuccess = (permRuleEffectResponse200) & {
+  headers: Headers;
+};
+export type permRuleEffectResponseError = (permRuleEffectResponse401 | permRuleEffectResponse403 | permRuleEffectResponse404 | permRuleEffectResponse500) & {
+  headers: Headers;
+};
+
+export type permRuleEffectResponse = (permRuleEffectResponseSuccess | permRuleEffectResponseError)
+
+export const getPermRuleEffectUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/rules/${encodeURIComponent(id)}/effect`
+}
+
+/**
+ * @summary What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview
+returns, from the same [`crate::effect::rule_effect`], so a surface showing
+a stored rule can say "Not enforced yet" with the preview's reason.
+ */
+export const permRuleEffect = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<permRuleEffectResponse> => {
+
+  return customInstance<permRuleEffectResponse>(getPermRuleEffectUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermRuleEffectQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/perm/rules/${encodeURIComponent(id)}/effect`
+    ] as const;
+    }
+
+
+export const getPermRuleEffectQueryOptions = <TData = Awaited<ReturnType<typeof permRuleEffect>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermRuleEffectQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permRuleEffect>>> = ({ signal }) => permRuleEffect(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermRuleEffectQueryResult = NonNullable<Awaited<ReturnType<typeof permRuleEffect>>>
+export type PermRuleEffectQueryError = ErrorBody
+
+
+export function usePermRuleEffect<TData = Awaited<ReturnType<typeof permRuleEffect>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permRuleEffect>>,
+          TError,
+          Awaited<ReturnType<typeof permRuleEffect>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermRuleEffect<TData = Awaited<ReturnType<typeof permRuleEffect>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permRuleEffect>>,
+          TError,
+          Awaited<ReturnType<typeof permRuleEffect>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermRuleEffect<TData = Awaited<ReturnType<typeof permRuleEffect>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What a STORED rule does — the same [`crate::effect::RuleEffect`] a preview
+returns, from the same [`crate::effect::rule_effect`], so a surface showing
+a stored rule can say "Not enforced yet" with the preview's reason.
+ */
+
+export function usePermRuleEffect<TData = Awaited<ReturnType<typeof permRuleEffect>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permRuleEffect>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermRuleEffectQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permListUnresolvedPrincipalsResponse200 = {
   data: UnresolvedPrincipal[]
   status: 200
 }
