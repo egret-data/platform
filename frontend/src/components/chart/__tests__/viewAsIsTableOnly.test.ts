@@ -123,9 +123,9 @@ describe("nothing but ChartTable renders from view_as", () => {
     "components/chart/format-types.ts": "declares the three fields on ColumnFormat",
     "components/chart/format.ts": "CONSULTED_BY_FORMAT_DATE marks all three false",
     "components/chart/settings/FormatSection.tsx": "the control, now gated by allowViewAs",
-    "components/dataset/PreviewTab.tsx": "writes semantic-type defaults for a ChartTable it renders",
+    "components/dataset/columnDefaults.ts":
+      "derives semantic-type defaults that PreviewTab and ChartExplore layer under a ChartTable",
     "components/dataset/FormatPicker.tsx": "the dataset's own format editor",
-    "routes/explore/ChartExplore.tsx": "writes dataset-derived defaults into columnSettings",
   };
 
   const SRC = resolve(__dirname, "../../..");

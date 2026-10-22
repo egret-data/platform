@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -18,6 +18,8 @@ const DEFAULT_DATASETS: DatasetFixture[] = [
 let datasets: DatasetFixture[] = DEFAULT_DATASETS;
 let folders: { id: string; name: string }[] = [];
 vi.mock("@/api/datasets", () => ({
+  useDatasetUsage: () => ({ data: [{ id: "c1", name: "Uses it", viz_type: "bar", trashed: false }], isPending: false, isError: false }),
+  useDuplicateDataset: () => ({ mutate: vi.fn(), isPending: false }),
   useDatasets: () => ({ data: datasets, isLoading: false }),
   useDataset: () => ({ data: undefined }),
   useDeleteDataset: () => ({ mutateAsync: delMock }),
@@ -78,6 +80,11 @@ describe("Datasets trash", () => {
     renderAt();
     await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
     await user.click(await screen.findByText("Move to Trash"));
+    // KI-111: it asks first, saying the charts keep working until the dataset is deleted.
+    expect(trashMock).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/1 chart uses this dataset and will keep working until the dataset is deleted/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
     expect(trashMock).toHaveBeenCalledWith("d1");
   });
 });

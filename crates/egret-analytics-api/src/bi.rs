@@ -200,6 +200,34 @@ pub struct DatasetDetailDto {
     pub certified: bool,
     pub certified_by: String,
     pub certification_details: String,
+    /// When the dataset was moved to the trash; null while it is live. Its charts keep running
+    /// until it is deleted, and say so.
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The answer to a Refresh: the dataset as it is now, and which physical columns the source
+/// added or dropped since the last sync.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DatasetRefreshDto {
+    #[serde(flatten)]
+    pub dataset: DatasetDetailDto,
+    pub added_columns: Vec<String>,
+    pub removed_columns: Vec<String>,
+}
+
+/// Body of `POST /datasets/{id}/duplicate`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DuplicateDataset {
+    /// Name of the copy; unique in the workspace.
+    pub name: String,
+}
+
+/// The typed confirmation a delete of something charts use requires: the object's own name.
+#[derive(Debug, Default, Deserialize)]
+pub struct ConfirmQuery {
+    /// The dataset's (or metric's) exact name. Required only while charts use it; with it, the
+    /// delete goes ahead and takes those charts (or their metric) with it.
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -239,6 +267,10 @@ pub struct MetricBody {
 pub struct DatasetUsageDto {
     pub id: String,
     pub name: String,
+    /// The chart's viz type, for its icon.
+    pub viz_type: String,
+    /// The chart is in the trash (listed only with `include_trashed`).
+    pub trashed: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

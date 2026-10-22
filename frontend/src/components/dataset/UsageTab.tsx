@@ -4,6 +4,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useDatasetUsage } from "@/api/datasets";
+import { ChartTypeIcon } from "@/components/dataset/ChartList";
 
 interface Props {
   ws: string;
@@ -49,7 +50,7 @@ export function UsageTab({ ws, datasetId }: Props) {
               to={`/explore/${ws}/charts/${c.id}`}
               className="flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-accent/40"
             >
-              <BarChart3 className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <ChartTypeIcon vizType={c.viz_type} className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{c.name}</span>
               <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             </Link>

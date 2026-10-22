@@ -93,6 +93,76 @@ pub fn validate(viz_type: &str, params: &serde_json::Value) -> Result<(), BiErro
     Ok(())
 }
 
+/// Rewrite a renamed metric through a chart's stored params, so the chart keeps running.
+///
+/// The query names the metric in `spec.metrics` and, when it sorts by it, in
+/// `spec.orderby[].field`. The settings name it in a dozen viz-specific places (`cartesian.yMetrics`,
+/// `table.metrics`, `pie.metric`, per-series maps keyed by the name, column formats keyed by the
+/// name, conditional-formatting rules…), and their keys are open by design, so they are rewritten
+/// by VALUE: every string equal to the old name and every object key equal to it. That is only
+/// unambiguous while no column has the same name, which the caller checks before calling this.
+///
+/// Returns whether anything changed.
+pub fn rename_metric(params: &mut serde_json::Value, old: &str, new: &str) -> bool {
+    let mut changed = false;
+    if let Some(spec) = params.get_mut("spec") {
+        if let Some(ms) = spec.get_mut("metrics").and_then(|v| v.as_array_mut()) {
+            for m in ms.iter_mut() {
+                if m.as_str() == Some(old) {
+                    *m = serde_json::Value::String(new.to_string());
+                    changed = true;
+                }
+            }
+        }
+        if let Some(os) = spec.get_mut("orderby").and_then(|v| v.as_array_mut()) {
+            for o in os.iter_mut() {
+                if let Some(f) = o.get_mut("field") {
+                    if f.as_str() == Some(old) {
+                        *f = serde_json::Value::String(new.to_string());
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(settings) = params.get_mut("settings") {
+        changed |= rename_in_settings(settings, old, new);
+    }
+    changed
+}
+
+/// The settings half of [`rename_metric`], also used for a dashboard card's `vizOverride`:
+/// every string value and every object key equal to `old` becomes `new`, at any depth.
+pub fn rename_in_settings(v: &mut serde_json::Value, old: &str, new: &str) -> bool {
+    use serde_json::Value;
+    match v {
+        Value::String(s) if s == old => {
+            *s = new.to_string();
+            true
+        }
+        Value::Array(xs) => xs
+            .iter_mut()
+            .fold(false, |acc, x| rename_in_settings(x, old, new) | acc),
+        Value::Object(map) => {
+            let mut changed = false;
+            if map.contains_key(old) {
+                // Rebuilt rather than remove + insert: the map keeps insertion order
+                // (`preserve_order`), and a rename should be the only difference in the row.
+                for (k, x) in std::mem::take(map) {
+                    let k = if k == old { new.to_string() } else { k };
+                    map.insert(k, x);
+                }
+                changed = true;
+            }
+            for x in map.values_mut() {
+                changed |= rename_in_settings(x, old, new);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +262,55 @@ mod tests {
         for viz in VIZ_TYPES {
             validate(viz, &v2()).unwrap_or_else(|e| panic!("{viz} rejected: {e}"));
         }
+    }
+
+    #[test]
+    fn rename_metric_rewrites_the_query_and_every_settings_reference() {
+        let mut p = json!({
+            "version": 2,
+            "spec": {
+                "metrics": ["revenue", "orders"], "dimensions": ["region"], "columns": [],
+                "filters": [], "orderby": [{"field": "revenue", "desc": true}, {"field": "region"}],
+                "row_limit": 10, "rollup_groups": []
+            },
+            "settings": {
+                "cartesian.xAxis": "region",
+                "cartesian.yMetrics": ["revenue", "orders"],
+                "cartesian.seriesSettings": {"revenue": {"color": "#f00"}, "orders": {}},
+                "column_settings": {"region": {}, "revenue": {"decimals": 2}},
+                "note": "revenue by region"
+            }
+        });
+        assert!(rename_metric(&mut p, "revenue", "sales"));
+        assert_eq!(p["spec"]["metrics"], json!(["sales", "orders"]));
+        assert_eq!(p["spec"]["orderby"][0]["field"], "sales");
+        assert_eq!(p["spec"]["orderby"][1]["field"], "region");
+        assert_eq!(
+            p["settings"]["cartesian.yMetrics"],
+            json!(["sales", "orders"])
+        );
+        assert_eq!(p["settings"]["cartesian.xAxis"], "region");
+        assert_eq!(
+            p["settings"]["cartesian.seriesSettings"],
+            json!({"sales": {"color": "#f00"}, "orders": {}})
+        );
+        // Key order is kept: the renamed key stays where it was.
+        let keys: Vec<&String> = p["settings"]["column_settings"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, ["region", "sales"]);
+        // A string that merely CONTAINS the name is not a reference to it.
+        assert_eq!(p["settings"]["note"], "revenue by region");
+        assert!(validate("bar", &p).is_ok(), "still a valid chart");
+    }
+
+    #[test]
+    fn rename_metric_leaves_a_chart_that_does_not_use_it_alone() {
+        let mut p = v2();
+        let before = p.clone();
+        assert!(!rename_metric(&mut p, "unused", "x"));
+        assert_eq!(p, before);
     }
 }

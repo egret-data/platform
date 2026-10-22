@@ -85,11 +85,22 @@ pub struct Metric {
     pub certification_details: String,
 }
 
-/// A chart that references a dataset (Usage view).
+/// A chart that references a dataset (Usage view, and the list a refused delete answers with).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DatasetUsage {
     pub id: Uuid,
     pub name: String,
+    pub viz_type: String,
+    /// The chart is in the trash. It still references the dataset, and a delete of the dataset
+    /// deletes it too (`ON DELETE CASCADE`), so a refusal names it.
+    pub trashed: bool,
+}
+
+/// What a Refresh changed in the physical column snapshot, by column name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefreshChanges {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at, deleted_at, certified, certified_by, certification_details";
@@ -348,11 +359,15 @@ impl DatasetRepo {
     /// Superset's fetch_metadata: upsert physical columns by name (preserving user-edited
     /// verbose_name/description), delete physical columns gone from the source, and NEVER
     /// touch calculated columns (expression IS NOT NULL) or metrics. Runs in one tx.
+    ///
+    /// The Time switch (`is_temporal`) is the user's: a column that still exists with the SAME
+    /// engine type keeps it. Only a column whose type changed takes the engine's answer, since the
+    /// old choice was made about a different type. The answer names the columns added and removed.
     pub async fn reconcile_physical_columns(
         &self,
         id: Uuid,
         fresh: &[NewColumn],
-    ) -> Result<(), BiError> {
+    ) -> Result<RefreshChanges, BiError> {
         // Defensive: an empty source would make the DELETE below wipe every physical column.
         // A real source always has ≥1 column; introspect() errors (not []) on an unreachable
         // engine, so an empty slice here means something is wrong — refuse rather than destroy.
@@ -363,6 +378,14 @@ impl DatasetRepo {
         }
         let mut tx = self.db.pool.begin().await?;
 
+        let before: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM analytics.dataset_columns \
+             WHERE dataset_id = $1 AND expression IS NULL ORDER BY ordinal",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+
         for (i, c) in fresh.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO analytics.dataset_columns \
@@ -371,7 +394,8 @@ impl DatasetRepo {
                  ON CONFLICT (dataset_id, column_name) DO UPDATE SET \
                    data_type = EXCLUDED.data_type, \
                    type_generic = EXCLUDED.type_generic, \
-                   is_temporal = EXCLUDED.is_temporal, \
+                   is_temporal = CASE WHEN dataset_columns.data_type = EXCLUDED.data_type \
+                                      THEN dataset_columns.is_temporal ELSE EXCLUDED.is_temporal END, \
                    ordinal = EXCLUDED.ordinal \
                  WHERE dataset_columns.expression IS NULL",
             )
@@ -414,7 +438,72 @@ impl DatasetRepo {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(RefreshChanges {
+            added: fresh_names
+                .iter()
+                .filter(|n| !before.contains(n))
+                .cloned()
+                .collect(),
+            removed: before
+                .into_iter()
+                .filter(|n| !fresh_names.contains(n))
+                .collect(),
+        })
+    }
+
+    /// Copy a dataset of either kind under a new name: the source, every column with all its
+    /// settings (calculated columns included) and every metric. Certification is NOT copied — a
+    /// copy has not been vouched for — and neither are shares, tags or bookmarks; the copy belongs
+    /// to `user`. One transaction.
+    pub async fn duplicate(
+        &self,
+        id: Uuid,
+        name: &str,
+        user: Option<UserId>,
+    ) -> Result<Dataset, BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        let ds = match sqlx::query_as::<_, Dataset>(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO analytics.datasets (workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id) \
+             SELECT workspace_id, database_id, $2, description, catalog, schema_name, table_name, sql, $3, folder_id \
+             FROM analytics.datasets WHERE id = $1 RETURNING {COLS}"
+        )))
+        .bind(id)
+        .bind(name)
+        .bind(user.map(|u| u.0))
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(d)) => d,
+            Ok(None) => return Err(BiError::NotFound("dataset".into())),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                return Err(BiError::Conflict("a dataset with this name already exists".into()));
+            }
+            Err(e) => return Err(BiError::Db(e)),
+        };
+        sqlx::query(
+            "INSERT INTO analytics.dataset_columns \
+               (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, \
+                verbose_name, description, groupby, filterable, format, semantic_type) \
+             SELECT $2, column_name, data_type, type_generic, is_temporal, ordinal, expression, \
+                verbose_name, description, groupby, filterable, format, semantic_type \
+             FROM analytics.dataset_columns WHERE dataset_id = $1",
+        )
+        .bind(id)
+        .bind(ds.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO analytics.dataset_metrics \
+               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, ordinal) \
+             SELECT $2, metric_name, expression, data_type, type_generic, verbose_name, description, format, ordinal \
+             FROM analytics.dataset_metrics WHERE dataset_id = $1",
+        )
+        .bind(id)
+        .bind(ds.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ds)
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
@@ -454,13 +543,50 @@ impl DatasetRepo {
         .await?)
     }
 
-    /// Charts that use this dataset (Usage view).
+    /// Charts that use this dataset (Usage view): live ones only.
     pub async fn usage(&self, dataset_id: Uuid) -> Result<Vec<DatasetUsage>, BiError> {
         Ok(sqlx::query_as::<_, DatasetUsage>(
-            "SELECT id, name FROM analytics.charts \
+            "SELECT id, name, viz_type, false AS trashed FROM analytics.charts \
              WHERE dataset_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC",
         )
         .bind(dataset_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// EVERY chart built on this dataset, the trashed ones included: deleting the dataset
+    /// deletes all of them (`charts.dataset_id … ON DELETE CASCADE`), so this is the list a
+    /// delete has to answer for. Live charts first.
+    pub async fn charts_on(&self, dataset_id: Uuid) -> Result<Vec<DatasetUsage>, BiError> {
+        Ok(sqlx::query_as::<_, DatasetUsage>(
+            "SELECT id, name, viz_type, (deleted_at IS NOT NULL) AS trashed FROM analytics.charts \
+             WHERE dataset_id = $1 ORDER BY (deleted_at IS NOT NULL), updated_at DESC",
+        )
+        .bind(dataset_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// Charts on this dataset (trashed ones included) whose query names the metric: in
+    /// `spec.metrics`, or as an order-by field. Those are the charts that fail with
+    /// `unknown metric` once it is renamed or deleted.
+    pub async fn charts_using_metric(
+        &self,
+        dataset_id: Uuid,
+        metric_name: &str,
+    ) -> Result<Vec<DatasetUsage>, BiError> {
+        Ok(sqlx::query_as::<_, DatasetUsage>(
+            "SELECT id, name, viz_type, (deleted_at IS NOT NULL) AS trashed FROM analytics.charts \
+             WHERE dataset_id = $1 AND ( \
+               COALESCE(params->'spec'->'metrics', '[]'::jsonb) ? $2 \
+               OR EXISTS (SELECT 1 FROM jsonb_array_elements( \
+                    CASE WHEN jsonb_typeof(params->'spec'->'orderby') = 'array' \
+                         THEN params->'spec'->'orderby' ELSE '[]'::jsonb END) o \
+                  WHERE o->>'field' = $2)) \
+             ORDER BY (deleted_at IS NOT NULL), updated_at DESC",
+        )
+        .bind(dataset_id)
+        .bind(metric_name)
         .fetch_all(&self.db.pool)
         .await?)
     }
@@ -528,6 +654,84 @@ impl DatasetRepo {
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
+    }
+
+    /// Rename a metric (and save its other fields) AND rewrite every chart on the dataset that
+    /// names it, in one transaction, so no chart is ever left pointing at a name that no longer
+    /// exists. The chart rows are locked before they are read so a concurrent chart save cannot
+    /// be overwritten with a stale rewrite. A dashboard card's `options.vizOverride` for those
+    /// charts carries the same settings keys, so it is rewritten the same way.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rename_metric(
+        &self,
+        dataset_id: Uuid,
+        metric_id: Uuid,
+        old_name: &str,
+        name: &str,
+        expression: &str,
+        data_type: &str,
+        type_generic: &str,
+        verbose_name: &str,
+        description: &str,
+        format: &str,
+    ) -> Result<(), BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        let r = sqlx::query(
+            "UPDATE analytics.dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
+               type_generic=$5, verbose_name=$6, description=$7, format=$8 WHERE id=$1",
+        )
+        .bind(metric_id)
+        .bind(name)
+        .bind(expression)
+        .bind(data_type)
+        .bind(type_generic)
+        .bind(verbose_name)
+        .bind(description)
+        .bind(format)
+        .execute(&mut *tx)
+        .await;
+        conflict_on_unique(r, "metric name already exists")?;
+
+        let charts: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, params FROM analytics.charts WHERE dataset_id = $1 ORDER BY id FOR UPDATE",
+        )
+        .bind(dataset_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (chart_id, mut params) in charts {
+            if !crate::chartparams::rename_metric(&mut params, old_name, name) {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE analytics.charts SET params = $2, updated_at = now() WHERE id = $1",
+            )
+            .bind(chart_id)
+            .bind(&params)
+            .execute(&mut *tx)
+            .await?;
+            let cards: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, options FROM analytics.dashboard_cards \
+                 WHERE chart_id = $1 AND options ? 'vizOverride' ORDER BY id FOR UPDATE",
+            )
+            .bind(chart_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (card_id, mut options) in cards {
+                let changed = options
+                    .get_mut("vizOverride")
+                    .map(|v| crate::chartparams::rename_in_settings(v, old_name, name))
+                    .unwrap_or(false);
+                if changed {
+                    sqlx::query("UPDATE analytics.dashboard_cards SET options = $2 WHERE id = $1")
+                        .bind(card_id)
+                        .bind(&options)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn delete_metric(&self, metric_id: Uuid) -> Result<(), BiError> {

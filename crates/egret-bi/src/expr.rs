@@ -113,6 +113,40 @@ pub async fn validate_expression(
     })
 }
 
+/// The probe that tells an aggregate from a row-level expression: beside `count(*)` and with no
+/// GROUP BY, every engine refuses a select item that is neither an aggregate nor a constant
+/// (`'totalprice' must be an aggregate expression or appear in GROUP BY clause`). That is exactly
+/// the condition a chart puts a metric in, so it fails here instead of inside the first chart.
+fn aggregate_probe(engine: Engine, source: &SourceSpec, expr: &str) -> String {
+    format!(
+        "SELECT count(*) AS _egret_n, {expr} AS _egret_expr FROM {}",
+        source_ref_for(engine, source)
+    )
+}
+
+/// [`validate_expression`] for a METRIC: the expression must also be an aggregate. The plain
+/// probe runs first so a typo is reported as the engine's own error; only an expression that is
+/// valid on its own and fails in an aggregate query gets the aggregate message.
+pub async fn validate_metric_expression(
+    spec: &ConnSpec,
+    source: &SourceSpec,
+    expr: &str,
+) -> Result<DescribedExpr, BiError> {
+    let described = validate_expression(spec, source, expr).await?;
+    build_connector(spec)
+        .describe(
+            &aggregate_probe(spec.engine, source, expr),
+            Duration::from_secs(15),
+        )
+        .await
+        .map_err(|e| {
+            BiError::BadRequest(format!(
+                "metric expression must be an aggregate, such as SUM(column) or COUNT(*): {e}"
+            ))
+        })?;
+    Ok(described)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +173,20 @@ mod tests {
         assert!(guard_single_statement("\"col;name\" + 1").is_ok());
         assert!(guard_single_statement("'abc").is_err());
         assert!(guard_single_statement("\"abc").is_err());
+    }
+
+    #[test]
+    fn the_aggregate_probe_puts_the_expression_beside_an_aggregate_without_group_by() {
+        let src = SourceSpec::Physical {
+            catalog: Some("tpch".into()),
+            schema: "tiny".into(),
+            table: "orders".into(),
+        };
+        let sql = aggregate_probe(Engine::Trino, &src, "totalprice");
+        assert_eq!(
+            sql,
+            "SELECT count(*) AS _egret_n, totalprice AS _egret_expr FROM \"tpch\".\"tiny\".\"orders\""
+        );
+        assert!(!sql.to_ascii_lowercase().contains("group by"));
     }
 }

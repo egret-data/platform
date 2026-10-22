@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -16,9 +15,12 @@ import { ListStates } from "@/components/explore/ListStates";
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { useDatabases } from "@/api/sqllab";
-import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
+import { useDatasets, useDatasetListMutations, type DatasetSummary } from "@/api/datasets";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
+import { DeleteDatasetDialog } from "@/components/dataset/DeleteDatasetDialog";
+import { DuplicateDatasetDialog } from "@/components/dataset/DuplicateDatasetDialog";
+import { TrashDatasetDialog } from "@/components/dataset/TrashDatasetDialog";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { TagDialog } from "@/components/access/TagEditor";
 import { RelativeTime } from "@/components/explore/RelativeTime";
@@ -40,7 +42,6 @@ export default function Datasets() {
   const { data, isLoading, isError, error } = useDatasets(ws, { trashed: showTrash });
   const { data: databases } = useDatabases(ws);
   const { trash, restore, addBookmark, removeBookmark } = useDatasetListMutations(ws);
-  const del = useDeleteDataset(ws);
   const { data: folders = [] } = useFolders(ws, "datasets");
   const setFolder = useSetFolder(ws, "datasets");
   const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "datasets");
@@ -57,8 +58,8 @@ export default function Datasets() {
   const [tagsTarget, setTagsTarget] = useState<DatasetSummary | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; ds?: DatasetSummary; folder?: { id: string; name: string } } | null>(null);
-  const [dupId, setDupId] = useState<string | null>(null);
-  const dup = useDataset(ws, dupId);
+  const [dupTarget, setDupTarget] = useState<DatasetSummary | null>(null);
+  const [trashTarget, setTrashTarget] = useState<DatasetSummary | null>(null);
 
   const dbName = (id: string) => {
     const d = databases?.find((x) => x.id === id);
@@ -189,10 +190,10 @@ export default function Datasets() {
       <td className="tabular-nums">{d.column_count}</td>
       <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
       <td><DatasetActionsMenu ws={ws} ds={d} trashed={showTrash} folders={folders}
-        onDuplicate={(x) => setDupId(x.id)}
+        onDuplicate={(x) => setDupTarget(x)}
         onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
         onNewFolder={(x) => setFolderDialog({ mode: "move", ds: x })}
-        onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
+        onTrash={(x) => setTrashTarget(x)}
         onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
         onDeletePermanent={(x) => setPendingDelete(x)}
         onShare={(x) => setShareTarget(x)}
@@ -386,24 +387,22 @@ export default function Datasets() {
 
       <CreateDatasetDialog ws={ws} open={createOpen} onOpenChange={setCreateOpen} />
 
-      {dup.data && (
-        <CreateDatasetDialog
-          key={`dup-${dup.data.id}`}
-          ws={ws}
-          open
-          onOpenChange={(o) => { if (!o) setDupId(null); }}
-          initialSql={dup.data.sql ?? ""}
-          initialDbId={dup.data.database_id}
-          initialName={`copy of ${dup.data.name}`}
-        />
-      )}
+      <DuplicateDatasetDialog ws={ws} dataset={dupTarget} onOpenChange={(o) => { if (!o) setDupTarget(null); }} />
 
-      <ConfirmDeleteDialog
-        open={pendingDelete !== null}
+      <TrashDatasetDialog
+        ws={ws}
+        dataset={trashTarget}
+        onOpenChange={(o) => { if (!o) setTrashTarget(null); }}
+        onConfirm={() => {
+          if (!trashTarget) return;
+          trash.mutateAsync(trashTarget.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)));
+        }}
+      />
+
+      <DeleteDatasetDialog
+        ws={ws}
+        dataset={pendingDelete}
         onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
-        title="Delete permanently"
-        description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
-        onConfirm={async () => { if (!pendingDelete) return; await guard(del.mutateAsync(pendingDelete.id)); setPendingDelete(null); }}
       />
 
       {shareTarget && (
