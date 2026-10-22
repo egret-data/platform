@@ -38,6 +38,14 @@ const monacoStub = vi.hoisted(() => {
       provide: (model: unknown, position: unknown) => { suggestions: { label: string }[] };
       disposed: boolean;
     }[],
+    /** The `value` the last render passed to `@monaco-editor/react` (it syncs a defined one into the editor). */
+    passedValue: undefined as string | undefined,
+    /** The mounted editor's text. */
+    text: "",
+    /** Every write of the caller's text into the editor. */
+    writes: [] as string[],
+    /** Types into the mounted editor: its text changes and `onChange` fires, as Monaco does. */
+    type: undefined as ((text: string) => void) | undefined,
     /** Calls the mounted component's `onMount` again, as `@monaco-editor/react` can. */
     remount: undefined as (() => void) | undefined,
     reset() {
@@ -45,6 +53,7 @@ const monacoStub = vi.hoisted(() => {
       this.actions = [];
       this.providers = [];
       this.models = [];
+      this.writes = [];
     },
     runCommand(): (() => void) | undefined {
       return this.commands[KeyMod.CtrlCmd | KeyCode.Enter];
@@ -55,17 +64,24 @@ const monacoStub = vi.hoisted(() => {
 vi.mock("@/components/monaco/MonacoEditor", () => ({
   default: function MonacoStub({
     value,
+    defaultValue,
+    onChange,
     onMount,
     beforeMount,
     options,
   }: {
-    value: string;
+    value?: string;
+    defaultValue?: string;
+    onChange?: (v: string | undefined) => void;
     onMount?: (editor: unknown, monaco: unknown) => void;
     beforeMount?: (monaco: unknown) => void;
     options?: { ariaLabel?: string; readOnly?: boolean };
   }) {
-    const latest = useRef(value);
-    latest.current = value;
+    monacoStub.passedValue = value;
+    const latest = useRef(value ?? defaultValue ?? "");
+    if (value !== undefined) latest.current = value;
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
     useEffect(() => {
       const monaco = {
         KeyMod: monacoStub.KeyMod,
@@ -91,11 +107,26 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         getValue: () => latest.current,
         getValueInRange: () => latest.current,
         getWordUntilPosition: () => ({ word: "", startColumn: 1, endColumn: 1 }),
+        getFullModelRange: () => ({ startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 }),
       };
       monacoStub.models.push(model);
+      monacoStub.text = latest.current;
+      monacoStub.type = (t: string) => {
+        latest.current = t;
+        monacoStub.text = t;
+        onChangeRef.current?.(t);
+      };
       const editor = {
         getId: () => editorId,
         getValue: () => latest.current,
+        setValue: (t: string) => { latest.current = t; monacoStub.text = t; monacoStub.writes.push(t); },
+        executeEdits: (_src: string, edits: { text: string }[]) => {
+          latest.current = edits[0].text;
+          monacoStub.text = latest.current;
+          monacoStub.writes.push(latest.current);
+          return true;
+        },
+        pushUndoStop: () => true,
         getSelection: () => null,
         getModel: () => model,
         addAction: (desc: { id: string; label: string; keybindings?: number[]; run: (e: unknown) => unknown }) => {
@@ -290,5 +321,42 @@ describe("SqlEditor — completion is scoped to its editor", () => {
 
     unmount();
     expect(monacoStub.providers[0].disposed).toBe(true);
+  });
+});
+
+/**
+ * KI-006. `@monaco-editor/react` writes every `value` it is given into the
+ * editor when it differs from the editor's text (`executeEdits` over the whole
+ * text). SQL Lab's value makes a round trip through tab state, so it could
+ * arrive one keystroke old while the editor already held the next one, and the
+ * write erased what was just typed. Measured in the browser: typing at 40 ms a
+ * key with a 1,000-row result on screen lost characters.
+ */
+describe("SqlEditor — typing is never overwritten by the caller's echo", () => {
+  beforeEach(() => monacoStub.reset());
+
+  function Parent({ value }: { value: string }) {
+    return <SqlEditor value={value} onChange={() => {}} schemaWords={[]} />;
+  }
+
+  it("does not hand the editor its own text back, even one keystroke late", () => {
+    const { rerender } = render(<Parent value="" />);
+    // Monaco is not driven by a `value`: nothing for it to write back.
+    expect(monacoStub.passedValue).toBeUndefined();
+    act(() => { monacoStub.type!("S"); monacoStub.type!("SE"); });
+    // The caller renders with the first keystroke's text: one keystroke behind.
+    rerender(<Parent value="S" />);
+    rerender(<Parent value="SE" />);
+    expect(monacoStub.text).toBe("SE");
+    expect(monacoStub.writes).toEqual([]);
+  });
+
+  it("still takes a change from outside (Format, a snippet, a history entry)", () => {
+    const { rerender } = render(<Parent value="select 1" />);
+    act(() => monacoStub.type!("select 1 "));
+    rerender(<Parent value="select 1 " />);
+    rerender(<Parent value={"SELECT\n  1"} />);
+    expect(monacoStub.text).toBe("SELECT\n  1");
+    expect(monacoStub.writes).toEqual(["SELECT\n  1"]);
   });
 });

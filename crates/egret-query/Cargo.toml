@@ -17,6 +17,9 @@ egret-storage.workspace = true
 # `egret_perm_compile::lineage::ExplainRunner` (already in this graph through
 # `egret-workspace`).
 egret-perm-compile.workspace = true
+# KI-154: the row limit is placed by reading the query (`execution::limit`);
+# already in this graph through `egret-perm-compile`.
+sqlparser.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

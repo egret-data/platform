@@ -86,9 +86,17 @@ pub trait Connector: Send + Sync {
             max_rows: 0,
             timeout,
         };
+        // The wrapper puts the user's SQL on line 2: report the engine's
+        // positions on the user's lines (KI-087).
         let r = self
             .execute(&wrapped, &limits, CancellationToken::new())
-            .await?;
+            .await
+            .map_err(|e| match e {
+                EngineError::Engine(m) => {
+                    EngineError::Engine(crate::execution::unshift_error_lines(&m))
+                }
+                other => other,
+            })?;
         Ok(r.columns)
     }
 

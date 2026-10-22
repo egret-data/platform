@@ -49,3 +49,25 @@ test("filtering rows narrows the set and shows the match count", () => {
   expect(screen.queryByText("apple")).not.toBeInTheDocument();
   expect(screen.getByText("1 of 2")).toBeInTheDocument();
 });
+
+/** KI-004: doubles are shown without binary representation noise; exact types are untouched. */
+test("rounds floating-point cells for display only, and leaves exact types and the copied value alone", () => {
+  const page: ResultsPage = {
+    columns: [
+      { name: "d", type: "double" }, { name: "r", type: "real" }, { name: "dec", type: "decimal(38,2)" },
+      { name: "big", type: "bigint" }, { name: "nan", type: "double" },
+    ],
+    rows: [[63339475.32000001, 0.30000000000000004, "0.30000000000000004", 9007199254740991, "NaN"]],
+    page: 0, page_size: 1000, row_count: 1, truncated: false,
+  };
+  render(<ResultsGrid page={page} truncated={false} csvHref={null} />);
+  expect(screen.getByText("63339475.32")).toBeInTheDocument();
+  expect(screen.getByText("0.3")).toBeInTheDocument();
+  // A decimal arrives as a string and is exact: shown as sent.
+  expect(screen.getByText("0.30000000000000004")).toBeInTheDocument();
+  expect(screen.getByText(String(9007199254740991))).toBeInTheDocument();
+  expect(screen.getByText("NaN")).toBeInTheDocument();
+  // The expanded cell shows the exact value.
+  fireEvent.click(screen.getByText("63339475.32"));
+  expect(screen.getByRole("dialog")).toHaveTextContent("63339475.32000001");
+});
