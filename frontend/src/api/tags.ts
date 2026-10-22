@@ -106,11 +106,26 @@ export function invalidateTagAssignment(queryClient: QueryClient, tagId: string,
 }
 
 /**
+ * A rename or a delete changes what every chip says: each object's tags (Data's
+ * `GET /governance/tags/{catalog}`, any catalog, and a BI object's tags) and the
+ * catalogue under its generated key (`AddTagDialog`), besides `["tags"]`.
+ */
+function invalidateTagChips(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({
+    predicate: (q) =>
+      (typeof q.queryKey[0] === "string" && OBJECT_TAGS.test(q.queryKey[0])) ||
+      (q.queryKey[0] === "ws" && q.queryKey[2] === "object-tags"),
+  });
+  void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
+}
+
+/**
  * A rename or a delete of tag `tagId` changes what matches its name: route A
- * everywhere and the tag's own Hand-written tab (route D).
+ * everywhere, the tag's own Hand-written tab (route D) and every chip.
  */
 function invalidateTagName(queryClient: QueryClient, tagId: string) {
   invalidateObjectHandwritten(queryClient);
+  invalidateTagChips(queryClient);
   void queryClient.invalidateQueries({ queryKey: getControlPlaneGovernanceTagHandwrittenQueryKey(tagId) });
 }
 
@@ -183,6 +198,8 @@ export function useDeleteTag() {
         queryClient.removeQueries({ queryKey });
       }
       invalidateObjectHandwritten(queryClient);
+      // Its chips go from every object, and the generated catalogue loses it.
+      invalidateTagChips(queryClient);
     },
   });
 }

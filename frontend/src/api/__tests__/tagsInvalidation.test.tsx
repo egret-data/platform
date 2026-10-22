@@ -11,11 +11,14 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getControlPlaneGovernanceObjectHandwrittenQueryKey,
+  getControlPlaneGovernanceObjectTagsQueryKey,
   getControlPlaneGovernanceTagHandwrittenQueryKey,
   getControlPlaneGovernanceTagUsageQueryKey,
 } from "../generated/control-plane-governance/control-plane-governance";
 import { useAssignResourceTag, useUnassignResourceTag } from "../catalogTags";
+import { getControlPlaneTagsListTagsQueryKey } from "../generated/control-plane-tags/control-plane-tags";
 import {
+  objectTagsQueryKey,
   tagsQueryKey,
   useAssignTag,
   useClearTagAccessPolicy,
@@ -134,5 +137,40 @@ describe("useDeleteTag", () => {
     result.current.mutate("t1");
     await waitFor(() => expect(result.current.isSuccess || result.current.isError).toBe(true));
     expect(result.current.error).toBeNull();
+  });
+});
+
+/**
+ * A rename or a delete changes what every object's chips say (Data's
+ * `GET /governance/tags/{catalog}` and a BI object's tags carry the name) and
+ * the catalogue under its generated key (`AddTagDialog` reads it): both are
+ * refetched, not left stale until a reload.
+ */
+describe("a tag rename or delete refreshes the chips and the generated list", () => {
+  const DATA_CHIPS = getControlPlaneGovernanceObjectTagsQueryKey("c-any", { schema: "s", table: "t" });
+  const BI_CHIPS = objectTagsQueryKey("w1", "chart", "c1");
+  const LIST = JSON.stringify(getControlPlaneTagsListTagsQueryKey());
+
+  it.each([
+    ["rename", () => useUpdateTag(), { id: "t1", name: "x" }, 200],
+    ["delete", () => useDeleteTag(), "t1", 204],
+  ] as const)("%s", async (_what, hook, vars, status) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      status === 204
+        ? new Response(null, { status })
+        : new Response(JSON.stringify({ id: "t1" }), { status, headers: { "content-type": "application/json" } }),
+    );
+    const qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+    const { result } = renderHook(hook as () => { mutate: (v: unknown) => void; isSuccess: boolean }, { wrapper });
+    result.current.mutate(vars);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const filters = spy.mock.calls.map((c) => c[0]);
+    const matches = (queryKey: readonly unknown[]) =>
+      filters.some((f) => f?.predicate?.({ queryKey } as never) === true || JSON.stringify(f?.queryKey) === JSON.stringify(queryKey));
+    expect(matches(DATA_CHIPS)).toBe(true);
+    expect(matches(BI_CHIPS)).toBe(true);
+    expect(filters.map((f) => JSON.stringify(f?.queryKey))).toContain(LIST);
   });
 });
