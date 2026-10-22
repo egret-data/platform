@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ExplainPrincipalResponse, ExplainResponse } from "@/api/generated/model";
@@ -280,5 +280,50 @@ describe("Who can read? — the user suggestions sit in the flow, not over Expla
     expect(list.parentElement?.className ?? "").not.toMatch(/\babsolute\b/);
     const explain = within(dialog).getByRole("button", { name: "Explain" });
     expect(list.compareDocumentPosition(explain) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("Who can read? — one click on Explain runs Explain while the suggestions are open (live check D1)", () => {
+  it("keeps the list's space until the click has landed, so the click reaches Explain", async () => {
+    const { calls } = serve({ userLookup: () => ok({ items: [], total: 0 }) });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    const field = within(dialog).getByLabelText("User");
+    await user.type(field, "nobody");
+    expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+    const explain = within(dialog).getByRole("button", { name: "Explain" });
+
+    // The browser's order for one click: pointerdown, mousedown and the focus
+    // move (the field's blur), then pointerup, mouseup and click. jsdom has no
+    // layout, so the hit test is modelled: the in-flow list sits above Explain,
+    // and if it has collapsed before the button is released, Explain has moved
+    // up from under the pointer and the click lands on the dialog instead.
+    fireEvent.pointerDown(explain);
+    fireEvent.mouseDown(explain);
+    act(() => explain.focus());
+    const listStillThere = within(dialog).queryByText("No matches.") !== null;
+    const target = listStillThere ? explain : dialog;
+    fireEvent.pointerUp(target);
+    fireEvent.mouseUp(target);
+    fireEvent.click(target);
+
+    const lookups = () => calls.filter((c) => c.path === "/api/control-plane/perm/people" && c.search.get("username") === "nobody");
+    await waitFor(() => expect(lookups()).toHaveLength(1));
+    expect(await within(dialog).findByText("No user named nobody. Pick a user from the suggestions.")).toBeInTheDocument();
+    // Once the click has landed, the list closes: focus has left the field.
+    await waitFor(() => expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument());
+    expect(lookups()).toHaveLength(1);
+  });
+
+  it("still closes the list at once when focus leaves by keyboard", async () => {
+    serve({});
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await user.type(within(dialog).getByLabelText("User"), "nobody");
+    expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+    await user.tab();
+    expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument();
   });
 });

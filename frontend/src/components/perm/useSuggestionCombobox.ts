@@ -31,6 +31,10 @@ export function useDebounced<T>(value: T): T {
  *   With the list closed, Escape is the dialog's again.
  * - Focus leaving the box (`boxRef`, the caller's: the field and its popup) closes the list,
  *   so Tab moves on to the next control; focus moving inside it keeps it open.
+ *   When a pointer press moved the focus, the list closes only once that press
+ *   is released and its click has landed (live check D1): a list in the flow
+ *   collapsing on the blur moved the control under the pointer before mouseup,
+ *   and the click reached nothing.
  * - `aria-controls` names the listbox only while it is rendered: the caller
  *   renders `<ul role="listbox" id={listId}>` whenever `open`, even with no
  *   option, and keeps status text outside it.
@@ -55,6 +59,10 @@ export function useSuggestionCombobox({
 }) {
   const listId = `${useId()}-list`;
   const skipNextFocusOpen = useRef(false);
+  /** A pointer is pressed (since a `pointerdown` while the list was open). */
+  const pointerHeld = useRef(false);
+  /** Focus left the box during that press: close once it is released. */
+  const closeOnRelease = useRef(false);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const activeRow = open && active >= 0 && active < count ? active : -1;
@@ -77,6 +85,35 @@ export function useSuggestionCombobox({
     return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [open, boxRef, inputRef]);
 
+  useEffect(() => {
+    if (!open) return;
+    const down = () => {
+      pointerHeld.current = true;
+    };
+    const up = () => {
+      pointerHeld.current = false;
+      if (!closeOnRelease.current) return;
+      closeOnRelease.current = false;
+      // After the click this release produces (dispatched in the same task), unless focus came back.
+      setTimeout(() => {
+        const focused = document.activeElement;
+        if (focused instanceof Node && boxRef.current?.contains(focused)) return;
+        setOpen(false);
+        setActive(-1);
+      }, 0);
+    };
+    window.addEventListener("pointerdown", down, { capture: true });
+    window.addEventListener("pointerup", up, { capture: true });
+    window.addEventListener("pointercancel", up, { capture: true });
+    return () => {
+      window.removeEventListener("pointerdown", down, { capture: true });
+      window.removeEventListener("pointerup", up, { capture: true });
+      window.removeEventListener("pointercancel", up, { capture: true });
+      pointerHeld.current = false;
+      closeOnRelease.current = false;
+    };
+  }, [open, boxRef]);
+
   const pick = (index: number) => {
     onPick(index);
     if (closeOnPick) close();
@@ -85,6 +122,10 @@ export function useSuggestionCombobox({
   const closeUnlessInside = (e: FocusEvent) => {
     const next = e.relatedTarget;
     if (next instanceof Node && boxRef.current?.contains(next)) return;
+    if (pointerHeld.current) {
+      closeOnRelease.current = true;
+      return;
+    }
     close();
   };
 
