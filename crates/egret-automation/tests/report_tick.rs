@@ -689,6 +689,218 @@ async fn a_png_report_with_a_same_workspace_schedule_targets_row_still_renders(p
     );
 }
 
+// ── KI-167: the render tokens of a multi-page report outlive its render ──
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_multi_page_reports_tokens_live_as_long_as_its_render_may(pool: sqlx::PgPool) {
+    // The renderer opens the pages one after another; the third page of a
+    // long report is fetched well after a fixed 60 s token would have expired.
+    let fx = setup(pool, RenderOutcome::Png(b"%PDF".to_vec())).await;
+    let dashboards = DashboardRepo::new(fx.db.clone());
+    for (i, name) in ["first", "second", "third"].iter().enumerate() {
+        let d = dashboards.create(fx.ws, name, "", None).await.unwrap();
+        sqlx::query(
+            "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+             VALUES ($1, 'dashboard', $2, $3)",
+        )
+        .bind(fx.schedule)
+        .bind(d.id)
+        .bind(i as i32)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    }
+
+    // The fake renderer never redeems, so the minted tokens stay in the table.
+    fx.runner.tick_once().await;
+    let lifetimes: Vec<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM expires_at - now())::float8 FROM automation.render_tokens",
+    )
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(lifetimes.len(), 3, "one token per page");
+    let budget = egret_automation::render::client::render_budget(3).as_secs_f64();
+    for left in lifetimes {
+        assert!(
+            left > budget - 10.0,
+            "a page token must outlive the whole render ({budget}s), it has {left}s"
+        );
+    }
+}
+
+// ── KI-157 / KI-169: what a csv/text report actually mails ───────────────
+
+/// The engine's answer for the KI-169 rows: a `double` revenue per status.
+struct RevenueEngine;
+
+#[async_trait::async_trait]
+impl QueryRunner for RevenueEngine {
+    async fn run(
+        &self,
+        _db: Uuid,
+        _sql: &str,
+        _identity: &RunIdentity,
+        _limit: Option<usize>,
+    ) -> Result<TabularResult, String> {
+        Ok(TabularResult {
+            columns: vec![
+                ColumnMeta {
+                    name: "orderstatus".into(),
+                    ty: "varchar".into(),
+                },
+                ColumnMeta {
+                    name: "revenue".into(),
+                    ty: "double".into(),
+                },
+            ],
+            rows: vec![
+                vec![
+                    serde_json::json!("F"),
+                    serde_json::from_str("1.0356810234900002e+9").unwrap(),
+                ],
+                vec![
+                    serde_json::json!("P"),
+                    serde_json::from_str("6.333947531999999e+7").unwrap(),
+                ],
+            ],
+            row_count: 2,
+            bytes_scanned: None,
+            truncated: false,
+        })
+    }
+}
+
+/// A plaintext SMTP relay that keeps every message it is handed — enough of
+/// RFC 5321 for `lettre` (`TlsMode::None`, no auth). One connection.
+async fn capturing_smtp() -> (std::net::SocketAddr, Arc<Mutex<String>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mail = Arc::new(Mutex::new(String::new()));
+    let sink = mail.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (r, mut w) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        let _ = w.write_all(b"220 fake.local ESMTP\r\n").await;
+        let mut in_data = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if in_data {
+                if line == "." {
+                    in_data = false;
+                    let _ = w.write_all(b"250 2.0.0 OK: queued\r\n").await;
+                } else {
+                    let mut m = sink.lock().unwrap();
+                    m.push_str(&line);
+                    m.push('\n');
+                }
+                continue;
+            }
+            let upper = line.to_ascii_uppercase();
+            let reply: &[u8] = if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                b"250-fake.local\r\n250 OK\r\n"
+            } else if upper == "DATA" {
+                in_data = true;
+                b"354 End data with <CR><LF>.<CR><LF>\r\n"
+            } else if upper.starts_with("QUIT") {
+                let _ = w.write_all(b"221 2.0.0 Bye\r\n").await;
+                break;
+            } else {
+                b"250 OK\r\n"
+            };
+            let _ = w.write_all(reply).await;
+        }
+    });
+    (addr, mail)
+}
+
+/// The csv fixture, renamed and given a mail recipient, a relay that keeps
+/// what it receives, and the revenue engine.
+async fn mailed_report(pool: sqlx::PgPool, name: &str, format: &str) -> (Fx, Arc<Mutex<String>>) {
+    let mut fx = setup_csv_chart_report(pool).await;
+    fx.runner.query = Arc::new(RevenueEngine);
+    sqlx::query("UPDATE automation.schedules SET name = $2, report_format = $3 WHERE id = $1")
+        .bind(fx.schedule)
+        .bind(name)
+        .bind(format)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+         VALUES ($1,'email',$2)",
+    )
+    .bind(fx.schedule)
+    .bind(serde_json::json!({"addresses": ["reader@example.com"]}))
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let (addr, mail) = capturing_smtp().await;
+    sqlx::query(
+        "INSERT INTO automation.smtp_config (workspace_id, host, port, from_address, tls_mode) \
+         VALUES ($1,$2,$3,'reports@example.com','none')",
+    )
+    .bind(fx.ws)
+    .bind(addr.ip().to_string())
+    .bind(addr.port() as i32)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    (fx, mail)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_csv_report_writes_numbers_as_the_table_shows_them(pool: sqlx::PgPool) {
+    let (fx, mail) = mailed_report(pool, "Revenue by status CSV", "csv").await;
+    fx.runner.tick_once().await;
+    assert_eq!(
+        run_log(&fx).await[0].0,
+        "success",
+        "{:?}",
+        run_log(&fx).await
+    );
+
+    let mail = mail.lock().unwrap().clone();
+    assert!(
+        mail.contains("\"F\",\"1035681023.49\""),
+        "rounded like the table, not grouped, not float noise:\n{mail}"
+    );
+    assert!(mail.contains("\"P\",\"63339475.32\""), "{mail}");
+    assert!(!mail.contains("e+9"), "no scientific notation:\n{mail}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_text_report_writes_numbers_as_the_table_shows_them(pool: sqlx::PgPool) {
+    let (fx, mail) = mailed_report(pool, "Revenue by status (text)", "text").await;
+    fx.runner.tick_once().await;
+    assert_eq!(
+        run_log(&fx).await[0].0,
+        "success",
+        "{:?}",
+        run_log(&fx).await
+    );
+
+    let mail = mail.lock().unwrap().clone();
+    assert!(mail.contains("F | 1,035,681,023.49"), "{mail}");
+    assert!(mail.contains("P | 63,339,475.32"), "{mail}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_report_named_report_is_not_mailed_as_report_report(pool: sqlx::PgPool) {
+    let (fx, mail) = mailed_report(pool, "start: first dashboard report", "csv").await;
+    fx.runner.tick_once().await;
+
+    let mail = mail.lock().unwrap().clone();
+    assert!(
+        mail.contains("Subject: [egret] start: first dashboard report\n"),
+        "{mail}"
+    );
+    assert!(!mail.contains("report report"), "{mail}");
+}
+
 /// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
 /// variable does not skip these tests — it silently points them at the database
 /// `.env` names, which is the DEV one. See

@@ -13,6 +13,7 @@ import {
   alertsRunNow,
   alertsSetActive,
   alertsUpdate,
+  getAlertsDetailQueryKey,
   getAlertsListQueryKey,
   getAlertsRunsQueryKey,
   useAlertsDetail,
@@ -107,11 +108,10 @@ export function useScheduleMutations(ws: string) {
     onSuccess: invalidate,
   });
   /**
-   * "Run now" (P5). Deliberately does NOT invalidate the list: `run_now`
-   * never touches `next_run_at` or `last_state` (see the route's own doc
-   * comment — a manual run must not move the schedule's own cadence), so the
-   * list has nothing new to show. What DID change is the run log, so only
-   * that query is invalidated — the drawer, if open, picks up the new row.
+   * "Run now" (P5). The run writes its outcome onto the schedule's
+   * `last_state` (KI-032; only `next_run_at` stays as it was), so the list's
+   * Last run and the detail badge change as well as the run log — all three
+   * are invalidated.
    *
    * Unwraps orval's `{data, status}` envelope to the `RunDto` itself — orval
    * widens `data` to `RunDto | void` because the generated type also covers
@@ -124,7 +124,11 @@ export function useScheduleMutations(ws: string) {
       return res.data as RunDto;
     },
     onSuccess: (_run, id) =>
-      qc.invalidateQueries({ queryKey: getAlertsRunsQueryKey(ws, id) }),
+      Promise.all([
+        qc.invalidateQueries({ queryKey: getAlertsRunsQueryKey(ws, id) }),
+        qc.invalidateQueries({ queryKey: getAlertsDetailQueryKey(ws, id) }),
+        invalidate(),
+      ]),
   });
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>

@@ -1047,9 +1047,11 @@ async fn running_a_schedule_now_writes_a_run_log_row() {
 }
 
 #[tokio::test]
-async fn running_a_schedule_does_not_move_its_next_run_or_last_state() {
+async fn running_a_schedule_records_its_last_state_but_not_a_new_next_run() {
     // The manual-run contract from `runner.rs`: `run_now` must not call
-    // `release`, so the schedule's own cadence is untouched by a click.
+    // `release`, so the schedule's own cadence is untouched by a click — but
+    // its outcome is the schedule's last state (KI-032), or the list and the
+    // detail badge keep saying "Never run" above a run log that shows runs.
     let fx = fixture!();
     let (_, made) = req(
         &fx,
@@ -1061,8 +1063,9 @@ async fn running_a_schedule_does_not_move_its_next_run_or_last_state() {
     .await;
     let id = made["id"].as_str().unwrap();
     let before = made["next_run_at"].as_str().unwrap().to_string();
+    assert!(made["last_state"].is_null(), "never run yet: {made}");
 
-    req(
+    let (_, run) = req(
         &fx,
         &fx.editor_tok,
         "POST",
@@ -1084,6 +1087,25 @@ async fn running_a_schedule_does_not_move_its_next_run_or_last_state() {
         before,
         "a manual run must not change next_run_at"
     );
+    assert_eq!(
+        after["last_state"], run["state"],
+        "the manual run's outcome is the schedule's last state: {after}"
+    );
+    let (_, list) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .expect("the schedule is listed");
+    assert_eq!(row["last_state"], run["state"], "the list agrees: {row}");
 }
 
 #[tokio::test]
