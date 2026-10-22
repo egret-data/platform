@@ -31,6 +31,7 @@ import type {
   LoginRequest,
   MeResponse,
   OidcStepUp,
+  RateLimited,
   StartImpersonation
 } from '../model';
 
@@ -371,7 +372,7 @@ export type authLoginResponse401 = {
 }
 
 export type authLoginResponse429 = {
-  data: ErrorBody
+  data: RateLimited
   status: 429
 }
 
@@ -412,7 +413,7 @@ export const authLogin = async (loginRequest: LoginRequest, options?: Parameters
 
 
 
-export const getAuthLoginMutationOptions = <TError = ErrorBody,
+export const getAuthLoginMutationOptions = <TError = ErrorBody | RateLimited,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authLogin>>, TError,{data: LoginRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof authLogin>>, TError,{data: LoginRequest}, TContext> => {
 
@@ -441,9 +442,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type AuthLoginMutationResult = NonNullable<Awaited<ReturnType<typeof authLogin>>>
     export type AuthLoginMutationBody = LoginRequest
-    export type AuthLoginMutationError = ErrorBody
+    export type AuthLoginMutationError = ErrorBody | RateLimited
 
-    export const useAuthLogin = <TError = ErrorBody,
+    export const useAuthLogin = <TError = ErrorBody | RateLimited,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authLogin>>, TError,{data: LoginRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof authLogin>>,

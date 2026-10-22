@@ -28,9 +28,11 @@ import type {
   AccessRequestDto,
   Ack,
   AddMember,
+  AddMemberResult,
   ApproveAccessRequest,
   DenyAccessRequest,
   ErrorBody,
+  InviteDto,
   MemberDto,
   ObjectGrantRollupDto,
   StartWsImpersonation,
@@ -562,6 +564,229 @@ export const useWorkspaceMembersWsImpersonateStart = <TError = ErrorBody | void,
       > => {
       return useMutation(getWorkspaceMembersWsImpersonateStartMutationOptions(options), queryClient);
     }
+    export type workspaceMembersListInvitesResponse200 = {
+  data: InviteDto[]
+  status: 200
+}
+
+export type workspaceMembersListInvitesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersListInvitesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersListInvitesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersListInvitesResponseSuccess = (workspaceMembersListInvitesResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersListInvitesResponseError = (workspaceMembersListInvitesResponse401 | workspaceMembersListInvitesResponse403 | workspaceMembersListInvitesResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersListInvitesResponse = (workspaceMembersListInvitesResponseSuccess | workspaceMembersListInvitesResponseError)
+
+export const getWorkspaceMembersListInvitesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/invites`
+}
+
+export const workspaceMembersListInvites = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<workspaceMembersListInvitesResponse> => {
+
+  return customInstance<workspaceMembersListInvitesResponse>(getWorkspaceMembersListInvitesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersListInvitesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/invites`
+    ] as const;
+    }
+
+
+export const getWorkspaceMembersListInvitesQueryOptions = <TData = Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkspaceMembersListInvitesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workspaceMembersListInvites>>> = ({ signal }) => workspaceMembersListInvites(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkspaceMembersListInvitesQueryResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersListInvites>>>
+export type WorkspaceMembersListInvitesQueryError = ErrorBody
+
+
+export function useWorkspaceMembersListInvites<TData = Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListInvites>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListInvites>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListInvites<TData = Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListInvites>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListInvites>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListInvites<TData = Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkspaceMembersListInvites<TData = Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListInvites>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkspaceMembersListInvitesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workspaceMembersDeleteInviteResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type workspaceMembersDeleteInviteResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersDeleteInviteResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersDeleteInviteResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workspaceMembersDeleteInviteResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersDeleteInviteResponseSuccess = (workspaceMembersDeleteInviteResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersDeleteInviteResponseError = (workspaceMembersDeleteInviteResponse401 | workspaceMembersDeleteInviteResponse403 | workspaceMembersDeleteInviteResponse404 | workspaceMembersDeleteInviteResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersDeleteInviteResponse = (workspaceMembersDeleteInviteResponseSuccess | workspaceMembersDeleteInviteResponseError)
+
+export const getWorkspaceMembersDeleteInviteUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/invites/${encodeURIComponent(id)}`
+}
+
+export const workspaceMembersDeleteInvite = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workspaceMembersDeleteInviteResponse> => {
+
+  return customInstance<workspaceMembersDeleteInviteResponse>(getWorkspaceMembersDeleteInviteUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersDeleteInviteMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workspaceMembersDeleteInvite'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workspaceMembersDeleteInvite(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkspaceMembersDeleteInviteMutationResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>>
+
+    export type WorkspaceMembersDeleteInviteMutationError = ErrorBody
+
+    export const useWorkspaceMembersDeleteInvite = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workspaceMembersDeleteInvite>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkspaceMembersDeleteInviteMutationOptions(options), queryClient);
+    }
     export type workspaceMembersListMembersResponse200 = {
   data: MemberDto[]
   status: 200
@@ -686,8 +911,13 @@ export function useWorkspaceMembersListMembers<TData = Awaited<ReturnType<typeof
 
 
 export type workspaceMembersAddMemberResponse200 = {
-  data: Ack
+  data: AddMemberResult
   status: 200
+}
+
+export type workspaceMembersAddMemberResponse400 = {
+  data: ErrorBody
+  status: 400
 }
 
 export type workspaceMembersAddMemberResponse401 = {
@@ -708,7 +938,7 @@ export type workspaceMembersAddMemberResponse500 = {
 export type workspaceMembersAddMemberResponseSuccess = (workspaceMembersAddMemberResponse200) & {
   headers: Headers;
 };
-export type workspaceMembersAddMemberResponseError = (workspaceMembersAddMemberResponse401 | workspaceMembersAddMemberResponse403 | workspaceMembersAddMemberResponse500) & {
+export type workspaceMembersAddMemberResponseError = (workspaceMembersAddMemberResponse400 | workspaceMembersAddMemberResponse401 | workspaceMembersAddMemberResponse403 | workspaceMembersAddMemberResponse500) & {
   headers: Headers;
 };
 

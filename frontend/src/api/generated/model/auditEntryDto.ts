@@ -12,6 +12,11 @@ export interface AuditEntryDto {
   kind: string;
   /** @nullable */
   actorUserId?: string | null;
+  /**
+     * The actor's email, when the actor is a user who still exists.
+     * @nullable
+     */
+  actorEmail?: string | null;
   /** @nullable */
   workspaceId?: string | null;
   action: string;
