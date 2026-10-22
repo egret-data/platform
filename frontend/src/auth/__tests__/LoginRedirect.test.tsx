@@ -94,8 +94,14 @@ test("successful login navigates to /", async () => {
 // ---------------------------------------------------------------------------
 
 test("HTTP 429 shows the rate-limit message", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response(JSON.stringify({ error: "Too Many Requests" }), { status: 429 }),
+  // A fresh Response per call: the auth-config probe reads one too.
+  vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({ error: "too many failed sign-in attempts", code: "rate_limited", retry_after_secs: 90 }),
+        { status: 429, headers: { "Retry-After": "90" } },
+      ),
+    ),
   );
 
   const user = userEvent.setup();
@@ -107,7 +113,7 @@ test("HTTP 429 shows the rate-limit message", async () => {
 
   await waitFor(() =>
     expect(
-      screen.getByText(/too many attempts/i),
+      screen.getByText("Too many failed sign-in attempts. Try again in 2 minutes."),
     ).toBeInTheDocument(),
   );
   // Generic message must NOT appear
