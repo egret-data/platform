@@ -47,7 +47,12 @@ function permMatches(p: WsPerm, q: string): boolean {
 }
 
 /** A role plus the permissions to show for it under the current search. */
-type FilteredRole = { role: WsRole; perms: WsPerm[] };
+type FilteredRole = { role: WsRole; perms: WsPerm[]; inherited: WsPerm[] };
+
+/** What a holder of the role gets: its own permissions plus the inherited ones. */
+function totalCount(role: WsRole): number {
+  return role.permissions.length + role.inherited_permissions.length;
+}
 
 /** Permissions inside an expanded role, clustered by their group so large
  *  roles (ws_admin / ws_editor) stay scannable instead of being one long list. */
@@ -124,7 +129,11 @@ export default function RolesPermissions() {
     const needle = query.trim().toLowerCase();
     let out: FilteredRole[];
     if (!needle) {
-      out = sorted.map((role) => ({ role, perms: role.permissions }));
+      out = sorted.map((role) => ({
+        role,
+        perms: role.permissions,
+        inherited: role.inherited_permissions,
+      }));
     } else {
       out = [];
       for (const role of sorted) {
@@ -134,12 +143,17 @@ export default function RolesPermissions() {
         const perms = roleHit
           ? role.permissions
           : role.permissions.filter((p) => permMatches(p, needle));
-        if (roleHit || perms.length > 0) out.push({ role, perms });
+        const inherited = roleHit
+          ? role.inherited_permissions
+          : role.inherited_permissions.filter((p) => permMatches(p, needle));
+        if (roleHit || perms.length > 0 || inherited.length > 0) {
+          out.push({ role, perms, inherited });
+        }
       }
     }
     // "Hide empty roles" filters on the role's real permission count, not the
     // search-narrowed list, so the toggle means the same thing while searching.
-    if (hideEmpty) out = out.filter((f) => f.role.permissions.length > 0);
+    if (hideEmpty) out = out.filter((f) => totalCount(f.role) > 0);
     return out;
   }, [sorted, query, hideEmpty]);
 
@@ -161,7 +175,9 @@ export default function RolesPermissions() {
         <SettingsNote>
           Roles are defined platform-wide in{" "}
           <span className="font-medium">Control Plane → Access control</span> and apply to every
-          workspace. This is a read-only view.
+          workspace. This is a read-only view. The Control Plane also lists{" "}
+          <span className="font-mono text-xs">data_api_invoker</span>: it is granted on one Data
+          API endpoint, never as a workspace role, so it is not shown here.
         </SettingsNote>
       </header>
 
@@ -223,11 +239,12 @@ export default function RolesPermissions() {
               onValueChange={searching ? undefined : setOpen}
               className="rounded-md border"
             >
-              {filtered.map(({ role, perms }, i) => {
+              {filtered.map(({ role, perms, inherited }, i) => {
                 const parentName = role.parent_role_id
                   ? nameById.get(role.parent_role_id)
                   : undefined;
-                const count = role.permissions.length;
+                const count = totalCount(role);
+                const inheritedCount = role.inherited_permissions.length;
                 return (
                   <AccordionItem
                     key={role.id}
@@ -251,6 +268,7 @@ export default function RolesPermissions() {
                         )}
                         <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                           {count} permission{count === 1 ? "" : "s"}
+                          {inheritedCount > 0 && ` (${inheritedCount} inherited)`}
                         </span>
                       </div>
                     </AccordionTrigger>
@@ -258,7 +276,15 @@ export default function RolesPermissions() {
                       {role.description && (
                         <p className="mb-3 text-sm text-muted-foreground">{role.description}</p>
                       )}
-                      <PermList perms={perms} />
+                      {(perms.length > 0 || inherited.length === 0) && <PermList perms={perms} />}
+                      {inherited.length > 0 && (
+                        <div className={perms.length > 0 ? "mt-4 border-t pt-3" : ""}>
+                          <p className="mb-2 text-sm font-medium">
+                            Inherited from {parentName ?? "its parent role"}
+                          </p>
+                          <PermList perms={inherited} />
+                        </div>
+                      )}
                     </AccordionContent>
                   </AccordionItem>
                 );

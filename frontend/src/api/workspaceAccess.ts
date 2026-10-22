@@ -24,7 +24,10 @@ export interface WsRole {
   name: string;
   description: string;
   parent_role_id: string | null;
+  /** The role's own permissions. */
   permissions: WsPerm[];
+  /** Held through the parent chain and not directly; a holder has them too. */
+  inherited_permissions: WsPerm[];
 }
 
 export interface ObjectGrantRollup {
