@@ -433,7 +433,10 @@ async fn stale_rows_are_pruned_on_upsert_and_fresh_ones_kept() {
     .await
     .unwrap();
 
-    // The prune runs on a fixed tick of upserts; 64 in a row always hit it.
+    // The prune runs on a fixed tick of this store's upserts; 64 in a row
+    // always hit it. The tick is the store's, not the process's: with one
+    // counter per process, another test's upserts took the 64th tick and the
+    // prune ran for ITS service, not this one.
     for i in 0..64 {
         store
             .record_plugin_download(id, "fresh", egret_policy::DownloadKind::Tags, Some(i), None)

@@ -8,6 +8,12 @@ use serde_json::Value;
 #[derive(Clone)]
 pub struct PolicyStore {
     db: Db,
+    /// Upserts into the plugin download ledger through this store and its
+    /// clones, which decides when one of them also prunes
+    /// (`plugin_downloads`). Per store, not per process: a test's own store
+    /// then sees every tick it causes, and in production the one store behind
+    /// the `/ranger` surface counts every poll, as the process-wide counter did.
+    pub(crate) download_ticks: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -683,7 +689,10 @@ async fn refuse_if_compiler_owned_policies_remain(
 
 impl PolicyStore {
     pub fn new(db: Db) -> Self {
-        Self { db }
+        Self {
+            db,
+            download_ticks: Default::default(),
+        }
     }
 
     /// The pool, for sibling modules that own their own tables

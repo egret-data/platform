@@ -13,7 +13,7 @@
 //! forged poll can end a hold early. It cannot change what the real plugin
 //! applies on its next poll.
 use crate::{PolicyStore, PolicyStoreError};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// `waiting_on` when no plugin has polled the service within the window.
@@ -23,7 +23,6 @@ pub const NO_PLUGIN_POLLED: &str = "<no plugin has polled>";
 /// Rows silent for this long are pruned.
 const RETENTION: Duration = Duration::from_secs(24 * 3600);
 const PRUNE_EVERY: u64 = 64;
-static PRUNE_TICK: AtomicU64 = AtomicU64::new(0);
 
 const WAIT_STEP: Duration = Duration::from_millis(500);
 /// A plugin that has not polled within three 30 s poll intervals is not waited
@@ -90,12 +89,13 @@ impl PolicyStore {
         .bind(served_version)
         .execute(self.pool())
         .await?;
-        // Retention without a scheduler: every PRUNE_EVERY-th upsert in this
-        // process also deletes this service's long-silent rows. One bounded
+        // Retention without a scheduler: every PRUNE_EVERY-th upsert through
+        // this store also deletes this service's long-silent rows. One bounded
         // statement (the PK prefix is `service_id`), run on 1 of 64 polls, so
         // it stays off the p99 of the common path. Forged ids cannot pile up
         // unboundedly; a failed prune is only a missed cleanup.
-        if PRUNE_TICK
+        if self
+            .download_ticks
             .fetch_add(1, Ordering::Relaxed)
             .is_multiple_of(PRUNE_EVERY)
         {
