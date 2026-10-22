@@ -4920,23 +4920,47 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
         }
     };
 
-    // A minted client's credential secret is `catalog-client-<client id>`; one
-    // whose client no longer exists was leaked by a rollback.
-    let orphaned_credentials = || {
+    // A minted client's credential secret is `catalog-client-<client id>`.
+    // The check is on the clients THIS test minted, named `engine-<engine
+    // name>`. It used to count every orphaned credential in the database, and
+    // other tests in this binary retire clients at the same time (the client
+    // goes first, its secret just after), so a credential mid-retire elsewhere
+    // failed this test once in CI. A rollback deletes the client row, so a
+    // trigger records each client as it is minted.
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS public.p2_minted_clients (id uuid, name text); \
+         CREATE OR REPLACE FUNCTION public.p2_record_minted_client() RETURNS trigger \
+           LANGUAGE plpgsql AS $$ BEGIN \
+             INSERT INTO public.p2_minted_clients VALUES (NEW.id, NEW.name); RETURN NEW; \
+           END $$; \
+         CREATE OR REPLACE TRIGGER p2_record_minted_client \
+           AFTER INSERT ON catalog.catalog_clients \
+           FOR EACH ROW EXECUTE FUNCTION public.p2_record_minted_client();",
+    )
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let credentials_left = |engine: String| {
         let pool = f.db.pool.clone();
         async move {
-            sqlx::query_scalar::<_, String>(
-                "SELECT s.name FROM workspace_secrets s \
-                  WHERE s.workspace_id IS NULL AND left(s.name, 15) = 'catalog-client-' \
-                    AND NOT EXISTS (SELECT 1 FROM catalog.catalog_clients c \
-                                     WHERE 'catalog-client-' || c.id::text = s.name)",
+            let minted: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM public.p2_minted_clients WHERE name = 'engine-' || $1",
             )
+            .bind(&engine)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(minted.len(), 1, "{engine}: the create minted one client");
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM workspace_secrets \
+                  WHERE workspace_id IS NULL AND name = 'catalog-client-' || $1::text",
+            )
+            .bind(minted[0])
             .fetch_all(&pool)
             .await
             .unwrap()
         }
     };
-    let orphans_before = orphaned_credentials().await;
 
     let wh_id = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
@@ -4990,13 +5014,15 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
     assert!(port.deleted.lock().unwrap().contains(&(
         "starrocks".to_string(),
         "egret-engines".to_string(),
-        sr_name
+        sr_name.clone()
     )));
-    assert_eq!(
-        orphaned_credentials().await,
-        orphans_before,
-        "both rollbacks deleted the credential secret of the client they revoked"
-    );
+    for engine in [name, sr_name] {
+        assert_eq!(
+            credentials_left(engine.clone()).await,
+            Vec::<String>::new(),
+            "{engine}: the rollback deleted the credential secret of the client it revoked"
+        );
+    }
 }
 
 /// P2 regression: the resource-group validation move (now ahead of the
