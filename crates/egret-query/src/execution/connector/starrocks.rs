@@ -373,10 +373,10 @@ impl Connector for StarRocksConnector {
             if let Some(u) = &execute_as {
                 StarRocksConnector::switch_identity(&mut conn, u).await?;
             }
-            let result = conn
-                .query_iter(wrapped)
-                .await
-                .map_err(|e| EngineError::Engine(e.to_string()))?;
+            // Positions on the user's lines, not the wrapper's (KI-087).
+            let result = conn.query_iter(wrapped).await.map_err(|e| {
+                EngineError::Engine(crate::execution::unshift_error_lines(&e.to_string()))
+            })?;
             let columns: Vec<ColumnMeta> = result
                 .columns_ref()
                 .iter()

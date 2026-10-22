@@ -124,6 +124,57 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
   const disposables = useRef<{ dispose: () => void }[]>([]);
   useEffect(() => () => { disposables.current.forEach((d) => d.dispose()); disposables.current = []; }, []);
 
+  // **The editor's text is not handed back to it on every keystroke (KI-006).**
+  // `@monaco-editor/react` given a `value` writes it into the editor whenever it
+  // differs from the editor's text. The caller's value makes a round trip
+  // through its own state, so it could arrive one keystroke old while the editor
+  // already held the next one, and the write erased what was just typed
+  // (measured: characters lost typing at 40 ms a key with a 1,000-row result on
+  // screen; none lost at any speed with the editor left alone). So the editor
+  // gets the caller's text only at mount (`defaultValue`) and, after that, only
+  // a value it did not emit itself: Format, a snippet, a history entry.
+  const editorRef = useRef<MonacoNS.editor.IStandaloneCodeEditor | null>(null);
+  const valueRef = useRef(value);
+  /** Texts this editor emitted that the caller has not echoed back yet, oldest first. */
+  const emitted = useRef<string[]>([]);
+  /** Set while this component writes the caller's value, so that write is not emitted. */
+  const writing = useRef(false);
+  function writeValue(editor: MonacoNS.editor.IStandaloneCodeEditor, text: string) {
+    const model = editor.getModel();
+    if (!model || editor.getValue() === text) return;
+    writing.current = true;
+    try {
+      if (readOnly) editor.setValue(text);
+      else {
+        // An edit, not `setValue`, so Undo can take it back.
+        editor.executeEdits("", [{ range: model.getFullModelRange(), text, forceMoveMarkers: true }]);
+        editor.pushUndoStop();
+      }
+    } finally {
+      writing.current = false;
+    }
+  }
+  useEffect(() => {
+    valueRef.current = value;
+    const echoed = emitted.current.indexOf(value);
+    if (echoed >= 0) {
+      // Our own text coming back, possibly behind what has been typed since.
+      emitted.current.splice(0, echoed + 1);
+      return;
+    }
+    emitted.current = [];
+    if (editorRef.current) writeValue(editorRef.current, value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs for a new value only
+  }, [value]);
+  function handleChange(v: string | undefined) {
+    if (writing.current) return;
+    const text = v ?? "";
+    emitted.current.push(text);
+    // A caller that never echoes would grow this without bound.
+    if (emitted.current.length > 200) emitted.current.shift();
+    onChange(text);
+  }
+
   function selectedText(editor: MonacoNS.editor.IStandaloneCodeEditor): string {
     const sel = editor.getSelection();
     return sel && !sel.isEmpty() ? (editor.getModel()?.getValueInRange(sel) ?? "") : "";
@@ -133,6 +184,9 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
     // A second mount replaces the editor: what the first registered goes first.
     disposables.current.forEach((d) => d.dispose());
     disposables.current = [];
+    // The caller's text may have changed while the editor was loading.
+    editorRef.current = editor;
+    writeValue(editor, valueRef.current);
     // **Answers only for this editor's model.** Monaco keeps completion
     // providers per LANGUAGE and asks every `sql` provider for every SQL model,
     // merging the answers (`suggest.js` `provideSuggestionItems`), so with two
@@ -184,7 +238,7 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
     );
   }
 
-  return <Editor height="100%" defaultLanguage="sql" value={value} onChange={(v) => onChange(v ?? "")}
+  return <Editor height="100%" defaultLanguage="sql" defaultValue={value} onChange={handleChange}
     theme={isDark ? DARK_THEME : LIGHT_THEME}
     beforeMount={defineThemes}
     onMount={handleMount}

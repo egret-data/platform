@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
-  AlertTriangle, ArrowDown, ArrowUp, ChevronsUpDown, Copy, Download, Search, TableProperties,
+  AlertTriangle, ArrowDown, Ban, ArrowUp, ChevronsUpDown, Copy, Download, Search, TableProperties,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -19,6 +19,17 @@ import type { ResultsPage } from "@/api/sqllab";
 const NUMERIC = /^(bigint|tinyint|smallint|integer|largeint|int|double|decimal|numeric|real|float|number|long|short|byte)\b/i;
 const isNumeric = (type: string) => NUMERIC.test(type.trim());
 const cellText = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+// Binary floating point (Trino `double`/`real`, StarRocks `double`/`float`).
+const FLOAT = /^(double|real|float)\b/i;
+/** A cell as the grid shows it. A float is rounded to 15 significant digits,
+ *  which drops binary representation noise (`63339475.32000001` → `63339475.32`)
+ *  and nothing a double carries reliably. Display only: copy, export, CSV and the
+ *  expanded cell keep the exact value; exact types (integers, decimals) are not
+ *  touched (KI-004). */
+function displayText(v: unknown, type: string): string {
+  if (typeof v === "number" && Number.isFinite(v) && FLOAT.test(type.trim())) return String(Number(v.toPrecision(15)));
+  return String(v);
+}
 
 function copyText(text: string, label: string) {
   navigator.clipboard?.writeText(text).then(
@@ -29,9 +40,14 @@ function copyText(text: string, label: string) {
 
 type SortDir = "asc" | "desc";
 
-export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loading }: {
+export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Query failed", cancelled, statusLine, loading }: {
   page: ResultsPage | null; csvHref: string | null; truncated: boolean;
-  error?: string | null; statusLine?: ReactNode; loading?: boolean;
+  error?: string | null;
+  /** The error panel's heading: "Query failed" unless the query never started. */
+  errorTitle?: string;
+  /** The run was cancelled: say so instead of the empty state (KI-078). */
+  cancelled?: boolean;
+  statusLine?: ReactNode; loading?: boolean;
 }) {
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -102,7 +118,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
     return (
       <div className="flex h-full flex-col">
         <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
-          <AlertTriangle className="h-4 w-4 shrink-0" /> Query failed
+          <AlertTriangle className="h-4 w-4 shrink-0" /> {errorTitle}
           <Button variant="ghost" size="sm" className="ml-auto h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
             onClick={() => copyText(error, "Error copied")}><Copy className="h-3 w-3" /> Copy</Button>
         </div>
@@ -117,6 +133,19 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
       <div className="space-y-2 p-4">
         <Skeleton className="h-8 w-full" />
         {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-6 w-full" style={{ opacity: 1 - i * 0.09 }} />)}
+      </div>
+    );
+  }
+
+  if (cancelled && !page) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+          <Ban className="h-7 w-7 opacity-40" />
+          <div className="font-medium text-foreground">Query cancelled</div>
+          <div className="text-xs">The run was stopped before it returned rows. Run it again to see results.</div>
+        </div>
+        {statusLine && <div className="border-t px-3 py-1.5 text-xs text-muted-foreground">{statusLine}</div>}
       </div>
     );
   }
@@ -211,7 +240,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
                       title="Click to expand"
                       style={widths[j] ? { maxWidth: widths[j] } : undefined}
                       className={`max-w-[28rem] cursor-pointer truncate border-b px-3 py-1 font-mono text-xs hover:underline ${numeric ? "text-right tabular-nums" : "text-left"} ${isNull ? "italic text-muted-foreground/60" : ""}`}>
-                      {isNull ? "NULL" : String(cell)}
+                      {isNull ? "NULL" : displayText(cell, cols[j]?.type ?? "")}
                     </td>
                   );
                 })}

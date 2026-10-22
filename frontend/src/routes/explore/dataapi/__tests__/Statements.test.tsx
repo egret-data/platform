@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type React from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -60,19 +60,26 @@ vi.mock("react-resizable-panels", () => ({
 vi.mock("@/components/monaco/MonacoEditor", () => ({
   default: function MonacoStub({
     value,
+    defaultValue,
     onChange,
     onMount,
     beforeMount,
     options,
   }: {
-    value: string;
+    value?: string;
+    defaultValue?: string;
     onChange?: (v?: string) => void;
     onMount?: (editor: unknown, monaco: unknown) => void;
     beforeMount?: (monaco: unknown) => void;
     options?: { ariaLabel?: string; readOnly?: boolean };
   }) {
-    const latest = useRef(value);
-    latest.current = value;
+    // Like `@monaco-editor/react`: a defined `value` drives the text; without
+    // one (`SqlEditor` passes only `defaultValue`), the editor owns its text and
+    // the component writes outside changes through `executeEdits`.
+    const latest = useRef(value ?? defaultValue ?? "");
+    if (value !== undefined) latest.current = value;
+    const [text, setText] = useState(latest.current);
+    const write = (t: string) => { latest.current = t; setText(t); };
     useEffect(() => {
       const monaco = {
         KeyMod: monacoStub.KeyMod,
@@ -88,7 +95,10 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         {
           getValue: () => latest.current,
           getSelection: () => null,
-          getModel: () => null,
+          getModel: () => ({ getFullModelRange: () => ({}) }),
+        setValue: write,
+        executeEdits: (_src: string, edits: { text: string }[]) => { write(edits[0].text); return true; },
+        pushUndoStop: () => true,
           // `addAction` only, no `addCommand`: an `addCommand` shortcut is not
           // scoped to its editor and is never removed (see `SqlEditor`), so a
           // regression to it throws here.
@@ -108,8 +118,8 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
       <textarea
         aria-label={options?.ariaLabel}
         readOnly={!!options?.readOnly}
-        value={value}
-        onChange={(e) => onChange?.(e.target.value)}
+        value={value ?? text}
+        onChange={(e) => { write(e.target.value); onChange?.(e.target.value); }}
       />
     );
   },

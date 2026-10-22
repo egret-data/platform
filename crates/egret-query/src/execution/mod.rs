@@ -6,6 +6,8 @@ pub mod catalog_listing;
 pub mod connector;
 mod error;
 mod job;
+/// KI-154/KI-081: the row limit appended to a query, not wrapped around it.
+mod limit;
 /// View governance B1: the `egret-lineage` EXPLAIN runner.
 pub mod lineage;
 pub mod model;
@@ -22,6 +24,7 @@ pub mod template;
 
 pub use error::{EngineApiError, EngineError};
 pub use job::{run_query, JobManager};
+pub use limit::{strip_trailing_semicolons, unshift_error_lines};
 pub use routes::{engine_router, rows_to_csv, EngineState, QueryExecutionApi};
 pub use store::{Query, QueryStore};
 
