@@ -44,26 +44,38 @@ pub struct HttpRenderer {
     client: reqwest::Client,
 }
 
-/// The renderer's own default readiness timeout
-/// (`renderer/server.js`'s `READY_TIMEOUT_MS`) is 20s. This client's timeout
-/// is set ABOVE that: the design (`docs/en/specs/2026-08-12-report-renderer-design.md`
-/// §6) is "a hard per-render timeout, below the CALLER's, so egret sees a
-/// clean error rather than a hanging socket" — i.e. the renderer is meant to
-/// give up first and answer with a clean `504 {"error": "..."}, which this
-/// client can then surface verbatim. A client timeout shorter than the
-/// renderer's own would instead abort the connection while the renderer is
-/// still legitimately working, turning a slow-but-successful render into a
-/// generic transport error.
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one render may take, end to end, for a request covering
+/// `objects` print pages (KI-167).
+///
+/// The renderer waits up to 20 s (`renderer/server.js`'s `READY_TIMEOUT_MS`)
+/// for EACH page to signal readiness, and captures the pages of a multi-object
+/// report ONE AFTER ANOTHER, so a fixed client timeout is wrong for every
+/// report but one size: it used to be 30 s, and two medium dashboards (about
+/// 20 s each) were cut off while the renderer was still legitimately working,
+/// as a bare transport error that did not even say "timeout".
+///
+/// Derived from the object count rather than made a config key: the number
+/// that matters is known on every call, and an operator would have to tune a
+/// key to the largest report anyone writes. 30 s a page covers the 20 s ready
+/// wait plus navigation and capture; the extra page covers waiting behind one
+/// other render for one of the renderer's two capture slots
+/// (`RENDER_MAX_CONCURRENT`), which concurrent ticks make likely. The design
+/// rule still holds per page — the renderer gives up on a page first and
+/// answers with a clean `504 {"error"}` this client surfaces verbatim.
+pub fn render_budget(objects: usize) -> Duration {
+    PER_PAGE * (objects.max(1) as u32 + 1)
+}
+
+const PER_PAGE: Duration = Duration::from_secs(30);
 
 impl HttpRenderer {
     pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            client: reqwest::Client::builder()
-                .timeout(CLIENT_TIMEOUT)
-                .build()
-                .expect("reqwest client with a fixed timeout always builds"),
+            // No client-wide timeout: each request sets its own from
+            // `render_budget`, because the right value depends on how many
+            // pages that request covers.
+            client: reqwest::Client::new(),
         }
     }
 }
@@ -72,13 +84,16 @@ impl HttpRenderer {
 impl Renderer for HttpRenderer {
     async fn render(&self, req: RenderRequest) -> Result<Vec<u8>, String> {
         let url = format!("{}/render", self.base_url.trim_end_matches('/'));
+        let objects = req.urls.len().max(1);
+        let budget = render_budget(objects);
         let resp = self
             .client
             .post(&url)
+            .timeout(budget)
             .json(&req)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| transport_error(&e, budget, objects))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -98,6 +113,71 @@ impl Renderer for HttpRenderer {
         resp.bytes()
             .await
             .map(|b| b.to_vec())
-            .map_err(|e| e.to_string())
+            .map_err(|e| transport_error(&e, budget, objects))
+    }
+}
+
+/// A transport failure in words a reader of the run log can act on. A timeout
+/// says so, with the budget and page count — the bare reqwest text ("error
+/// sending request for url") read as "the renderer is down" when it was only
+/// slow.
+fn transport_error(e: &reqwest::Error, budget: Duration, objects: usize) -> String {
+    if e.is_timeout() {
+        format!(
+            "the renderer did not finish within {}s for {objects} page(s) (timeout)",
+            budget.as_secs()
+        )
+    } else {
+        e.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_budget_grows_with_the_number_of_pages() {
+        // KI-167: two dashboards of about 20 s each did not fit in the old
+        // fixed 30 s. Each page may legitimately take the renderer's full
+        // 20 s ready wait, one after another.
+        const READY: Duration = Duration::from_secs(20);
+        for objects in 1..=20 {
+            assert!(
+                render_budget(objects) > READY * objects as u32,
+                "{objects} page(s) must fit {objects} full ready waits: {:?}",
+                render_budget(objects)
+            );
+        }
+        assert!(render_budget(2) > render_budget(1));
+        assert_eq!(
+            render_budget(0),
+            render_budget(1),
+            "a request is at least one page"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_renderer_is_reported_as_a_timeout() {
+        // A listener that accepts and never answers: the request must end as
+        // a timeout that says so, not as "error sending request".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let client = reqwest::Client::new();
+        let budget = Duration::from_millis(200);
+        let err = client
+            .post(format!("http://{addr}/render"))
+            .timeout(budget)
+            .send()
+            .await
+            .unwrap_err();
+        let msg = transport_error(&err, budget, 2);
+        assert!(msg.contains("timeout"), "{msg}");
+        assert!(msg.contains("2 page(s)"), "{msg}");
+        hold.abort();
     }
 }

@@ -17,7 +17,7 @@ use egret_core::TabularResult;
 use egret_metastore::Db;
 use uuid::Uuid;
 
-// `trunc_subsecs`: see `run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state`.
+// `trunc_subsecs`: see `run_now_records_its_outcome_without_touching_next_run_at`.
 use chrono::SubsecRound as _;
 
 // ── fakes ────────────────────────────────────────────────────────────────
@@ -27,6 +27,8 @@ struct FakeEngine {
     value: Mutex<serde_json::Value>,
     seen: Mutex<Vec<RunIdentity>>,
     fail: bool,
+    /// How long each query takes — a slow engine or render (KI-173).
+    delay: std::time::Duration,
 }
 
 #[async_trait::async_trait]
@@ -39,6 +41,7 @@ impl QueryRunner for FakeEngine {
         _limit: Option<usize>,
     ) -> Result<TabularResult, String> {
         self.seen.lock().unwrap().push(identity.clone());
+        tokio::time::sleep(self.delay).await;
         if self.fail {
             return Err("Access Denied: Cannot select from table orders".into());
         }
@@ -228,6 +231,7 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
         value: Mutex::new(value),
         seen: Mutex::new(vec![]),
         fail,
+        delay: std::time::Duration::ZERO,
     });
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
@@ -429,23 +433,201 @@ async fn a_schedule_with_no_owner_errors_rather_than_running_as_nobody(pool: sql
     );
 }
 
+/// Point the fixture's webhook at a loopback address, which the SSRF guard
+/// refuses — a delivery failure that needs no network.
+fn with_blocked_webhook(fx: &mut Fx) {
+    fx.runner.resolver = Arc::new(LoopbackDns("127.0.0.1:9".parse().unwrap()));
+}
+
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_webhook_that_cannot_be_reached_still_records_the_firing(pool: sqlx::PgPool) {
-    // The alert DID fire; only delivery failed. Recording it as `error` would
-    // lose the fact that the condition was met, and starting no grace period
-    // would re-fire it every minute.
-    let fx = setup(pool, serde_json::json!(9), false, true).await;
+async fn a_firing_whose_delivery_failed_is_an_error_and_starts_no_grace(pool: sqlx::PgPool) {
+    // KI-033: the alert fired but nobody was told. That used to be `success`
+    // — and start the grace period — with the failure only in the detail.
+    let mut fx = setup(pool, serde_json::json!(9), false, true).await;
+    with_blocked_webhook(&mut fx);
+    sqlx::query("UPDATE automation.schedules SET grace_period_s = 3600 WHERE id = $1")
+        .bind(fx.schedule)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    fx.runner.tick_once().await;
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, "error", "an undelivered firing is not a success");
+    let detail = log[0].1.as_deref().unwrap_or_default();
+    assert!(
+        detail.starts_with("webhook hooks.example.com: ") && detail.contains("blocked"),
+        "the failure names its destination: {detail}"
+    );
+    assert_eq!(
+        schedule_state(&fx).await.0,
+        "error",
+        "the list shows it as failing"
+    );
+
+    // Nobody was told, so the next tick tries again instead of going quiet.
+    sqlx::query(
+        "UPDATE automation.schedules SET next_run_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(fx.schedule)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    fx.runner.tick_once().await;
+    let states: Vec<String> = run_log(&fx).await.into_iter().map(|(s, _)| s).collect();
+    assert_eq!(
+        states,
+        vec!["error", "error"],
+        "no grace after a failed delivery"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_failed_destination_is_recorded_not_only_the_first(pool: sqlx::PgPool) {
+    // KI-034: email (no SMTP in this workspace) + webhook (blocked) + Slack
+    // (no app): the run log used to show only the webhook's error.
+    let mut fx = setup(pool, serde_json::json!(9), false, true).await;
+    with_blocked_webhook(&mut fx);
+    for (kind, config) in [
+        ("email", serde_json::json!({"addresses": ["a@example.com"]})),
+        ("slack", serde_json::json!({"channel": "#alerts"})),
+    ] {
+        sqlx::query(
+            "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+             VALUES ($1,$2,$3)",
+        )
+        .bind(fx.schedule)
+        .bind(kind)
+        .bind(config)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    }
+
+    fx.runner.tick_once().await;
+    let log = run_log(&fx).await;
+    assert_eq!(log[0].0, "error");
+    let detail = log[0].1.as_deref().unwrap_or_default();
+    for want in [
+        "webhook hooks.example.com: ",
+        "slack #alerts: ",
+        "email: smtp is not configured",
+    ] {
+        assert!(detail.contains(want), "{want:?} missing from {detail:?}");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_firing_that_reached_someone_still_starts_the_grace_period(pool: sqlx::PgPool) {
+    // The other half of KI-033's rule: the webhook took the message, the
+    // email did not. The run is an `error` (something failed) but the grace
+    // period starts — re-firing every tick would spam the webhook.
+    let (addr, received) = fake_webhook_receiver().await;
+    let mut fx = setup(pool, serde_json::json!(9), false, false).await;
+    fx.runner.resolver = Arc::new(LoopbackDns(addr));
+    fx.runner.policy = SsrfPolicy {
+        allow_hosts: vec!["hook.test".into()],
+    };
+    sqlx::query("UPDATE automation.schedules SET grace_period_s = 3600 WHERE id = $1")
+        .bind(fx.schedule)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    for (kind, config) in [
+        (
+            "webhook",
+            serde_json::json!({"url": format!("http://hook.test:{}/x", addr.port())}),
+        ),
+        ("email", serde_json::json!({"addresses": ["a@example.com"]})),
+    ] {
+        sqlx::query(
+            "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+             VALUES ($1,$2,$3)",
+        )
+        .bind(fx.schedule)
+        .bind(kind)
+        .bind(config)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    }
+
+    fx.runner.tick_once().await;
+    assert!(!received.lock().unwrap().is_empty(), "the webhook got it");
+    sqlx::query(
+        "UPDATE automation.schedules SET next_run_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(fx.schedule)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
     fx.runner.tick_once().await;
 
     let log = run_log(&fx).await;
-    assert_eq!(log.len(), 1);
-    assert_eq!(
-        log[0].0, "success",
-        "firing is recorded even if delivery is not"
-    );
+    let states: Vec<&str> = log.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(states, vec!["error", "grace"], "{log:?}");
+    assert!(log[0]
+        .1
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("email: "));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn schedules_due_in_one_tick_run_side_by_side(pool: sqlx::PgPool) {
+    // KI-173: twelve items due at 12:10:00 started between 12:10:18 and
+    // 12:11:21 — one slow run delayed every other. Four due schedules, each
+    // taking 400 ms, must not take 4 x 400 ms.
+    let mut fx = setup(pool, serde_json::json!(0), false, false).await;
+    let delay = std::time::Duration::from_millis(400);
+    fx.runner.query = Arc::new(FakeEngine {
+        value: Mutex::new(serde_json::json!(0)),
+        seen: Mutex::new(vec![]),
+        fail: false,
+        delay,
+    });
+    for i in 0..3 {
+        let copy: Uuid = sqlx::query_scalar(
+            "INSERT INTO automation.schedules \
+               (workspace_id, type, name, crontab, next_run_at, database_id, sql, \
+                validator_type, grace_period_s) \
+             SELECT workspace_id, type, name || $2, crontab, next_run_at, database_id, sql, \
+                    validator_type, grace_period_s \
+               FROM automation.schedules WHERE id = $1 RETURNING id",
+        )
+        .bind(fx.schedule)
+        .bind(format!(" {i}"))
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO automation.schedule_owners (schedule_id, user_id) \
+             SELECT $2, user_id FROM automation.schedule_owners WHERE schedule_id = $1",
+        )
+        .bind(fx.schedule)
+        .bind(copy)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    }
+
+    let started = std::time::Instant::now();
+    assert_eq!(fx.runner.tick_once().await, 4);
+    let took = started.elapsed();
+
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedule_runs r JOIN automation.schedules s \
+           ON s.id = r.schedule_id WHERE s.workspace_id = $1 AND r.state = 'noop'",
+    )
+    .bind(fx.ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(runs, 4, "every due schedule ran");
     assert!(
-        log[0].1.is_some(),
-        "...and the delivery failure is visible rather than swallowed"
+        took < delay * 3,
+        "four 400 ms runs took {took:?}: they ran one after another"
     );
 }
 
@@ -579,6 +761,7 @@ async fn an_alert_with_a_foreign_chart_id_still_fires_and_notifies_by_webhook(po
         value: Mutex::new(serde_json::json!(9)),
         seen: Mutex::new(vec![]),
         fail: false,
+        delay: std::time::Duration::ZERO,
     });
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
@@ -675,13 +858,13 @@ async fn nothing_due_writes_nothing(pool: sqlx::PgPool) {
 // ── run_now (P5 "Run now") ──────────────────────────────────────────────
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state(
-    pool: sqlx::PgPool,
-) {
+async fn run_now_records_its_outcome_without_touching_next_run_at(pool: sqlx::PgPool) {
     // The whole point of `run_now` NOT calling `release`: a manual run must
-    // not move the schedule's own cadence. Pin `next_run_at` and `last_state`
-    // to known values first, so "unchanged" is checked against something
-    // other than NULL.
+    // not move the schedule's own cadence. But its OUTCOME must reach the
+    // schedule (KI-032): the list's Last run and the detail badge stayed
+    // "Never run" while the run log showed the runs. Pin `next_run_at` and
+    // `last_state` to known values first, so both "unchanged" and "changed"
+    // are checked against something other than NULL.
     //
     // PINNED AT MICROSECONDS, and that is not cosmetic. `timestamptz` holds
     // microseconds; `Utc::now()` holds nanoseconds. Binding the nanosecond value
@@ -719,14 +902,35 @@ async fn run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state
 
     let (last_state, next_run_at) = schedule_state(&fx).await;
     assert_eq!(
-        last_state, "noop",
-        "run_now must not touch last_state — that would race a concurrent tick's claim"
+        last_state, "success",
+        "run_now must write its outcome onto the schedule, as a tick does"
     );
     assert_eq!(
         next_run_at,
         Some(pinned_next),
         "run_now must not touch next_run_at, or the schedule's own slot would skip or double-fire"
     );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn run_now_leaves_a_row_the_tick_is_running_alone(pool: sqlx::PgPool) {
+    // A tick has claimed the row (`working`). Overwriting that marker with the
+    // manual outcome would make the row claimable again mid-run; the tick's own
+    // release writes the outcome a moment later.
+    let fx = setup(pool, serde_json::json!(7), false, false).await;
+    let claimed = egret_automation::scheduler::claim_due(&fx.db.pool, 10)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    fx.runner.run_now(&claimed[0]).await;
+
+    assert_eq!(
+        run_log(&fx).await.len(),
+        1,
+        "the manual run is still logged"
+    );
+    assert_eq!(schedule_state(&fx).await.0, "working");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

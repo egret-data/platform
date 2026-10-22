@@ -36,6 +36,8 @@ chrono-tz.workspace = true
 croner.workspace = true
 lettre.workspace = true
 url.workspace = true
+# `for_each_concurrent`: a tick runs its claimed schedules side by side (KI-173).
+futures-util.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 hmac = "0.12"
