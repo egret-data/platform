@@ -907,6 +907,7 @@ async fn login(db: &Db, groups: &[&str]) -> Uuid {
     let claims = OidcClaims {
         subject: format!("sub-{tag}"),
         email: format!("{tag}@idp.local"),
+        email_verified: true,
         name: "IdP User".into(),
         groups: groups.iter().map(|g| g.to_string()).collect(),
     };

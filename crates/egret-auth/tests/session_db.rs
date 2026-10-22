@@ -531,3 +531,159 @@ async fn login_is_rate_limited() {
     assert_eq!(s2, StatusCode::UNAUTHORIZED);
     assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// One `POST /api/auth/login` against a fresh router over `st`.
+async fn post_login(
+    app: &axum::Router,
+    email: &str,
+    password: &str,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+    let body =
+        serde_json::to_vec(&serde_json::json!({"email": email, "password": password})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, headers, json)
+}
+
+fn login_app(db: &Db, limiter: egret_core::ratelimit::RateLimiter) -> axum::Router {
+    let st = AuthState {
+        users: UserRepo::new(db.clone()),
+        sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
+        config: Config::default(),
+        rate_limiter: limiter,
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
+    };
+    axum::Router::new()
+        .nest("/api/auth", auth_router())
+        .with_state(st)
+}
+
+/// KI-145: the login response carries the same roles and permissions as
+/// `GET /api/auth/me`, not two empty lists.
+#[tokio::test]
+async fn login_response_carries_the_platform_roles() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let email = unique_email("roles");
+    let id = UserRepo::new(db.clone())
+        .insert_local(&email, "R", &hash_password("pw").unwrap())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
+         SELECT 'user', $1, r.id, 'platform' FROM roles r \
+          WHERE r.scope = 'platform' AND r.name = 'data_steward'",
+    )
+    .bind(id.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let app = login_app(&db, egret_core::ratelimit::RateLimiter::new(5, 300, 300));
+    let (status, _, json) = post_login(&app, &email, "pw").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["platform_roles"], serde_json::json!(["data_steward"]));
+    assert!(
+        json["permissions"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|v| v == "role:read")),
+        "the steward's permissions, as /me lists them: {json}"
+    );
+}
+
+/// KI-144: successes do not use up the sign-in budget, and a success forgives
+/// the failures before it.
+#[tokio::test]
+async fn login_limit_counts_only_failures() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let email = unique_email("rlok");
+    UserRepo::new(db.clone())
+        .insert_local(&email, "R", &hash_password("pw").unwrap())
+        .await
+        .unwrap();
+    let app = login_app(&db, egret_core::ratelimit::RateLimiter::new(5, 300, 300));
+
+    assert_eq!(post_login(&app, &email, "pw").await.0, StatusCode::OK);
+    for _ in 0..4 {
+        assert_eq!(
+            post_login(&app, &email, "wrong").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        post_login(&app, &email, "pw").await.0,
+        StatusCode::OK,
+        "1 success + 4 failures is not 5 failures"
+    );
+    for _ in 0..4 {
+        assert_eq!(
+            post_login(&app, &email, "wrong").await.0,
+            StatusCode::UNAUTHORIZED,
+            "the success forgave the earlier failures"
+        );
+    }
+    assert_eq!(post_login(&app, &email, "pw").await.0, StatusCode::OK);
+}
+
+/// KI-002: the refusal says when to try again, in `Retry-After` and in the body.
+#[tokio::test]
+async fn a_locked_out_login_says_when_to_retry() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let email = unique_email("rlwait");
+    UserRepo::new(db.clone())
+        .insert_local(&email, "R", &hash_password("pw").unwrap())
+        .await
+        .unwrap();
+    let app = login_app(&db, egret_core::ratelimit::RateLimiter::new(5, 300, 300));
+
+    for _ in 0..5 {
+        assert_eq!(
+            post_login(&app, &email, "wrong").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, headers, json) = post_login(&app, &email, "wrong").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "five failures lock the sixth attempt"
+    );
+    assert_eq!(headers["retry-after"], "300");
+    assert_eq!(json["retry_after_secs"], 300);
+    assert_eq!(json["code"], "rate_limited");
+
+    let (status, headers, _) = post_login(&app, &email, "pw").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the right password inside the lockout is still refused"
+    );
+    let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((299..=300).contains(&wait), "remaining wait, got {wait}");
+}

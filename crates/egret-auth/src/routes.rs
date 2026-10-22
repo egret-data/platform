@@ -154,7 +154,8 @@ async fn auth_config(State(st): State<AuthState>) -> Json<serde_json::Value> {
     responses(
         (status = 200, description = "Logged in; sets session + CSRF cookies", body = MeResponse),
         (status = 401, description = "Invalid email or password", body = ErrorBody),
-        (status = 429, description = "Too many login attempts", body = ErrorBody),
+        (status = 429, description = "Too many failed attempts; `Retry-After` says when to try again", body = RateLimited,
+            headers(("Retry-After" = u64, description = "Seconds until a new attempt is accepted"))),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -163,11 +164,12 @@ async fn login(
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
-) -> Result<impl IntoResponse, AuthError> {
+) -> Result<Response, AuthError> {
     let ip = client_ip(&headers);
     let rl_key = format!("{ip}:{}", body.email.to_lowercase());
-    if !st.rate_limiter.check(&rl_key) {
-        return Err(AuthError(Error::TooManyRequests));
+    // Only failed attempts cost budget (KI-144); a success forgives them.
+    if let Some(wait) = st.rate_limiter.retry_after(&rl_key) {
+        return Ok(too_many_attempts(wait));
     }
 
     let dummy =
@@ -182,19 +184,29 @@ async fn login(
         _ => {
             // Equalize timing for unknown/disabled/no-password users.
             let _ = crate::password::verify_password(&body.password, dummy);
-            return Err(AuthError(Error::Unauthorized));
+            return Ok(failed_attempt(&st, &rl_key));
         }
     };
     let hash = user.password_hash.as_deref().unwrap();
     if !verify_password(&body.password, hash).map_err(AuthError)? {
-        return Err(AuthError(Error::Unauthorized));
+        return Ok(failed_attempt(&st, &rl_key));
     }
+    st.rate_limiter.clear(&rl_key);
 
     let issued = st
         .sessions
         .create(user.id, "", &ip)
         .await
         .map_err(AuthError)?;
+    // The same principal `/me` resolves for this session (KI-145): the SPA
+    // reads the roles off this response, and an empty list here sent a
+    // freshly signed-in admin to the no-workspace page.
+    let principal = st
+        .sessions
+        .validate(&issued.token)
+        .await
+        .map_err(AuthError)?
+        .ok_or(AuthError(Error::Unauthorized))?;
     st.users
         .touch_last_login(user.id)
         .await
@@ -210,13 +222,54 @@ async fn login(
     Ok((
         jar,
         Json(MeResponse {
-            user_id: user.id.to_string(),
-            email: user.email,
-            platform_roles: vec![],
-            permissions: vec![],
+            user_id: principal.user_id.to_string(),
+            email: principal.email,
+            platform_roles: principal.platform_roles,
+            permissions: principal.permissions,
             impersonating: None,
         }),
-    ))
+    )
+        .into_response())
+}
+
+/// Count a failed sign-in and answer it. The answer is 401 even for the
+/// failure that uses up the budget: the password was checked and was wrong,
+/// and the next attempt is the one that is told to wait.
+fn failed_attempt(st: &AuthState, rl_key: &str) -> Response {
+    st.rate_limiter.record_failure(rl_key);
+    AuthError(Error::Unauthorized).into_response()
+}
+
+/// The 429 a locked-out sign-in gets: `Retry-After` in seconds (RFC 9110
+/// §10.2.3) and the same number in the body, so the login page can say when
+/// to try again (KI-002).
+fn too_many_attempts(wait: std::time::Duration) -> Response {
+    // Round up: a client that waits the advertised time must find the lock gone.
+    let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(RateLimited {
+            error: format!("too many failed sign-in attempts; try again in {secs} seconds"),
+            code: "rate_limited".into(),
+            retry_after_secs: secs,
+        }),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(secs),
+    );
+    resp
+}
+
+/// `429` body of `POST /api/auth/login`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct RateLimited {
+    pub error: String,
+    /// Always `"rate_limited"`.
+    pub code: String,
+    /// Seconds until a new attempt is accepted; also sent as `Retry-After`.
+    pub retry_after_secs: u64,
 }
 
 #[utoipa::path(
@@ -516,6 +569,7 @@ impl FromRef<AuthState> for SessionService {
         ImpersonationDto,
         StartImpersonation,
         OidcStepUp,
+        RateLimited,
         Ack,
         ErrorBody
     )),

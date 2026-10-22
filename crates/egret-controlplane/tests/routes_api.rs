@@ -3324,3 +3324,85 @@ async fn a_caller_without_policy_read_gets_only_the_count_in_the_409() {
         "a caller with policy:read sees the entries; body={j}"
     );
 }
+
+/// KI-017 / KI-018: `hideAllowed=true` leaves out the authorization decisions
+/// that allowed a call (the page views that flood the log) and keeps changes
+/// and denials; every entry names its actor by email.
+#[tokio::test]
+async fn audit_hides_allowed_decisions_and_names_the_actor() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "audit_view_admin", true).await;
+    let email = format!("audit_actor_{}@egret.local", Uuid::new_v4().simple());
+    let actor = f
+        .users
+        .insert_local(&email, "Actor", "x")
+        .await
+        .expect("insert actor")
+        .0;
+    let store = egret_audit::AuditStore::new(f.db.clone());
+    let decision = |allow: bool| egret_audit::AuditEvent::Decision {
+        actor: Some(actor),
+        workspace_id: None,
+        action: "dashboard:read".into(),
+        resource_type: "workspace".into(),
+        resource_id: Some("w".into()),
+        allow,
+        reasons: vec![],
+    };
+    store
+        .insert_batch(&[
+            decision(true),
+            decision(false),
+            egret_audit::AuditEvent::Mutation {
+                actor: Some(actor),
+                impersonator: None,
+                workspace_id: None,
+                action: "member:add".into(),
+                resource_type: "grant".into(),
+                resource_id: None,
+                detail: serde_json::json!({}),
+            },
+        ])
+        .await
+        .expect("seed audit rows");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/audit?actor={actor}&hideAllowed=true"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    let entries = j["entries"].as_array().expect("entries");
+    let mut kinds: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap().to_string(),
+                e["decision"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        vec![
+            ("decision".to_string(), "deny".to_string()),
+            ("mutation".to_string(), String::new()),
+        ],
+        "the allowed read is hidden; body={j}"
+    );
+    for e in entries {
+        assert_eq!(e["actorEmail"], email.as_str(), "body={j}");
+    }
+}

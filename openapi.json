@@ -1624,11 +1624,21 @@
             }
           },
           "429": {
-            "description": "Too many login attempts",
+            "description": "Too many failed attempts; `Retry-After` says when to try again",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Seconds until a new attempt is accepted"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/RateLimited"
                 }
               }
             }
@@ -2520,6 +2530,18 @@
             "schema": {
               "type": [
                 "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "hideAllowed",
+            "in": "query",
+            "description": "`true` leaves out authorization decisions that allowed the call\n(routine reads): what is left is changes and denials.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
                 "null"
               ]
             }
@@ -27367,6 +27389,159 @@
         }
       }
     },
+    "/api/ws/{workspace}/invites": {
+      "get": {
+        "tags": [
+          "workspace-members"
+        ],
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Emails pre-registered for their first SSO sign-in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/InviteDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/invites/{id}": {
+      "delete": {
+        "tags": [
+          "workspace-members"
+        ],
+        "operationId": "delete_invite",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Pre-registration id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pre-registration withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pre-registration in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/members": {
       "get": {
         "tags": [
@@ -27458,11 +27633,21 @@
         },
         "responses": {
           "200": {
-            "description": "Member added",
+            "description": "Member added, or (`invited`) an unknown email pre-registered for its first SSO sign-in",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Ack"
+                  "$ref": "#/components/schemas/AddMemberResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown principal or role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -37780,6 +37965,23 @@
           }
         }
       },
+      "AddMemberResult": {
+        "type": "object",
+        "description": "What `POST /ws/{workspace}/members` did.",
+        "required": [
+          "ok",
+          "invited"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "invited": {
+            "type": "boolean",
+            "description": "`true` when the email belongs to nobody yet and was pre-registered\ninstead: the membership binds at that SSO user's first sign-in (KI-185)."
+          }
+        }
+      },
       "AffectedProfile": {
         "type": "object",
         "description": "One policy profile a write would touch, named so a steward reads\n\"Trino-prod\" rather than a bare id.",
@@ -38406,6 +38608,13 @@
             ],
             "format": "uuid"
           },
+          "actorEmail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The actor's email, when the actor is a user who still exists."
+          },
           "workspaceId": {
             "type": [
               "string",
@@ -38487,6 +38696,13 @@
               "string",
               "null"
             ]
+          },
+          "hideAllowed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` leaves out authorization decisions that allowed the call\n(routine reads): what is left is changes and denials."
           },
           "workspace": {
             "type": [
@@ -45810,6 +46026,37 @@
           }
         }
       },
+      "InviteDto": {
+        "type": "object",
+        "description": "A pre-registered email waiting for its SSO user's first sign-in.",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "invited_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "IssueClientInput": {
         "type": "object",
         "required": [
@@ -50130,6 +50377,30 @@
           }
         },
         "additionalProperties": false
+      },
+      "RateLimited": {
+        "type": "object",
+        "description": "`429` body of `POST /api/auth/login`.",
+        "required": [
+          "error",
+          "code",
+          "retry_after_secs"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "description": "Always `\"rate_limited\"`."
+          },
+          "retry_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until a new attempt is accepted; also sent as `Retry-After`.",
+            "minimum": 0
+          }
+        }
       },
       "Reach": {
         "type": "object",
@@ -58060,7 +58331,8 @@
           "id",
           "name",
           "description",
-          "permissions"
+          "permissions",
+          "inherited_permissions"
         ],
         "properties": {
           "id": {
@@ -58082,7 +58354,15 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/WsPermDto"
-            }
+            },
+            "description": "The role's own permissions."
+          },
+          "inherited_permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WsPermDto"
+            },
+            "description": "Permissions held through the parent chain and not held directly; a\nholder of the role has them too."
           }
         }
       }

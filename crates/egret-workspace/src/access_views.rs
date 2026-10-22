@@ -35,6 +35,9 @@ pub struct WsRole {
     /// The role this one inherits from (same scope), if any.
     pub parent_role_id: Option<Uuid>,
     pub permissions: Vec<WsPerm>,
+    /// What the role holds through its parent chain and does not hold itself,
+    /// by key. A holder of the role has these too (KI-127).
+    pub inherited_permissions: Vec<WsPerm>,
 }
 
 /// A single permission key, enriched from the code-defined catalog.
@@ -81,8 +84,8 @@ impl AccessViewsRepo {
         // One flat scan: every workspace role, LEFT-joined to its permissions so
         // roles with no permissions still appear. Folded into `WsRole`s below.
         //
-        // `data_api_invoker` is excluded HERE, in the query, rather than by the
-        // route handler that currently is this method's only caller. This is the
+        // `data_api_invoker` is excluded HERE, rather than by the route
+        // handler that currently is this method's only caller. This is the
         // workspace-scope role catalog a member picker offers, and
         // `data_api_invoker` (seeded by migration 0124, egret-dataapi — literal
         // string here to avoid a cross-crate dependency, same convention as
@@ -90,14 +93,15 @@ impl AccessViewsRepo {
         // service account for one endpoint. Offered as a workspace MEMBERSHIP
         // role it would mean "invoke every endpoint in this workspace" through
         // Cedar's workspace→object cascade — the same over-grant a `ws_admin`
-        // membership now carries. Filtering in the query means a future SECOND
+        // membership now carries. Excluding it here means a future SECOND
         // consumer of this method inherits the exclusion automatically, instead
-        // of needing to remember to filter it out itself.
+        // of needing to remember to filter it out itself. It is read, and
+        // dropped only at the end, because a custom role may inherit from it.
         let rows = sqlx::query_as::<_, RolePermRow>(
             "SELECT r.id, r.name, r.description, r.parent_role_id, rp.permission \
              FROM roles r \
              LEFT JOIN role_permissions rp ON rp.role_id = r.id \
-             WHERE r.scope = 'workspace' AND r.name <> 'data_api_invoker' \
+             WHERE r.scope = 'workspace' \
              ORDER BY r.name, rp.permission",
         )
         .fetch_all(&self.db.pool)
@@ -122,6 +126,7 @@ impl AccessViewsRepo {
                     description: row.description,
                     parent_role_id: row.parent_role_id,
                     permissions: Vec::new(),
+                    inherited_permissions: Vec::new(),
                 });
             }
             if let Some(key) = row.permission {
@@ -136,6 +141,35 @@ impl AccessViewsRepo {
                 });
             }
         }
+        // KI-127: walk each role's parent chain (same scope, acyclic and at
+        // most 64 deep — `roles_parent_guard`, migration 0071), the way the
+        // Control Plane role page counts.
+        let by_id: HashMap<Uuid, &WsRole> = out.iter().map(|r| (r.id, r)).collect();
+        let inherited: Vec<Vec<WsPerm>> = out
+            .iter()
+            .map(|role| {
+                let own: std::collections::HashSet<&str> =
+                    role.permissions.iter().map(|p| p.key.as_str()).collect();
+                let mut acc: std::collections::BTreeMap<&str, &WsPerm> = Default::default();
+                let mut cur = role.parent_role_id;
+                for _ in 0..64 {
+                    let Some(parent) = cur.and_then(|id| by_id.get(&id)) else {
+                        break;
+                    };
+                    for p in &parent.permissions {
+                        if !own.contains(p.key.as_str()) {
+                            acc.insert(p.key.as_str(), p);
+                        }
+                    }
+                    cur = parent.parent_role_id;
+                }
+                acc.into_values().cloned().collect()
+            })
+            .collect();
+        for (role, perms) in out.iter_mut().zip(inherited) {
+            role.inherited_permissions = perms;
+        }
+        out.retain(|r| r.name != "data_api_invoker");
         Ok(out)
     }
 
