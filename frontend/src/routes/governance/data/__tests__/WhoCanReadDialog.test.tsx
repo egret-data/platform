@@ -316,7 +316,7 @@ describe("Who can read? — one click on Explain runs Explain while the suggesti
     expect(lookups()).toHaveLength(1);
   });
 
-  it("still closes the list at once when focus leaves by keyboard", async () => {
+  it("closes the list when focus leaves by keyboard", async () => {
     serve({});
     const user = userEvent.setup();
     open();
@@ -324,6 +324,32 @@ describe("Who can read? — one click on Explain runs Explain while the suggesti
     await user.type(within(dialog).getByLabelText("User"), "nobody");
     expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
     await user.tab();
-    expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument());
+  });
+
+  it("Tab from the field with the list open lands on Explain, not on the dialog (live check N1)", async () => {
+    serve({});
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    const field = within(dialog).getByLabelText("User");
+    await user.type(field, "nobody");
+    expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+    const explain = within(dialog).getByRole("button", { name: "Explain" });
+
+    // The browser's order for Tab: the field's focusout runs while <body>
+    // holds focus, the microtasks after it run, and only then does Explain get
+    // its focusin. The dialog's FocusScope watches for removed nodes in those
+    // microtasks and, finding <body> focused, pulls focus to its container.
+    act(() => field.blur());
+    await act(async () => {
+      await new Promise<void>((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(r));
+    });
+    expect(document.activeElement).toBe(document.body);
+    act(() => explain.focus());
+
+    await waitFor(() => expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(explain);
   });
 });

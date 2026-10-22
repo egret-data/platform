@@ -29,8 +29,9 @@ export function useDebounced<T>(value: T): T {
  *   field, and dismisses itself unless the event is already
  *   `defaultPrevented`; a window capture listener runs first and prevents it.
  *   With the list closed, Escape is the dialog's again.
- * - Focus leaving the box (`boxRef`, the caller's: the field and its popup) closes the list,
- *   so Tab moves on to the next control; focus moving inside it keeps it open.
+ * - Focus leaving the box (`boxRef`, the caller's: the field and its popup) closes the list
+ *   once the focus move has finished, so Tab moves on to the next control (live
+ *   check N1); focus moving inside it keeps it open.
  *   When a pointer press moved the focus, the list closes only once that press
  *   is released and its click has landed (live check D1): a list in the flow
  *   collapsing on the blur moved the control under the pointer before mouseup,
@@ -72,6 +73,16 @@ export function useSuggestionCombobox({
     setActive(-1);
   };
 
+  /** Closes on the next task, unless focus has come back into the box by then. */
+  const closeOnceFocusSettles = () => {
+    setTimeout(() => {
+      const focused = document.activeElement;
+      if (focused instanceof Node && boxRef.current?.contains(focused)) return;
+      setOpen(false);
+      setActive(-1);
+    }, 0);
+  };
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -94,13 +105,8 @@ export function useSuggestionCombobox({
       pointerHeld.current = false;
       if (!closeOnRelease.current) return;
       closeOnRelease.current = false;
-      // After the click this release produces (dispatched in the same task), unless focus came back.
-      setTimeout(() => {
-        const focused = document.activeElement;
-        if (focused instanceof Node && boxRef.current?.contains(focused)) return;
-        setOpen(false);
-        setActive(-1);
-      }, 0);
+      // After the click this release produces (dispatched in the same task).
+      closeOnceFocusSettles();
     };
     window.addEventListener("pointerdown", down, { capture: true });
     window.addEventListener("pointerup", up, { capture: true });
@@ -126,7 +132,10 @@ export function useSuggestionCombobox({
       closeOnRelease.current = true;
       return;
     }
-    close();
+    // Not now: between this focusout and the next control's focusin <body> holds
+    // focus, and an enclosing Radix dialog's FocusScope pulls focus to its
+    // container when a node is removed meanwhile (live check N1).
+    closeOnceFocusSettles();
   };
 
   return {
