@@ -100,11 +100,11 @@ data:
   {{- if eq .Values.workflow.containerRunner "kubernetes" }}
   {{- $t := .Values.workflow.tasks }}
   EGRET_WORKFLOW__KUBERNETES__NAMESPACE: "{{ $t.namespace }}"
-  EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE: "{{ $t.helperImage }}"
+  EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE: "{{ $t.helperImage | default (include "egret.image" (dict "name" "egret-task-helper" "root" $)) }}"
   EGRET_WORKFLOW__KUBERNETES__RUN_AS_USER: "{{ $t.runAsUser }}"
   EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS: {{ $t.imagePullSecrets | toJson | quote }}
   {{- $h := .Values.workflow.pluginHost }}
-  EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ required "workflow.pluginHost.image is required with containerRunner kubernetes" $h.image | quote }}
+  EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ $h.image | default (include "egret.image" (dict "name" "egret-plugin-host" "root" $)) | quote }}
   EGRET_WORKFLOW__PLUGIN_HOST__JVM_MAX_HEAP: {{ $h.jvmMaxHeap | quote }}
   EGRET_WORKFLOW__PLUGIN_HOST__KILL_GRACE_S: {{ $h.killGraceS | quote }}
   {{- range $key, $res := dict "DEFAULT_RESOURCES" $t.defaultResources "MAX_RESOURCES" $t.maxResources }}

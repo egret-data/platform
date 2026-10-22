@@ -3,4 +3,4 @@ name: egret
 description: egret data portal — local kind deployment (dev only, NOT a production chart)
 type: application
 version: 0.1.0
-appVersion: "dev"
+appVersion: "edge"

@@ -23,7 +23,7 @@ spec:
       serviceAccountName: egret
       containers:
         - name: egret
-          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
           ports:
             - { containerPort: 8080 }
@@ -53,7 +53,7 @@ spec:
             {{- if eq .Values.apps.pod.launcher "kubernetes" }}
             - { name: EGRET_APPS__POD__LAUNCHER, value: "kubernetes" }
             - { name: EGRET_APPS__POD__NAMESPACE, value: "{{ .Values.apps.pod.namespace }}" }
-            - { name: EGRET_APPS__POD__IMAGE, value: "{{ .Values.apps.pod.image }}" }
+            - { name: EGRET_APPS__POD__IMAGE, value: "{{ .Values.apps.pod.image | default (include "egret.image" (dict "name" "egret-apps" "root" $)) }}" }
             - { name: EGRET_APPS__POD__IMAGE_PULL_POLICY, value: "{{ .Values.apps.pod.imagePullPolicy }}" }
             - { name: EGRET_APPS__POD__CPU_REQUEST, value: "{{ .Values.apps.pod.resources.cpuRequest }}" }
             - { name: EGRET_APPS__POD__MEM_REQUEST, value: "{{ .Values.apps.pod.resources.memRequest }}" }

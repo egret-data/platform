@@ -24,7 +24,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: init
-          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
           args: ["init"]
           envFrom:

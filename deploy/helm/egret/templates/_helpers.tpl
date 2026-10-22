@@ -28,3 +28,6 @@
 {{- $s := (lookup "v1" "Secret" .Release.Namespace "egret-secrets") -}}
 {{- if and $s (index $s.data "catalog-auth-token") -}}{{ index $s.data "catalog-auth-token" | b64dec }}{{- else -}}{{ randAlphaNum 40 }}{{- end -}}
 {{- end -}}
+{{/* An egret image published by .github/workflows/images.yml, at the chart's appVersion:
+     `include "egret.image" (dict "name" "egret-apps" "root" $)`. */}}
+{{- define "egret.image" -}}ghcr.io/egret-data/{{ .name }}:{{ .root.Chart.AppVersion }}{{- end -}}
