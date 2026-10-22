@@ -9,6 +9,7 @@ pub mod dataapi_metric;
 pub mod deliver;
 mod error;
 pub mod evaluator;
+mod format;
 pub mod model;
 pub mod render;
 mod repo;

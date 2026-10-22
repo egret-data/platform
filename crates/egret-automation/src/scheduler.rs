@@ -71,15 +71,18 @@ pub async fn claim_due(
 /// a silent skip: without it a 1-minute alert on a condition that stays true
 /// sends 60 mails an hour, and the user's only recourse is to delete it.
 ///
-/// Measured from the last run that FIRED (`success`), not from the last run and
-/// not from the last delivery. Two consequences, both deliberate:
+/// Measured from the last run that REACHED SOMEONE (`notification_sent_at`),
+/// not from the last run and not from the last `success`. Consequences, all
+/// deliberate:
 ///
 /// - a `noop` — ran, condition false — must not extend the quiet period, or a
 ///   flapping alert would silence itself;
-/// - an alert that fired but could not deliver (no transport configured yet, a
-///   webhook that refused) still starts its grace period. Keying on delivery
-///   instead would re-fire it every tick and fill the run log with a success a
-///   minute, which reads as a broken product rather than a missing transport.
+/// - a firing whose every destination failed (no transport configured, a
+///   webhook that refused) starts NO grace period (KI-033): nobody was told,
+///   so the next tick must try again rather than stay quiet for an hour;
+/// - a firing that reached at least one destination starts it even when
+///   another destination failed, because re-firing every tick would spam the
+///   recipients who did get the message.
 pub async fn in_grace(db: &Db, id: Uuid, grace_period_s: i32) -> Result<bool, AutomationError> {
     if grace_period_s <= 0 {
         return Ok(false);
@@ -91,7 +94,7 @@ pub async fn in_grace(db: &Db, id: Uuid, grace_period_s: i32) -> Result<bool, Au
     sqlx::query_scalar(
         "SELECT EXISTS( \
            SELECT 1 FROM automation.schedule_runs \
-            WHERE schedule_id = $1 AND state = 'success' \
+            WHERE schedule_id = $1 AND notification_sent_at IS NOT NULL \
               AND started_at > now() - make_interval(secs => $2) \
          )",
     )
@@ -152,6 +155,34 @@ pub async fn release(
     .bind(state)
     .bind(value)
     .bind(next_run_at)
+    .execute(&db.pool)
+    .await
+    .map_err(AutomationError::from_db)?;
+    Ok(())
+}
+
+/// Write a MANUAL run's outcome onto the schedule (KI-032), so the list's
+/// **Last run** and the detail badge show what "Run now" just did.
+///
+/// Unlike [`release`] it leaves `next_run_at` alone: a manual run must not move
+/// the schedule's own cadence. And it skips a row a tick has claimed
+/// (`working`): overwriting that marker would make the row claimable again
+/// while the tick is still running it, and the tick's own `release` writes the
+/// outcome a moment later anyway.
+pub async fn record_manual_outcome(
+    db: &Db,
+    id: Uuid,
+    state: &str,
+    value: Option<f64>,
+) -> Result<(), AutomationError> {
+    sqlx::query(
+        "UPDATE automation.schedules \
+         SET last_state = $2, last_value = $3, last_eval_at = now(), updated_at = updated_at \
+         WHERE id = $1 AND last_state IS DISTINCT FROM 'working'",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(value)
     .execute(&db.pool)
     .await
     .map_err(AutomationError::from_db)?;
@@ -422,14 +453,23 @@ mod tests {
             "a noop run must not suppress the next real trigger"
         );
 
-        // One that fired but delivered nothing still starts the grace period:
-        // otherwise an alert with no working transport re-fires every tick.
-        let fired = record_run(&db, id, "success", Some(1.0), None, false)
+        // One that fired but reached nobody must not start it either (KI-033):
+        // nobody was told, so the next tick has to try again.
+        record_run(&db, id, "error", Some(1.0), Some("webhook: refused"), false)
+            .await
+            .unwrap();
+        assert!(
+            !in_grace(&db, id, 3600).await.unwrap(),
+            "a firing whose every destination failed must not silence the next one"
+        );
+
+        // One that reached someone does — even with another destination failing.
+        let fired = record_run(&db, id, "error", Some(1.0), Some("slack: no token"), true)
             .await
             .unwrap();
         assert!(
             in_grace(&db, id, 3600).await.unwrap(),
-            "firing starts the quiet period even when nothing was delivered"
+            "a firing that reached a recipient starts the quiet period"
         );
 
         // ...and it expires. Backdated rather than slept on: a grace period is
