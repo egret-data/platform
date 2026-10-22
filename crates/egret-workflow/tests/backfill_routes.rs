@@ -1411,7 +1411,11 @@ async fn delete_resumes_the_regular_schedule_where_it_stood() {
     let body =
         json!({"start": rfc(m - Duration::minutes(10)), "end": rfc(m - Duration::minutes(5))});
 
-    // A future resume position; one window tick fired first.
+    // A future resume position; one window tick fired first. Set here, after
+    // `make_due`, as for `bug` below: the date the save stored is the minute
+    // after the SEED, and a seed in a minute's last ten seconds has
+    // `make_due` wait across that minute, which leaves it in the past.
+    fx.sql("UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) + interval '1 minute' WHERE flow_id = $1 AND trigger_id = 's'", flow).await;
     let prev = fx.next_date(flow, "s").await.unwrap();
     assert!(prev > fx.now().await);
     let (status, _) = fx.create(flow, "s", body.clone()).await;
