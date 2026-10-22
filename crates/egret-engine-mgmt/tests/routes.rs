@@ -4493,6 +4493,9 @@ async fn trino_update_without_an_image_keeps_the_stored_image() {
     assert_eq!(spec["imageVersion"], "483", "stored image kept");
     assert_eq!(spec["workerReplicas"], 3, "the resize itself applied");
     assert_eq!(port.last_updated().image_version, "483", "applied image");
+    // ... to the engine, not only to the stored flat count (KI-197).
+    assert_eq!(spec["trinoConfig"]["worker"]["replicas"], 3);
+    assert_eq!(port.last_updated().config.worker.base.replicas, 3);
 }
 
 /// Plugin 2.5.0 (Trino 470) is dropped: creating an engine on that image, or
@@ -15640,9 +15643,12 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for FakeMinter {
 /// A Trino 483 coordinator behind the Docker transport: `/v1/node` is 404
 /// (no Airlift discovery), `/v1/query` lists one query, and a statement
 /// finishes at once with one node row. Records every request's headers.
+/// `(method, path, headers)` of one coordinator request.
+type CoordinatorCall = (String, String, Vec<(String, String)>);
+
 #[derive(Default)]
 struct Trino483Transport {
-    calls: std::sync::Mutex<Vec<(String, String, Vec<(String, String)>)>>,
+    calls: std::sync::Mutex<Vec<CoordinatorCall>>,
 }
 
 #[async_trait::async_trait]

@@ -5917,6 +5917,15 @@ async fn update_trino_engine(
         spec["trinoConfig"] = tc.clone();
     } else if let Some(tc) = engine.spec.get("trinoConfig") {
         spec["trinoConfig"] = tc.clone();
+        // A body with no per-role blocks resizes through the flat counts: carry
+        // them into the stored blocks the engine is rendered from.
+        if spec["trinoConfig"]["coordinator"].is_object() {
+            spec["trinoConfig"]["coordinator"]["replicas"] =
+                serde_json::json!(b.coordinator_replicas);
+        }
+        if spec["trinoConfig"]["worker"].is_object() {
+            spec["trinoConfig"]["worker"]["replicas"] = serde_json::json!(b.worker_replicas);
+        }
     }
     preserve_trino_delegation_mode(&mut spec, &engine.spec);
     sync_flat_replicas(&mut spec);
