@@ -1469,6 +1469,7 @@ mod http {
             impersonations: ImpersonationRepo::new(db.clone()),
             audit: egret_audit::AuditSink::new(16).0,
             group_recompiler: std::sync::Arc::new(crate::recorder::Recorder::default()),
+            invites: std::sync::Arc::new(crate::recorder::NoInvites),
         }
     }
 

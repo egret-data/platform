@@ -22,6 +22,7 @@ import {
 } from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
+import { NoWorkspaceYet } from "@/auth/NoWorkspaceYet";
 import { NotFound } from "@/routes/NotFound";
 import { useAuth } from "@/auth/useAuth";
 import { canEnterControlPlane, canEnterGovernance } from "@/auth/appAccess";
@@ -231,7 +232,7 @@ function HomeRedirect() {
   // this page renders no header, so without the redirect they would be stranded.
   if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
   if (canEnterControlPlane(me)) return <Navigate to="/control-plane" replace />;
-  return <div className="p-10">No workspaces yet. Ask an admin to add you to one.</div>;
+  return <NoWorkspaceYet email={me?.email ?? ""} />;
 }
 
 function ExploreRoutes() {

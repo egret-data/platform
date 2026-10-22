@@ -43,6 +43,10 @@ pub struct OidcRoutesState {
     /// 1b) — `egret_perm_compile::PermGroupRecompiler`, wired by `egret-bin`.
     /// Not optional: see `crate::groups`' module doc.
     pub group_recompiler: std::sync::Arc<dyn crate::groups::GroupMembershipRecompiler>,
+    /// Turns the workspace pre-registrations for a verified email into
+    /// memberships at sign-in (KI-185) — `egret_workspace::members::MemberRepo`,
+    /// wired by `egret-bin`. See `crate::preregistration`.
+    pub invites: std::sync::Arc<dyn crate::preregistration::PendingMembershipRedeemer>,
 }
 
 impl FromRef<OidcRoutesState> for Key {
@@ -205,6 +209,37 @@ async fn oidc_callback(
     // here rather than performing an ordinary login.
     if let Some(intent) = state.impersonate {
         return complete_impersonation_step_up(&st, jar, user_id, intent).await;
+    }
+
+    // KI-185: memberships a workspace admin set up for this email before the
+    // first sign-in. A failure here must not refuse the sign-in: the
+    // pre-registrations stay and the next sign-in redeems them.
+    match crate::preregistration::redeem_verified(&*st.invites, user_id, &login.claims).await {
+        Ok(redeemed) => {
+            for r in redeemed {
+                // The admin who added the email made the grant; it takes
+                // effect now.
+                st.audit.emit(AuditEvent::Mutation {
+                    actor: Some(r.invited_by),
+                    impersonator: None,
+                    workspace_id: Some(r.workspace_id),
+                    action: "member:add".into(),
+                    resource_type: "grant".into(),
+                    resource_id: None,
+                    detail: serde_json::json!({
+                        "principal_type": "user",
+                        "principal_id": user_id.0,
+                        "role": r.role,
+                        "via": "pre-registration",
+                    }),
+                });
+            }
+        }
+        Err(e) => tracing::warn!(
+            user_id = %user_id.0,
+            error = %e,
+            "could not redeem workspace pre-registrations; sign-in continues"
+        ),
     }
 
     let issued = match st.sessions.create(user_id, "", "").await {

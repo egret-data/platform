@@ -10,6 +10,9 @@ use crate::users::UserRepo;
 pub struct OidcClaims {
     pub subject: String,
     pub email: String,
+    /// The IdP's `email_verified` claim; `false` when absent. Only a verified
+    /// email may claim a workspace pre-registration (KI-185).
+    pub email_verified: bool,
     pub name: String,
     pub groups: Vec<String>,
 }
@@ -336,7 +339,9 @@ impl OidcService {
             CsrfToken::new_random,
             Nonce::new_random,
         );
-        for s in &self.scopes {
+        // `authorize_url` always sends `openid` itself; adding the configured
+        // one again put it in the request twice (KI-142).
+        for s in self.scopes.iter().filter(|s| s.as_str() != "openid") {
             req = req.add_scope(Scope::new(s.clone()));
         }
         if prompt_login {
@@ -419,6 +424,7 @@ impl OidcService {
         Ok(OidcClaims {
             subject,
             email,
+            email_verified: claims.email_verified().unwrap_or(false),
             name,
             groups,
         })
