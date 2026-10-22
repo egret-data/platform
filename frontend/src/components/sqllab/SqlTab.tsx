@@ -315,7 +315,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
       <Panel defaultSize="45%" minSize="20%">
         <Tabs value={tabValue} onValueChange={setTabValue} className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b px-2 py-1.5">
-            <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
+            <TabsList variant="underline" className="w-auto border-b-0"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
             {tabValue === "results" && (
               <div className="ml-auto flex items-center gap-2">
                 {finished && results.data && (

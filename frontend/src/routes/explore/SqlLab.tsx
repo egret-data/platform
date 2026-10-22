@@ -3,6 +3,8 @@ import { useParams } from "react-router-dom";
 import { Command, Plus, X } from "lucide-react";
 import { useTabs } from "@/hooks/useTabs";
 import { SqlTab } from "@/components/sqllab/SqlTab";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 export default function SqlLab() {
   // Remount per workspace so the per-workspace tab state (localStorage) reloads
@@ -17,10 +19,14 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
   const active = tabs.find((t) => t.id === activeId) ?? tabs[0];
 
   return (
-    <div className="flex h-full flex-col bg-background">
-      <h1 className="sr-only">SQL Lab</h1>
+    // A tool page: full width, and its title is the compact 16px one, at the
+    // start of the tab bar where it costs the editor no height (FE-PAGE-7).
+    <PageContainer className="flex h-full flex-col bg-background">
       {/* Tab strip — VS Code-style editor tabs. */}
       <div className="flex items-stretch border-b bg-muted/40">
+        <PageTitle size="compact" className="flex shrink-0 items-center border-r px-3">
+          SQL Lab
+        </PageTitle>
         <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
           {tabs.map((t) => {
             const activeTab = t.id === activeId;
@@ -64,6 +70,6 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
             onOpenPreview={(init) => openTab({ ...init, limit: 100, autoRun: true })} />
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

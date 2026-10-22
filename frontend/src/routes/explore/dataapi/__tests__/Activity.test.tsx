@@ -539,7 +539,7 @@ describe("Activity — page scaffold", () => {
   it("uses the top-level idiom: exactly one h1, no subtitle paragraph", async () => {
     renderActivity();
     const h1 = await screen.findByRole("heading", { level: 1, name: "Activity" });
-    expect(h1.className).toContain("text-lg");
+    expect(h1.className).toContain("text-xl"); // PageTitle, FE-PAGE-7
     expect(h1.className).toContain("font-semibold");
     // §1.1 is that the shell owns THE SINGLE `h1`, so counting is the actual
     // rule: a page that kept a hand-written heading beside the shell's would

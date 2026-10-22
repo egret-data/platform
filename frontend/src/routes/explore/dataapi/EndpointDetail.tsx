@@ -30,6 +30,10 @@ import {
 import { useRestoreEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, UpdateEndpointInput } from "@/api/generated/model";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { BackLink } from "@/components/layout/DetailHeader";
+import { tabsListClass, tabsTriggerClass } from "@/components/ui/tabs";
 
 /**
  * The subset of `DataApiEndpointDto` an author edits. Deliberately every
@@ -426,46 +430,43 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     }
   }, [restoreMutation, ws, id]);
 
-  // The page's one document-outline `h1`, on every branch below — this route has no
-  // shell to supply it (unlike the three list pages, it has no room for a *visible*
-  // `h1`: the endpoint name is already the page's title as a breadcrumb-style `h2`,
-  // and doubling it visibly would read as two titles stacked on top of each other).
-  // `sr-only`, same idiom as `SqlLab.tsx`/`ChartExplore.tsx` for a page whose design
-  // has no visible slot for one. Falls back to "Endpoint" before the name is known
-  // (loading/error), exactly as `ChartExplore.tsx`'s own `h1` falls back to "New chart".
+  // The page's one document-outline `h1`, on every branch below. Once the endpoint
+  // has loaded it is the VISIBLE compact tool title (FE-PAGE-7, 16px); before
+  // that (loading/error) there is no title to show, so it is `sr-only` and falls
+  // back to "Endpoint", as `ChartExplore.tsx`'s own `h1` falls back to "New chart".
   const headingName = endpoint?.name ?? "Endpoint";
 
   if (isLoading) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <h1 className="sr-only">{headingName}</h1>
         <ListSkeleton cols={2} />
-      </div>
+      </PageContainer>
     );
   }
   if (isError || !endpoint) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <h1 className="sr-only">{headingName}</h1>
         <Alert variant="destructive">
           <AlertDescription>
             {(error as unknown as Error)?.message ?? "Could not load this endpoint."}
           </AlertDescription>
         </Alert>
-        <Link className="mt-3 inline-block text-sm underline" to={`/explore/${ws}/data-api/endpoints`}>
-          ← Back to endpoints
-        </Link>
-      </div>
+        <div className="mt-3">
+          <BackLink to={`/explore/${ws}/data-api/endpoints`}>Endpoints</BackLink>
+        </div>
+      </PageContainer>
     );
   }
   if (!form || !baselineForm) {
     // Either the hydration effect hasn't flushed yet, or `id` just changed
     // and the new endpoint hasn't arrived — one render, at most, either way.
     return (
-      <div className="p-4">
+      <PageContainer>
         <h1 className="sr-only">{headingName}</h1>
         <ListSkeleton cols={2} />
-      </div>
+      </PageContainer>
     );
   }
 
@@ -528,8 +529,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     // header, the trash banner and the section nav are `shrink-0` so a long
     // section cannot squeeze them (flex items shrink by default), which is
     // also what keeps them on screen while a section scrolls under them.
-    <div className="flex h-full flex-col p-4">
-      <h1 className="sr-only">{headingName}</h1>
+    <PageContainer className="flex h-full flex-col">
       <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           {/* Guarded, and it is the whole of Finding 3: measured back to back
@@ -539,14 +539,12 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
               `LeaveGuardLink` (which reads the context the Outlet provides) —
               it holds `guardLeave` directly, and this is the same call the
               component makes for the sections. */}
-          <Link
-            className="text-sm text-muted-foreground hover:underline"
-            to={endpointsHref}
-            onClick={(e) => guardLeave(e, endpointsHref)}
-          >
-            ← Endpoints
-          </Link>
-          <h2 className="truncate text-lg font-semibold leading-tight">{endpoint.name}</h2>
+          <BackLink to={endpointsHref} onClick={(e) => guardLeave(e, endpointsHref)}>
+            Endpoints
+          </BackLink>
+          <PageTitle size="compact" className="truncate">
+            {headingName}
+          </PageTitle>
         </div>
         {/* No Save at all for a trashed endpoint — not a disabled one either.
             A greyed-out Save still says "this page edits things, just not right
@@ -665,7 +663,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
       )}
 
       <nav
-        className="-mx-1 mb-5 flex shrink-0 gap-1 overflow-x-auto border-b border-border px-1"
+        className={`-mx-1 mb-5 shrink-0 px-1 ${tabsListClass("underline")}`}
         aria-label="Endpoint sections"
       >
         {SECTIONS.map((s) => (
@@ -673,13 +671,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
             key={s.to}
             to={s.to}
             end={s.end}
-            className={({ isActive }) =>
-              `-mb-px shrink-0 border-b-2 px-3 py-2 text-sm transition-colors ${
-                isActive
-                  ? "border-primary font-semibold text-foreground"
-                  : "border-transparent font-medium text-muted-foreground hover:border-border hover:text-foreground"
-              }`
-            }
+            className={tabsTriggerClass("underline")}
           >
             {s.label}
           </NavLink>
@@ -744,6 +736,6 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
       <fieldset disabled={trashed} className="min-h-0 min-w-0 flex-1 overflow-auto">
         <Outlet key={id} context={ctx} />
       </fieldset>
-    </div>
+    </PageContainer>
   );
 }

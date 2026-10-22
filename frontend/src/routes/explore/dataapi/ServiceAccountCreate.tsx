@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import { ListPageShell } from "@/components/explore/ListPageShell";
 // wired straight to the generated hook, a new account is missing from all five
 // for `staleTime`'s thirty seconds.
 import { useCreateServiceAccount } from "@/api/dataApi";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /**
  * Create a service account on a page with a URL
@@ -111,6 +112,7 @@ export default function ServiceAccountCreate() {
 
   return (
     <ListPageShell
+      width="narrow"
       title="New service account"
       /* Every clause of this names a place, and each place has to exist.
          "grant it endpoints from the Clients list" did not: the Clients list
@@ -134,12 +136,7 @@ export default function ServiceAccountCreate() {
            anything" sat one control away from "create it" while its sibling
            create page put it in the opposite corner. Seen side by side in the
            browser, the two pages disagreed about where the way out is. */
-        <Link
-          className="text-sm text-muted-foreground hover:underline"
-          to={`/explore/${ws}/data-api/clients`}
-        >
-          ← Clients
-        </Link>
+        <BackLink to={`/explore/${ws}/data-api/clients`}>Clients</BackLink>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || create.isPending}>
@@ -147,7 +144,7 @@ export default function ServiceAccountCreate() {
         </Button>
       }
     >
-      <div className="max-w-3xl space-y-4">
+      <div className="space-y-4">
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
