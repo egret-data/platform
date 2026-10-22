@@ -101,6 +101,7 @@ function catalog(over: Partial<RegistryCatalogDto> = {}): RegistryCatalogDto {
 
 function engine(over: Partial<EngineDto> = {}): EngineDto {
   return {
+    endpoint: "trino-prod-trino.egret.svc:8443",
     id: "e1",
     name: "trino-prod",
     type: "trino",

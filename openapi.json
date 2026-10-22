@@ -5738,7 +5738,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Coordinator + worker pods rolled (rollout restart)"
+            "description": "Coordinator + worker pods (or containers) rolled; a Trino engine that ran before and now has none (removed outside egret) is created again from its stored spec"
           },
           "400": {
             "description": "Kubernetes not configured or restart failed",
@@ -5781,7 +5781,7 @@
             }
           },
           "409": {
-            "description": "The engine is external (`code` = `engine_is_external`): egret does not restart it",
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not restart it; or, when it is created again, the engine changed concurrently (retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5792,6 +5792,16 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Creating the engine again was refused by the cluster",
             "content": {
               "application/json": {
                 "schema": {
@@ -39902,8 +39912,7 @@
         "required": [
           "running",
           "queued",
-          "blocked",
-          "nodes"
+          "blocked"
         ],
         "properties": {
           "running": {
@@ -39922,10 +39931,14 @@
             "minimum": 0
           },
           "nodes": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/components/schemas/NodeDto"
-            }
+            },
+            "description": "`None` when the coordinator would not list its nodes: the count is\nunknown, not zero ([`cluster_nodes`])."
           }
         }
       },
@@ -43242,7 +43255,8 @@
           "status",
           "spec",
           "origin",
-          "rangerCredentialPending"
+          "rangerCredentialPending",
+          "endpoint"
         ],
         "properties": {
           "id": {
@@ -43323,6 +43337,21 @@
             ],
             "format": "uuid",
             "description": "The id of the engine's CURRENT Ranger plugin credential: the\n`credentialId` registration or the last rotation returned with it.\nAn opaque id that grants nothing (never the password); an external\nengine's operator sends it as `installed` to confirm which credential\nthe engine runs with. Absent when the engine has no credential yet."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "`host:port` clients reach the engine on, as a workspace connection to\nit dials it (`Engine::client_endpoint`). External: the declared address."
+          },
+          "runtime": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EngineRuntime",
+                "description": "Provisioned only: what runs the engine (`kubernetes` or `docker`).\nAbsent for an external engine and when nothing provisions engines. Set\nby the reads (`GET /engines`, `GET /engines/{id}`)."
+              }
+            ]
           }
         }
       },
@@ -43581,6 +43610,14 @@
             "type": "string"
           }
         }
+      },
+      "EngineRuntime": {
+        "type": "string",
+        "description": "What runs the engines egret provisions, as the UI needs to know it: which\nactions can work (pod logs and exec need Kubernetes) and what to call the\nthings that run an engine (pods or containers).",
+        "enum": [
+          "kubernetes",
+          "docker"
+        ]
       },
       "EngineSpecDto": {
         "type": "object",
@@ -47658,16 +47695,19 @@
       "NodeDto": {
         "type": "object",
         "required": [
-          "uri",
-          "recentFailures"
+          "uri"
         ],
         "properties": {
           "uri": {
             "type": "string"
           },
           "recentFailures": {
-            "type": "number",
-            "format": "double"
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The failure detector's recent failure rate. Absent when the node list\ncame from `system.runtime.nodes`, which does not report it."
           }
         }
       },
