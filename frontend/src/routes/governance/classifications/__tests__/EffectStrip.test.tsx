@@ -100,7 +100,7 @@ describe("the Effect strip", () => {
       ]),
     });
     openArea("/governance/classifications/t-pii", ADMIN);
-    await waitFor(() => expect(strip()).toHaveTextContent("Partly enforced — Not enforced in demo_warehouse — no engine attached."), T);
+    await waitFor(() => expect(strip()).toHaveTextContent("Partly enforced. Not enforced in demo_warehouse — no engine attached."), T);
     expect(strip()).not.toHaveTextContent("Not enforced yet");
   });
 

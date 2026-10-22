@@ -197,7 +197,7 @@ describe("TagRulesSection: enforcement", () => {
       </QueryClientProvider>,
     );
     const row = screen.getByRole("link", { name: "mask ssn" }).closest("tr") as HTMLElement;
-    expect(row).toHaveTextContent("Partly enforced — Not enforced in demo_warehouse — no engine attached.");
+    expect(row).toHaveTextContent("Partly enforced. Not enforced in demo_warehouse — no engine attached.");
     expect(row).not.toHaveTextContent("Not enforced yet");
   });
 });

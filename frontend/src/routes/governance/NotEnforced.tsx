@@ -133,7 +133,7 @@ export function NotEnforcedSummary({
 }
 
 /**
- * "Partly enforced — Not enforced in demo_warehouse — no engine attached.": a
+ * "Partly enforced. Not enforced in demo_warehouse — no engine attached.": a
  * stored rule some engine enforces in one catalog it reaches while another
  * has none (live check D2), said beside the rule on a rule-wide surface. The
  * catalogs come from the server's per-catalog entries. Renders nothing for a
@@ -160,7 +160,7 @@ function PartlyEnforcedLine({ lead, lines, className }: { lead: string; lines: s
       <AlertTriangle aria-hidden className="mt-0.5 size-3 shrink-0" />
       <span>
         <span className="font-medium">{lead}</span>
-        {` — ${lines.join(" ")}`}
+        {`. ${lines.join(" ")}`}
       </span>
     </span>
   );
