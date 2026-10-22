@@ -2409,6 +2409,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine_provisioner,
         kube,
         coordinator_transport,
+        // The native monitor signs in to a JWT-delegation engine as the viewer.
+        engine_token_minter: Some(engine_minter.clone()),
         engine_egret_url,
         // Engines trust egret's OWN machine-IdP (the STS): the same issuer that
         // signs catalog + engine tokens, independent of whether external OIDC is

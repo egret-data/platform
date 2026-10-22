@@ -46,6 +46,9 @@ pub struct ContainerPlan {
     pub env: Vec<(String, String)>,
     pub labels: BTreeMap<String, String>,
     pub aliases: Vec<String>,
+    /// The container's hostname ([`container_hostname`]); `None` leaves
+    /// Docker's default (the container id).
+    pub hostname: Option<String>,
     pub files: Vec<PlanFile>,
     pub nano_cpus: Option<i64>,
     pub memory_bytes: Option<i64>,
@@ -62,6 +65,7 @@ impl std::fmt::Debug for ContainerPlan {
             .field("env_keys", &env_keys)
             .field("labels", &self.labels)
             .field("aliases", &self.aliases)
+            .field("hostname", &self.hostname)
             .field("files", &self.files)
             .field("nano_cpus", &self.nano_cpus)
             .field("memory_bytes", &self.memory_bytes)
@@ -122,6 +126,28 @@ fn unsupported(spec: &EngineSpec) -> Vec<&'static str> {
         }
     }
     out
+}
+
+/// The hostname a container of engine `name` runs with: the shape of a
+/// Kubernetes pod of the same role (`{name}-coordinator-<hash>-<suffix>`, here
+/// `{name}-coordinator-docker-0` and `{name}-worker-docker-{i}`).
+///
+/// The Ranger plugin sends `<appId>@<hostname>-<service>` as its `pluginId`,
+/// and egret serves the `egret-lineage` policy transform only to a poller whose
+/// hostname is a pod of an eligible engine
+/// (`egret_policy::lineage_transform::host_is_engine_pod`). With Docker's
+/// default hostname (the container id) no Docker engine was ever recognised,
+/// so the lineage EXPLAIN was denied on every one (KI-201).
+///
+/// `None` past 63 characters (a DNS label, the most Docker and Kubernetes take):
+/// the container keeps Docker's default and the lineage transform is not
+/// served to it, the same refusal as before.
+pub fn container_hostname(name: &str, role: &PlanRole) -> Option<String> {
+    let host = match role {
+        PlanRole::Coordinator => format!("{name}-coordinator-docker-0"),
+        PlanRole::Worker(i) => format!("{name}-worker-docker-{i}"),
+    };
+    (host.len() <= 63).then_some(host)
 }
 
 pub fn container_name(namespace: &str, name: &str, role: &PlanRole) -> String {
@@ -365,6 +391,7 @@ pub fn plan_trino(spec: &EngineSpec, opts: &PlanOptions) -> Result<Vec<Container
         };
         plans.push(ContainerPlan {
             name: container_name(&spec.namespace, &spec.name, &role),
+            hostname: container_hostname(&spec.name, &role),
             files: role_files(spec, k8s_role)?,
             image,
             env: env.clone(),
@@ -568,6 +595,23 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         assert_eq!(p.labels, want);
+        assert_eq!(p.hostname.as_deref(), Some("demo-coordinator-docker-0"));
+    }
+
+    #[test]
+    fn hostnames_take_the_pod_shape_and_never_pass_a_dns_label() {
+        assert_eq!(
+            container_hostname("lake", &PlanRole::Worker(3)).as_deref(),
+            Some("lake-worker-docker-3")
+        );
+        // 46 + "-coordinator-docker-0" (21) = 67 > 63: Docker's default stays.
+        let long = "a".repeat(46);
+        assert_eq!(container_hostname(&long, &PlanRole::Coordinator), None);
+        let fits = "a".repeat(42);
+        assert_eq!(
+            container_hostname(&fits, &PlanRole::Coordinator).map(|h| h.len()),
+            Some(63)
+        );
     }
 
     #[test]

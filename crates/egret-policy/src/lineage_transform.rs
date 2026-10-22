@@ -447,6 +447,11 @@ pub fn plugin_host<'a>(plugin_id: Option<&'a str>, service: &str) -> Option<&'a 
 /// lowercase alphanumeric segments, nothing more. An engine whose name happens
 /// to extend another's cannot match it, because the remainder would have more
 /// than two segments.
+///
+/// The Docker engine provisioner gives each container a hostname of the same
+/// shape (`{engine}-coordinator-docker-0`, `{engine}-worker-docker-{i}`;
+/// `egret_provisioner::docker::plan::container_hostname`), so its engines are
+/// recognised by this same rule.
 pub fn host_is_engine_pod(host: &str, engine: &str) -> bool {
     let segment = |s: &str| {
         !s.is_empty()

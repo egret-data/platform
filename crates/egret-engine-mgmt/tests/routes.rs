@@ -291,6 +291,7 @@ fn engine_state(
         engine_provisioner,
         kube,
         coordinator_transport: None,
+        engine_token_minter: Some(Arc::new(FakeMinter::default())),
         engine_egret_url: "http://egret:8080".into(),
         engine_jwks_uri: "https://idp/jwks".into(),
         engine_oidc_issuer: "https://idp/realms/egret".into(),
@@ -15609,4 +15610,384 @@ async fn former_profile_deleting_the_only_engine_of_a_profile_compiles_nothing()
         compiler.in_tx_calls.lock().unwrap().is_empty(),
         "no recompile"
     );
+}
+
+// ── B6: engines and monitor (KI-194, KI-197, KI-199, KI-213) ──────────────────
+
+/// Mints `tok-for-<user id>` and records whom it minted for.
+#[derive(Default, Clone)]
+struct FakeMinter {
+    minted_for: Arc<std::sync::Mutex<Vec<Uuid>>>,
+}
+
+#[async_trait::async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for FakeMinter {
+    async fn mint(
+        &self,
+        user_id: Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        self.minted_for.lock().unwrap().push(user_id);
+        Ok(egret_analytics_api::engine_token::EngineToken {
+            access_token: format!("tok-for-{user_id}"),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
+        })
+    }
+}
+
+/// A Trino 483 coordinator behind the Docker transport: `/v1/node` is 404
+/// (no Airlift discovery), `/v1/query` lists one query, and a statement
+/// finishes at once with one node row. Records every request's headers.
+#[derive(Default)]
+struct Trino483Transport {
+    calls: std::sync::Mutex<Vec<(String, String, Vec<(String, String)>)>>,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt_api::CoordinatorTransport for Trino483Transport {
+    async fn request(
+        &self,
+        _namespace: &str,
+        _service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        _body: Option<Vec<u8>>,
+    ) -> Result<(u16, Vec<u8>), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.into(), path.into(), headers.to_vec()));
+        Ok(match (method, path) {
+            ("GET", "/v1/node") => (404, b"Not Found".to_vec()),
+            ("GET", "/v1/query") => (
+                200,
+                br#"[{"queryId":"q1","state":"RUNNING","query":"SELECT 1","session":{"user":"alice"},"queryStats":{}}]"#.to_vec(),
+            ),
+            ("POST", "/v1/statement") => (
+                200,
+                br#"{"id":"s1","stats":{"state":"FINISHED"},"data":[["http://172.18.0.9:8080"],["http://172.18.0.10:8080"]]}"#.to_vec(),
+            ),
+            _ => (500, b"unexpected".to_vec()),
+        })
+    }
+}
+
+/// The app over `f`'s database with the Docker engine provisioner's seams:
+/// no `kube`, a coordinator transport, and `minter`.
+fn docker_app(
+    f: &Fixture,
+    transport: Arc<dyn egret_engine_mgmt_api::CoordinatorTransport>,
+    minter: FakeMinter,
+) -> axum::Router {
+    let mut st = engine_state(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        None,
+        std::sync::Arc::new(AllowAllPdp),
+        false,
+        f.starrocks_ddl.clone(),
+        None,
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
+    );
+    st.coordinator_transport = Some(transport);
+    st.engine_token_minter = Some(Arc::new(minter));
+    engine_mgmt_router().with_state(st)
+}
+
+async fn user_id_of(f: &Fixture, token: &str) -> Uuid {
+    f.sessions
+        .validate(token)
+        .await
+        .expect("validate")
+        .expect("session")
+        .user_id
+        .0
+}
+
+/// KI-194: the Monitor of a JWT-delegation Trino 483 engine. Its coordinator
+/// has no password authenticator (no `egret-monitor` sign-in) and no
+/// `/v1/node`; the summary answered 502 on both counts. Now egret signs in as
+/// the viewer with the engine token it mints for them, and lists the nodes from
+/// `system.runtime.nodes`.
+#[tokio::test]
+async fn ki194_monitor_of_a_jwt_trino_483_engine_signs_in_as_the_viewer_and_lists_nodes() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "b6_monitor", true).await;
+    let viewer = user_id_of(&f, &token).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("b6-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    assert_eq!(j["spec"]["trinoConfig"]["delegationMode"], "jwt", "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let transport = Arc::new(Trino483Transport::default());
+    let minter = FakeMinter::default();
+    let app = docker_app(&f, transport.clone(), minter.clone());
+    let resp = app
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "cluster summary; body={j}");
+    assert_eq!(j["running"], 1, "{j}");
+    assert_eq!(j["nodes"].as_array().map(Vec::len), Some(2), "{j}");
+    assert_eq!(j["nodes"][0]["uri"], "http://172.18.0.9:8080", "{j}");
+
+    assert_eq!(*minter.minted_for.lock().unwrap().first().unwrap(), viewer);
+    let calls = transport.calls.lock().unwrap();
+    assert!(!calls.is_empty());
+    for (method, path, headers) in calls.iter() {
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == &format!("Bearer tok-for-{viewer}")),
+            "{method} {path} signs in as the viewer: {headers:?}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "X-Forwarded-Proto" && v == "https"),
+            "{method} {path}: {headers:?}"
+        );
+    }
+}
+
+/// KI-194: when the coordinator will not list its nodes at all, the summary
+/// still answers with the queries and an unknown (null) node list, not a 502.
+#[tokio::test]
+async fn ki194_a_coordinator_that_lists_no_nodes_still_answers_the_summary() {
+    #[derive(Default)]
+    struct NoNodes;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::CoordinatorTransport for NoNodes {
+        async fn request(
+            &self,
+            _: &str,
+            _: &str,
+            method: &str,
+            path: &str,
+            _: &[(String, String)],
+            _: Option<Vec<u8>>,
+        ) -> Result<(u16, Vec<u8>), String> {
+            Ok(match (method, path) {
+                ("GET", "/v1/query") => (200, b"[]".to_vec()),
+                ("POST", "/v1/statement") => (
+                    200,
+                    br#"{"error":{"message":"Access Denied: Cannot access catalog system"}}"#
+                        .to_vec(),
+                ),
+                _ => (404, b"Not Found".to_vec()),
+            })
+        }
+    }
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "b6_monitor_nonodes", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("b6-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let app = docker_app(&f, Arc::new(NoNodes), FakeMinter::default());
+    let resp = app
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(j["running"], 0, "{j}");
+    assert!(j["nodes"].is_null(), "unknown, not zero: {j}");
+}
+
+/// KI-197: the flat replica counts say what the per-role blocks provision.
+/// The create wizard sends the flat default `workerReplicas: 2` beside the
+/// per-role block; a `0` worker block was provisioned with no worker while the
+/// stored spec (and the Overview) said 2, and a block with no `replicas` was
+/// provisioned with 1.
+#[tokio::test]
+async fn ki197_the_flat_replica_counts_follow_the_per_role_blocks() {
+    let fake = FakeEnginePort::default();
+    let Some(f) = setup_full(Some(Arc::new(fake.clone())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "b6_replicas", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    for (worker, want) in [
+        (serde_json::json!({"replicas": 0}), 0),
+        (serde_json::json!({"resources": {"cpuLimit": "1"}}), 1),
+    ] {
+        let name = format!("b6-{}", Uuid::new_v4().simple());
+        let (status, j) = call(
+            &f,
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 2,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "trinoConfig": {"coordinator": {}, "worker": worker},
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+        assert_eq!(
+            j["spec"]["workerReplicas"], want,
+            "stored flat count; body={j}"
+        );
+        assert_eq!(j["spec"]["coordinatorReplicas"], 1, "body={j}");
+        let provisioned = fake
+            .provisioned
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.config.worker.base.replicas);
+        assert_eq!(provisioned, Some(want as u32), "provisioned workers");
+    }
+}
+
+/// KI-199 (and the runtime KI-195/KI-196 read): the engine reports the
+/// endpoint a workspace connection dials and what runs it.
+#[tokio::test]
+async fn ki199_an_engine_reports_its_endpoint_and_runtime() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "b6_endpoint", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("b6-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let ns = j["namespace"].as_str().unwrap().to_string();
+    let want = format!("{name}-trino.{ns}.svc:8443");
+
+    let (status, j) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["endpoint"], want, "{j}");
+    assert_eq!(j["runtime"], "kubernetes", "{j}");
+    let (_, list) = call(&f, "GET", "/engines", &token, None).await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == engine_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["endpoint"], want, "{row}");
+    assert_eq!(row["runtime"], "kubernetes", "{row}");
+
+    let app = docker_app(
+        &f,
+        Arc::new(Trino483Transport::default()),
+        FakeMinter::default(),
+    );
+    let resp = app
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (_, j) = into_json(resp).await;
+    assert_eq!(j["runtime"], "docker", "{j}");
+}
+
+/// KI-213: an engine that ran and whose containers were removed outside egret
+/// (`just demo-down`) is created again by Restart, from its stored spec. One
+/// still being created (row `provisioning`) is left to its create.
+#[tokio::test]
+async fn ki213_restart_creates_an_engine_with_no_containers_again() {
+    let fake = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(fake.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "b6_restart", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("b6-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let gone = egret_engine_mgmt_api::EngineStatus {
+        phase: "provisioning".into(),
+        message: None,
+        pods: vec![],
+    };
+    // Still being created: the row is `provisioning`, Restart only restarts.
+    *fake.status_response.lock().unwrap() = Some(gone.clone());
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/restart"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(fake.restarted.lock().unwrap().len(), 1);
+    assert!(fake.updated.lock().unwrap().iter().all(|s| s.name != name));
+
+    // It ran (a read observed it running) ...
+    *fake.status_response.lock().unwrap() = None;
+    let (status, j) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["status"]["phase"], "running", "{j}");
+    // ... and then its containers were removed.
+    *fake.status_response.lock().unwrap() = Some(gone);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/restart"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        fake.restarted.lock().unwrap().len(),
+        1,
+        "not restarted again"
+    );
+    let recreated: Vec<_> = fake
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.name == name)
+        .cloned()
+        .collect();
+    assert_eq!(recreated.len(), 1, "created again from the stored spec");
 }

@@ -352,6 +352,24 @@ pub(crate) struct EngineDto {
     /// the engine runs with. Absent when the engine has no credential yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_credential_id: Option<Uuid>,
+    /// `host:port` clients reach the engine on, as a workspace connection to
+    /// it dials it (`Engine::client_endpoint`). External: the declared address.
+    endpoint: String,
+    /// Provisioned only: what runs the engine (`kubernetes` or `docker`).
+    /// Absent for an external engine and when nothing provisions engines. Set
+    /// by the reads (`GET /engines`, `GET /engines/{id}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<crate::state::EngineRuntime>,
+}
+
+impl EngineDto {
+    /// The DTO with what runs the engine filled in (absent for an external one).
+    fn with_runtime(mut self, st: &CpState) -> Self {
+        if self.origin != crate::external::ORIGIN_EXTERNAL {
+            self.runtime = st.engine_runtime();
+        }
+        self
+    }
 }
 
 impl From<Engine> for EngineDto {
@@ -372,6 +390,7 @@ impl From<Engine> for EngineDto {
             e.ranger_plugin_version.as_deref(),
             &e.spec,
         );
+        let endpoint = e.client_endpoint();
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
         EngineDto {
             id: e.id,
@@ -389,6 +408,8 @@ impl From<Engine> for EngineDto {
             ranger_plugin_version_note: note,
             ranger_credential_pending: e.ranger_secret_prev_id.is_some(),
             ranger_credential_id: e.ranger_secret_id,
+            endpoint,
+            runtime: None,
         }
     }
 }
@@ -1503,6 +1524,26 @@ fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
         },
         image: None,
         ..Default::default()
+    }
+}
+
+/// Make the flat `coordinatorReplicas`/`workerReplicas` of a Trino spec say
+/// what the per-role blocks provision. [`trino_config_from_json`] renders from
+/// `trinoConfig.{coordinator,worker}.replicas` (1 when a block omits it), while
+/// the UI's summary reads the flat fields; a body whose flat value disagrees
+/// with its per-role block (the create wizard always sends the flat default
+/// `2`) stored a count no container matched (KI-197). An old flat spec (no
+/// per-role blocks) renders from the flat fields and is left alone.
+fn sync_flat_replicas(spec: &mut serde_json::Value) {
+    if !spec["trinoConfig"]["coordinator"].is_object() {
+        return;
+    }
+    for (role, flat) in [
+        ("coordinator", "coordinatorReplicas"),
+        ("worker", "workerReplicas"),
+    ] {
+        let n = spec["trinoConfig"][role]["replicas"].as_u64().unwrap_or(1);
+        spec[flat] = serde_json::json!(n);
     }
 }
 
@@ -2653,7 +2694,7 @@ async fn list_engines(
         // An external engine has no cluster egret can ask: its row's `running`
         // is a placeholder and `origin` is what a reader shows.
         let external = crate::external::is_external(&engine);
-        let mut dto: EngineDto = engine.into();
+        let mut dto = EngineDto::from(engine).with_runtime(&st);
         if external {
             out.push(dto);
             continue;
@@ -3402,6 +3443,7 @@ async fn create_engine(
         "imageVersion": image_version,
     });
     spec["trinoConfig"] = trino_config;
+    sync_flat_replicas(&mut spec);
     validate_spec_resource_groups(&spec)?;
     // Kubernetes must be configured before anything is minted or rendered.
     let Some(prov) = st.engine_provisioner.clone() else {
@@ -5339,7 +5381,7 @@ async fn get_engine(
     // is a compare-and-set, so a concurrent sweep is harmless.
     crate::ranger_credential::spawn_retire_if_rolled_out(&st, engine.clone());
     Ok(Json(EngineDetailDto {
-        engine: engine.into(),
+        engine: EngineDto::from(engine).with_runtime(&st),
         status,
     }))
 }
@@ -5877,6 +5919,7 @@ async fn update_trino_engine(
         spec["trinoConfig"] = tc.clone();
     }
     preserve_trino_delegation_mode(&mut spec, &engine.spec);
+    sync_flat_replicas(&mut spec);
     validate_spec_resource_groups(&spec)?;
     // Validate an optional ingress-TLS secret reference (400 on a missing /
     // non-TLS / incomplete secret) before persisting, mirroring create.
@@ -6433,12 +6476,13 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "Coordinator + worker pods rolled (rollout restart)"),
+        (status = 200, description = "Coordinator + worker pods (or containers) rolled; a Trino engine that ran before and now has none (removed outside egret) is created again from its stored spec"),
         (status = 400, description = "Kubernetes not configured or restart failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not restart it", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not restart it; or, when it is created again, the engine changed concurrently (retry)", body = ErrorBody),
+        (status = 502, description = "Creating the engine again was refused by the cluster", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6467,10 +6511,45 @@ async fn restart_engine(
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
+    if recreates_on_restart(&engine, prov.as_ref()).await {
+        // Restart has nothing to roll: re-apply the stored spec, which creates
+        // the engine's pods or containers again (KI-213).
+        let built = build_provision_req(&st, &engine).await?;
+        apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .map_err(|e| match e {
+                ApplyBuiltError::Conflict => apply_conflict(),
+                ApplyBuiltError::CredentialChanged => {
+                    CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+                }
+                ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+            })?;
+        return Ok(StatusCode::OK);
+    }
     prov.restart(&engine.r#type, &engine.namespace, &engine.name)
         .await
         .map_err(|e| CpError::BadRequest(format!("engine restart failed: {e}")))?;
     Ok(StatusCode::OK)
+}
+
+/// Whether Restart must create the engine again rather than roll it: a Trino
+/// engine that once ran (its row left `provisioning`) and now has no pod or
+/// container at all, because they were removed outside egret (on the Docker
+/// demo stack `just demo-down` removes every engine container; KI-213). An
+/// engine still being created has none yet either; its row is still
+/// `provisioning`, so it is left to its create. A failed status read decides
+/// nothing: the plain restart runs and reports its own error.
+async fn recreates_on_restart(
+    engine: &Engine,
+    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+) -> bool {
+    if engine.r#type != "trino" || engine.status == crate::engine_status::PROVISIONING {
+        return false;
+    }
+    matches!(
+        prov.status(&engine.r#type, &engine.namespace, &engine.name).await,
+        Ok(s) if s.pods.is_empty()
+    )
 }
 
 /// `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
@@ -7039,7 +7118,8 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
     )
 }
 
-/// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator and
+/// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator, as
+/// `viewer` where the engine signs in its users ([`run_statement`]), and
 /// return the verdict as `(ok, message)`. Shared by the per-engine
 /// `POST /engines/{id}/catalogs/{cid}/test` above and by the registry's
 /// `POST /catalogs/{id}/test` (SP3c D4), so the two cannot drift into two
@@ -7049,67 +7129,89 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
 pub(crate) async fn show_schemas_verdict(
     st: &CpState,
     engine: &Engine,
+    viewer: egret_core::UserId,
     catalog_name: &str,
 ) -> Result<(bool, String), CpError> {
     // The chokepoint under both test routes: egret never queries the
     // coordinator of an engine it does not run.
     crate::external::refuse_if_external(engine, "run a catalog test against it")?;
     let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(catalog_name));
+    Ok(match run_statement(st, engine, viewer, &sql).await? {
+        // Name the check and the engine. `tcp` puts its disclaimer in the
+        // sentence and `unsupported` names the kind; the bare word "ok" left
+        // the strongest of the three the only one that did not say what it
+        // had done (SP3c review F5).
+        Ok(_) => (
+            true,
+            format!(
+                "{sql} succeeded on `{}`, so the catalog answered — credentials included.",
+                engine.name
+            ),
+        ),
+        Err(message) => (false, message),
+    })
+}
+
+/// Run one statement on `engine`'s Trino coordinator through the
+/// `/v1/statement` submit-then-poll protocol, with the monitor's sign-in
+/// ([`crate::monitor::coordinator_call`]), and collect its rows. A refusal of
+/// the statement (an error, a non-2xx reply, a non-JSON body, a state other
+/// than `FINISHED`, or more than [`CATALOG_TEST_MAX_POLLS`] polls) is the inner
+/// `Err`, in words a reader can act on; only an unreachable coordinator is the
+/// outer one.
+pub(crate) async fn run_statement(
+    st: &CpState,
+    engine: &Engine,
+    viewer: egret_core::UserId,
+    sql: &str,
+) -> Result<Result<Vec<Vec<serde_json::Value>>, String>, CpError> {
     let (code, body) = crate::monitor::coordinator_call(
         st,
         engine,
+        viewer,
         "POST",
         "/v1/statement",
-        Some(sql.clone().into_bytes()),
+        Some(sql.as_bytes().to_vec()),
     )
     .await?;
     if !(200..300).contains(&code) {
-        return Ok((false, coordinator_error_message(code, &body)));
+        return Ok(Err(coordinator_error_message(code, &body)));
     }
     let mut v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
+        Err(_) => return Ok(Err("coordinator returned a non-JSON response".into())),
     };
-
+    let mut rows = Vec::new();
     for _ in 0..=CATALOG_TEST_MAX_POLLS {
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-            return Ok((
-                false,
-                err["message"]
-                    .as_str()
-                    .unwrap_or("query failed")
-                    .to_string(),
-            ));
+            return Ok(Err(err["message"]
+                .as_str()
+                .unwrap_or("query failed")
+                .to_string()));
+        }
+        if let Some(data) = v["data"].as_array() {
+            rows.extend(data.iter().filter_map(|r| r.as_array().cloned()));
         }
         let state = v["stats"]["state"].as_str().unwrap_or("");
         let Some(next_uri) = v["nextUri"].as_str() else {
-            return Ok((
-                state == "FINISHED",
-                if state == "FINISHED" {
-                    // Name the check and the engine. `tcp` puts its disclaimer
-                    // in the sentence and `unsupported` names the kind; the bare
-                    // word "ok" left the strongest of the three the only one
-                    // that did not say what it had done (SP3c review F5).
-                    format!(
-                        "{sql} succeeded on `{}`, so the catalog answered — credentials included.",
-                        engine.name
-                    )
-                } else {
-                    format!("query ended in state {state}")
-                },
-            ));
+            return Ok(if state == "FINISHED" {
+                Ok(rows)
+            } else {
+                Err(format!("query ended in state {state}"))
+            });
         };
         let path = next_uri_path(next_uri);
-        let (code, body) = crate::monitor::coordinator_call(st, engine, "GET", &path, None).await?;
+        let (code, body) =
+            crate::monitor::coordinator_call(st, engine, viewer, "GET", &path, None).await?;
         if !(200..300).contains(&code) {
-            return Ok((false, coordinator_error_message(code, &body)));
+            return Ok(Err(coordinator_error_message(code, &body)));
         }
         v = match serde_json::from_slice(&body) {
             Ok(v) => v,
-            Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
+            Err(_) => return Ok(Err("coordinator returned a non-JSON response".into())),
         };
     }
-    Ok((false, "timed out".into()))
+    Ok(Err("timed out".into()))
 }
 
 /// The registry catalog `cid` as attached to `engine` (404 when not attached).
@@ -7197,7 +7299,7 @@ async fn test_catalog(
         .ok_or(CpError::NotFound)?;
     crate::external::refuse_if_external(&engine, "run a catalog test against it")?;
     let cat = find_attached(&st, &engine, cid).await?.catalog;
-    let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
+    let (ok, message) = show_schemas_verdict(&st, &engine, p.user_id, &cat.name).await?;
     Ok(Json(CatalogTestDto { ok, message }))
 }
 
@@ -7676,6 +7778,33 @@ fn kube_only_error(has_coordinator_transport: bool) -> CpError {
 
 #[cfg(test)]
 mod tests {
+    /// KI-201: the lineage policy transform is served only to a Ranger plugin
+    /// whose hostname is a pod of the engine; a Docker container must be one.
+    /// Before the fix a Docker engine ran under its container id, never
+    /// recognised, so the lineage EXPLAIN was denied on every Docker engine.
+    #[test]
+    fn a_docker_engines_containers_are_recognised_as_its_pods() {
+        use egret_policy::lineage_transform::{host_is_engine_pod, plugin_host};
+        use egret_provisioner::docker::plan::container_hostname;
+        use egret_provisioner::docker::PlanRole;
+        for role in [
+            PlanRole::Coordinator,
+            PlanRole::Worker(0),
+            PlanRole::Worker(7),
+        ] {
+            let host = container_hostname("lake", &role).expect("fits a DNS label");
+            let plugin_id = format!("trino@{host}-lake-svc");
+            assert_eq!(
+                plugin_host(Some(&plugin_id), "lake-svc"),
+                Some(host.as_str())
+            );
+            assert!(host_is_engine_pod(&host, "lake"), "{host}");
+            assert!(!host_is_engine_pod(&host, "lake2"), "{host}");
+        }
+        // Docker's default hostname, the container id, is no engine's pod.
+        assert!(!host_is_engine_pod("e00d4f5be6a4", "lake"));
+    }
+
     #[test]
     fn kube_only_routes_say_why_they_are_unavailable() {
         assert!(matches!(kube_only_error(true),
@@ -8672,6 +8801,7 @@ mod tests {
             engine_provisioner: None,
             kube: None,
             coordinator_transport: None,
+            engine_token_minter: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),

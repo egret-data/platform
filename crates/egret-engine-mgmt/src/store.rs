@@ -125,6 +125,27 @@ impl Engine {
         }
     }
 
+    /// The port a workspace connection to this engine dials: a delegating
+    /// Trino engine's separate https listener (`8443`), else
+    /// [`Self::coordinator_port`]. StarRocks negotiates TLS in-band on its one
+    /// MySQL-protocol port, so it never moves.
+    pub fn client_port(&self) -> i32 {
+        if !self.is_starrocks()
+            && self.external_address_port().is_none()
+            && self.supports_delegation()
+        {
+            8443
+        } else {
+            self.coordinator_port()
+        }
+    }
+
+    /// `host:port` clients reach the engine on: what a workspace connection to
+    /// it dials ([`Self::coordinator_host`], [`Self::client_port`]).
+    pub fn client_endpoint(&self) -> String {
+        format!("{}:{}", self.coordinator_host(), self.client_port())
+    }
+
     /// Whether the engine accepts a minted per-user engine JWT — a prerequisite
     /// for materializing a delegated (read-only) workspace connection.
     ///
