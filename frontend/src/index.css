@@ -189,6 +189,9 @@
 
   /* Letter spacing */
   --tracking-normal: 0.025em;
+
+  /* The form/editor/settings column (FE-PAGE-6): `max-w-page`, 960px. */
+  --container-page: 60rem;
 }
 
 @theme inline {

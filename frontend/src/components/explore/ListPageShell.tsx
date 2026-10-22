@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /**
- * The frame every Explore list page shares: `p-4`, one `h1`, a right-aligned
- * toolbar, and a primary action.
+ * The frame every list page shares: `PageContainer`, one `PageTitle` (`h1`), a
+ * right-aligned toolbar, and a primary action.
  *
  * The `p-4` + `flex items-center justify-between` header is written out by hand
  * in all six list pages, and three of them carry a comment calling it "the
@@ -25,6 +27,7 @@ import type { ReactNode } from "react";
  * right.
  */
 export function ListPageShell({
+  width = "full",
   title,
   description,
   back,
@@ -32,6 +35,12 @@ export function ListPageShell({
   action,
   children,
 }: {
+  /**
+   * `full` for a list (the default). `narrow` for the create pages that reuse
+   * this frame (`EndpointCreate`, `ClientCreate`, `ServiceAccountCreate`): a
+   * form is a 960px column on the list's left edge (FE-PAGE-6).
+   */
+  width?: "full" | "narrow";
   title: string;
   description?: string;
   /**
@@ -54,11 +63,11 @@ export function ListPageShell({
 }) {
   const alignClass = description ? "items-start" : "items-center";
   return (
-    <div className="p-4">
+    <PageContainer width={width}>
       <header className={`mb-4 flex flex-wrap ${alignClass} justify-between gap-3`}>
         <div className="min-w-0">
           {back}
-          <h1 className="text-lg font-semibold">{title}</h1>
+          <PageTitle>{title}</PageTitle>
           {description ? (
             <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
           ) : null}
@@ -73,6 +82,6 @@ export function ListPageShell({
         </div>
       </header>
       {children}
-    </div>
+    </PageContainer>
   );
 }
