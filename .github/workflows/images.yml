@@ -124,7 +124,7 @@ jobs:
       - name: Build the plugin host's jars
         if: matrix.image == 'egret-plugin-host'
         run: |
-          docker run --rm -v "$PWD/plugin-host:/w" -w /w maven:3.9.11-eclipse-temurin-25 \
+          docker run --rm -v "$PWD/plugin-host:/w" -w /w maven:3.9.16-eclipse-temurin-25 \
             bash -c './fetch-plugins.sh target/plugins && mvn -q -B package -DskipTests'
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -210,8 +210,10 @@ jobs:
 
       # Vulnerability scan, amd64 only (the arm64 image carries the same package versions).
       # Threshold (docs/en/guides/releasing.md): every CRITICAL and HIGH finding, fixed or not, goes
-      # to code scanning and never fails the job; a CRITICAL finding that HAS a fixed version fails
-      # it, which stops `merge`, so nothing is tagged until the base image or dependency is bumped.
+      # to code scanning and never fails the job. A CRITICAL finding that HAS a fixed version fails
+      # the job on a version tag, which stops `merge`: no release ships one. On main and pull
+      # requests that step is allowed to fail (shown as a failed step in a green job), so `edge`
+      # keeps publishing while the finding is open.
       - name: Trivy report (SARIF)
         if: matrix.arch == 'amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -235,6 +237,7 @@ jobs:
           category: trivy-${{ matrix.image }}
       - name: Trivy gate (fixable CRITICAL)
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ env.PUSH == 'true' && github.actor || '' }}

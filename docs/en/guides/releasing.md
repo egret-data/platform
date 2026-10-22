@@ -71,7 +71,7 @@ Also once, in the organisation settings: Packages must allow public packages (Se
 Trivy scans each image (the `amd64` build) in the `build` job:
 
 - **Reported, never blocking:** every `CRITICAL` and `HIGH` finding, with or without a fixed version, is uploaded to code scanning (Security, Code scanning, category `trivy-<image>`).
-- **Blocking:** a `CRITICAL` finding that has a fixed version fails the job. On a push this stops `merge`, so nothing of that build is tagged (all images of a version are published together or not at all). Fix it by bumping the base image or the dependency.
+- **Blocking releases only:** a `CRITICAL` finding that has a fixed version fails the job on a version tag. That stops `merge`, so no image of that release is tagged (all images of a version are published together or not at all). Fix it on `main` by bumping the base image or the dependency, then tag the next patch version. On `main` and on pull requests the same check runs and shows as a failed step inside a green job, so `edge` keeps publishing while the finding is open; check the `images` run on `main` before tagging.
 
 Unfixed findings do not block, because there is nothing to upgrade to; they stay visible in code scanning.
 

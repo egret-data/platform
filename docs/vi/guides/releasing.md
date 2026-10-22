@@ -73,7 +73,7 @@ Cũng một lần, trong cài đặt organisation: Packages phải cho phép pac
 Trivy quét từng image (bản build `amd64`) trong job `build`:
 
 - **Báo cáo, không bao giờ chặn:** mọi phát hiện `CRITICAL` và `HIGH`, có hay không có bản sửa, được upload lên code scanning (Security, Code scanning, category `trivy-<image>`).
-- **Chặn:** một phát hiện `CRITICAL` CÓ bản sửa làm job hỏng. Khi push, điều này chặn `merge`, nên không gì của lần build đó được gắn tag (mọi image của một phiên bản được publish cùng nhau hoặc không). Sửa bằng cách nâng base image hoặc dependency.
+- **Chỉ chặn bản phát hành:** một phát hiện `CRITICAL` CÓ bản sửa làm job hỏng khi build một tag phiên bản. Điều này chặn `merge`, nên không image nào của bản phát hành đó được gắn tag (mọi image của một phiên bản được publish cùng nhau hoặc không). Sửa trên `main` bằng cách nâng base image hoặc dependency, rồi gắn tag bản patch kế tiếp. Trên `main` và pull request, cùng bước kiểm tra đó chạy và hiện thành một bước hỏng trong một job xanh, nên `edge` vẫn tiếp tục publish khi phát hiện còn mở; xem lần chạy `images` trên `main` trước khi gắn tag.
 
 Phát hiện chưa có bản sửa không chặn, vì không có gì để nâng lên; chúng vẫn hiện trong code scanning.
 

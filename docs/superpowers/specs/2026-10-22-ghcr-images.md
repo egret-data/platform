@@ -28,8 +28,11 @@ Before this change nothing was published: every deployment built `egret-*:dev` l
   mounts do not persist on GitHub runners. `type=gha` layer cache with `mode=min` for the three large
   images (the shared 10 GB cache also holds `ci.yml`'s Rust cache), `mode=max` for the small ones;
   only publishing runs write it.
-- Trivy: CRITICAL and HIGH (fixed or not) go to code scanning and never block; a CRITICAL with a
-  fixed version fails the build leg, which stops the publish of that version.
+- Trivy: CRITICAL and HIGH (fixed or not) go to code scanning and never block. A CRITICAL with a
+  fixed version fails the build leg on a version tag (stopping that release); on main and PRs the
+  step may fail without failing the job, so `edge` keeps flowing. Measured on the first PR run:
+  three images already carry one each (renderer `tar` npm, apps `certifi`, plugin-host
+  `netty-handler`), so blocking main would have stopped every publish from day one.
 - Retention uses `dataaxiom/ghcr-cleanup-action`: deleting "untagged versions" through the API
   would delete the platform manifests of every multi-arch image.
 - The chart's string-valued images (`apps.pod.image`, `workflow.pluginHost.image`,
