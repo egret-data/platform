@@ -1974,20 +1974,23 @@ async fn rules_enforcement(
     Query(q): Query<RuleIdsQuery>,
 ) -> Result<Json<Vec<crate::effect::RuleEnforcement>>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // Distinct ids in the order asked; the cap is checked as each new id is
+    // seen, so an oversized list is refused without parsing the rest of it.
     let mut ids: Vec<Uuid> = Vec::new();
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let id = raw
             .parse::<Uuid>()
             .map_err(|_| PermHttpError::BadRequest(format!("`{raw}` is not a rule id")))?;
-        if !ids.contains(&id) {
+        if seen.insert(id) {
+            if seen.len() > crate::effect::RULE_ENFORCEMENT_CAP {
+                return Err(PermHttpError::BadRequest(format!(
+                    "at most {} rule ids per request",
+                    crate::effect::RULE_ENFORCEMENT_CAP
+                )));
+            }
             ids.push(id);
         }
-    }
-    if ids.len() > crate::effect::RULE_ENFORCEMENT_CAP {
-        return Err(PermHttpError::BadRequest(format!(
-            "at most {} rule ids per request",
-            crate::effect::RULE_ENFORCEMENT_CAP
-        )));
     }
     if ids.is_empty() {
         return Ok(Json(Vec::new()));

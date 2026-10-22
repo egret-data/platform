@@ -8865,6 +8865,31 @@ async fn rule_enforcement_is_capped_at_one_hundred_ids() {
     let (status, got) = get_json(&f, &token, "/perm/rules/enforcement?ids=not-a-uuid").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
 
+    // The cap is checked while parsing: the 101st distinct id fails the
+    // request before the rest of the list is read, so a bad id after it is
+    // never reached and the refusal names the cap.
+    let (status, got) = get_json(
+        &f,
+        &token,
+        &format!("/perm/rules/enforcement?ids={},not-a-uuid", ids(101)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{got}");
+    assert!(
+        got.to_string().contains("at most 100 rule ids"),
+        "the cap refuses first: {got}"
+    );
+
+    // Repeats are not distinct: 100 ids each asked twice is within the cap.
+    let hundred = ids(100);
+    let (status, got) = get_json(
+        &f,
+        &token,
+        &format!("/perm/rules/enforcement?ids={hundred},{hundred}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "repeats count once: {got}");
+
     let (status, got) = get_json(&f, &token, "/perm/rules/enforcement?ids=").await;
     assert_eq!(status, StatusCode::OK, "{got}");
     assert_eq!(got, json!([]));
