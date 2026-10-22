@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TagUsage } from "@/api/generated/model";
+import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
 import { ADMIN, fail, ok, openArea, serve, tag, TAG_READER } from "./harness";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -67,6 +68,15 @@ describe("Where used: Data", () => {
     expect(within(orders).getAllByRole("cell")[1].textContent).toBe("Columns: email, phone");
   });
 
+  // #729 follow-up (U3): at 390 px the pinned Remove column covered the table names and the long
+  // catalog.schema heading ran past the card. jsdom has no layout: this pins what the layout rests on.
+  it("stacks each table into cards below sm, and wraps a long catalog.schema heading", async () => {
+    open(usage({ data: { tables: TABLES, tableCount: 3, columnCount: 3 } }), ADMIN);
+    await screen.findByRole("link", { name: "accounts" }, T);
+    for (const table of within(data()).getAllByRole("table")) expectStackedLabels(table);
+    for (const heading of within(data()).getAllByRole("heading", { level: 3 })) expect(heading).toHaveClass("break-all");
+  });
+
   it("counts assignments in a warehouse no catalog names", async () => {
     open(usage({ data: { tables: TABLES.slice(0, 1), tableCount: 1, orphaned: 2 } }));
     expect(await screen.findByText("2 assignments are in a warehouse no catalog names.", {}, T)).toBeInTheDocument();
@@ -114,6 +124,12 @@ describe("Where used: BI", () => {
     const folder = within(bi()).getByText("Finance folder").closest("tr") as HTMLElement;
     expect(folder).toHaveTextContent("Folder");
     expect(folder).toHaveTextContent("w2");
+  });
+
+  it("stacks the objects into cards below sm (U3)", async () => {
+    open(usage({ bi: { readable: READABLE, checked: 6 } }));
+    await screen.findByRole("link", { name: "Revenue" }, T);
+    expectStackedLabels(within(bi()).getByRole("table", { name: "BI objects" }));
   });
 
   it("counts objects the reader cannot read, naming no workspace (Q5)", async () => {
