@@ -1,0 +1,22 @@
+# Runs the demo stack on the images published to GHCR instead of building them here.
+# Add it after the demo file (`just demo-up-ghcr` does):
+#
+#   docker compose --env-file deploy/demo/demo.env -f deploy/docker-compose.demo.yml \
+#     -f deploy/docker-compose.demo.ghcr.yml up -d
+#
+# EGRET_TAG picks the release: `edge` (the last build of main, the default), `latest`, or a version
+# such as `1.2.0`. The stack's config files and scripts come from this checkout, so check out the
+# same version as the images. Without this file the demo builds every egret image from source.
+services:
+  egret:
+    image: ghcr.io/egret-data/egret-backend-demo:${EGRET_TAG:-edge}
+    build: !reset null
+    pull_policy: always
+  frontend:
+    image: ghcr.io/egret-data/egret-frontend:${EGRET_TAG:-edge}
+    build: !reset null
+    pull_policy: always
+  renderer:
+    image: ghcr.io/egret-data/egret-renderer:${EGRET_TAG:-edge}
+    build: !reset null
+    pull_policy: always
