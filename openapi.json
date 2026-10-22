@@ -10447,7 +10447,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11192,7 +11192,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
