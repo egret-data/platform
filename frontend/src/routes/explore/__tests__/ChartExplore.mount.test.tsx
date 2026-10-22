@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -105,7 +105,19 @@ const PIE_DOW = {
   },
 };
 
+/** A one-row chart: its query is a single aggregate whatever the Row limit says (KI-051). */
+const SCALAR = {
+  ...PIE_V1,
+  id: "c-scalar", name: "Big number", viz_type: "scalar",
+  params: {
+    version: 2,
+    spec: { metrics: ["total_revenue"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1, rollup_groups: [] },
+    settings: { "scalar.metric": "total_revenue" },
+  },
+};
+
 const CHARTS: Record<string, unknown> = {
+  "c-scalar": SCALAR,
   "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2, "c-bar-sorted": BAR_SORTED,
   "c-boxplot": BOXPLOT, "c-trend": TREND, "c-pie-dow": PIE_DOW,
 };
@@ -203,6 +215,36 @@ describe("ChartExplore mounts", () => {
   // A2 PR1/PR2 replaced ChartSettingsSections with the descriptor's controls for migrated
   // viz types and silently dropped the shared display sections with it. They are shell-owned
   // settings, so they must show up next to the descriptor's own controls.
+  it("offers Row limit where the query reads it, and not on a one-row chart (KI-051)", { timeout: 15_000 }, async () => {
+    const { unmount } = await mountChart("c-bar");
+    expect(await screen.findByLabelText("Row limit")).toBeInTheDocument();
+    unmount();
+    await mountChart("c-scalar");
+    await screen.findByDisplayValue("Big number");
+    expect(screen.queryByLabelText("Row limit")).not.toBeInTheDocument();
+  });
+
+  /**
+   * KI-047: bar, line, area and combo share one settings namespace (`cartesian.*`), so a Change
+   * between them has nothing to translate — it used to drop the X-axis and the Y-axis anyway. A
+   * switch to a type with its own namespace (pie) still starts from that type's defaults.
+   */
+  it("keeps the X-axis and Y-axis across a Change between cartesian types", { timeout: 15_000 }, async () => {
+    lastRanSpec = null;
+    const user = userEvent.setup();
+    await mountChart("c-bar");
+    await screen.findByDisplayValue("Bar v2");
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(within(await screen.findByRole("dialog")).getByText("Line", { exact: true }));
+    expect(await screen.findByText("Line")).toBeInTheDocument();
+    expect(screen.queryByText("Pick a dimension…")).not.toBeInTheDocument();
+    await waitFor(() => expect(lastRanSpec).toMatchObject({ dimensions: ["region"], metrics: ["total_revenue"] }));
+
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(within(await screen.findByRole("dialog")).getByText("Pie", { exact: true }));
+    expect(await screen.findByText("Add a dimension…")).toBeInTheDocument();
+  });
+
   it("keeps the shared formatting sections on a migrated viz's Display tab", async () => {
     await mountChart("c-bar", "display");
     expect(await screen.findByText("Formatting")).toBeInTheDocument();

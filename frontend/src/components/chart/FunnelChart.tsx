@@ -338,7 +338,10 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
 
   return (
     <EChartsRenderer
-      option={buildCartesianOption(wideColumns, wideRows, {
+      // A function of the measured size, like every other cartesian option: without it the x-axis
+      // label fit has nothing to measure against, the axis falls back to ECharts' `interval:
+      // "auto"`, and two of five stage names vanished at 1440px (KI-164).
+      option={(size) => buildCartesianOption(wideColumns, wideRows, {
         kind: "bar",
         xAxis: dimName,
         yMetrics: keys,
@@ -360,7 +363,7 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
           ...(format ? Object.fromEntries(keys.map((n) => [n, format])) : {}),
           ...(dimFormat ? { [dimName]: dimFormat } : {}),
         },
-      })}
+      }, size)}
       // THE CARTESIAN ADAPTER IS NOT REUSABLE HERE, and it is worth saying why rather than leaving
       // a reader to wonder: this option's x column is `dimName` but its SERIES are the step names,
       // one single-valued series per step. `ChartRenderer`'s cartesian handler drills `xAxis` plus

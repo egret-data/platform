@@ -195,3 +195,35 @@ describe("MapChart — a pin map accounts for its own rows", () => {
     expect(view.container.textContent).not.toContain("None of these");
   });
 });
+
+/**
+ * KI-046: a REGION map dropped a row whose region names no shape with nothing on screen to say so,
+ * and its legend still ran up to that row's value. Against the shipped Vietnam geojson, whose keys
+ * are names such as `TP. Hồ Chí Minh` — the spelling a reader most easily misses.
+ */
+describe("MapChart — a region map accounts for rows that match no region", () => {
+  const regionParams: AnyChartParams = {
+    version: 2,
+    spec: { metrics: ["rev"], dimensions: ["province"], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] },
+    settings: { "map.key": "vietnam", "map.type": "region", "map.region": "province", "map.metric": "rev" },
+  };
+  const cols = [{ name: "province", type: "varchar" }, { name: "rev", type: "double" }];
+  const drawRegion = async (rows: unknown[][]) => {
+    const view = render(<MapChart columns={cols} rows={rows} params={regionParams} />);
+    // The Vietnam geojson is the largest of the three (600 KB), and its first import is slow.
+    await waitFor(() => expect(view.container.textContent).not.toContain("Loading map"), { timeout: 10_000 });
+    return view;
+  };
+
+  it("says nothing when every row lands on a province", { timeout: 15_000 }, async () => {
+    const { container } = await drawRegion([["Hà Nội", 10], ["TP. Hồ Chí Minh", 30]]);
+    expect(container.textContent).not.toContain("Showing");
+  });
+
+  it("names the rows it could not place, under the map", async () => {
+    const { container } = await drawRegion([["Hà Nội", 10], ["Thành phố Hồ Chí Minh", 30]]);
+    expect(container.textContent).toContain(
+      'Showing 1 of 2 rows: 1 matches no region on the Vietnam provinces map ("Thành phố Hồ Chí Minh").',
+    );
+  });
+});

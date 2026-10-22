@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::execution::connector::ConnectorFactory;
 use crate::execution::error::EngineError;
+use crate::execution::limit::{apply_sql_limit, unshift_error_lines};
 use crate::execution::model::Limits;
 use crate::execution::store::QueryStore;
 use egret_core::TabularResult;
@@ -125,6 +126,21 @@ impl JobManager {
             Err(EngineError::Cancelled) => {
                 let _ = self.store.set_cancelled(id).await;
             }
+            Err(EngineError::Timeout) => {
+                let _ = self
+                    .store
+                    .fail(id, &timeout_message(self.limits.timeout))
+                    .await;
+            }
+            // Trino's own stop at the same limit (egret sends it as
+            // `query_max_run_time`): its words, plus where the limit comes from.
+            Err(EngineError::Engine(m)) if m.contains("exceeded maximum time limit") => {
+                let msg = format!(
+                    "engine: {m}. The limit is SQL Lab's {} s, the server setting `engine.query_timeout_secs`.",
+                    self.limits.timeout.as_secs()
+                );
+                let _ = self.store.fail(id, &msg).await;
+            }
             Err(e) => {
                 let _ = self.store.fail(id, &e.to_string()).await;
             }
@@ -176,8 +192,9 @@ impl JobManager {
 /// Run `sql` on `database_id` to completion and return the full result.
 ///
 /// This is the single shared execution path. It resolves the connection for
-/// `database_id`, applies the row `limit` (Superset-style SQL wrap + fetch cap,
-/// clamped to `limits.max_rows`), builds the connector via `factory`, and runs
+/// `database_id`, applies the row `limit` (appended to the query, see
+/// `execution::limit`, plus the connector's fetch cap, clamped to
+/// `limits.max_rows`), builds the connector via `factory`, and runs
 /// the query to completion under the outer `limits.timeout`, returning the
 /// coerced [`TabularResult`] (columns + row-major rows, values already typed by
 /// the connector). Async engines (Trino) are polled to completion inside their
@@ -210,16 +227,18 @@ pub async fn run_query(
         max_rows,
         timeout: limits.timeout,
     };
-    let effective_sql = apply_sql_limit(sql, limit, max_rows); // wrapped for SELECT
-
     let db = databases.get(database_id).await?;
+    let limited = apply_sql_limit(sql, db.engine, limit, max_rows);
     let secret = databases.open_secret(database_id).await?;
     let connector = factory
         .build(&db, secret, session_user, bearer_token)
         .await?;
 
-    let fut = connector.execute(&effective_sql, &effective, cancel.clone());
+    let fut = connector.execute(&limited.sql, &effective, cancel.clone());
     match tokio::time::timeout(effective.timeout, fut).await {
+        Ok(Err(EngineError::Engine(m))) if limited.wrapped => {
+            Err(EngineError::Engine(unshift_error_lines(&m)))
+        }
         Ok(r) => r,
         Err(_) => {
             cancel.cancel();
@@ -228,65 +247,12 @@ pub async fn run_query(
     }
 }
 
-/// Wrap a single SELECT/WITH statement with a SQL `LIMIT n` (Superset-style) so the
-/// engine returns exactly `n` rows. Non-SELECT / multi-statement SQL is returned
-/// unchanged (the fetch-cap remains the backstop).
-fn apply_sql_limit(sql: &str, limit: Option<usize>, max_rows: usize) -> String {
-    let Some(l) = limit else {
-        return sql.to_string();
-    };
-    let n = l.clamp(1, max_rows);
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lower = trimmed.to_ascii_lowercase();
-    let is_select = lower.starts_with("select") || lower.starts_with("with");
-    let single_statement = !trimmed.contains(';');
-    if is_select && single_statement {
-        format!("SELECT * FROM (\n{trimmed}\n) AS _egret_lim LIMIT {n}")
-    } else {
-        sql.to_string()
-    }
-}
-
-#[cfg(test)]
-mod limit_tests {
-    use super::apply_sql_limit;
-    #[test]
-    fn wraps_single_select() {
-        let out = apply_sql_limit("SELECT * FROM t", Some(5), 100);
-        assert_eq!(
-            out,
-            "SELECT * FROM (\nSELECT * FROM t\n) AS _egret_lim LIMIT 5"
-        );
-    }
-    #[test]
-    fn wraps_with_cte_and_strips_trailing_semicolon() {
-        let out = apply_sql_limit("WITH a AS (SELECT 1) SELECT * FROM a;", Some(10), 100);
-        assert_eq!(
-            out,
-            "SELECT * FROM (\nWITH a AS (SELECT 1) SELECT * FROM a\n) AS _egret_lim LIMIT 10"
-        );
-    }
-    #[test]
-    fn clamps_to_max_rows() {
-        let out = apply_sql_limit("SELECT 1", Some(999), 100);
-        assert!(out.ends_with("LIMIT 100"));
-    }
-    #[test]
-    fn does_not_wrap_show() {
-        assert_eq!(
-            apply_sql_limit("SHOW CATALOGS", Some(5), 100),
-            "SHOW CATALOGS"
-        );
-    }
-    #[test]
-    fn does_not_wrap_multi_statement() {
-        assert_eq!(
-            apply_sql_limit("SELECT 1; SELECT 2", Some(5), 100),
-            "SELECT 1; SELECT 2"
-        );
-    }
-    #[test]
-    fn no_limit_unchanged() {
-        assert_eq!(apply_sql_limit("SELECT 1", None, 100), "SELECT 1");
-    }
+/// What a SQL Lab run that outran its time limit says (KI-211): the limit, and
+/// the setting an operator raises it with. A bare "timeout" said neither.
+fn timeout_message(limit: std::time::Duration) -> String {
+    format!(
+        "timeout: the query ran longer than the {} s limit for SQL Lab queries and was stopped. \
+         The limit is the server setting `engine.query_timeout_secs`.",
+        limit.as_secs()
+    )
 }

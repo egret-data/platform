@@ -35,6 +35,23 @@ describe("ProgressChart — Metabase parity", () => {
     expect(screen.queryByText(/Goal (met|exceeded)/)).toBeNull();
   });
 
+  // KI-044: an empty Goal box stores nothing, and the bar used to read that as a goal of 0 —
+  // "Goal 0" and "Goal exceeded" for any positive value, so "No goal set" could never appear.
+  it("treats an empty goal as no goal, not as 0", () => {
+    const { container } = render(<ProgressChart columns={[{ name: "m", type: "double" }]} rows={[[60]]} metric="m" />);
+    expect(screen.getByText("No goal set")).toBeInTheDocument();
+    expect(screen.queryByText(/Goal 0/)).toBeNull();
+    expect(screen.queryByText("Goal exceeded")).toBeNull();
+    expect(container.querySelector("[data-progress-pointer]")).toBeNull();
+  });
+
+  it("treats a goal column with no value as no goal", () => {
+    const two = [{ name: "m", type: "double" }, { name: "target", type: "double" }];
+    render(<ProgressChart columns={two} rows={[[60, null]]} metric="m" goalColumn="target" />);
+    expect(screen.getByText("No goal set")).toBeInTheDocument();
+    expect(screen.queryByText(/Goal 0/)).toBeNull();
+  });
+
   it("reads its goal from a metric when one is chosen", () => {
     render(<ProgressChart columns={cols} rows={[[120, 500]]} metric="m" goal={100} goalColumn="target" />);
     // The column wins over the typed number, so 120 is now well short of 500.

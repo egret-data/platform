@@ -966,7 +966,7 @@ async fn get_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission — :read does not imply authoring", body = ErrorBody),
         (status = 404, description = "No such database in this workspace", body = ErrorBody),
-        (status = 409, description = "Another endpoint already serves that method and path", body = ErrorBody),
+        (status = 409, description = "Another endpoint's draft already sits at that method and path", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1042,7 +1042,7 @@ async fn create_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint, or no such database, in this workspace", body = ErrorBody),
-        (status = 409, description = "Another endpoint already serves that method and path, or the endpoint is in the trash — restore it before editing it", body = ErrorBody),
+        (status = 409, description = "Another endpoint's draft already sits at that method and path, or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1589,7 +1589,7 @@ async fn preview_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
-        (status = 409, description = "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change", body = ErrorBody),
+        (status = 409, description = "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change; or another endpoint is still served at this draft's method and path (it keeps its published URL until it is published again)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1664,7 +1664,7 @@ async fn publish_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint here, or no such version OF THIS ENDPOINT", body = ErrorBody),
-        (status = 409, description = "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request", body = ErrorBody),
+        (status = 409, description = "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request; or another endpoint is now served at the URL that version was published at", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1865,6 +1865,11 @@ pub struct DataApiEndpointGrantDto {
     /// call. `None` if the account row has since been deleted.
     pub service_account_name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Whether the account ALSO reaches invoke through the workspace (a
+    /// workspace role carrying `data_api_endpoint:invoke`), so that revoking
+    /// this grant would not remove its access. Asked of the PDP at workspace
+    /// scope, where this grant cannot count — see `invoke::inherits_invoke`.
+    pub inherits_invoke: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1937,16 +1942,22 @@ async fn list_endpoint_grants(
     .fetch_all(&st.db.pool)
     .await
     .map_err(db_err)?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|(gid, sa, name, created_at)| DataApiEndpointGrantDto {
-                id: gid,
-                service_account_id: sa,
-                service_account_name: name,
-                created_at,
-            })
-            .collect(),
-    ))
+    // One PDP question per grant, the same expression the serving path's
+    // cascade answers to. An error is a 500 rather than `false`: a wrong `false`
+    // would present Revoke as the thing holding the access up.
+    let mut out = Vec::with_capacity(rows.len());
+    for (gid, sa, name, created_at) in rows {
+        let inherits_invoke =
+            crate::invoke::inherits_invoke(&st, UserId(sa), ctx.workspace_id).await?;
+        out.push(DataApiEndpointGrantDto {
+            id: gid,
+            service_account_id: sa,
+            service_account_name: name,
+            created_at,
+            inherits_invoke,
+        });
+    }
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -2033,6 +2044,7 @@ async fn grant_endpoint_invoke(
         // resolving one here would be a query for a field nothing reads.
         service_account_name: None,
         created_at,
+        inherits_invoke: crate::invoke::inherits_invoke(&st, UserId(sa), ctx.workspace_id).await?,
     }))
 }
 

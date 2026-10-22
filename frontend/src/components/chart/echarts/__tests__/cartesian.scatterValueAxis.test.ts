@@ -155,3 +155,21 @@ describe("a scatter's axes honour the lines-and-ticks selects the panel already 
     expect(one(dim({ yTickCount: 3 }).yAxis).splitNumber).toBe(3);
   });
 });
+
+/**
+ * KI-163: the metric-vs-metric scatter's axis TITLES were drawn in ECharts' default pale grey —
+ * almost invisible on the plot — while bar, line and combo titles take the axis-label ink. The
+ * same ink here, read off a bar chart built from the same rows rather than restated.
+ */
+describe("a scatter's axis titles are drawn in the family's axis-title colour", () => {
+  type Named = { name?: string; nameTextStyle?: { color?: string } };
+  const bar = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "d", yMetrics: ["v"] } as CartesianBuildConfig) as unknown as { xAxis: Named | Named[] };
+  const ink = (one(bar.xAxis as Axis) as Named).nameTextStyle?.color;
+
+  it("colours both titles of the metric-vs-metric scatter", () => {
+    const o = xy({});
+    expect(ink).toBeTruthy();
+    expect((one(o.xAxis) as Named).nameTextStyle?.color).toBe(ink);
+    expect((one(o.yAxis) as Named).nameTextStyle?.color).toBe(ink);
+  });
+});

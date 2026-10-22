@@ -52,6 +52,20 @@ export interface DataApiEndpointDto {
      * @nullable
      */
   live_version_id?: string | null;
+  /**
+     * The method and path the LIVE version is served at, or `null` for an
+     * endpoint never published. Written only by publish and rollback, from the
+     * snapshot they make live; the serving router matches these, never
+     * `method`/`path`. When they differ from `method`/`path` the draft has a
+     * new URL that goes live at the next publish (KI-023).
+     * @nullable
+     */
+  live_method?: string | null;
+  /**
+     * See [`Self::live_method`].
+     * @nullable
+     */
+  live_path?: string | null;
   state: string;
   /** @nullable */
   created_by?: string | null;

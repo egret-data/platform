@@ -737,16 +737,20 @@ pub async fn build(
     // and a disabled endpoint answers 404, so documenting either describes
     // something that does not happen.
     //
+    // The path and method are the LIVE route (`live_path` / `live_method`), the
+    // URL the serving router matches — not the draft's, which may carry a new
+    // path that only goes live at the next publish (KI-023).
+    //
     // `LIMIT $3` fetches ONE more row than may be described, so an overflow is
     // detected from the count rather than from a document that came back short.
     // See [`MAX_DOCUMENTED_ENDPOINTS`].
     let rows: Vec<(Uuid, String, String, String, String, Value, i32)> = sqlx::query_as(
-        "SELECT e.id, e.name, e.description, e.path, e.method, ev.snapshot, ev.version \
+        "SELECT e.id, e.name, e.description, e.live_path, e.live_method, ev.snapshot, ev.version \
          FROM dataapi.endpoints e \
          JOIN dataapi.endpoint_versions ev ON ev.id = e.live_version_id \
-         WHERE e.workspace_id = $1 AND e.state = 'live' \
+         WHERE e.workspace_id = $1 AND e.state = 'live' AND e.live_path IS NOT NULL \
            AND ($2::uuid IS NULL OR e.id = $2) \
-         ORDER BY e.path \
+         ORDER BY e.live_path \
          LIMIT $3",
     )
     .bind(ws.0)

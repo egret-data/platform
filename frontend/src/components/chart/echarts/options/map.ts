@@ -28,6 +28,12 @@ export interface MapBuildConfig {
   /** Pin maps only: the loaded geojson's bounding box, once it has been indexed. */
   extent?: RegionExtent;
   /**
+   * Region maps only: the geojson's region keys, once it has been indexed. A row whose region is
+   * not one of them is drawn nowhere, so it is left out of the data and out of the legend's range
+   * too (KI-046) and counted by `regionCoverage`. Undefined is "no opinion" (not indexed yet).
+   */
+  regions?: ReadonlySet<string>;
+  /**
    * Pin maps only: extra result columns to print in a pin's tooltip — Metabase's "Additional
    * tooltip columns" (`graph.tooltip_columns`), ported for real rather than by analogy.
    *
@@ -419,6 +425,47 @@ function annotationSeries(annotations: { name: string; coord: [number, number] }
   };
 }
 
+/** How many of a region map's rows land on a region, and the raw values of the ones that do not. */
+export interface RegionCoverage { total: number; matched: number; unmatched: string[] }
+
+/** The rows `buildMapOption` can colour and the ones it cannot, read with the builder's own rule:
+ *  a row counts once it has a value, and lands when its region resolves to a key of the map. */
+export function regionCoverage(columns: ResultColumn[], rows: unknown[][], cfg: MapBuildConfig): RegionCoverage {
+  const ri = columns.findIndex((c) => c.name === cfg.region);
+  const mi = columns.findIndex((c) => c.name === cfg.metric);
+  if (ri < 0 || mi < 0) return { total: 0, matched: 0, unmatched: [] };
+  let total = 0;
+  const unmatched: string[] = [];
+  for (const r of rows) {
+    if (!Number.isFinite(Number(r[mi]))) continue;
+    total += 1;
+    if (!regionLands(cfg.normalize(r[ri]), cfg.regions)) unmatched.push(String(r[ri] ?? ""));
+  }
+  return { total, matched: total - unmatched.length, unmatched };
+}
+
+const regionLands = (name: string, regions: ReadonlySet<string> | undefined) =>
+  name !== "" && (!regions || regions.has(name));
+
+/** How many unmatched values the note names before it stops listing them. */
+const NAMED_UNMATCHED = 3;
+
+/**
+ * THE REGION MAP'S OWN "N OF M ROWS" — the line a pin map has had since #434 (`pinNote`), for the
+ * case a choropleth used to swallow: a row whose region names no shape on the map. Vietnam's keys
+ * are names such as `TP. Hồ Chí Minh`, so `Thành phố Hồ Chí Minh` left Ho Chi Minh City unshaded
+ * with nothing on screen to say why (KI-046). The first few values are named, quoted as stored, so
+ * the reader can find the spelling to fix.
+ */
+export function regionNote(cov: RegionCoverage, mapLabel: string): string | undefined {
+  const n = cov.unmatched.length;
+  if (cov.total === 0 || n === 0) return undefined;
+  const named = cov.unmatched.slice(0, NAMED_UNMATCHED).map((v) => `"${v}"`).join(", ");
+  const more = n > NAMED_UNMATCHED ? ", …" : "";
+  const match = n === 1 ? "matches" : "match";
+  return `Showing ${cov.matched} of ${cov.total} rows: ${n} ${match} no region on the ${mapLabel} map (${named}${more}).`;
+}
+
 /** Build a map option: a choropleth `map` series by default, or a `scatter` of pins when
  *  `cfg.type` is "pin". The choropleth's data names are normalized region keys that match the
  *  registered geojson's `properties.key`; unmatched/NaN rows are dropped. */
@@ -432,7 +479,9 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
       ? []
       : rows
           .map((r) => ({ name: cfg.normalize(r[ri]), value: Number(r[mi]) }))
-          .filter((d) => d.name !== "" && Number.isFinite(d.value));
+          // Rows that land on no region are dropped HERE rather than left for ECharts to ignore, so
+          // the legend's min and max are the range of what is coloured (KI-046).
+          .filter((d) => regionLands(d.name, cfg.regions) && Number.isFinite(d.value));
   const values = data.map((d) => d.value);
   const min = values.length ? Math.min(...values) : 0;
   const max = values.length ? Math.max(...values) : 1;

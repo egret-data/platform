@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ComponentProps } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -152,13 +153,41 @@ function AllowedValuesField({
 }
 
 /**
+ * One constraint input with its own visible label, tied by `htmlFor`/`id`
+ * (FE-FORM-2). The label used to be the placeholder alone, which disappears
+ * the moment the box is filled — a number parameter then showed `0` and
+ * `1000000` under its type with nothing saying which bound was which (KI-026).
+ * The `aria-label` stays: it carries the ROW ("Parameter 2 minimum"), which a
+ * label above one input in one cell cannot.
+ */
+function ConstraintInput({
+  id,
+  label,
+  ariaLabel,
+  ...input
+}: {
+  id: string;
+  label: string;
+  ariaLabel: string;
+} & Omit<ComponentProps<typeof Input>, "id" | "aria-label">) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-xs font-normal text-muted-foreground">
+        {label}
+      </Label>
+      <Input id={id} aria-label={ariaLabel} {...input} />
+    </div>
+  );
+}
+
+/**
  * The constraint inputs for `string`, `number`, `date` and `timestamp` — the
- * types that have any (see `constraintFieldsFor`). Placed and named the same
- * way as `AllowedValuesField`: no visible label of its own, an `aria-label`
- * per input, and a plain controlled value straight off `p` with no local
- * draft. The draft trick `AllowedValuesField` needs exists because it
- * reformats text on blur (`"a,b"` → `"a, b"`); nothing here reformats what
- * the author typed, so there is no re-render to fight.
+ * types that have any (see `constraintFieldsFor`). Each carries a visible
+ * label and an `aria-label` naming its row (see `ConstraintInput`), and a
+ * plain controlled value straight off `p` with no local draft. The draft trick
+ * `AllowedValuesField` needs exists because it reformats text on blur
+ * (`"a,b"` → `"a, b"`); nothing here reformats what the author typed, so there
+ * is no re-render to fight.
  */
 function ConstraintFields({
   id,
@@ -178,32 +207,32 @@ function ConstraintFields({
     case ParamType.string:
       return (
         <div className="mt-1.5 space-y-1.5">
-          <Input
+          <ConstraintInput
             id={`${id}-min-length`}
-            aria-label={`${row} min length`}
+            label="Min length"
+            ariaLabel={`${row} min length`}
             type="number"
             min={0}
-            placeholder="min length"
             value={param.min_length ?? ""}
             onChange={(e) =>
               onChange({ min_length: e.target.value === "" ? undefined : Number(e.target.value) })
             }
           />
-          <Input
+          <ConstraintInput
             id={`${id}-max-length`}
-            aria-label={`${row} max length`}
+            label="Max length"
+            ariaLabel={`${row} max length`}
             type="number"
             min={0}
-            placeholder="max length"
             value={param.max_length ?? ""}
             onChange={(e) =>
               onChange({ max_length: e.target.value === "" ? undefined : Number(e.target.value) })
             }
           />
-          <Input
+          <ConstraintInput
             id={`${id}-pattern`}
-            aria-label={`${row} pattern`}
-            placeholder="pattern (regex)"
+            label="Pattern (regex)"
+            ariaLabel={`${row} pattern`}
             value={param.pattern ?? ""}
             onChange={(e) => onChange({ pattern: e.target.value === "" ? undefined : e.target.value })}
           />
@@ -216,17 +245,17 @@ function ConstraintFields({
         // a float stops comparing equal to itself on the engine, and a
         // numeric input would round-trip it through the browser's float too.
         <div className="mt-1.5 space-y-1.5">
-          <Input
+          <ConstraintInput
             id={`${id}-minimum`}
-            aria-label={`${row} minimum`}
-            placeholder="minimum"
+            label="Minimum"
+            ariaLabel={`${row} minimum`}
             value={param.minimum ?? ""}
             onChange={(e) => onChange({ minimum: e.target.value === "" ? undefined : e.target.value })}
           />
-          <Input
+          <ConstraintInput
             id={`${id}-maximum`}
-            aria-label={`${row} maximum`}
-            placeholder="maximum"
+            label="Maximum"
+            ariaLabel={`${row} maximum`}
             value={param.maximum ?? ""}
             onChange={(e) => onChange({ maximum: e.target.value === "" ? undefined : e.target.value })}
           />
@@ -236,17 +265,17 @@ function ConstraintFields({
     case ParamType.timestamp:
       return (
         <div className="mt-1.5 space-y-1.5">
-          <Input
+          <ConstraintInput
             id={`${id}-not-before`}
-            aria-label={`${row} not before`}
-            placeholder="not before"
+            label="Not before"
+            ariaLabel={`${row} not before`}
             value={param.not_before ?? ""}
             onChange={(e) => onChange({ not_before: e.target.value === "" ? undefined : e.target.value })}
           />
-          <Input
+          <ConstraintInput
             id={`${id}-not-after`}
-            aria-label={`${row} not after`}
-            placeholder="not after"
+            label="Not after"
+            ariaLabel={`${row} not after`}
             value={param.not_after ?? ""}
             onChange={(e) => onChange({ not_after: e.target.value === "" ? undefined : e.target.value })}
           />

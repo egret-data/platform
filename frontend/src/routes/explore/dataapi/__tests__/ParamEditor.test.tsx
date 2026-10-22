@@ -25,6 +25,25 @@ async function chooseType(user: ReturnType<typeof userEvent.setup>, row: string,
 }
 
 describe("ParamEditor constraint fields", () => {
+  // KI-026. The placeholder was the only name a constraint box had, and it
+  // disappears once the box is filled: `0` and `1000000` stood under `number`
+  // with nothing saying which was the minimum. Each box now has a visible label
+  // tied to it by `htmlFor`/`id` (FE-FORM-2), still there when it is filled.
+  it.each([
+    [ParamType.number, { minimum: "0", maximum: "1000000" }, [["Minimum", "0"], ["Maximum", "1000000"]]],
+    [ParamType.string, { min_length: 1, max_length: 40, pattern: "^[a-z]+$" }, [["Min length", "1"], ["Max length", "40"], ["Pattern (regex)", "^[a-z]+$"]]],
+    [ParamType.date, { not_before: "2020-01-01", not_after: "2030-12-31" }, [["Not before", "2020-01-01"], ["Not after", "2030-12-31"]]],
+  ] as const)("names each filled %s constraint with a visible label tied to its box", (type, values, expected) => {
+    render(<ParamEditor params={[makeParam({ type, ...values })]} onChange={vi.fn()} />);
+
+    for (const [text, value] of expected) {
+      const label = screen.getByText(text, { selector: "label" });
+      const input = document.getElementById(label.getAttribute("for") ?? "");
+      expect(input, `${text} is tied to an input`).not.toBeNull();
+      expect(input).toHaveValue(type === ParamType.string && text !== "Pattern (regex)" ? Number(value) : value);
+    }
+  });
+
   it("shows only the constraints that apply to a string parameter", () => {
     render(<ParamEditor params={[makeParam()]} onChange={vi.fn()} />);
 

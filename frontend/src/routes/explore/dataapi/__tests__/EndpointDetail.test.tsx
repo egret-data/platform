@@ -430,6 +430,46 @@ describe("Config", () => {
   });
 });
 
+// KI-023. The served URL is the LIVE route, which only publish moves; a new
+// path or method on the draft waits for the next publish, and the row it is
+// typed in says so, naming the URL callers still use.
+describe("EndpointDetail — Config, a path that goes live at publish", () => {
+  const live = { state: "live", live_version_id: "v-1", live_method: "GET", live_path: "/reports/daily" } as const;
+
+  it("says a typed path goes live when you publish, with the URL callers still use", async () => {
+    const user = userEvent.setup();
+    renderConfig(makeEndpoint({ ...live, path: "/reports/daily" }));
+    const path = await screen.findByLabelText("Path");
+    expect(screen.queryByText(/goes live when you publish/i)).not.toBeInTheDocument();
+
+    await user.clear(path);
+    await user.type(path, "orders/lookup");
+    const note = screen.getByText(/the new path goes live when you publish/i);
+    expect(note).toHaveTextContent("Callers still use GET /reports/daily.");
+    expect(path).toHaveAttribute("aria-describedby", note.id);
+  });
+
+  it("keeps saying so once the new path is saved and not yet published", async () => {
+    renderConfig(makeEndpoint({ ...live, path: "/orders/lookup" }));
+    await screen.findByLabelText("Path");
+    expect(screen.getByText(/the new path goes live when you publish/i)).toHaveTextContent(
+      "Callers still use GET /reports/daily.",
+    );
+  });
+
+  it("does not call the same path in another spelling a move", async () => {
+    renderConfig(makeEndpoint({ ...live, path: "reports/daily/" }));
+    await screen.findByLabelText("Path");
+    expect(screen.queryByText(/goes live when you publish/i)).not.toBeInTheDocument();
+  });
+
+  it("says nothing on an endpoint never published", async () => {
+    renderConfig(makeEndpoint({ path: "/orders/lookup", live_method: null, live_path: null }));
+    await screen.findByLabelText("Path");
+    expect(screen.queryByText(/goes live when you publish/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("EndpointDetail — save invalidation", () => {
   // Reviewer finding (Important #5): the generated `useDataApiUpdateEndpoint`
   // attaches no invalidation of its own, so a rename would leave the OLD name

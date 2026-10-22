@@ -8,11 +8,10 @@
 //! frozen against editing here. The one exception is [`EndpointStore::set_state`],
 //! which is `pub(crate)` and reachable only from the lifecycle routes.
 //!
-//! One thing editing CAN still do to a live endpoint: move it. `path` and
-//! `method` live on this row and nothing below refuses a PATCH because
-//! `state = 'live'`. That is now a decided contract rather than an open question
-//! — a URL belongs to the endpoint object, behaviour belongs to the frozen
-//! version. See `lifecycle.rs`' module comment for what P4 must do with it.
+//! Editing `path` and `method` on a live endpoint is allowed and moves nothing
+//! yet: serving matches `live_method`/`live_path`, which only publish and
+//! rollback write (KI-023, migration 0204). The draft's new URL goes live at the
+//! next publish. See `lifecycle.rs`' module comment.
 //!
 //! **Workspace containment lives HERE, in exactly one place: the `WHERE id = $1
 //! AND workspace_id = $2` that every statement below carries.** There is no
@@ -46,8 +45,8 @@ use uuid::Uuid;
 macro_rules! endpoint_cols {
     () => {
         "id, folder_id, name, description, path, method, database_id, statements, params, output, \
-         cache, limits, rate_limit, source_kind, source_ref, live_version_id, state, \
-         created_by, created_at, updated_at, deleted_at"
+         cache, limits, rate_limit, source_kind, source_ref, live_version_id, live_method, \
+         live_path, state, created_by, created_at, updated_at, deleted_at"
     };
 }
 
@@ -72,6 +71,8 @@ struct Row {
     source_kind: String,
     source_ref: Option<Uuid>,
     live_version_id: Option<Uuid>,
+    live_method: Option<String>,
+    live_path: Option<String>,
     state: String,
     created_by: Option<Uuid>,
     created_at: DateTime<Utc>,
@@ -119,6 +120,14 @@ pub struct DataApiEndpointDto {
     /// The version currently served. Never written by this module — publishing
     /// is a separate lifecycle.
     pub live_version_id: Option<Uuid>,
+    /// The method and path the LIVE version is served at, or `null` for an
+    /// endpoint never published. Written only by publish and rollback, from the
+    /// snapshot they make live; the serving router matches these, never
+    /// `method`/`path`. When they differ from `method`/`path` the draft has a
+    /// new URL that goes live at the next publish (KI-023).
+    pub live_method: Option<String>,
+    /// See [`Self::live_method`].
+    pub live_path: Option<String>,
     pub state: String,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -197,6 +206,8 @@ impl TryFrom<Row> for DataApiEndpointDto {
             source_kind: r.source_kind,
             source_ref: r.source_ref,
             live_version_id: r.live_version_id,
+            live_method: r.live_method,
+            live_path: r.live_path,
             state: r.state,
             created_by: r.created_by,
             created_at: r.created_at,

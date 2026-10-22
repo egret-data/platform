@@ -4,14 +4,16 @@
 //!
 //! # The one invariant this module exists to hold
 //!
-//! **Routing comes from the endpoint row; content comes from the snapshot.**
-//! `dataapi.endpoints (workspace_id, method, path)` is the pair carrying the
-//! `UNIQUE` constraint, so it is the only place where "two endpoints claiming
-//! one URL" is impossible — the snapshot's own `method`/`path` record where a
-//! version *was* published and are not a routing key. Everything that decides
-//! what the request RETURNS is then read from `v.snapshot` and from nowhere
-//! else. If serving took its content from the draft table, an author saving an
-//! edit would change behaviour under every already-deployed client and P3's
+//! **Routing comes from the endpoint row's LIVE route; content comes from the
+//! snapshot.** The router matches `dataapi.endpoints (workspace_id, live_method,
+//! live_path)` — the URL the live version was published at, written only by
+//! publish and rollback (migration 0204) and carrying a `UNIQUE` index, so "two
+//! endpoints live at one URL" is impossible. It never matches the draft's
+//! `method`/`path`: saving a new path on a draft used to move the served URL at
+//! once, before publish (KI-023). Everything that decides what the request
+//! RETURNS is then read from `v.snapshot` and from nowhere else. If serving took
+//! its content — or its URL — from the draft columns, an author saving an edit
+//! would change behaviour under every already-deployed client and P3's
 //! versioning would be decoration. See `crate::lifecycle`'s module comment.
 //!
 //! # Where 404 stops and 403 starts
@@ -2461,7 +2463,7 @@ async fn live_snapshot(
                AND v.version = $4 AND v.version <= lv.version) \
          LEFT JOIN query.databases d \
            ON d.id = (v.snapshot->>'database_id')::uuid AND d.workspace_id = $1 \
-         WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
+         WHERE e.workspace_id = $1 AND e.live_method = $2 AND e.live_path = $3 \
            AND e.state = 'live'",
     )
     .bind(ws)

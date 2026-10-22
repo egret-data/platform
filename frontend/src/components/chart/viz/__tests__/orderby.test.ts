@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import type { ChartParamsV2, VizType } from "@/api/charts";
 import { getDescriptor } from "../registry";
-import { authoredOrderby, honoursOrderby, sortableFields } from "../orderby";
+import { authoredOrderby, honoursOrderby, honoursRowLimit, sortableFields } from "../orderby";
 import { cartesianDescriptor } from "../cartesian";
 import { pivotDescriptor } from "../pivot";
 import { tableDescriptor, objectDescriptor } from "../table";
@@ -61,10 +61,23 @@ describe("an authored sort reaches every descriptor's spec", () => {
 
 describe("with no authored sort, PR #394's implicit default is untouched", () => {
   it("a cartesian chart still orders ascending by its x-axis", () => {
-    for (const kind of ["bar", "row", "line", "area", "combo", "scatter"] as const) {
+    for (const kind of ["bar", "line", "area", "combo", "scatter"] as const) {
       expect(cartesianDescriptor(kind).buildSpec({ xAxis: "category", yMetrics: ["revenue"] }, NONE).orderby, kind)
         .toEqual([{ field: "category", desc: false }]);
     }
+  });
+
+  // D7 / KI-045: the row chart is the one cartesian that ranks. Its default is its first metric,
+  // largest first — what the gallery says, and what makes "Row limit 10" the top ten — with the
+  // x-axis kept as the tie-breaker so equal values still come back in a fixed order.
+  it("a row chart orders by its first metric, descending, then by its x-axis", () => {
+    expect(cartesianDescriptor("row").buildSpec({ xAxis: "category", yMetrics: ["revenue", "orders"] }, NONE).orderby)
+      .toEqual([{ field: "revenue", desc: true }, { field: "category", desc: false }]);
+  });
+
+  it("a row chart's authored sort still wins over its default", () => {
+    expect(cartesianDescriptor("row").buildSpec({ xAxis: "category", yMetrics: ["revenue"] }, { ...NONE, orderby: [{ field: "category", desc: false }] }).orderby)
+      .toEqual([{ field: "category", desc: false }]);
   });
 
   it("a cartesian chart with no x-axis still asks for nothing", () => {
@@ -218,5 +231,47 @@ describe("honoursOrderby", () => {
     expect(honoursOrderby(getDescriptor("smartscalar")!, { dimension: "day", metric: "revenue" } as never)).toBe(false);
     // Also with nothing configured yet — the control must not flicker into existence.
     expect(honoursOrderby(getDescriptor("smartscalar")!, {} as never)).toBe(false);
+  });
+});
+
+// KI-051: the editor showed Row limit on charts whose query is one aggregate row regardless.
+describe("honoursRowLimit", () => {
+  const ask = (key: VizType) => {
+    const d = getDescriptor(key)!;
+    return honoursRowLimit(d, d.defaultConfig as never);
+  };
+  it("is false for the one-row charts: Big number, Progress and Gauge", () => {
+    expect(ask("scalar")).toBe(false);
+    expect(ask("progress")).toBe(false);
+    expect(ask("gauge")).toBe(false);
+  });
+  it("is true for a chart whose rows the limit decides", () => {
+    for (const key of ["bar", "row", "table", "pie", "map", "boxplot", "funnel"] as VizType[]) {
+      expect(ask(key), key).toBe(true);
+    }
+  });
+});
+
+/**
+ * An authored sort that coincides with a clause the descriptor derives must survive a save and a
+ * reload. The row chart derives `[metric DESC, dimension ASC]`, so an authored `dimension ASC`
+ * (alphabetical rows) used to be stripped as "derived" on load and silently replaced by the default.
+ */
+describe("authoredOrderby on a row chart (KI-045)", () => {
+  const row = getDescriptor("row")!;
+  const params = (orderby: { field: string; desc: boolean }[]): ChartParamsV2 => ({
+    version: 2,
+    spec: { metrics: ["revenue"], dimensions: ["category"], columns: [], filters: [], orderby, row_limit: 10, rollup_groups: [] },
+    settings: { "cartesian.xAxis": "category", "cartesian.yMetrics": ["revenue"] },
+  });
+  it("reads the default it derives as no authored sort", () => {
+    expect(authoredOrderby(params([{ field: "revenue", desc: true }, { field: "category", desc: false }]), row)).toEqual([]);
+  });
+  it("keeps an authored alphabetical sort", () => {
+    expect(authoredOrderby(params([{ field: "category", desc: false }]), row)).toEqual([{ field: "category", desc: false }]);
+  });
+  it("keeps an authored ascending value sort", () => {
+    expect(authoredOrderby(params([{ field: "revenue", desc: false }, { field: "category", desc: false }]), row))
+      .toEqual([{ field: "revenue", desc: false }]);
   });
 });

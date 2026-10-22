@@ -54,6 +54,18 @@ export function honoursOrderby(descriptor: VizDescriptor<never>, config: never):
 }
 
 /**
+ * Whether this descriptor's query reads the shared Row limit at all — asked of the descriptor the
+ * same way `honoursOrderby` is, by building a spec with a limit no default could produce and
+ * looking for it. Big number, Progress and Gauge answer no: their query is one aggregate row
+ * (`row_limit: 1`, `fieldDescriptor`'s `oneRow`) whatever the box says, so the editor does not
+ * offer a box with nothing to act on (KI-051).
+ */
+export function honoursRowLimit(descriptor: VizDescriptor<never>, config: never): boolean {
+  const probe = 7_919;
+  return descriptor.buildSpec(config, { ...NO_SHARED, rowLimit: probe }).row_limit === probe;
+}
+
+/**
  * Recovers the sort the chart's AUTHOR asked for from a stored spec, which is not the same thing as
  * the spec's `orderby`.
  *
@@ -68,11 +80,11 @@ export function honoursOrderby(descriptor: VizDescriptor<never>, config: never):
  *   reopen it, change the x-axis to `state`, and the spec becomes `[category ASC, state ASC]` —
  *   `category` is no longer a dimension, and `orderby_sql` answers 400 `unknown order-by field`.
  *
- * So the derived clauses are subtracted back out: build the spec the descriptor would emit with NO
- * authored sort, and drop exactly those clauses. What is left is what the author added. The
- * round-trip is stable — save re-derives them, load strips them again — and a sort that only looks
- * derived (`category ASC` written by hand) is dropped and re-derived identically, which is a
- * difference nothing can observe.
+ * So the derived clauses are subtracted back out: the author's sort is the shortest prefix of the
+ * stored one that the descriptor rebuilds the whole stored list from (see the loop below). The
+ * round-trip is stable — save re-derives the tail, load strips it again — and a sort that only
+ * looks derived (`category ASC` written by hand on a bar chart, whose default is exactly that) is
+ * dropped and re-derived identically, which is a difference nothing can observe.
  */
 export function authoredOrderby(
   params: AnyChartParams,
@@ -80,11 +92,28 @@ export function authoredOrderby(
 ): ChartOrderBy[] {
   const stored = params.spec?.orderby ?? [];
   if (!descriptor || stored.length === 0) return stored;
-  const derived = descriptor.buildSpec(descriptor.fromParams(params), {
+  const config = descriptor.fromParams(params);
+  const built = (orderby: ChartOrderBy[]) => descriptor.buildSpec(config, {
     filters: params.spec?.filters ?? [],
     rowLimit: params.spec?.row_limit ?? 1000,
     temporalUnits: params.spec?.temporal_units ?? {},
-    orderby: [],
+    orderby,
   }).orderby;
+  /**
+   * THE SHORTEST AUTHORED PREFIX THAT REBUILDS THE STORED SORT. A stored `orderby` is the author's
+   * clauses followed by whatever the descriptor appends, so the first `k` for which building with
+   * `stored[0..k]` gives `stored` back is what the author wrote. Dropping every clause that also
+   * appears in the derived list was the old reading, and it was wrong once a derived list can hold
+   * a clause an author can also write: a row chart derives `[metric DESC, dimension ASC]` (KI-045),
+   * so an authored `dimension ASC` would have been taken for derived and replaced by the default.
+   */
+  for (let k = 0; k <= stored.length; k++) {
+    const head = stored.slice(0, k);
+    const again = built(head);
+    if (again.length === stored.length && again.every((o, i) => same(o, stored[i]))) return head;
+  }
+  // A stored sort no prefix rebuilds (hand-edited, or a descriptor that has since changed): keep
+  // what is not derived, the reading this used before.
+  const derived = built([]);
   return stored.filter((o) => !derived.some((d) => same(d, o)));
 }

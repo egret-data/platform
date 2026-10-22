@@ -15,20 +15,59 @@ use uuid::Uuid;
 
 struct FakeConnector {
     sleep_ms: u64,
+    /// The SQL the engine was sent.
+    last_sql: Arc<Mutex<Option<String>>>,
 }
+
+/// How many rows the fake engine's table `t` holds.
+const TABLE_ROWS: usize = 25;
+
 #[async_trait]
 impl Connector for FakeConnector {
     async fn execute(
         &self,
-        _sql: &str,
-        _limits: &Limits,
+        sql: &str,
+        limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, egret_query::EngineError> {
+        *self.last_sql.lock().unwrap() = Some(sql.to_string());
         for _ in 0..(self.sleep_ms / 10).max(1) {
             if cancel.is_cancelled() {
                 return Err(egret_query::EngineError::Cancelled);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A query of table `t`: the engine applies a trailing `LIMIT k` (as the
+        // real engines do), and the connector fetches `max_rows + 1` and flags
+        // `truncated`, as the real connectors do.
+        if sql.contains(" FROM t") {
+            if sql.contains("_egret_lim") && sql.contains("nosuch") {
+                // Trino's position for a name on the user's first line, one line
+                // down inside the wrapper.
+                return Err(egret_query::EngineError::Engine(
+                    "line 2:15: Table 'nosuch' does not exist".into(),
+                ));
+            }
+            let engine_rows = sql
+                .rsplit_once("LIMIT ")
+                .and_then(|(_, k)| k.trim().parse::<usize>().ok())
+                .map_or(TABLE_ROWS, |k| k.min(TABLE_ROWS));
+            let cap = limits.max_rows;
+            let mut rows: Vec<Vec<serde_json::Value>> = (0..engine_rows.min(cap + 1))
+                .map(|i| vec![serde_json::json!(TABLE_ROWS - i)])
+                .collect();
+            let truncated = rows.len() > cap;
+            rows.truncate(cap);
+            return Ok(TabularResult {
+                columns: vec![ColumnMeta {
+                    name: "n".into(),
+                    ty: "bigint".into(),
+                }],
+                row_count: rows.len() as u64,
+                rows,
+                bytes_scanned: None,
+                truncated,
+            });
         }
         Ok(TabularResult {
             columns: vec![ColumnMeta {
@@ -48,6 +87,8 @@ struct FakeFactory {
     last_session_user: Arc<Mutex<Option<Option<String>>>>,
     /// Records the last `bearer_token` passed to `build` for test assertions.
     last_bearer_token: Arc<Mutex<Option<Option<String>>>>,
+    /// The SQL the last connector was sent.
+    last_sql: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeFactory {
@@ -56,7 +97,12 @@ impl FakeFactory {
             sleep_ms,
             last_session_user: Arc::new(Mutex::new(None)),
             last_bearer_token: Arc::new(Mutex::new(None)),
+            last_sql: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn last_sql(&self) -> Option<String> {
+        self.last_sql.lock().unwrap().clone()
     }
 
     fn last_session_user(&self) -> Option<Option<String>> {
@@ -81,6 +127,7 @@ impl ConnectorFactory for FakeFactory {
         *self.last_bearer_token.lock().unwrap() = Some(bearer_token);
         Ok(Box::new(FakeConnector {
             sleep_ms: self.sleep_ms,
+            last_sql: self.last_sql.clone(),
         }))
     }
 }
@@ -126,6 +173,13 @@ impl ObjectStore for MemStore {
 }
 
 async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc<FakeFactory>)> {
+    setup_with_timeout(sleep_ms, Duration::from_secs(10)).await
+}
+
+async fn setup_with_timeout(
+    sleep_ms: u64,
+    timeout: Duration,
+) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc<FakeFactory>)> {
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -163,7 +217,7 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc
         "query-results".into(),
         Limits {
             max_rows: 100,
-            timeout: Duration::from_secs(10),
+            timeout,
         },
         100,
     );
@@ -370,4 +424,100 @@ async fn session_user_reaches_factory() {
         Some(Some("alice".to_string())),
         "factory.build must receive session_user=Some(\"alice\")"
     );
+}
+
+/// KI-154 + KI-081: SQL Lab's row limit keeps the query's own `ORDER BY`
+/// outermost (no subquery for Trino to drop the ordering of), and asks for one
+/// row more, so a cut result says it was cut.
+#[tokio::test]
+async fn the_row_limit_keeps_order_by_outermost_and_reports_a_cut_result() {
+    let Some((jobs, store, wid, did, factory)) = setup(0).await else {
+        eprintln!("skip");
+        return;
+    };
+    let sql = "SELECT n FROM t ORDER BY n DESC";
+    let id = jobs
+        .submit(wid, did, None, None, None, sql, Some(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_status(&store, id, QueryStatus::Finished, 40).await,
+        QueryStatus::Finished
+    );
+    assert_eq!(
+        factory.last_sql().as_deref(),
+        Some("SELECT n FROM t ORDER BY n DESC\nLIMIT 6")
+    );
+    let q = store.get(id).await.unwrap().unwrap();
+    assert_eq!(q.row_count, Some(5));
+    assert!(
+        q.truncated,
+        "25 rows exist, 5 were returned: the result is cut"
+    );
+
+    // A limit the result fits in is not flagged.
+    let id = jobs
+        .submit(wid, did, None, None, None, sql, Some(30))
+        .await
+        .unwrap();
+    wait_status(&store, id, QueryStatus::Finished, 40).await;
+    let q = store.get(id).await.unwrap().unwrap();
+    assert_eq!(q.row_count, Some(TABLE_ROWS as i64));
+    assert!(!q.truncated);
+}
+
+/// KI-087: when the query is wrapped (SQL the parser cannot read), the engine's
+/// error positions are mapped back to the user's lines.
+#[tokio::test]
+async fn a_wrapped_query_reports_errors_on_the_users_line() {
+    let Some((jobs, store, wid, did, factory)) = setup(0).await else {
+        eprintln!("skip");
+        return;
+    };
+    // `/* a /* b */` nests for sqlparser and not for Trino: not decided on, wrapped.
+    let id = jobs
+        .submit(
+            wid,
+            did,
+            None,
+            None,
+            None,
+            "SELECT n FROM t, nosuch /* a /* b */",
+            Some(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_status(&store, id, QueryStatus::Failed, 40).await,
+        QueryStatus::Failed
+    );
+    assert!(factory.last_sql().unwrap().contains("_egret_lim"));
+    let q = store.get(id).await.unwrap().unwrap();
+    assert_eq!(
+        q.error.as_deref(),
+        Some("engine: line 1:15: Table 'nosuch' does not exist")
+    );
+}
+
+/// KI-211: a query that outruns SQL Lab's time limit says what the limit is and
+/// which setting sets it, not a bare "timeout".
+#[tokio::test]
+async fn a_timeout_names_the_limit_and_the_setting() {
+    let Some((jobs, store, wid, did, _factory)) =
+        setup_with_timeout(5000, Duration::from_secs(1)).await
+    else {
+        eprintln!("skip");
+        return;
+    };
+    let id = jobs
+        .submit(wid, did, None, None, None, "SELECT 1", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_status(&store, id, QueryStatus::Failed, 80).await,
+        QueryStatus::Failed
+    );
+    let err = store.get(id).await.unwrap().unwrap().error.unwrap();
+    assert!(err.contains("1 s"), "{err}");
+    assert!(err.contains("engine.query_timeout_secs"), "{err}");
 }

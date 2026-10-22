@@ -4,7 +4,8 @@ import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { WaterfallConfig } from "@/api/charts";
-import { INCREASE, DECREASE } from "@/components/chart/echarts/options/waterfall";
+import { INCREASE, DECREASE, defaultTotalColor } from "@/components/chart/echarts/options/waterfall";
+import { toHexColor } from "@/components/chart/echarts/palette";
 import { Toggle } from "@/components/chart/settings/ChartAxesSection";
 
 /**
@@ -50,10 +51,10 @@ export function WaterfallBarsSection({ config, onChange }: Props) {
       <Toggle id="wf-total" label="Show total" checked={showTotal}
         onChange={(v) => onChange({ showTotal: v ? undefined : false })} />
       {showTotal && (
-        // No `fallback` from the palette: the total takes the page's ink, which is a CSS token and
-        // theme-dependent, so there is no one hex to preview. A native colour input must be given
-        // something concrete, and a mid-grey is the honest stand-in for "follows the theme".
-        <ColorRow label="Total color" value={config.totalColor} fallback="#4C5773"
+        // The fallback is the colour the builder draws the bar in, the page's ink resolved for the
+        // current theme — a stand-in slate here used to disagree with the near-black bar (KI-057).
+        // As a hex, because the picker's native colour input takes nothing else.
+        <ColorRow label="Total color" value={config.totalColor} fallback={toHexColor(defaultTotalColor())}
           onChange={(v) => onChange({ totalColor: v })} />
       )}
     </div>

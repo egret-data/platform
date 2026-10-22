@@ -81,6 +81,12 @@ export const DECREASE = SERIES_PALETTE[3]; // #EF8C8C red
  *  navy this replaced stayed navy on a dark card, where Metabase's flips. */
 const TOTAL_TOKEN = "var(--foreground)";
 
+/** The colour the Total bar is drawn in when none is chosen. One function, so the settings swatch
+ *  shows the bar's actual colour rather than a stand-in for it (KI-057). */
+export function defaultTotalColor(): string {
+  return resolveColor(TOTAL_TOKEN, COLOR_FALLBACK.axisLabel);
+}
+
 /**
  * Metabase-style Waterfall: sequential deltas floating on a running total, with an optional Total
  * bar rising from zero.
@@ -112,7 +118,7 @@ export function buildWaterfallOption(
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const increase = cfg.increaseColor ?? INCREASE;
   const decrease = cfg.decreaseColor ?? DECREASE;
-  const total = cfg.totalColor ?? resolveColor(TOTAL_TOKEN, COLOR_FALLBACK.axisLabel);
+  const total = cfg.totalColor ?? defaultTotalColor();
 
   const categories: string[] = [];
   const base: number[] = [];

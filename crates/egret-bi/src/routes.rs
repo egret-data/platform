@@ -762,6 +762,19 @@ async fn ds_set_folder(
 }
 
 /// Introspect a source's columns and classify them. Physical → schema service; virtual → describe().
+/// A dataset's columns are keyed by name, so a source that returns one name
+/// twice (`select 1 as x, 2 as x`) is refused here, as a 400 that names the
+/// column, rather than by the store's unique key as a 500 (KI-095).
+fn ensure_unique_column_names(cols: &[(String, String)]) -> Result<(), crate::BiError> {
+    let mut seen = std::collections::HashSet::new();
+    match cols.iter().find(|(name, _)| !seen.insert(name.as_str())) {
+        Some((name, _)) => Err(crate::BiError::BadRequest(format!(
+            "the query returns more than one column named `{name}`; give each column its own name with AS"
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn introspect(
     st: &BiState,
     spec: &ConnSpec,
@@ -788,6 +801,7 @@ async fn introspect(
             .map(|c| (c.name, c.ty))
             .collect(),
     };
+    ensure_unique_column_names(&raw)?;
     Ok(raw
         .into_iter()
         .map(|(name, ty)| {
@@ -833,7 +847,11 @@ async fn ds_create(
             schema,
             table,
         },
-        CreateSource::Virtual { sql } => SourceSpec::Virtual { sql },
+        // Stored without a trailing `;`, as SQL Lab runs it: the stored SQL is
+        // later placed inside a subquery, where a `;` is a syntax error (KI-095).
+        CreateSource::Virtual { sql } => SourceSpec::Virtual {
+            sql: egret_query::execution::strip_trailing_semicolons(&sql, spec.engine).to_string(),
+        },
     };
     let columns = introspect(&st, &spec, &source).await?;
     let ds = st
@@ -3756,3 +3774,31 @@ pub struct BiSqlLabApi;
     tags((name = "dashboards", description = "BI dashboards: CRUD, layout (tabs + cards), folders, trash + bookmarks")),
 )]
 pub struct BiDashboardApi;
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_unique_column_names;
+    use axum::response::IntoResponse;
+
+    fn cols(names: &[&str]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), "integer".to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_repeated_column_name_is_a_400_that_names_the_column() {
+        let err = ensure_unique_column_names(&cols(&["x", "y", "x"])).unwrap_err();
+        assert!(err.to_string().contains("`x`"), "{err}");
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn distinct_names_pass_and_case_is_significant() {
+        assert!(ensure_unique_column_names(&cols(&["x", "X", "y"])).is_ok());
+    }
+}
