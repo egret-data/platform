@@ -9,7 +9,7 @@ anyio==4.15.1
 anywidget==0.9.18
 asttokens==3.0.2
 attrs==26.1.0
-certifi==2026.7.22
+certifi==2026.10.19
 click==8.5.0
 comm==0.2.3
 docutils==0.23
