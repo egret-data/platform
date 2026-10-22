@@ -87,19 +87,33 @@ type SelectorType = Selector["type"];
  * the dropdown shows `name`, the click stores `key`. Storing a name would
  * compile and then match nothing, since `Selector`'s `tag` variant is
  * `{key, type: "tag"}`, not a name.
+ *
+ * The chosen key is always shown, even when the list cannot say which
+ * classification it is (refused, failed, or not in it): Create saves it, so
+ * the form must show it. A refusal and a failure each say so, never "No
+ * matches.".
  */
 function TagKeySelector({
   value,
   onChange,
   disabled,
+  knownName,
 }: {
   value: string;
   onChange: (key: string) => void;
   disabled?: boolean;
+  /** The classification's name when the entry point knows it, for when the list cannot tell. */
+  knownName?: string;
 }) {
   const tags = useTags();
   const rows: Tag[] = tags.data ?? [];
-  const selected = rows.find((t) => t.key === value);
+  const found = rows.find((t) => t.key === value);
+  const selected = found ?? (value ? { key: value, name: knownName ?? "" } : undefined);
+  const unavailable = tags.isError
+    ? tags.error instanceof ApiError && tags.error.status === 403
+      ? "The classification list can't be shown without permission to read classifications."
+      : "The classification list failed to load."
+    : null;
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const filtered = rows.filter((t) => t.name.toLowerCase().includes(q.toLowerCase()));
@@ -111,14 +125,17 @@ function TagKeySelector({
         <RequiredMark />
       </Label>
       {selected ? (
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary">{selected.name}</Badge>
-          <span className="font-mono text-xs text-muted-foreground">{`${TERM.key} ${selected.key}`}</span>
-          {!disabled && (
-            <Button type="button" variant="ghost" size="sm" onClick={() => onChange("")}>
-              Change
-            </Button>
-          )}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            {selected.name ? <Badge variant="secondary">{selected.name}</Badge> : null}
+            <span className="font-mono text-xs text-muted-foreground">{`${TERM.key} ${selected.key}`}</span>
+            {!disabled && (
+              <Button type="button" variant="ghost" size="sm" onClick={() => onChange("")}>
+                Change
+              </Button>
+            )}
+          </div>
+          {unavailable ? <p className="text-xs text-muted-foreground">{unavailable}</p> : null}
         </div>
       ) : (
         !disabled && (
@@ -152,7 +169,7 @@ function TagKeySelector({
                 ))}
                 {filtered.length === 0 && (
                   <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                    {tags.isFetching ? "Loading…" : "No matches."}
+                    {unavailable ?? (tags.isFetching ? "Loading…" : "No matches.")}
                   </div>
                 )}
               </div>
@@ -162,6 +179,19 @@ function TagKeySelector({
       )}
     </div>
   );
+}
+
+/** The name of classification `key` as entry point `entry` knows it, if it does. */
+function knownTagName(entry: RuleEntry, key: string): string | undefined {
+  if (!key) return undefined;
+  if (entry.kind === "classification") return entry.tagKey === key && entry.tagName ? entry.tagName : undefined;
+  if (entry.kind === "column" || entry.kind === "table") return entry.classifications?.find((c) => c.key === key)?.name;
+  if (entry.kind === "edit" && entry.rule.selector.type === "tag" && entry.rule.selector.key === key) {
+    // A rule from the list (`RuleView`) carries its classification's name.
+    const name = (entry.rule as { tag_name?: string | null }).tag_name;
+    return name ?? undefined;
+  }
+  return undefined;
 }
 
 /** The form's fields, one per control. A `NewRule` is derived from them ({@link bodyOf}). */
@@ -744,7 +774,7 @@ function RuleForm({
         </div>
 
         {selectorType === "tag" ? (
-          <TagKeySelector value={tagKey} onChange={(key) => update({ tagKey: key })} />
+          <TagKeySelector value={tagKey} onChange={(key) => update({ tagKey: key })} knownName={knownTagName(entry, tagKey)} />
         ) : (
           <div className="space-y-1.5">
             <Label>Scope</Label>

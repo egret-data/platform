@@ -222,6 +222,40 @@ describe("RuleDialog — the tag selector carries the key, not the name", () => 
   });
 });
 
+describe("RuleDialog — the tag selector when the classification list cannot be read", () => {
+  const refuse = (error: unknown) =>
+    vi.mocked(tagsApi.useTags).mockReturnValue({ data: undefined, isError: true, error, isFetching: false } as unknown as ReturnType<typeof tagsApi.useTags>);
+
+  test("a 403 still shows the seeded classification, says why the list is missing, and the key is what is saved", async () => {
+    refuse(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    renderDialog();
+    // The entry's classification, by name and key, as the selected value.
+    expect(screen.getByText("PII Data")).toBeInTheDocument();
+    expect(screen.getByText("Key pii_v2")).toBeInTheDocument();
+    expect(screen.getByText("The classification list can't be shown without permission to read classifications.")).toBeInTheDocument();
+    expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({ type: "tag", key: "pii_v2" });
+  });
+
+  test("a failed read shows the seeded key and says the list failed to load, also in the search", async () => {
+    refuse(new ApiError(500, "boom"));
+    const user = userEvent.setup();
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "" } });
+    expect(screen.getByText("Key pii_v2")).toBeInTheDocument();
+    expect(screen.getByText("The classification list failed to load.")).toBeInTheDocument();
+
+    // Cleared, the search says the same rather than "No matches.".
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    await user.click(screen.getByPlaceholderText("Search classifications by name…"));
+    expect(await screen.findAllByText("The classification list failed to load.")).not.toHaveLength(0);
+    expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+  });
+});
+
 describe("RuleDialog — mask_type is a fixed list, CUSTOM reveals the expression", () => {
   test("CUSTOM shows the expression field; MASK_HASH does not", async () => {
     const user = userEvent.setup();
