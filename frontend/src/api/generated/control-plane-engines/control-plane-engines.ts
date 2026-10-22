@@ -2700,10 +2700,15 @@ export type controlPlaneEnginesRestartEngineResponse500 = {
   status: 500
 }
 
+export type controlPlaneEnginesRestartEngineResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
 export type controlPlaneEnginesRestartEngineResponseSuccess = (controlPlaneEnginesRestartEngineResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse409 | controlPlaneEnginesRestartEngineResponse500) & {
+export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse409 | controlPlaneEnginesRestartEngineResponse500 | controlPlaneEnginesRestartEngineResponse502) & {
   headers: Headers;
 };
 

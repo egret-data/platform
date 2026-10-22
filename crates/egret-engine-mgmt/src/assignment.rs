@@ -98,19 +98,8 @@ impl EngineAssignmentService {
             .map_err(to_mgmt_err)?;
         let (opts, secret_id) = delegated_conn_options(engine);
         // Trino delegated connections materialize over the coordinator's
-        // separate https listener (8443); non-delegation Trino engines keep
-        // the plain coordinator port. StarRocks has no such separate TLS
-        // listener — it does in-band TLS on its single MySQL-protocol port
-        // (9030) — so it always uses `coordinator_port()` regardless of
-        // delegation mode; TLS (when configured) is negotiated in-band via
-        // `options.tls_cert`, not a different port.
-        let port = if engine.is_starrocks() {
-            engine.coordinator_port()
-        } else if engine.supports_delegation() {
-            8443
-        } else {
-            engine.coordinator_port()
-        };
+        // separate https listener (8443); see `Engine::client_port`.
+        let port = engine.client_port();
         let host = engine.coordinator_host();
         // Refresh in place when a connection for this engine already exists —
         // keeps `assign` idempotent and lets a delegation/TLS change re-point

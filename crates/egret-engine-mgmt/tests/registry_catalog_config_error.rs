@@ -84,6 +84,7 @@ async fn setup() -> Option<Fixture> {
             engine_provisioner: None,
             kube: None,
             coordinator_transport: None,
+            engine_token_minter: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),

@@ -18,6 +18,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
+use egret_core::UserId;
 
 use crate::engines::monitor_password_for;
 use crate::Engine;
@@ -51,7 +52,9 @@ pub struct QueryDetailDto {
 #[serde(rename_all = "camelCase")]
 pub struct NodeDto {
     pub uri: String,
-    pub recent_failures: f64,
+    /// The failure detector's recent failure rate. Absent when the node list
+    /// came from `system.runtime.nodes`, which does not report it.
+    pub recent_failures: Option<f64>,
 }
 
 #[derive(Serialize, Clone, ToSchema)]
@@ -60,7 +63,9 @@ pub struct ClusterDto {
     pub running: u32,
     pub queued: u32,
     pub blocked: u32,
-    pub nodes: Vec<NodeDto>,
+    /// `None` when the coordinator would not list its nodes: the count is
+    /// unknown, not zero ([`cluster_nodes`]).
+    pub nodes: Option<Vec<NodeDto>>,
 }
 
 fn s(v: &Value, p: &str) -> String {
@@ -92,7 +97,7 @@ pub fn query_detail_dto(v: &Value) -> QueryDetailDto {
     }
 }
 
-pub fn cluster_dto(queries: &Value, nodes: &Value) -> ClusterDto {
+pub fn cluster_dto(queries: &Value, nodes: Option<Vec<NodeDto>>) -> ClusterDto {
     let count = |st: &str| {
         queries
             .as_array()
@@ -103,19 +108,27 @@ pub fn cluster_dto(queries: &Value, nodes: &Value) -> ClusterDto {
         running: count("RUNNING"),
         queued: count("QUEUED"),
         blocked: count("BLOCKED"),
-        nodes: nodes
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|n| NodeDto {
-                        uri: n["uri"].as_str().unwrap_or("").to_string(),
-                        recent_failures: n["recentFailures"].as_f64().unwrap_or(0.0),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        nodes,
     }
 }
+
+/// `GET /v1/node`'s failure-detector stats as nodes.
+pub fn nodes_from_failure_detector(nodes: &Value) -> Vec<NodeDto> {
+    nodes
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|n| NodeDto {
+                    uri: n["uri"].as_str().unwrap_or("").to_string(),
+                    recent_failures: n["recentFailures"].as_f64(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The statement [`cluster_nodes`] falls back to.
+pub(crate) const NODES_SQL: &str = "SELECT http_uri FROM system.runtime.nodes";
 
 // ── routes ─────────────────────────────────────────────────────────────────────
 //
@@ -139,24 +152,51 @@ pub fn routes() -> Router<CpState> {
         .route("/engines/{id}/cluster", get(get_cluster))
 }
 
-/// Monitor auth headers for a coordinator request. When the engine's stored spec
-/// has an auth block (`trinoConfig.auth`), authenticate as the `egret-monitor`
-/// file-password user over HTTP Basic (plus `X-Forwarded-Proto: https` so Trino
-/// accepts Basic on the proxied hop), with the password the engine's pods were
-/// last given ([`monitor_password_for`]); otherwise pass the trino user header
-/// directly (no-auth engines).
-async fn monitor_headers(st: &CpState, engine: &Engine) -> Result<Vec<(String, String)>, CpError> {
-    if engine.spec["trinoConfig"]["auth"].is_object() {
+/// Monitor auth headers for a coordinator request.
+///
+/// - A JWT-delegation engine with auth: its coordinator authenticates by JWT
+///   only (no password authenticator, so no `egret-monitor` account; KI-194).
+///   egret signs in as `viewer`, the user asking, with the engine JWT it mints
+///   for them, so the engine's own policy decides what they see and may cancel.
+/// - Any other engine with an auth block (`trinoConfig.auth`): the
+///   `egret-monitor` file-password user over HTTP Basic, with the password the
+///   engine's pods were last given ([`monitor_password_for`]).
+/// - No auth: the trino user header directly.
+///
+/// Both signed-in forms add `X-Forwarded-Proto: https`: egret reaches the
+/// coordinator's plain listener through a proxy hop, and Trino accepts
+/// credentials only on a request it considers secure.
+async fn monitor_headers(
+    st: &CpState,
+    engine: &Engine,
+    viewer: UserId,
+) -> Result<Vec<(String, String)>, CpError> {
+    if !engine.spec["trinoConfig"]["auth"].is_object() {
+        return Ok(vec![("X-Trino-User".into(), "egret-monitor".into())]);
+    }
+    let authorization = if engine.is_jwt_delegation() {
+        let minter = st.engine_token_minter.as_ref().ok_or_else(|| {
+            CpError::BadRequest(
+                "this engine accepts only egret-signed engine tokens, and no token minter \
+                 is configured"
+                    .into(),
+            )
+        })?;
+        let token = minter
+            .mint(viewer.0)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("could not mint your engine token: {e}")))?;
+        format!("Bearer {}", token.access_token)
+    } else {
         let password = monitor_password_for(st, engine).await?;
         let creds = format!("egret-monitor:{password}");
         let b64 = base64::engine::general_purpose::STANDARD.encode(creds);
-        Ok(vec![
-            ("Authorization".into(), format!("Basic {b64}")),
-            ("X-Forwarded-Proto".into(), "https".into()),
-        ])
-    } else {
-        Ok(vec![("X-Trino-User".into(), "egret-monitor".into())])
-    }
+        format!("Basic {b64}")
+    };
+    Ok(vec![
+        ("Authorization".into(), authorization),
+        ("X-Forwarded-Proto".into(), "https".into()),
+    ])
 }
 
 async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
@@ -232,6 +272,7 @@ async fn try_ingress(
 pub(crate) async fn coordinator_call(
     st: &CpState,
     engine: &Engine,
+    viewer: UserId,
     method: &str,
     path: &str,
     body: Option<Vec<u8>>,
@@ -239,7 +280,7 @@ pub(crate) async fn coordinator_call(
     // The chokepoint under every coordinator request, including the catalog
     // tests, whatever route reached it.
     crate::external::refuse_if_external(engine, "send requests to its coordinator")?;
-    let headers = monitor_headers(st, engine).await?;
+    let headers = monitor_headers(st, engine, viewer).await?;
     if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
         return Ok(resp);
     }
@@ -291,10 +332,11 @@ async fn dispatch_coordinator(
 async fn coordinator_json(
     st: &CpState,
     engine: &Engine,
+    viewer: UserId,
     method: &str,
     path: &str,
 ) -> Result<Value, CpError> {
-    let (code, body) = coordinator_call(st, engine, method, path, None).await?;
+    let (code, body) = coordinator_call(st, engine, viewer, method, path, None).await?;
     if !(200..300).contains(&code) {
         return Err(CpError::BadGateway);
     }
@@ -323,7 +365,7 @@ async fn list_queries(
 ) -> Result<Json<Vec<QueryDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
-    let v = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
+    let v = coordinator_json(&st, &engine, p.user_id, "GET", "/v1/query").await?;
     let list = v
         .as_array()
         .map(|a| a.iter().map(query_dto).collect())
@@ -356,7 +398,7 @@ async fn get_query(
 ) -> Result<Json<QueryDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
-    let v = coordinator_json(&st, &engine, "GET", &format!("/v1/query/{qid}")).await?;
+    let v = coordinator_json(&st, &engine, p.user_id, "GET", &format!("/v1/query/{qid}")).await?;
     Ok(Json(query_detail_dto(&v)))
 }
 
@@ -385,8 +427,15 @@ async fn kill_query(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:kill").await?;
     let engine = load_engine(&st, id).await?;
-    let (code, _) =
-        coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}"), None).await?;
+    let (code, _) = coordinator_call(
+        &st,
+        &engine,
+        p.user_id,
+        "DELETE",
+        &format!("/v1/query/{qid}"),
+        None,
+    )
+    .await?;
     if !(200..300).contains(&code) {
         return Err(CpError::BadGateway);
     }
@@ -415,9 +464,41 @@ async fn get_cluster(
 ) -> Result<Json<ClusterDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
-    let nodes = coordinator_json(&st, &engine, "GET", "/v1/node").await?;
-    let queries = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
-    Ok(Json(cluster_dto(&queries, &nodes)))
+    let queries = coordinator_json(&st, &engine, p.user_id, "GET", "/v1/query").await?;
+    let nodes = cluster_nodes(&st, &engine, p.user_id).await?;
+    Ok(Json(cluster_dto(&queries, nodes)))
+}
+
+/// The coordinator's nodes. `GET /v1/node` answers only on a coordinator that
+/// runs Airlift discovery; the node inventory Trino 483 uses by default does
+/// not serve it (404), which failed the whole summary (KI-194). Then the nodes
+/// come from [`NODES_SQL`], run as `viewer`. `None` when that is refused too:
+/// the summary still reports the queries, and the node count is unknown.
+async fn cluster_nodes(
+    st: &CpState,
+    engine: &Engine,
+    viewer: UserId,
+) -> Result<Option<Vec<NodeDto>>, CpError> {
+    let (code, body) = coordinator_call(st, engine, viewer, "GET", "/v1/node", None).await?;
+    if (200..300).contains(&code) {
+        let v: Value = serde_json::from_slice(&body).map_err(|_| CpError::BadGateway)?;
+        return Ok(Some(nodes_from_failure_detector(&v)));
+    }
+    match crate::engines::run_statement(st, engine, viewer, NODES_SQL).await? {
+        Ok(rows) => Ok(Some(
+            rows.iter()
+                .map(|r| NodeDto {
+                    uri: r.first().and_then(Value::as_str).unwrap_or("").to_string(),
+                    recent_failures: None,
+                })
+                .collect(),
+        )),
+        Err(reason) => {
+            tracing::info!(engine = %engine.name, %reason,
+                "the coordinator would not list its nodes; the node count is unknown");
+            Ok(None)
+        }
+    }
 }
 
 /// OpenAPI fragment for the native-Trino monitor routes merged onto the engines
@@ -604,10 +685,12 @@ mod tests {
     fn cluster_tally_counts_states() {
         let queries = json!([{"state":"RUNNING"},{"state":"RUNNING"},{"state":"QUEUED"},{"state":"FINISHED"}]);
         let nodes = json!([{"uri":"http://w1:8080","recentFailures":0.0}]);
-        let c = cluster_dto(&queries, &nodes);
+        let c = cluster_dto(&queries, Some(nodes_from_failure_detector(&nodes)));
         assert_eq!(c.running, 2);
         assert_eq!(c.queued, 1);
-        assert_eq!(c.nodes.len(), 1);
+        let nodes = c.nodes.expect("nodes");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].recent_failures, Some(0.0));
     }
 
     /// Allow-all `Pdp`, only so `CpState` can be constructed — `monitor_headers`
@@ -665,6 +748,7 @@ mod tests {
             engine_provisioner: None,
             kube: None,
             coordinator_transport: None,
+            engine_token_minter: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
@@ -717,7 +801,9 @@ mod tests {
             .expect("create test secret");
         let mut stored = engine_with_spec(json!({ "trinoConfig": { "auth": {} } }));
         stored.monitor_secret_id = Some(secret_id);
-        let headers = monitor_headers(&st, &stored).await.expect("headers");
+        let headers = monitor_headers(&st, &stored, UserId(Uuid::nil()))
+            .await
+            .expect("headers");
         assert_eq!(
             decoded_basic_credential(&headers),
             "egret-monitor:s3cr3t-rotated-pw"
@@ -733,7 +819,9 @@ mod tests {
         // engine that predates rotation) falls back to the derived password.
         let legacy = engine_with_spec(json!({ "trinoConfig": { "auth": {} } }));
         assert_eq!(legacy.monitor_secret_id, None);
-        let headers = monitor_headers(&st, &legacy).await.expect("headers");
+        let headers = monitor_headers(&st, &legacy, UserId(Uuid::nil()))
+            .await
+            .expect("headers");
         assert_eq!(
             decoded_basic_credential(&headers),
             format!(

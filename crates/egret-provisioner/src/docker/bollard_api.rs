@@ -141,6 +141,7 @@ fn state_of(inspect: &ContainerInspectResponse) -> ContainerState {
 fn create_body(plan: &ContainerPlan, network: &str) -> ContainerCreateBody {
     ContainerCreateBody {
         image: Some(plan.image.clone()),
+        hostname: plan.hostname.clone(),
         env: Some(plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
         labels: Some(plan.labels.clone().into_iter().collect()),
         healthcheck: Some(HealthConfig {
@@ -381,6 +382,7 @@ mod tests {
             env: vec![("A".into(), "b=c".into())],
             labels: [("egret.managed".to_string(), "true".to_string())].into(),
             aliases: vec!["e-trino".into()],
+            hostname: Some("e-coordinator-docker-0".into()),
             files: vec![],
             nano_cpus: Some(1_000_000_000),
             memory_bytes: Some(1 << 30),
@@ -406,6 +408,7 @@ mod tests {
         assert_eq!(b.exposed_ports, None);
         assert_eq!(b.volumes, None);
         assert_eq!(b.env, Some(vec!["A=b=c".to_string()]));
+        assert_eq!(b.hostname.as_deref(), Some("e-coordinator-docker-0"));
         let aliases = b.networking_config.unwrap().endpoints_config.unwrap()["net"]
             .aliases
             .clone();

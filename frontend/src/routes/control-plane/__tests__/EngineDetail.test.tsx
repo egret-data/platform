@@ -205,6 +205,138 @@ describe("EngineDetail — a provisioned engine (control for the external branch
   });
 });
 
+/**
+ * B6: an engine the Docker provisioner runs (KI-195, KI-196, KI-198, KI-199,
+ * KI-200), with a Kubernetes control where the copy differs.
+ */
+describe("EngineDetail — an engine Docker runs", () => {
+  const PODS = [{ name: "egret-engine-egret-engines-b6-coordinator", phase: "Running", ready: true }];
+
+  function mockRuntime(runtime: api.EngineRuntime, spec: api.Engine["spec"] = ENGINE.spec) {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      spec,
+      runtime,
+      endpoint: "analytics-trino-trino.engines.svc:8443",
+      status: { phase: "running", message: null, pods: PODS },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  }
+
+  const JWT_ONLY: api.Engine["spec"] = {
+    ...ENGINE.spec,
+    // As the server stores a JWT engine: no `passwordUsers` key at all.
+    trinoConfig: { coordinator: {}, worker: {}, auth: { jwt: {} } },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegistryList([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesListEngineWorkspaces>,
+    );
+  });
+
+  test("lists containers with no Logs or Exec, and says where the log is (KI-195)", async () => {
+    mockRuntime("docker");
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Container" })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: "Exec" })).not.toBeInTheDocument();
+    expect(screen.getByText(/not available here for an engine Docker runs/i)).toBeInTheDocument();
+    expect(screen.getByText("containers")).toBeInTheDocument();
+  });
+
+  test("a Kubernetes engine keeps Logs and Exec per pod", async () => {
+    mockRuntime("kubernetes");
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Pod" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "Logs" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "Exec" })).toBeInTheDocument();
+  });
+
+  test("Restart and Delete speak of containers, not pods or a Kubernetes cluster (KI-196)", async () => {
+    const user = userEvent.setup();
+    mockRuntime("docker");
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(screen.getByRole("button", { name: "Restart" }));
+    const restart = await screen.findByRole("alertdialog");
+    expect(restart).toHaveTextContent(/restarts the coordinator and worker containers/i);
+    expect(restart).toHaveTextContent(/if the containers are gone, they are created again/i);
+    expect(restart).not.toHaveTextContent(/pods/i);
+    await user.click(within(restart).getByRole("button", { name: "Cancel" }));
+
+    await user.click(screen.getByRole("button", { name: /more engine actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /delete engine/i }));
+    const del = await screen.findByRole("alertdialog");
+    expect(del).toHaveTextContent(/removes the engine's containers/i);
+    expect(del).not.toHaveTextContent(/kubernetes/i);
+  });
+
+  test("the header shows the endpoint the server reports (KI-199)", async () => {
+    mockRuntime("docker");
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByText("analytics-trino-trino.engines.svc:8443")).toBeInTheDocument();
+    expect(screen.queryByText(/analytics-trino-coordinator/)).not.toBeInTheDocument();
+  });
+
+  test("an ingress with no host is refused beside the field, and Save waits for one (KI-200)", async () => {
+    const user = userEvent.setup();
+    mockRuntime("docker", JWT_ONLY);
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=settings&section=security`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(await screen.findByRole("switch", { name: /expose via ingress/i }));
+    expect(screen.getByText(/enter the host the ingress serves/i)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Host" })).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    await user.type(screen.getByRole("textbox", { name: "Host" }), "b6.example.com");
+    expect(screen.queryByText(/enter the host the ingress serves/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  });
+
+  test("Save changes lists only the real changes and saves only once confirmed (KI-198)", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateEngine).mockResolvedValue(ENGINE);
+    mockRuntime("docker", JWT_ONLY);
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=settings&section=security`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(await screen.findByRole("switch", { name: /expose via ingress/i }));
+    await user.type(screen.getByRole("textbox", { name: "Host" }), "b6.example.com");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Review changes" });
+    // The one real change (the new ingress block), and nothing else.
+    expect(dialog).toHaveTextContent("1 field will change.");
+    expect(dialog).toHaveTextContent(/b6\.example\.com/);
+    expect(dialog).not.toHaveTextContent(/passwordUsers/);
+    expect(dialog).toHaveTextContent(/recreates the engine's containers/i);
+    expect(api.updateEngine).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(api.updateEngine).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    const again = await screen.findByRole("dialog", { name: "Review changes" });
+    await user.click(within(again).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.trinoConfig?.auth).toEqual({ jwt: {} });
+    expect(body.trinoConfig?.ingress).toMatchObject({ enabled: true, host: "b6.example.com" });
+  });
+});
+
 describe("EngineDetail — Workspaces tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -535,6 +667,7 @@ describe("EngineDetail — header metadata + page-level actions", () => {
     vi.mocked(api.getEngine).mockResolvedValue({
       ...ENGINE,
       type: "starrocks",
+      endpoint: "analytics-trino-fe-service.engines.svc:9030",
       spec: {
         coordinatorReplicas: 0,
         workerReplicas: 0,
@@ -559,9 +692,9 @@ describe("EngineDetail — header metadata + page-level actions", () => {
     expect(
       screen.getByText("starrocks/fe-ubuntu:3.3-latest"),
     ).toBeInTheDocument();
-    // endpoint host:port derived by kind (StarRocks → {name}-fe-service.{ns}:9030)
+    // endpoint host:port as the server reports it (KI-199)
     expect(
-      screen.getByText("analytics-trino-fe-service.engines:9030"),
+      screen.getByText("analytics-trino-fe-service.engines.svc:9030"),
     ).toBeInTheDocument();
     // delegation mode — none configured. Rendered in exactly two places now:
     // the header meta row and the Overview KPI strip's Auth item.

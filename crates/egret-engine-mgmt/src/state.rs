@@ -66,6 +66,12 @@ pub struct EngineMgmtState {
     /// Docker engine provisioner); `None` otherwise. Consulted only after
     /// `kube`, so a Kubernetes deployment never uses it.
     pub coordinator_transport: Option<Arc<dyn egret_engine_mgmt_api::CoordinatorTransport>>,
+    /// Mints the engine JWT the native monitor presents to a JWT-delegation
+    /// Trino engine, for the user viewing it: such a coordinator has no
+    /// password authenticator, so the `egret-monitor` account cannot sign in
+    /// (KI-194). `None` in tests that do not reach such an engine; the monitor
+    /// of one then answers 400.
+    pub engine_token_minter: Option<Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>>,
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
     pub engine_egret_url: String,
@@ -122,6 +128,31 @@ pub struct EngineMgmtState {
     /// that does not wire one, same contract as `perm_compiler`.
     pub catalog_assignment_compiler:
         Option<Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>>,
+}
+
+/// What runs the engines egret provisions, as the UI needs to know it: which
+/// actions can work (pod logs and exec need Kubernetes) and what to call the
+/// things that run an engine (pods or containers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineRuntime {
+    Kubernetes,
+    Docker,
+}
+
+impl EngineMgmtState {
+    /// `kube` wins, as it does for every coordinator request
+    /// (`monitor::dispatch_coordinator`); a coordinator transport without it is
+    /// the Docker engine provisioner. `None` when nothing provisions engines.
+    pub fn engine_runtime(&self) -> Option<EngineRuntime> {
+        if self.kube.is_some() {
+            Some(EngineRuntime::Kubernetes)
+        } else if self.coordinator_transport.is_some() {
+            Some(EngineRuntime::Docker)
+        } else {
+            None
+        }
+    }
 }
 
 impl FromRef<EngineMgmtState> for SessionService {

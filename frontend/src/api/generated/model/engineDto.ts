@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { EngineRuntime } from './engineRuntime';
 import type { EngineSpecDto } from './engineSpecDto';
 
 export interface EngineDto {
@@ -83,4 +84,10 @@ export interface EngineDto {
      * @nullable
      */
   rangerCredentialId?: string | null;
+  /**
+     * `host:port` clients reach the engine on, as a workspace connection to
+     * it dials it (`Engine::client_endpoint`). External: the declared address.
+     */
+  endpoint: string;
+  runtime?: null | EngineRuntime;
 }

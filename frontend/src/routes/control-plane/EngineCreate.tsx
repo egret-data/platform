@@ -210,6 +210,9 @@ export default function EngineCreate() {
     name.trim().length > 0 &&
     primaryCatalogId.length > 0 &&
     !rawInvalid &&
+    // An ingress without a host was dropped silently (KI-200); the host field
+    // says why Create is blocked.
+    (isStarRocks || !cfg.ingressHostMissing) &&
     !createMutation.isPending &&
     // The engine already exists; a second click would be a 409 at best.
     created === null;

@@ -68,11 +68,14 @@ export const TRINO_FIELD_DEFAULTS = {
   memory: "4Gi",
 };
 
-/** DNS name of the engine's coordinator/FE service, as shown in the Endpoint column. */
+/**
+ * The `host:port` clients reach the engine on, as the server reports it (what
+ * a workspace connection to it dials). Rebuilding it here named a host that
+ * does not resolve (KI-199).
+ */
 function engineEndpoint(engine: Engine): string {
-  if (isExternal(engine)) return `${engine.host}:${engine.port}`;
-  const suffix = engine.type === "starrocks" ? "-fe-service" : "-coordinator";
-  return `${engine.name}${suffix}.${engine.namespace}`;
+  if (engine.endpoint) return engine.endpoint;
+  return isExternal(engine) ? `${engine.host}:${engine.port}` : "—";
 }
 
 // StarRocks per-user delegation mode (Access parity slice 3 + default-on
