@@ -128,6 +128,8 @@ impl From<egret_bi::BiError> for CpError {
             // and whose structured body is served as is.
             E::Overlap { body } => CpError::RuleOverlap(body),
             E::Coded { status, body } => CpError::Coded(status, body),
+            // Only a dataset or metric delete/rename answers this; no control-plane route does.
+            E::InUse { message, .. } => CpError::Conflict(message),
             E::Engine(_) | E::Db(_) => CpError::Internal,
         }
     }

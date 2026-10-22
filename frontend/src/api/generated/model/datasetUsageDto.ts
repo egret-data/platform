@@ -12,4 +12,8 @@
 export interface DatasetUsageDto {
   id: string;
   name: string;
+  /** The chart's viz type, for its icon. */
+  viz_type: string;
+  /** The chart is in the trash (listed only with `include_trashed`). */
+  trashed: boolean;
 }

@@ -35,6 +35,14 @@ pub enum BiError {
         status: StatusCode,
         body: serde_json::Value,
     },
+    /// A delete or rename that would break (or silently delete) the charts built on the object.
+    /// 409 `{error, code: "in_use", charts: [{id, name, viz_type, trashed}]}`, so the UI can name
+    /// them and ask for the typed confirmation that overrides the refusal.
+    #[error("{message}")]
+    InUse {
+        message: String,
+        charts: Vec<crate::dataset::DatasetUsage>,
+    },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -54,10 +62,11 @@ impl BiError {
         BiError::Coded { status, body }
     }
 
-    /// The stable code of a coded or overlap refusal.
+    /// The stable code of a coded, overlap or in-use refusal.
     pub fn code(&self) -> Option<&str> {
         match self {
             BiError::Coded { body, .. } | BiError::Overlap { body } => body["code"].as_str(),
+            BiError::InUse { .. } => Some("in_use"),
             _ => None,
         }
     }
@@ -137,6 +146,19 @@ impl IntoResponse for BiError {
             // The structured body, served as is: its `error` is the sentence.
             BiError::Overlap { body } => (StatusCode::CONFLICT, body),
             BiError::Coded { status, body } => (status, body),
+            BiError::InUse { message, charts } => (
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": message,
+                    "code": "in_use",
+                    "charts": charts.iter().map(|c| serde_json::json!({
+                        "id": c.id,
+                        "name": c.name,
+                        "viz_type": c.viz_type,
+                        "trashed": c.trashed,
+                    })).collect::<Vec<_>>(),
+                }),
+            ),
             BiError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, error("internal error")),
         };
         (status, Json(body)).into_response()

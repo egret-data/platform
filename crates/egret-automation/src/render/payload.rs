@@ -362,6 +362,8 @@ fn bi_err(e: egret_bi::BiError) -> AutomationError {
                 AutomationError::Conflict(msg)
             }
         }
+        // Only a delete or a metric rename answers this; a render never does.
+        egret_bi::BiError::InUse { message, .. } => AutomationError::Conflict(message),
         egret_bi::BiError::Forbidden => {
             AutomationError::Internal("bi repo unexpectedly refused a render read".into())
         }

@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FormatPicker } from "@/components/dataset/FormatPicker";
 import { useDatasetMutations, type ColumnUpdate, type DatasetColumn } from "@/api/datasets";
 
@@ -50,6 +51,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
   const [newDesc, setNewDesc] = useState("");
   const [exprFor, setExprFor] = useState<DatasetColumn | null>(null);
   const [exprVal, setExprVal] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const save = (name: string, body: ColumnUpdate) =>
     updateColumn.mutateAsync({ name, body }).catch((e) => toast.error(String(e)));
@@ -175,7 +177,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                     <div className="flex justify-end gap-1">
                       <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => { setExprFor(c); setExprVal(c.expression ?? ""); }}>Edit</Button>
                       <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                        onClick={() => deleteColumn.mutateAsync(c.column_name).catch((e) => toast.error(String(e)))}>Delete</Button>
+                        onClick={() => setPendingDelete(c.column_name)}>Delete</Button>
                     </div>
                   )}
                 </td>
@@ -231,6 +233,19 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
           </div>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title={`Delete calculated column “${pendingDelete ?? ""}”?`}
+        description="Charts that use this column will stop running until it is removed from them. This cannot be undone."
+        confirmLabel="Delete column"
+        onConfirm={() => {
+          const name = pendingDelete;
+          if (name === null) return;
+          deleteColumn.mutateAsync(name).then(() => toast.success(`Deleted column ${name}`)).catch((e) => toast.error(String(e)));
+        }}
+      />
 
       {/* Edit a calculated column's expression */}
       <Dialog open={exprFor != null} onOpenChange={(o) => { if (!o) setExprFor(null); }}>

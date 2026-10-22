@@ -11,7 +11,7 @@
  * loosely (plain `string`) than the FE unions (`DatasetKind`, `CreateSource`),
  * so aliasing to the generated DTOs would widen them and churn call sites.
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "./client";
 import {
@@ -22,6 +22,7 @@ import {
   datasetsDsCreate,
   datasetsDsDeleteColumn,
   datasetsDsDeleteMetric,
+  datasetsDsDuplicate,
   datasetsDsRefresh,
   datasetsDsSetCertification,
   datasetsDsSetMetricCertification,
@@ -32,10 +33,12 @@ import {
   datasetsDsUpdateColumn,
   datasetsDsUpdateMetric,
   getDatasetsDsGetQueryKey,
+  getDatasetsDsGetQueryOptions,
   getDatasetsDsListQueryKey,
   useDatasetsDsGet,
   useDatasetsDsList,
 } from "./generated/datasets/datasets";
+import { getChartsChListQueryKey } from "./generated/charts/charts";
 
 export type DatasetKind = "physical" | "virtual";
 export interface DatasetSummary {
@@ -57,12 +60,29 @@ export interface DatasetMetric {
   verbose_name: string; description: string; ordinal: number; format: string;
   certified: boolean; certified_by: string; certification_details: string;
 }
-export interface DatasetUsage { id: string; name: string }
+export interface DatasetUsage { id: string; name: string; viz_type: string; trashed: boolean }
 export interface DatasetDetail {
   id: string; name: string; description: string; database_id: string; kind: DatasetKind;
   catalog: string | null; schema: string | null; table: string | null; sql: string | null;
   updated_at: string; columns: DatasetColumn[]; metrics: DatasetMetric[];
   certified: boolean; certified_by: string; certification_details: string;
+  /** Set while the dataset is in the trash; its charts keep running until it is deleted. */
+  deleted_at?: string | null;
+}
+/** The answer to Refresh: the dataset now, and the physical columns the source added or dropped. */
+export interface DatasetRefresh extends DatasetDetail { added_columns: string[]; removed_columns: string[] }
+
+/** A chart named by a refused delete or rename (409 `code: "in_use"`). */
+export interface InUseChart { id: string; name: string; viz_type: string; trashed: boolean }
+/**
+ * The charts a 409 `in_use` refusal names, or `null` for any other error. The server refuses to
+ * delete a dataset or a metric that charts use unless the request carries the object's name as
+ * `confirm` (D8), and refuses a metric rename it cannot rewrite the charts for.
+ */
+export function inUseCharts(e: unknown): InUseChart[] | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.code !== "in_use") return null;
+  const charts = (e.body as { charts?: InUseChart[] } | undefined)?.charts;
+  return Array.isArray(charts) ? charts : [];
 }
 export type CreateSource =
   | { kind: "physical"; catalog?: string | null; schema: string; table: string }
@@ -138,15 +158,32 @@ export function useSetDatasetCertification(ws: string, id: string) {
 
 export function useRefreshDataset(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation<DatasetDetail, ApiError, void>({
-    mutationFn: async () => (await datasetsDsRefresh(ws, id)).data as DatasetDetail,
+  return useMutation<DatasetRefresh, ApiError, void>({
+    mutationFn: async () => (await datasetsDsRefresh(ws, id)).data as DatasetRefresh,
     onSuccess: () => qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) }),
   });
 }
+/**
+ * Delete a dataset. `confirm` is the dataset's name, and the server requires it while charts are
+ * built on the dataset (they are deleted with it); without it such a delete is a 409 `in_use`.
+ */
 export function useDeleteDataset(ws: string) {
   const qc = useQueryClient();
-  return useMutation<void, ApiError, string>({
-    mutationFn: async (id) => { await datasetsDsRemove(ws, id); },
+  return useMutation<void, ApiError, { id: string; confirm?: string }>({
+    mutationFn: async ({ id, confirm }) => { await datasetsDsRemove(ws, id, confirm === undefined ? undefined : { confirm }); },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) });
+      // The charts built on it went with it.
+      qc.invalidateQueries({ queryKey: getChartsChListQueryKey(ws) });
+    },
+  });
+}
+
+/** Copy a dataset (either kind) with its column settings and metrics under a new name. */
+export function useDuplicateDataset(ws: string) {
+  const qc = useQueryClient();
+  return useMutation<DatasetDetail, ApiError, { id: string; name: string }>({
+    mutationFn: async ({ id, name }) => (await datasetsDsDuplicate(ws, id, { name })).data as DatasetDetail,
     onSuccess: () => qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) }),
   });
 }
@@ -209,7 +246,12 @@ export function useDatasetMutations(ws: string, id: string) {
       onError: (_e, _v, ctx) => rollback(ctx as DetailEnvelope | undefined),
       onSettled: inval,
     }),
-    deleteMetric: useMutation({ mutationFn: (metricId: string) => datasetsDsDeleteMetric(ws, id, metricId), onSuccess: inval }),
+    // `confirm` is the metric's name; the server requires it while charts use the metric.
+    deleteMetric: useMutation({
+      mutationFn: (a: { metricId: string; confirm?: string }) =>
+        datasetsDsDeleteMetric(ws, id, a.metricId, a.confirm === undefined ? undefined : { confirm: a.confirm }),
+      onSuccess: inval,
+    }),
     addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddColumn(ws, id, b), onSuccess: inval }),
     updateColumn: useMutation({
       // Regenerating the client for the dashboard-revision endpoints also picked up migration
@@ -227,14 +269,36 @@ export function useDatasetMutations(ws: string, id: string) {
   };
 }
 
-export function useDatasetUsage(ws: string, id: string | null) {
+/** Charts built on the dataset. `includeTrashed` adds the trashed ones: everything a delete takes. */
+export function useDatasetUsage(ws: string, id: string | null, opts?: { includeTrashed?: boolean }) {
+  const all = !!opts?.includeTrashed;
   return useQuery<DatasetUsage[]>({
-    queryKey: ["datasets", ws, "usage", id ?? ""],
+    queryKey: ["datasets", ws, "usage", id ?? "", all],
     enabled: !!id,
     queryFn: async () => {
-      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/datasets/${id}/usage`, { credentials: "same-origin" });
+      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/datasets/${id}/usage${all ? "?include_trashed=true" : ""}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`usage failed: ${r.status}`);
       return (await r.json()) as DatasetUsage[];
     },
   });
+}
+
+/**
+ * For each of `datasetIds`, the names of its columns with the **Filter** switch off (KI-096). A
+ * dashboard's filter-to-card mapping draws on every card at once, so this loads one dataset per
+ * distinct id, and only while `enabled` (a filter's mapping is being edited). An id still loading
+ * or failing has no entry, which offers every column: the switch narrows a picker, and a picker
+ * that cannot load the switch must not come up empty.
+ */
+export function useDatasetsFilterOff(ws: string, datasetIds: string[], enabled: boolean): Map<string, Set<string>> {
+  const ids = [...new Set(datasetIds)].sort();
+  const results = useQueries({
+    queries: ids.map((id) => getDatasetsDsGetQueryOptions(ws, id, { query: { enabled } })),
+  });
+  const out = new Map<string, Set<string>>();
+  results.forEach((r, i) => {
+    const d = (r.data as { data?: DatasetDetail } | undefined)?.data;
+    if (d?.columns) out.set(ids[i], new Set(d.columns.filter((c) => c.filterable === false).map((c) => c.column_name)));
+  });
+  return out;
 }

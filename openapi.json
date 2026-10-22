@@ -25146,6 +25146,15 @@
             }
           },
           {
+            "name": "confirm",
+            "in": "query",
+            "description": "The dataset's exact name. Required while charts are built on it: with it, those charts are deleted too.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -25187,6 +25196,16 @@
           },
           "404": {
             "description": "No such dataset in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Charts are built on this dataset (live or in the trash) and `confirm` is not its name. Body: `{error, code: \"in_use\", charts: [{id, name, viz_type, trashed}]}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -25540,7 +25559,7 @@
             }
           },
           "400": {
-            "description": "Invalid column expression",
+            "description": "Empty column name, or invalid column expression",
             "content": {
               "application/json": {
                 "schema": {
@@ -25926,6 +25945,125 @@
         }
       }
     },
+    "/api/ws/{workspace}/datasets/{id}/duplicate": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "operationId": "ds_duplicate",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dataset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateDataset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The copy: same source, every column setting and metric (not the certification)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No dataset:read on the source, or no dataset:manage (or the database is not granted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dataset in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A dataset with this name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/datasets/{id}/folder": {
       "patch": {
         "tags": [
@@ -26082,7 +26220,7 @@
             }
           },
           "400": {
-            "description": "Invalid metric expression",
+            "description": "Invalid metric expression, or not an aggregate",
             "content": {
               "application/json": {
                 "schema": {
@@ -26191,7 +26329,7 @@
         },
         "responses": {
           "200": {
-            "description": "Metric updated (expression validated)",
+            "description": "Metric updated (expression validated). A rename rewrites the charts that use the metric in the same transaction.",
             "content": {
               "application/json": {
                 "schema": {
@@ -26201,7 +26339,7 @@
             }
           },
           "400": {
-            "description": "Invalid metric expression",
+            "description": "Invalid metric expression, or not an aggregate",
             "content": {
               "application/json": {
                 "schema": {
@@ -26232,6 +26370,16 @@
           },
           "404": {
             "description": "No such dataset, or metric not in this dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name taken, or a rename of a used metric whose old or new name is also a column name (the charts could not be rewritten unambiguously). Body of the latter: `{error, code: \"in_use\", charts}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -26288,6 +26436,15 @@
             }
           },
           {
+            "name": "confirm",
+            "in": "query",
+            "description": "The metric's exact name. Required while charts use it: with it, the metric is deleted and those charts stop running.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -26329,6 +26486,16 @@
           },
           "404": {
             "description": "No such dataset, or metric not in this dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Charts use this metric and `confirm` is not its name. Body: `{error, code: \"in_use\", charts}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -26496,11 +26663,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Physical columns reconciled from the source",
+            "description": "Physical columns reconciled from the source; names the columns added and removed. A column that kept its engine type keeps its Time switch.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DatasetDetailDto"
+                  "$ref": "#/components/schemas/DatasetRefreshDto"
                 }
               }
             }
@@ -26753,6 +26920,15 @@
             }
           },
           {
+            "name": "include_trashed",
+            "in": "query",
+            "description": "Also list charts in the trash: every chart a delete of the dataset would delete with it",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -26763,7 +26939,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Charts that use this dataset",
+            "description": "Charts that use this dataset, live ones first",
             "content": {
               "application/json": {
                 "schema": {
@@ -42672,8 +42848,45 @@
           },
           "certification_details": {
             "type": "string"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the dataset was moved to the trash; null while it is live. Its charts keep running\nuntil it is deleted, and say so."
           }
         }
+      },
+      "DatasetRefreshDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DatasetDetailDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "added_columns",
+              "removed_columns"
+            ],
+            "properties": {
+              "added_columns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "removed_columns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ],
+        "description": "The answer to a Refresh: the dataset as it is now, and which physical columns the source\nadded or dropped since the last sync."
       },
       "DatasetSummaryDto": {
         "type": "object",
@@ -42757,7 +42970,9 @@
         "description": "A chart that uses a dataset (for the dataset Usage view).",
         "required": [
           "id",
-          "name"
+          "name",
+          "viz_type",
+          "trashed"
         ],
         "properties": {
           "id": {
@@ -42765,6 +42980,14 @@
           },
           "name": {
             "type": "string"
+          },
+          "viz_type": {
+            "type": "string",
+            "description": "The chart's viz type, for its icon."
+          },
+          "trashed": {
+            "type": "boolean",
+            "description": "The chart is in the trash (listed only with `include_trashed`)."
           }
         }
       },
@@ -42941,6 +43164,19 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "DuplicateDataset": {
+        "type": "object",
+        "description": "Body of `POST /datasets/{id}/duplicate`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the copy; unique in the workspace."
           }
         }
       },

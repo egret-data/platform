@@ -31,9 +31,14 @@ import type {
   CreateDataset,
   DatasetDataBody,
   DatasetDetailDto,
+  DatasetRefreshDto,
   DatasetSummaryDto,
   DatasetUsageDto,
+  DatasetsDsDeleteMetricParams,
   DatasetsDsListParams,
+  DatasetsDsRemoveParams,
+  DatasetsDsUsageParams,
+  DuplicateDataset,
   ErrorBody,
   MetricBody,
   SetDatasetCertification,
@@ -558,6 +563,11 @@ export type datasetsDsRemoveResponse404 = {
   status: 404
 }
 
+export type datasetsDsRemoveResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type datasetsDsRemoveResponse500 = {
   data: ErrorBody
   status: 500
@@ -566,25 +576,34 @@ export type datasetsDsRemoveResponse500 = {
 export type datasetsDsRemoveResponseSuccess = (datasetsDsRemoveResponse200) & {
   headers: Headers;
 };
-export type datasetsDsRemoveResponseError = (datasetsDsRemoveResponse401 | datasetsDsRemoveResponse403 | datasetsDsRemoveResponse404 | datasetsDsRemoveResponse500) & {
+export type datasetsDsRemoveResponseError = (datasetsDsRemoveResponse401 | datasetsDsRemoveResponse403 | datasetsDsRemoveResponse404 | datasetsDsRemoveResponse409 | datasetsDsRemoveResponse500) & {
   headers: Headers;
 };
 
 export type datasetsDsRemoveResponse = (datasetsDsRemoveResponseSuccess | datasetsDsRemoveResponseError)
 
 export const getDatasetsDsRemoveUrl = (workspace: string,
-    id: string,) => {
+    id: string,
+    params?: DatasetsDsRemoveParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
 }
 
 export const datasetsDsRemove = async (workspace: string,
-    id: string, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsRemoveResponse> => {
+    id: string,
+    params?: DatasetsDsRemoveParams, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsRemoveResponse> => {
 
-  return customInstance<datasetsDsRemoveResponse>(getDatasetsDsRemoveUrl(workspace,id),
+  return customInstance<datasetsDsRemoveResponse>(getDatasetsDsRemoveUrl(workspace,id,params),
   {
     ...options,
     method: 'DELETE'
@@ -598,8 +617,8 @@ export const datasetsDsRemove = async (workspace: string,
 
 
 export const getDatasetsDsRemoveMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string;params?: DatasetsDsRemoveParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string;params?: DatasetsDsRemoveParams}, TContext> => {
 
 const mutationKey = ['datasetsDsRemove'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -611,10 +630,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsRemove>>, {workspace: string;id: string}> = (props) => {
-          const {workspace,id} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsRemove>>, {workspace: string;id: string;params?: DatasetsDsRemoveParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
 
-          return  datasetsDsRemove(workspace,id,requestOptions)
+          return  datasetsDsRemove(workspace,id,params,requestOptions)
         }
 
 
@@ -629,11 +648,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type DatasetsDsRemoveMutationError = ErrorBody
 
     export const useDatasetsDsRemove = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsRemove>>, TError,{workspace: string;id: string;params?: DatasetsDsRemoveParams}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof datasetsDsRemove>>,
         TError,
-        {workspace: string;id: string},
+        {workspace: string;id: string;params?: DatasetsDsRemoveParams},
         TContext
       > => {
       return useMutation(getDatasetsDsRemoveMutationOptions(options), queryClient);
@@ -1380,6 +1399,117 @@ export const useDatasetsDsData = <TError = ErrorBody,
       > => {
       return useMutation(getDatasetsDsDataMutationOptions(options), queryClient);
     }
+    export type datasetsDsDuplicateResponse200 = {
+  data: DatasetDetailDto
+  status: 200
+}
+
+export type datasetsDsDuplicateResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type datasetsDsDuplicateResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type datasetsDsDuplicateResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsDuplicateResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsDuplicateResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type datasetsDsDuplicateResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type datasetsDsDuplicateResponseSuccess = (datasetsDsDuplicateResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsDuplicateResponseError = (datasetsDsDuplicateResponse400 | datasetsDsDuplicateResponse401 | datasetsDsDuplicateResponse403 | datasetsDsDuplicateResponse404 | datasetsDsDuplicateResponse409 | datasetsDsDuplicateResponse500) & {
+  headers: Headers;
+};
+
+export type datasetsDsDuplicateResponse = (datasetsDsDuplicateResponseSuccess | datasetsDsDuplicateResponseError)
+
+export const getDatasetsDsDuplicateUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/duplicate`
+}
+
+export const datasetsDsDuplicate = async (workspace: string,
+    id: string,
+    duplicateDataset: DuplicateDataset, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsDuplicateResponse> => {
+
+  return customInstance<datasetsDsDuplicateResponse>(getDatasetsDsDuplicateUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(duplicateDataset)
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsDuplicateMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDuplicate>>, TError,{workspace: string;id: string;data: DuplicateDataset}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDuplicate>>, TError,{workspace: string;id: string;data: DuplicateDataset}, TContext> => {
+
+const mutationKey = ['datasetsDsDuplicate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsDuplicate>>, {workspace: string;id: string;data: DuplicateDataset}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  datasetsDsDuplicate(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DatasetsDsDuplicateMutationResult = NonNullable<Awaited<ReturnType<typeof datasetsDsDuplicate>>>
+    export type DatasetsDsDuplicateMutationBody = DuplicateDataset
+    export type DatasetsDsDuplicateMutationError = ErrorBody
+
+    export const useDatasetsDsDuplicate = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDuplicate>>, TError,{workspace: string;id: string;data: DuplicateDataset}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof datasetsDsDuplicate>>,
+        TError,
+        {workspace: string;id: string;data: DuplicateDataset},
+        TContext
+      > => {
+      return useMutation(getDatasetsDsDuplicateMutationOptions(options), queryClient);
+    }
     export type datasetsDsSetFolderResponse200 = {
   data: Ack
   status: 200
@@ -1612,6 +1742,11 @@ export type datasetsDsUpdateMetricResponse404 = {
   status: 404
 }
 
+export type datasetsDsUpdateMetricResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type datasetsDsUpdateMetricResponse500 = {
   data: ErrorBody
   status: 500
@@ -1620,7 +1755,7 @@ export type datasetsDsUpdateMetricResponse500 = {
 export type datasetsDsUpdateMetricResponseSuccess = (datasetsDsUpdateMetricResponse200) & {
   headers: Headers;
 };
-export type datasetsDsUpdateMetricResponseError = (datasetsDsUpdateMetricResponse400 | datasetsDsUpdateMetricResponse401 | datasetsDsUpdateMetricResponse403 | datasetsDsUpdateMetricResponse404 | datasetsDsUpdateMetricResponse500) & {
+export type datasetsDsUpdateMetricResponseError = (datasetsDsUpdateMetricResponse400 | datasetsDsUpdateMetricResponse401 | datasetsDsUpdateMetricResponse403 | datasetsDsUpdateMetricResponse404 | datasetsDsUpdateMetricResponse409 | datasetsDsUpdateMetricResponse500) & {
   headers: Headers;
 };
 
@@ -1715,6 +1850,11 @@ export type datasetsDsDeleteMetricResponse404 = {
   status: 404
 }
 
+export type datasetsDsDeleteMetricResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type datasetsDsDeleteMetricResponse500 = {
   data: ErrorBody
   status: 500
@@ -1723,7 +1863,7 @@ export type datasetsDsDeleteMetricResponse500 = {
 export type datasetsDsDeleteMetricResponseSuccess = (datasetsDsDeleteMetricResponse200) & {
   headers: Headers;
 };
-export type datasetsDsDeleteMetricResponseError = (datasetsDsDeleteMetricResponse401 | datasetsDsDeleteMetricResponse403 | datasetsDsDeleteMetricResponse404 | datasetsDsDeleteMetricResponse500) & {
+export type datasetsDsDeleteMetricResponseError = (datasetsDsDeleteMetricResponse401 | datasetsDsDeleteMetricResponse403 | datasetsDsDeleteMetricResponse404 | datasetsDsDeleteMetricResponse409 | datasetsDsDeleteMetricResponse500) & {
   headers: Headers;
 };
 
@@ -1731,19 +1871,28 @@ export type datasetsDsDeleteMetricResponse = (datasetsDsDeleteMetricResponseSucc
 
 export const getDatasetsDsDeleteMetricUrl = (workspace: string,
     id: string,
-    metricId: string,) => {
+    metricId: string,
+    params?: DatasetsDsDeleteMetricParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}`
 }
 
 export const datasetsDsDeleteMetric = async (workspace: string,
     id: string,
-    metricId: string, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsDeleteMetricResponse> => {
+    metricId: string,
+    params?: DatasetsDsDeleteMetricParams, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsDeleteMetricResponse> => {
 
-  return customInstance<datasetsDsDeleteMetricResponse>(getDatasetsDsDeleteMetricUrl(workspace,id,metricId),
+  return customInstance<datasetsDsDeleteMetricResponse>(getDatasetsDsDeleteMetricUrl(workspace,id,metricId,params),
   {
     ...options,
     method: 'DELETE'
@@ -1757,8 +1906,8 @@ export const datasetsDsDeleteMetric = async (workspace: string,
 
 
 export const getDatasetsDsDeleteMetricMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string;params?: DatasetsDsDeleteMetricParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string;params?: DatasetsDsDeleteMetricParams}, TContext> => {
 
 const mutationKey = ['datasetsDsDeleteMetric'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1770,10 +1919,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, {workspace: string;id: string;metricId: string}> = (props) => {
-          const {workspace,id,metricId} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, {workspace: string;id: string;metricId: string;params?: DatasetsDsDeleteMetricParams}> = (props) => {
+          const {workspace,id,metricId,params} = props ?? {};
 
-          return  datasetsDsDeleteMetric(workspace,id,metricId,requestOptions)
+          return  datasetsDsDeleteMetric(workspace,id,metricId,params,requestOptions)
         }
 
 
@@ -1788,11 +1937,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type DatasetsDsDeleteMetricMutationError = ErrorBody
 
     export const useDatasetsDsDeleteMetric = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteMetric>>, TError,{workspace: string;id: string;metricId: string;params?: DatasetsDsDeleteMetricParams}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof datasetsDsDeleteMetric>>,
         TError,
-        {workspace: string;id: string;metricId: string},
+        {workspace: string;id: string;metricId: string;params?: DatasetsDsDeleteMetricParams},
         TContext
       > => {
       return useMutation(getDatasetsDsDeleteMetricMutationOptions(options), queryClient);
@@ -1901,7 +2050,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getDatasetsDsSetMetricCertificationMutationOptions(options), queryClient);
     }
     export type datasetsDsRefreshResponse200 = {
-  data: DatasetDetailDto
+  data: DatasetRefreshDto
   status: 200
 }
 
@@ -2225,18 +2374,27 @@ export type datasetsDsUsageResponseError = (datasetsDsUsageResponse403 | dataset
 export type datasetsDsUsageResponse = (datasetsDsUsageResponseSuccess | datasetsDsUsageResponseError)
 
 export const getDatasetsDsUsageUrl = (workspace: string,
-    id: string,) => {
+    id: string,
+    params?: DatasetsDsUsageParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`
 }
 
 export const datasetsDsUsage = async (workspace: string,
-    id: string, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsUsageResponse> => {
+    id: string,
+    params?: DatasetsDsUsageParams, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsUsageResponse> => {
 
-  return customInstance<datasetsDsUsageResponse>(getDatasetsDsUsageUrl(workspace,id),
+  return customInstance<datasetsDsUsageResponse>(getDatasetsDsUsageUrl(workspace,id,params),
   {
     ...options,
     method: 'GET'
@@ -2250,24 +2408,26 @@ export const datasetsDsUsage = async (workspace: string,
 
 
 export const getDatasetsDsUsageQueryKey = (workspace: string,
-    id: string,) => {
+    id: string,
+    params?: DatasetsDsUsageParams,) => {
     return [
-    `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`
+    `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`, ...(params ? [params] : [])
     ] as const;
     }
 
 
 export const getDatasetsDsUsageQueryOptions = <TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(workspace: string,
-    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+    id: string,
+    params?: DatasetsDsUsageParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getDatasetsDsUsageQueryKey(workspace,id);
+  const queryKey =  queryOptions?.queryKey ?? getDatasetsDsUsageQueryKey(workspace,id,params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof datasetsDsUsage>>> = ({ signal }) => datasetsDsUsage(workspace,id, { signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof datasetsDsUsage>>> = ({ signal }) => datasetsDsUsage(workspace,id,params, { signal, ...requestOptions });
 
 
 
@@ -2282,7 +2442,8 @@ export type DatasetsDsUsageQueryError = ErrorBody
 
 export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
  workspace: string,
-    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
+    id: string,
+    params: undefined |  DatasetsDsUsageParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
         DefinedInitialDataOptions<
           Awaited<ReturnType<typeof datasetsDsUsage>>,
           TError,
@@ -2293,7 +2454,8 @@ export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsU
   ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
  workspace: string,
-    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
+    id: string,
+    params?: DatasetsDsUsageParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
         UndefinedInitialDataOptions<
           Awaited<ReturnType<typeof datasetsDsUsage>>,
           TError,
@@ -2304,17 +2466,19 @@ export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsU
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
  workspace: string,
-    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+    id: string,
+    params?: DatasetsDsUsageParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 
 export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
  workspace: string,
-    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+    id: string,
+    params?: DatasetsDsUsageParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
-  const queryOptions = getDatasetsDsUsageQueryOptions(workspace,id,options)
+  const queryOptions = getDatasetsDsUsageQueryOptions(workspace,id,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

@@ -19,7 +19,8 @@ import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/compon
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
-import { parseFormat } from "@/components/dataset/FormatPicker";
+import { datasetColumnDefaults, withDatasetDefaults } from "@/components/dataset/columnDefaults";
+import { pickableColumns } from "@/components/dataset/pickableColumns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -304,7 +305,9 @@ export default function ChartExplore() {
         // table's. It also stops the group repeating the section's own "Columns" heading directly
         // above it, which is what a plain "Columns" here read as.
         label: detail.data?.name ?? "Columns",
-        options: columns.map((c) => c.column_name),
+        // With a metric these columns are the GROUP BY, so Dimension-off columns drop out, as in
+        // the Data tab's own picker (KI-096); without one the table lists records and keeps all.
+        options: pickableColumns(columns, { recordsView: !cfg.metrics?.length, inUse: [cfg] }).map((c) => c.column_name),
         selected: cfg.columns ?? [],
         // The Data tab's list is built from this exact array and has read `verbose_name` since
         // #444. The options here are bare strings, so the naming has to travel beside them or the
@@ -325,28 +328,14 @@ export default function ChartExplore() {
     // `descConfig` is rebuilt on every render, so key on what is actually read out of it.
   }, [viz, columns, metrics, (descConfig as { columns?: string[] }).columns, (descConfig as { metrics?: string[] }).metrics]);
 
-  // Dataset-level formats (column & metric) become chart DEFAULTS: they render
-  // unless the chart has its own per-column override. Applied at render time
-  // only (never baked into saved params) so editing the dataset stays live.
-  const datasetDefaults = useMemo(() => {
-    const m: Record<string, ColumnFormat> = {};
-    for (const c of detail.data?.columns ?? []) {
-      const cf: ColumnFormat = { ...parseFormat(c.format) };
-      if (!cf.view_as) {
-        if (c.semantic_type === "email") cf.view_as = "email";
-        else if (c.semantic_type === "url") cf.view_as = "link";
-        else if (c.semantic_type === "image") cf.view_as = "image";
-      }
-      if (c.semantic_type === "currency" && !cf.number_style) { cf.number_style = "currency"; cf.currency = cf.currency ?? "USD"; }
-      if (Object.keys(cf).length) m[c.column_name] = cf;
-    }
-    for (const mt of detail.data?.metrics ?? []) {
-      const cf = parseFormat(mt.format);
-      if (Object.keys(cf).length) m[mt.metric_name] = cf;
-    }
-    return m;
-  }, [detail.data]);
-  const effCS = useMemo(() => ({ ...datasetDefaults, ...columnSettings }), [datasetDefaults, columnSettings]);
+  // Dataset-level formats and display names (column & metric) become chart DEFAULTS: they
+  // render unless the chart has its own per-column override. Applied at render time only (never
+  // baked into saved params) so editing the dataset stays live. See `datasetColumnDefaults`.
+  const datasetDefaults = useMemo(
+    () => datasetColumnDefaults(detail.data?.columns ?? [], detail.data?.metrics ?? []),
+    [detail.data],
+  );
+  const effCS = useMemo(() => withDatasetDefaults(datasetDefaults, columnSettings), [datasetDefaults, columnSettings]);
 
   // "View SQL" disclosure: build-only, fetched lazily (only while the
   // disclosure is open) via the `charts`-gated ch_data endpoint — independent
@@ -645,6 +634,11 @@ export default function ChartExplore() {
     );
   }
 
+  // The field pickers offer only the columns with Dimension on, plus any the chart already uses
+  // (KI-096); a records view lists every column. See `pickableColumns`.
+  const recordsView = viz === "object" || (viz === "table" && !((descConfig as { metrics?: string[] }).metrics?.length));
+  const pickerColumns = pickableColumns(columns, { recordsView, inUse: [descConfig, specForRun()] });
+
   return (
     <div className="flex h-full min-h-0 gap-0">
       {/* Left panel */}
@@ -715,7 +709,7 @@ export default function ChartExplore() {
 
             {descriptor && (
               <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
-                columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                columns={pickerColumns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
                 temporalUnits={shownUnits()} columnSettings={columnSettings} unitRow={unitRow} tab="data" />
             )}
 
@@ -800,7 +794,7 @@ export default function ChartExplore() {
             {descriptor && (
               <>
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
-                  columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                  columns={pickerColumns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
                   temporalUnits={shownUnits()} columnSettings={columnSettings} unitRow={unitRow} tab="display" hasMoreBelow />
                 {/* Formatting, table columns and conditional formatting edit settings the
                     shell owns, not any one viz — so they sit beside the descriptor's own
@@ -848,7 +842,7 @@ export default function ChartExplore() {
             <TabsContent value="axes" className="space-y-4">
               {descriptor && (
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
-                  columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                  columns={pickerColumns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
                   temporalUnits={shownUnits()} columnSettings={columnSettings} unitRow={unitRow} tab="axes" />
               )}
             </TabsContent>
@@ -930,6 +924,17 @@ export default function ChartExplore() {
             </details>
           )}
         />
+
+        {/* KI-111: trashing a dataset hides it but deletes nothing, so its charts keep running.
+            Without this the chart's owner had no way to learn that the dataset is on its way
+            out — the next thing they would see is the chart gone, when it is deleted. */}
+        {detail.data?.deleted_at && (
+          <Alert>
+            <AlertDescription>
+              This chart's dataset “{detail.data.name}” is in the Trash. The chart keeps working until the dataset is deleted; restore the dataset from the Trash to keep it.
+            </AlertDescription>
+          </Alert>
+        )}
 
         {(() => {
           const pivotCfg = descConfig as unknown as PivotConfig;

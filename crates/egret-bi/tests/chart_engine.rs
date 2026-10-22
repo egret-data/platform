@@ -166,3 +166,44 @@ async fn pivot_rollup_x_rollup_runs_on_trino() {
         "expected per-priority subtotals, sql=\n{sql}"
     );
 }
+
+/// KI-100: a metric must be an aggregate. `totalprice` is a valid expression on its own and used
+/// to be stored, then failed inside every chart with "must be an aggregate expression or appear
+/// in GROUP BY clause". The aggregate probe refuses it on save; an aggregate and a constant pass.
+#[tokio::test]
+async fn a_non_aggregate_metric_is_refused_on_save() {
+    let Some(spec) = trino_spec() else {
+        eprintln!("skip: EGRET_TEST_TRINO_URL unset");
+        return;
+    };
+    let err = egret_bi::validate_metric_expression(&spec, &orders(), "totalprice")
+        .await
+        .unwrap_err();
+    match err {
+        egret_bi::BiError::BadRequest(m) => {
+            assert!(
+                m.starts_with("metric expression must be an aggregate"),
+                "{m}"
+            )
+        }
+        other => panic!("expected a 400, got {other:?}"),
+    }
+    for ok in [
+        "sum(totalprice)",
+        "count(*)",
+        "sum(totalprice) / count(*)",
+        "1",
+    ] {
+        egret_bi::validate_metric_expression(&spec, &orders(), ok)
+            .await
+            .unwrap_or_else(|e| panic!("{ok}: {e:?}"));
+    }
+    // A typo is still the engine's own error, not the aggregate message.
+    let err = egret_bi::validate_metric_expression(&spec, &orders(), "sum(nope)")
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(err, egret_bi::BiError::BadRequest(ref m) if m.contains("aggregate")),
+        "{err:?}"
+    );
+}

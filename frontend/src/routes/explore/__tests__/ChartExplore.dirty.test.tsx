@@ -198,7 +198,9 @@ describe("ChartExplore unsaved-changes guard", () => {
   // Back to "the result is already there" for every test that does not ask otherwise.
   afterEach(() => { ctl.lateResult = false; ctl.failed = false; });
 
-  it("leaves a freshly loaded chart clean, so nothing cancels an unload", async () => {
+  // The first test pays for the cold import of the whole route (measured 5.5 s alone), the same
+  // reason `ChartExplore.mount.test.tsx` gives its first test 15 s.
+  it("leaves a freshly loaded chart clean, so nothing cancels an unload", { timeout: 15_000 }, async () => {
     await mountChart("c-bar");
     expect(await screen.findByDisplayValue("1000")).toBeInTheDocument();
     // Let every load-time effect settle before asking — the question is about the state the
