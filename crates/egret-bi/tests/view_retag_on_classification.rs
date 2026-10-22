@@ -116,9 +116,14 @@ async fn setup() -> Option<Fx> {
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = &db.pool;
+    // Every test in this binary seeds this def at once, against one database.
+    // `ON CONFLICT (id)` makes only the primary key the arbiter, so a racer that
+    // misses the other's uncommitted `id` still collides on the `name` UNIQUE
+    // index and raises `authz_service_defs_name_key` instead of doing nothing.
+    // With no conflict target every unique index is an arbiter.
     sqlx::query(
         "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1, $2, '{}'::jsonb) \
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(950951_i64)
     .bind("trino_vr")

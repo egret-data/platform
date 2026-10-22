@@ -5254,9 +5254,23 @@ mod tests {
         shim.display().to_string()
     }
 
-    /// An object store that answers every read, after `delay`, with an
-    /// unreachable-S3 error.
-    struct LateDown(std::time::Duration);
+    /// An object store that answers every read with an unreachable-S3 error:
+    /// at once (`None`), or once the file at the path exists -- an EVENT the
+    /// test controls, such as a `docker cp` shim saying it has started, not a
+    /// delay that a slow process spawn on a loaded runner can outlast.
+    struct LateDown(Option<std::path::PathBuf>);
+
+    impl LateDown {
+        /// Wait for the file, bounded so a shim that never starts fails the
+        /// test on its own assertion instead of hanging the suite.
+        async fn wait(&self) {
+            let Some(path) = &self.0 else { return };
+            let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !path.exists() && tokio::time::Instant::now() < give_up {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl egret_storage::ObjectStore for LateDown {
@@ -5294,7 +5308,7 @@ mod tests {
             Box<dyn tokio::io::AsyncBufRead + Send + Unpin>,
             egret_storage::StorageError,
         > {
-            tokio::time::sleep(self.0).await;
+            self.wait().await;
             Err(egret_storage::StorageError::S3("connection refused".into()))
         }
         async fn put_stream(
@@ -5305,7 +5319,7 @@ mod tests {
         ) -> std::result::Result<u64, egret_storage::StorageError> {
             let mut first = [0u8; 1];
             let _ = tokio::io::AsyncReadExt::read(body, &mut first).await;
-            tokio::time::sleep(self.0).await;
+            self.wait().await;
             Err(egret_storage::StorageError::S3(format!(
                 "{uri}: connection refused"
             )))
@@ -5325,7 +5339,7 @@ mod tests {
         let shim = cp_shim(&dir, &format!("cat {}", tar.display()));
         let task = leased(1);
         let down = std::sync::Arc::new(crate::storage::FileStore {
-            store: std::sync::Arc::new(LateDown(std::time::Duration::ZERO)),
+            store: std::sync::Arc::new(LateDown(None)),
             ..std::sync::Arc::into_inner(mem_files()).unwrap()
         });
         let mut r = CommandsResult::default();
@@ -5365,7 +5379,7 @@ mod tests {
         let shim = cp_shim(&dir, &format!("cat {}", tree_path.display()));
         let task = leased(1);
         let down = std::sync::Arc::new(crate::storage::FileStore {
-            store: std::sync::Arc::new(LateDown(std::time::Duration::ZERO)),
+            store: std::sync::Arc::new(LateDown(None)),
             ..std::sync::Arc::into_inner(mem_files()).unwrap()
         });
         let mut r = CommandsResult::default();
@@ -5473,16 +5487,22 @@ mod tests {
         let dir = staging("cp-kill");
         let pid = dir.join("pid");
         let log = dir.join("log");
+        // The store fails only once the shim has written its pid, so the
+        // failure always lands on a `docker cp` that is running and reading.
+        // It used to fail 500 ms after the call, a race with the shim's own
+        // start: a spawn slower than that under load killed `sh` before it
+        // wrote the pid, and the test failed reading it. The pid is written
+        // to a side file and renamed, so its appearance means it is whole.
         let shim = cp_shim(
             &dir,
             &format!(
-                "echo $$ > {pid}; cat > /dev/null; echo eof >> {log}",
+                "echo $$ > {pid}.tmp; mv {pid}.tmp {pid}; cat > /dev/null; echo eof >> {log}",
                 pid = pid.display(),
                 log = log.display()
             ),
         );
         let files = std::sync::Arc::new(crate::storage::FileStore {
-            store: std::sync::Arc::new(LateDown(std::time::Duration::from_millis(500))),
+            store: std::sync::Arc::new(LateDown(Some(pid.clone()))),
             bucket: "egret-test".into(),
             prefix: "workflow/".into(),
             caps: crate::storage::Caps::default(),

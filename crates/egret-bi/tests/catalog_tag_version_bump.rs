@@ -145,9 +145,14 @@ async fn attach_catalog(pool: &sqlx::PgPool, engine_id: Uuid, catalog_id: Uuid) 
 
 async fn create_service(pool: &sqlx::PgPool) -> i64 {
     // Seed a minimal service-def + service directly (no full policy seam needed).
+    // Both tests in this binary seed this def at once, against one database.
+    // `ON CONFLICT (id)` makes only the primary key the arbiter, so a racer that
+    // misses the other's uncommitted `id` still collides on the `name` UNIQUE
+    // index and raises `authz_service_defs_name_key` instead of doing nothing.
+    // With no conflict target every unique index is an arbiter.
     sqlx::query(
         "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,'{}'::jsonb) \
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(950950_i64)
     .bind("trino_tv")
