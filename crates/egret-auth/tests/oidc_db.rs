@@ -24,6 +24,7 @@ fn claims(sub: &str, email: &str, groups: &[&str]) -> OidcClaims {
     OidcClaims {
         subject: sub.into(),
         email: email.into(),
+        email_verified: true,
         name: "T".into(),
         groups: groups.iter().map(|s| s.to_string()).collect(),
     }

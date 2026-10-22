@@ -80,3 +80,77 @@ async fn workspace_roles_include_direct_permissions() {
         "platform-scope roles are excluded"
     );
 }
+
+/// KI-127: a role that inherits lists what it holds through its parent chain,
+/// so the workspace page can count what the Control Plane role page counts.
+/// `data_api_invoker` is still not offered, even as some role's parent.
+#[tokio::test]
+async fn an_inheriting_role_lists_its_inherited_permissions() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let repo = AccessViewsRepo::new(db.clone());
+    let viewer: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_viewer'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let mid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description, parent_role_id) \
+         VALUES ('workspace', $1, '', $2) RETURNING id",
+    )
+    .bind(uniq("mid"))
+    .bind(viewer)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let leaf: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description, parent_role_id) \
+         VALUES ('workspace', $1, '', $2) RETURNING id",
+    )
+    .bind(uniq("leaf"))
+    .bind(mid)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    for (role, key) in [
+        (mid, "chart:manage"),
+        (leaf, "dashboard:manage"),
+        (leaf, "chart:read"),
+    ] {
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role)
+            .bind(key)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let viewer_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT permission FROM role_permissions WHERE role_id = $1 ORDER BY permission",
+    )
+    .bind(viewer)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+
+    let roles = repo.list_workspace_roles_with_perms().await.unwrap();
+    let leaf = roles.iter().find(|r| r.id == leaf).expect("leaf listed");
+
+    let mut expected: Vec<String> = viewer_keys
+        .into_iter()
+        .chain(["chart:manage".to_string()])
+        .filter(|k| k != "chart:read" && k != "dashboard:manage")
+        .collect();
+    expected.sort();
+    let inherited: Vec<String> = leaf
+        .inherited_permissions
+        .iter()
+        .map(|p| p.key.clone())
+        .collect();
+    assert_eq!(
+        inherited, expected,
+        "the parent's and the grandparent's keys, without the leaf's own"
+    );
+    assert!(!roles.iter().any(|r| r.name == "data_api_invoker"));
+}

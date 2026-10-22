@@ -87,6 +87,9 @@ pub struct AuditRow {
     pub reasons: Option<Vec<String>>,
     pub detail: serde_json::Value,
     pub impersonator: Option<Uuid>,
+    /// The actor's current email (KI-018); `None` for a system event or a
+    /// deleted user. Read at query time, not stored in the row.
+    pub actor_email: Option<String>,
 }
 
 /// Filters for the query API. `None` = unfiltered.
@@ -99,6 +102,9 @@ pub struct AuditQuery {
     pub workspace: Option<Uuid>,
     pub from: Option<chrono::DateTime<chrono::Utc>>,
     pub to: Option<chrono::DateTime<chrono::Utc>>,
+    /// Leave out authorization decisions that allowed the call (KI-017):
+    /// every page view writes one, and they bury the changes and denials.
+    pub hide_allowed: bool,
     /// Keyset cursor: return rows strictly older than (ts, id).
     pub before: Option<(chrono::DateTime<chrono::Utc>, i64)>,
     pub limit: i64,
@@ -171,36 +177,42 @@ impl AuditStore {
 
     /// Filtered, keyset-paginated, newest-first query.
     pub async fn query(&self, q: &AuditQuery) -> Result<Vec<AuditRow>, sqlx::Error> {
-        let mut qb = sqlx::QueryBuilder::new("SELECT * FROM audit.audit_log WHERE 1=1");
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT a.*, u.email::text AS actor_email FROM audit.audit_log a \
+             LEFT JOIN public.users u ON u.id = a.actor_user_id WHERE 1=1",
+        );
         if let Some(a) = q.actor {
-            qb.push(" AND actor_user_id = ").push_bind(a);
+            qb.push(" AND a.actor_user_id = ").push_bind(a);
         }
         if let Some(a) = &q.action {
-            qb.push(" AND action = ").push_bind(a.clone());
+            qb.push(" AND a.action = ").push_bind(a.clone());
         }
         if let Some(k) = &q.kind {
-            qb.push(" AND kind = ").push_bind(k.clone());
+            qb.push(" AND a.kind = ").push_bind(k.clone());
         }
         if let Some(d) = &q.decision {
-            qb.push(" AND decision = ").push_bind(d.clone());
+            qb.push(" AND a.decision = ").push_bind(d.clone());
+        }
+        if q.hide_allowed {
+            qb.push(" AND NOT (a.kind = 'decision' AND a.decision IS NOT DISTINCT FROM 'allow')");
         }
         if let Some(w) = q.workspace {
-            qb.push(" AND workspace_id = ").push_bind(w);
+            qb.push(" AND a.workspace_id = ").push_bind(w);
         }
         if let Some(f) = q.from {
-            qb.push(" AND ts >= ").push_bind(f);
+            qb.push(" AND a.ts >= ").push_bind(f);
         }
         if let Some(t) = q.to {
-            qb.push(" AND ts <= ").push_bind(t);
+            qb.push(" AND a.ts <= ").push_bind(t);
         }
         if let Some((ts, id)) = q.before {
-            qb.push(" AND (ts, id) < (")
+            qb.push(" AND (a.ts, a.id) < (")
                 .push_bind(ts)
                 .push(", ")
                 .push_bind(id)
                 .push(")");
         }
-        qb.push(" ORDER BY ts DESC, id DESC LIMIT ")
+        qb.push(" ORDER BY a.ts DESC, a.id DESC LIMIT ")
             .push_bind(q.limit.clamp(1, 500));
         qb.build_query_as::<AuditRow>()
             .fetch_all(&self.db.pool)

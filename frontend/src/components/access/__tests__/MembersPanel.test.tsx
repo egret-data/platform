@@ -15,8 +15,14 @@ vi.mock("@/api/members", async () => {
     useWorkspaceRoles: vi.fn(),
     useAddMember: vi.fn(),
     useRemoveMember: vi.fn(),
+    useWorkspaceInvites: vi.fn(),
+    useDeleteInvite: vi.fn(),
   };
 });
+vi.mock("@/api/hooks", async () => ({
+  ...(await vi.importActual<typeof import("@/api/hooks")>("@/api/hooks")),
+  useAuthConfig: () => ({ data: { oidc_enabled: true } }),
+}));
 vi.mock("@/auth/useAuth", () => ({
   useAuth: () => ({ me: { id: "me", email: "me@example.com", platform_roles: ["platform_admin"] } }),
 }));
@@ -46,6 +52,7 @@ const MEMBERS: WorkspaceMember[] = [
 ];
 
 const removeMutateAsync = vi.fn().mockResolvedValue(undefined);
+const deleteInviteMutate = vi.fn();
 
 function renderPanel() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -79,6 +86,14 @@ describe("MembersPanel", () => {
       mutate: vi.fn(),
       mutateAsync: removeMutateAsync,
     } as unknown as ReturnType<typeof members.useRemoveMember>);
+    vi.mocked(members.useWorkspaceInvites).mockReturnValue({
+      data: [],
+      isLoading: false,
+      error: null,
+    } as unknown as ReturnType<typeof members.useWorkspaceInvites>);
+    vi.mocked(members.useDeleteInvite).mockReturnValue({
+      mutate: deleteInviteMutate,
+    } as unknown as ReturnType<typeof members.useDeleteInvite>);
   });
 
   /**
@@ -119,5 +134,60 @@ describe("MembersPanel", () => {
       principal_type: "user",
       principal_id: "u2",
     });
+  });
+
+  /**
+   * KI-185: an email added before its owner's first sign-in is listed as
+   * waiting, and withdrawing it asks first.
+   */
+  test("lists pending invitations and confirms before withdrawing one", async () => {
+    vi.mocked(members.useWorkspaceInvites).mockReturnValue({
+      data: [
+        {
+          id: "inv-1",
+          email: "new@example.com",
+          role: "ws_member",
+          invited_by_name: "alice@example.com",
+          created_at: "2026-01-03T00:00:00Z",
+        },
+      ],
+      isLoading: false,
+      error: null,
+    } as unknown as ReturnType<typeof members.useWorkspaceInvites>);
+    const user = userEvent.setup();
+    renderPanel();
+
+    const section = await screen.findByRole("region", { name: "Waiting for first sign-in" });
+    expect(within(section).getByText("new@example.com")).toBeInTheDocument();
+
+    await user.click(
+      within(section).getByRole("button", { name: "Withdraw the invitation for new@example.com" }),
+    );
+    expect(deleteInviteMutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Withdraw" }));
+    expect(deleteInviteMutate).toHaveBeenCalledWith("inv-1", expect.anything());
+  });
+
+  test("says when an added email is waiting for its first sign-in", async () => {
+    const mutateAsync = vi.fn().mockResolvedValue({ ok: true, invited: true });
+    vi.mocked(members.useAddMember).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync,
+    } as unknown as ReturnType<typeof members.useAddMember>);
+    const user = userEvent.setup();
+    renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: /Add member/i }));
+    expect(screen.getByText(/They join when they first sign in with SSO/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("User email"), "new@example.com");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Add member" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        principal_type: "user",
+        principal_id: "new@example.com",
+        role: "ws_admin",
+      }),
+    );
   });
 });

@@ -6,11 +6,16 @@ import { toast } from "sonner";
 import {
   membersKey,
   useAddMember,
+  useDeleteInvite,
   useRemoveMember,
+  useWorkspaceInvites,
   useWorkspaceMembers,
   useWorkspaceRoles,
+  type AddMemberResult,
+  type WorkspaceInvite,
   type WorkspaceMember,
 } from "@/api/members";
+import { useAuthConfig } from "@/api/hooks";
 import { listPrincipals } from "@/api/policies";
 import { useAuth } from "@/auth/useAuth";
 import { ImpersonateDialog } from "@/components/ImpersonateDialog";
@@ -90,16 +95,21 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
   const ws = workspaceId;
   const { me } = useAuth();
   const membersQ = useWorkspaceMembers(ws);
-  const rolesQ = useWorkspaceRoles();
+  const rolesQ = useWorkspaceRoles(ws);
+  const invitesQ = useWorkspaceInvites(ws);
   const addMut = useAddMember(ws);
   const removeMut = useRemoveMember(ws);
+  const deleteInviteMut = useDeleteInvite(ws);
+  const ssoEnabled = !!useAuthConfig().data?.oidc_enabled;
 
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
+  const [withdrawTarget, setWithdrawTarget] = useState<WorkspaceInvite | null>(null);
   const [impersonateTarget, setImpersonateTarget] = useState<WorkspaceMember | null>(null);
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
   const members = membersQ.data ?? [];
+  const invites = invitesQ.data ?? [];
   const roles = rolesQ.data ?? [];
   const forbidden = errorStatus(membersQ.error) === 403;
 
@@ -398,6 +408,10 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
               bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined
             }
           />
+
+          {invites.length > 0 && (
+            <PendingInvites invites={invites} onWithdraw={setWithdrawTarget} />
+          )}
         </>
       )}
 
@@ -418,8 +432,37 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
         onOpenChange={setAddOpen}
         roles={roles}
         pending={addMut.isPending}
+        ssoEnabled={ssoEnabled}
         onAdd={(body) => addMut.mutateAsync(body)}
       />
+
+      <AlertDialog open={!!withdrawTarget} onOpenChange={(o) => !o && setWithdrawTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Withdraw the invitation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {withdrawTarget?.email} will not join <span className="font-medium">{ws}</span> when
+              they first sign in.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!withdrawTarget) return;
+                deleteInviteMut.mutate(withdrawTarget.id, {
+                  onSuccess: () => toast.success("Invitation withdrawn"),
+                  onError: (e) => toast.error(String(e)),
+                });
+                setWithdrawTarget(null);
+              }}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Withdraw
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!removeTarget} onOpenChange={(o) => !o && setRemoveTarget(null)}>
         <AlertDialogContent>
@@ -601,6 +644,56 @@ function RoleCell({
 }
 
 /**
+ * Emails added before their owner's first sign-in (KI-185). Each becomes a
+ * membership when that person first signs in with SSO and the IdP has
+ * verified the address.
+ */
+function PendingInvites({
+  invites,
+  onWithdraw,
+}: {
+  invites: WorkspaceInvite[];
+  onWithdraw: (invite: WorkspaceInvite) => void;
+}) {
+  return (
+    <section className="space-y-2" aria-labelledby="pending-invites-heading">
+      <div>
+        <h3 id="pending-invites-heading" className="text-sm font-semibold">
+          Waiting for first sign-in
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          These people join when they first sign in with SSO.
+        </p>
+      </div>
+      <ul className="divide-y rounded-md border">
+        {invites.map((i) => (
+          <li key={i.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
+            <span className="min-w-0 truncate font-medium">{i.email}</span>
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <RoleDot role={i.role} />
+              {i.role}
+            </span>
+            <span className="text-muted-foreground" title={fullTimestamp(i.created_at)}>
+              added {timeAgo(i.created_at)}
+              {i.invited_by_name ? ` by ${i.invited_by_name}` : ""}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto"
+              onClick={() => onWithdraw(i)}
+              aria-label={`Withdraw the invitation for ${i.email}`}
+            >
+              Withdraw
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
  * Add-a-member dialog: a principal-type toggle, a search/select for the
  * principal (suggestions from the policy principal picker), and a workspace-role
  * select. Opened from the header's "Add member" button so the form stays out of
@@ -613,13 +706,20 @@ function AddMemberDialog({
   onOpenChange,
   roles,
   pending,
+  ssoEnabled,
   onAdd,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   roles: { name: string }[];
   pending: boolean;
-  onAdd: (body: { principal_type: string; principal_id: string; role: string }) => Promise<unknown>;
+  /** With SSO on, an email nobody has signed in with yet is pre-registered. */
+  ssoEnabled: boolean;
+  onAdd: (body: {
+    principal_type: string;
+    principal_id: string;
+    role: string;
+  }) => Promise<AddMemberResult>;
 }) {
   const [type, setType] = useState<"user" | "group">("user");
   const [value, setValue] = useState("");
@@ -650,8 +750,16 @@ function AddMemberDialog({
   const submit = async () => {
     if (!canAdd) return;
     try {
-      await onAdd({ principal_type: type, principal_id: value.trim(), role: effectiveRole });
-      toast.success("Member added");
+      const result = await onAdd({
+        principal_type: type,
+        principal_id: value.trim(),
+        role: effectiveRole,
+      });
+      toast.success(
+        result.invited
+          ? `${value.trim()} will join as ${effectiveRole} at their first sign-in`
+          : "Member added",
+      );
       onOpenChange(false);
     } catch (e) {
       toast.error(String(e));
@@ -729,6 +837,12 @@ function AddMemberDialog({
                 </ul>
               )}
             </div>
+            {type === "user" && ssoEnabled && (
+              <p className="text-xs text-muted-foreground">
+                Someone who has not signed in yet can be added by email. They join when they first
+                sign in with SSO.
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">

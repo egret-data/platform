@@ -15,6 +15,12 @@ export interface AuditQueryParams {
   kind?: string | null;
   /** @nullable */
   decision?: string | null;
+  /**
+     * `true` leaves out authorization decisions that allowed the call
+     * (routine reads): what is left is changes and denials.
+     * @nullable
+     */
+  hideAllowed?: boolean | null;
   /** @nullable */
   workspace?: string | null;
   /** @nullable */

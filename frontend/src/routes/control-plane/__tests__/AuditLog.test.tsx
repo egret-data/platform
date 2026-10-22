@@ -6,11 +6,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import AuditLog from "@/routes/control-plane/AuditLog";
 import * as auditApi from "@/api/generated/control-plane-audit/control-plane-audit";
-import * as accessApi from "@/api/access";
 import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 
 vi.mock("@/api/generated/control-plane-audit/control-plane-audit");
-vi.mock("@/api/access");
 
 const ENTRIES: AuditEntryDto[] = [
   {
@@ -18,6 +16,7 @@ const ENTRIES: AuditEntryDto[] = [
     ts: "2026-07-10T10:00:00Z",
     kind: "decision",
     actorUserId: "user-abc-12345",
+    actorEmail: "alice@egret.local",
     workspaceId: null,
     action: "secret:read",
     resourceType: "secret",
@@ -31,6 +30,7 @@ const ENTRIES: AuditEntryDto[] = [
     ts: "2026-07-10T09:00:00Z",
     kind: "mutation",
     actorUserId: null,
+    actorEmail: null,
     workspaceId: null,
     action: "grant.create",
     resourceType: "access_grant",
@@ -77,9 +77,6 @@ describe("AuditLog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockHook({ entries: ENTRIES, nextCursor: null });
-    vi.mocked(accessApi.listUsers).mockResolvedValue([
-      { id: "user-abc-12345", email: "alice@egret.local", name: "Alice" },
-    ] as unknown as accessApi.AccessUser[]);
   });
 
   test("renders decision and mutation rows with a destructive deny badge", async () => {
@@ -96,10 +93,33 @@ describe("AuditLog", () => {
     expect(screen.getByText("system")).toBeInTheDocument();
   });
 
-  test("resolves the actor id to the user's email", async () => {
+  test("names the actor by the email the API returns", async () => {
     renderPage();
-    // The decision row's actor (user-abc-12345) surfaces as its email.
+    // KI-018: the decision row's actor (user-abc-12345) surfaces as its email.
     expect(await screen.findByText("alice@egret.local")).toBeInTheDocument();
+  });
+
+  // KI-017: page views write an allowed decision each; the log opens on what
+  // changed and what was refused.
+  test("opens on changes and denials, and All shows everything", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("secret:read");
+    expect(auditApi.useControlPlaneAuditListAudit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hideAllowed: true, kind: undefined }),
+      expect.anything(),
+    );
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveTextContent("Changes and denials");
+
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "All" }));
+
+    await waitFor(() =>
+      expect(auditApi.useControlPlaneAuditListAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ hideAllowed: undefined, kind: undefined }),
+        expect.anything(),
+      ),
+    );
   });
 
   test("shows the empty state when there are no entries", () => {

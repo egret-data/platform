@@ -9,7 +9,7 @@ import {
   type AccessRequest,
 } from "@/api/accessRequests";
 import { useWorkspaceRoles } from "@/api/members";
-import { type AccessRole } from "@/api/access";
+import { type WsRole } from "@/api/workspaceAccess";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,7 +67,7 @@ function toExpiresAt(dateValue: string): string | undefined {
 export default function AccessRequests() {
   const ws = useParams().workspace!;
   const q = useWorkspaceRequests(ws);
-  const rolesQ = useWorkspaceRoles();
+  const rolesQ = useWorkspaceRoles(ws);
   const approveMut = useApproveRequest(ws);
   const denyMut = useDenyRequest(ws);
 
@@ -193,7 +193,7 @@ function ApproveDialog({
   onConfirm,
 }: {
   request: AccessRequest | null;
-  roles: AccessRole[];
+  roles: WsRole[];
   pending: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: (role: string, expiresDate: string) => void;

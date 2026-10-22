@@ -83,3 +83,19 @@ impl GroupMembershipRecompiler for Recorder {
             .collect())
     }
 }
+
+/// A `PendingMembershipRedeemer` with nothing pending. The real one is
+/// `egret_workspace::members::MemberRepo` (a crate that depends on this one);
+/// its redemption is tested there.
+pub struct NoInvites;
+
+#[async_trait::async_trait]
+impl egret_auth::preregistration::PendingMembershipRedeemer for NoInvites {
+    async fn redeem(
+        &self,
+        _user: egret_core::UserId,
+        _email: &str,
+    ) -> egret_core::Result<Vec<egret_auth::preregistration::RedeemedInvite>> {
+        Ok(Vec::new())
+    }
+}

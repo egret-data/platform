@@ -279,6 +279,126 @@ impl MemberRepo {
     }
 }
 
+/// A workspace pre-registration waiting for its SSO user's first sign-in
+/// (KI-185; see `egret_auth::preregistration`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Invite {
+    pub id: Uuid,
+    pub email: String,
+    pub role: String,
+    pub invited_by_name: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl MemberRepo {
+    /// Pre-register `email` for `role` in `ws`. Adding the same email again
+    /// replaces the role. Only a workspace role is accepted, here and by the
+    /// table's foreign key.
+    pub async fn invite(&self, ws: WorkspaceId, email: &str, role: &str, by: UserId) -> Result<()> {
+        let email = email.trim();
+        if email.len() > 320
+            || email.chars().any(char::is_whitespace)
+            || !email
+                .split_once('@')
+                .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        {
+            return Err(Error::InvalidInput(format!(
+                "not an email address: {email}"
+            )));
+        }
+        let written = sqlx::query(
+            "INSERT INTO workspace_invites (workspace_id, email, role_id, invited_by) \
+             SELECT $1, $2, r.id, $4 FROM roles r WHERE r.scope = 'workspace' AND r.name = $3 \
+             ON CONFLICT (workspace_id, email) DO UPDATE \
+               SET role_id = EXCLUDED.role_id, invited_by = EXCLUDED.invited_by, created_at = now()",
+        )
+        .bind(ws.0)
+        .bind(email)
+        .bind(role)
+        .bind(by.0)
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        if written == 0 {
+            return Err(Error::InvalidInput(format!(
+                "unknown workspace role: {role}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The pre-registrations of `ws`, oldest first.
+    pub async fn list_invites(&self, ws: WorkspaceId) -> Result<Vec<Invite>> {
+        sqlx::query_as::<_, Invite>(
+            "SELECT i.id, i.email::text AS email, r.name AS role, \
+                    u.email::text AS invited_by_name, i.created_at \
+             FROM workspace_invites i \
+             JOIN roles r ON r.id = i.role_id \
+             LEFT JOIN users u ON u.id = i.invited_by \
+             WHERE i.workspace_id = $1 ORDER BY i.created_at, i.email",
+        )
+        .bind(ws.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    /// Withdraw a pre-registration of `ws`. Scoped to `ws`, so an id from
+    /// another workspace is not found. Returns whether a row went.
+    pub async fn delete_invite(&self, ws: WorkspaceId, id: Uuid) -> Result<bool> {
+        let n = sqlx::query("DELETE FROM workspace_invites WHERE workspace_id = $1 AND id = $2")
+            .bind(ws.0)
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        Ok(n > 0)
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_auth::preregistration::PendingMembershipRedeemer for MemberRepo {
+    async fn redeem(
+        &self,
+        user: UserId,
+        email: &str,
+    ) -> Result<Vec<egret_auth::preregistration::RedeemedInvite>> {
+        let pending: Vec<(Uuid, Uuid, String, Uuid)> = sqlx::query_as(
+            "SELECT i.id, i.workspace_id, r.name, i.invited_by \
+             FROM workspace_invites i JOIN roles r ON r.id = i.role_id \
+             WHERE i.email = $1::citext ORDER BY i.created_at",
+        )
+        .bind(email)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let mut redeemed = Vec::new();
+        for (id, ws, role, invited_by) in pending {
+            let ws = WorkspaceId(ws);
+            // Through `add`, so the membership recompiles the engine policies
+            // like any other. An existing membership is left as it is: it was
+            // set after the pre-registration, by someone who saw the user.
+            if self.role_of(ws, "user", user.0).await?.is_none() {
+                self.add(ws, "user", user.0, &role, UserId(invited_by))
+                    .await?;
+                redeemed.push(egret_auth::preregistration::RedeemedInvite {
+                    workspace_id: ws.0,
+                    role,
+                    invited_by,
+                });
+            }
+            sqlx::query("DELETE FROM workspace_invites WHERE id = $1")
+                .bind(id)
+                .execute(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+        }
+        Ok(redeemed)
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct MemberRow {
     principal_type: String,

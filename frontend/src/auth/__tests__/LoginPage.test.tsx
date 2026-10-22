@@ -69,3 +69,27 @@ test("OIDC disabled: local form is visible immediately, no SSO link", () => {
     screen.queryByRole("link", { name: /sign in with sso/i }),
   ).not.toBeInTheDocument();
 });
+
+// KI-002: a locked-out sign-in says when the user can try again, from the
+// server's `retry_after_secs`, rather than "a few minutes".
+test("a 429 says when to try again", async () => {
+  const { ApiError } = await import("@/api/client");
+  useAuthConfig.mockReturnValue({ data: { oidc_enabled: false } });
+  mutateAsync.mockRejectedValue(
+    new ApiError(429, "too many failed sign-in attempts", "rate_limited", {
+      error: "too many failed sign-in attempts",
+      code: "rate_limited",
+      retry_after_secs: 240,
+    }),
+  );
+  const user = userEvent.setup();
+  renderLogin();
+
+  await user.type(screen.getByPlaceholderText("Email"), "b7@example.com");
+  await user.type(screen.getByPlaceholderText("Password"), "nope");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Too many failed sign-in attempts. Try again in 4 minutes.",
+  );
+});
