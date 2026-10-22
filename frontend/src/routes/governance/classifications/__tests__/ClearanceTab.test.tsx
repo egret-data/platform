@@ -326,8 +326,9 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
       "Bo · group data-team · Cleared in egret, refused on engines",
       "Cy · cy · role cleared through group ops · Cleared in egret, refused on engines",
     ]);
-    // The marker is defined where it appears.
-    expect(within(list).getByTitle(/^Named in the engines' policy/)).toHaveTextContent("engines");
+    // The marker is defined where it appears, and says only what `onEngines`
+    // means: excepted from the compiled deny, not able to read.
+    expect(within(list).getByTitle("Excepted from the engines' clearance deny (reading still needs a grant).")).toHaveTextContent("engines");
   });
 
   it("marks no one refused on engines when engines enforce nothing", async () => {

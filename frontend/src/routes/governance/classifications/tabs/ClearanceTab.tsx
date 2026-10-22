@@ -60,8 +60,11 @@ export const ENGINES_DO_NOT_ENFORCE = "Engines do not enforce this clearance: an
 export const REFUSED_ON_ENGINES = "Cleared in egret, refused on engines";
 export const NO_ONE_LISTED = "No one holds a required role or belongs to a required group yet.";
 export const ADD_MASK_NEEDS_POLICY_UPDATE = "Adding a mask rule needs the policy:update permission.";
-/** What the "engines" marker means, said where it appears. */
-const ENGINES_MARK_TITLE = "Named in the engines' policy: engines let this person read the data.";
+/**
+ * What the "engines" marker means, said where it appears: `onEngines` says the
+ * compiled clearance deny excepts this person, nothing about any grant.
+ */
+const ENGINES_MARK_TITLE = "Excepted from the engines' clearance deny (reading still needs a grant).";
 
 /** A neutral statement (the clearance's scope), muted with an Info icon; warnings use `Callout`. */
 function ScopeNote({ children }: { children: ReactNode }) {
