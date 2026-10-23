@@ -356,6 +356,7 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 | FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 6 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
 | FE-DATA-2 | hai tiền tố key `cp` và `control-plane` cho cùng một domain | (7) 30 dòng `["cp"`; (8) 52 dòng `["control-plane"` |
 | FE-ROUTE-2 | chỉ khu vực Workflows trong `App.tsx` được lazy-load; các khu vực có trước nó vẫn eager | (9) 1 `lazy(` trong `App.tsx` (Workflows, W7a) |
+| FE-FORM-3 | ô ngày và giờ của trình duyệt (`type="date"`, `datetime-local`, `time`) mà `DateTimePicker` chưa thay (đếm ngày 2026-10-23 sau U2, gói đã thay ô của nhật ký kiểm toán) | (11) 17 dòng |
 | tài liệu | `docs/vi/ui-conventions.md` đã lệch so với `docs/en/ui-conventions.md` | (10) 664 dòng so với 2.227 |
 
 ```bash
@@ -369,6 +370,7 @@ grep -rn "\[\"cp\"\|\['cp'" src --include='*.ts*' | grep -v __tests__ | wc -l   
 grep -rn "\[\"control-plane\"" src --include='*.ts*' | grep -v __tests__ | wc -l                                # (8)
 grep -c "lazy(" src/App.tsx                                                                                    # (9)
 wc -l ../docs/vi/ui-conventions.md ../docs/en/ui-conventions.md                                               # (10)
+grep -rn 'type="\(date\|datetime-local\|time\)"' src --include='*.tsx' | grep -v __tests__ | wc -l            # (11)
 ```
 
 **Lệnh grep đã thu hẹp (2026-10-10, final review của W7a).** Lệnh (3) và (5) từng đếm cả code đúng rule, nên các phần W7a thêm vào dù đúng rule vẫn trông như nợ mới (FE-PAGE-4 từ 19 lên 21, FE-STATE-3 từ 20 lên 22). Giờ chúng bỏ qua dòng comment, và (5) bỏ qua dòng `title=`, tức tiêu đề của `EmptyState` (dạng đúng rule). Với cùng lệnh đã thu hẹp, số đếm trước W7a là 16 và 6. Dòng duy nhất của W7a mà (3) còn đếm là đúng rule: `<table>` nhóm theo namespace trong `src/routes/workflows/FlowsList.tsx`, một grid đặc thù được phép, có comment FE-PAGE-4.
