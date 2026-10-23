@@ -3,6 +3,8 @@ import type { UnreadablePolicy } from "@/api/generated/model";
 import { Section } from "@/routes/governance/tabParts";
 import { editorUrl, type EditorSubject } from "@/routes/governance/engines/engineUrl";
 import { policyTypeWord } from "@/routes/governance/handwritten/handwrittenText";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
@@ -40,7 +42,7 @@ export function UnreadablePolicies({ policies, what }: { policies: UnreadablePol
           return (
             <li key={`${p.service}/${p.id}`}>
               {href ? (
-                <Link to={href} className="break-all font-medium text-primary hover:underline">
+                <Link to={href} className={cn(ENTITY_LINK_CLASS, "break-all")}>
                   {p.name}
                 </Link>
               ) : (

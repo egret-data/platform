@@ -221,15 +221,15 @@ describe("EnginesTab — the attachment table", () => {
       }),
     );
 
-    expect(within(rowFor("trino-prod")).getByText("applied")).toBeInTheDocument();
-    expect(within(rowFor("sr-eu")).getByText("pending")).toBeInTheDocument();
-    expect(within(rowFor("sr-us")).getByText("failed")).toBeInTheDocument();
+    expect(within(rowFor("trino-prod")).getByText("Applied")).toBeInTheDocument();
+    expect(within(rowFor("sr-eu")).getByText("Pending")).toBeInTheDocument();
+    expect(within(rowFor("sr-us")).getByText("Failed")).toBeInTheDocument();
 
     // Three distinct words is only half of it: the three must not be the same
     // badge with three captions, or "failed" reads as calmly as "applied".
-    const applied = within(rowFor("trino-prod")).getByText("applied").className;
-    const pending = within(rowFor("sr-eu")).getByText("pending").className;
-    const failed = within(rowFor("sr-us")).getByText("failed").className;
+    const applied = within(rowFor("trino-prod")).getByText("Applied").className;
+    const pending = within(rowFor("sr-eu")).getByText("Pending").className;
+    const failed = within(rowFor("sr-us")).getByText("Failed").className;
     expect(new Set([applied, pending, failed]).size).toBe(3);
 
     // The one string that says what to fix, in full, outside the `title`
@@ -299,9 +299,9 @@ describe("EnginesTab — the attachment table", () => {
     );
     const unknown = within(rowFor("sr-eu")).getByText("applying");
     expect(unknown).toBeInTheDocument();
-    expect(within(rowFor("sr-eu")).queryByText("applied")).not.toBeInTheDocument();
+    expect(within(rowFor("sr-eu")).queryByText("Applied")).not.toBeInTheDocument();
     expect(unknown.className).not.toBe(
-      within(rowFor("trino-prod")).getByText("applied").className,
+      within(rowFor("trino-prod")).getByText("Applied").className,
     );
   });
 
@@ -360,15 +360,15 @@ describe("EnginesTab — the attachment table", () => {
     );
 
     const broken = rowFor("trino-prod");
-    expect(within(broken).getByText("applied")).toBeInTheDocument();
-    expect(within(broken).getByText("failed")).toBeInTheDocument();
+    expect(within(broken).getByText("Applied")).toBeInTheDocument();
+    expect(within(broken).getByText("Failed")).toBeInTheDocument();
     // …and the healthy engine is not painted the same way. The colour is the
     // part an operator scans; two words in one variant is the same defect in a
     // smaller costume.
-    const healthy = within(rowFor("sr-eu")).getByText("running");
+    const healthy = within(rowFor("sr-eu")).getByText("Running");
     expect(healthy).toBeInTheDocument();
-    expect(within(rowFor("sr-eu")).queryByText("failed")).not.toBeInTheDocument();
-    expect(within(broken).getByText("failed").className).not.toBe(healthy.className);
+    expect(within(rowFor("sr-eu")).queryByText("Failed")).not.toBeInTheDocument();
+    expect(within(broken).getByText("Failed").className).not.toBe(healthy.className);
   });
 
   test("the apply column is not named Status, and the table says what it is not", () => {
@@ -394,7 +394,7 @@ describe("EnginesTab — the attachment table", () => {
     renderTab(catalog(), READER);
     // Not a silent blank: an absent badge reads as "fine", which is the same
     // false green in a different costume.
-    expect(screen.queryByText("running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
     expect(screen.queryByText("engine unknown")).not.toBeInTheDocument();
     expect(screen.getByTestId("catalog-apply-footnote")).toHaveTextContent("engine:read");
   });

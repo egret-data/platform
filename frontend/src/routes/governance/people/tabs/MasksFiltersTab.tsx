@@ -13,6 +13,8 @@ import { principalSubject, principalTitle, type Principal } from "@/routes/gover
 import { REACH_GROUPS, reachesAtAll, reachGroup, setReach, type Reach, type ReachGroup } from "@/routes/governance/people/reach";
 import { GROUP_TITLE, NO_USERNAME_NOTE, reachText } from "@/routes/governance/people/tabs/PermissionsTab";
 import { TERM } from "@/routes/governance/glossary";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 /** The Permissions tab's group titles; an exclude here takes the principal out of an exemption. */
 const RULE_GROUP_TITLE: Record<ReachGroup, string> = { ...GROUP_TITLE, excluded: "Excluded from the exemption" };
@@ -150,7 +152,7 @@ function RuleTable({
             <TableRow key={rule.id}>
               <TableCell className="whitespace-normal">
                 <div className="space-y-1">
-                  <Link to={`/governance/rules/${encodeURIComponent(rule.id)}`} className="text-sm font-medium text-primary hover:underline">
+                  <Link to={`/governance/rules/${encodeURIComponent(rule.id)}`} className={cn(ENTITY_LINK_CLASS, "text-sm")}>
                     {rule.name}
                   </Link>
                   <p className="text-xs text-muted-foreground break-words">{formatRuleKind(rule)}</p>

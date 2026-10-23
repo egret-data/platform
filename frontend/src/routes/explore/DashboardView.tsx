@@ -23,6 +23,7 @@ import { useDashboardParams } from "@/api/useDashboardParams";
 import { useFilterDrafts } from "@/api/useFilterDrafts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
 import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
@@ -56,6 +57,7 @@ import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
 import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /** Loads distinct column values for one category/id parameter (hook is called
  * unconditionally inside this child so the Rules of Hooks are respected). */
@@ -689,9 +691,9 @@ export default function DashboardView() {
       <div className={`mb-3 flex items-center justify-between border-b pb-3 ${narrowViewport ? "flex-wrap gap-y-2" : ""}`}>
         {editing ? (
           <input aria-label="dashboard name" value={draftName} onChange={(e) => setDraftName(e.target.value)}
-            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-semibold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
         ) : (
-          <h1 className={`text-xl font-bold ${narrowViewport ? "min-w-0 basis-full" : ""}`}>{dash.name}</h1>
+          <PageTitle className={narrowViewport ? "min-w-0 basis-full" : undefined}>{dash.name}</PageTitle>
         )}
         <div className={`flex items-center gap-2 ${narrowViewport ? "min-w-0 flex-wrap gap-y-2" : ""}`}>
           {!editing && (
@@ -1000,14 +1002,16 @@ export default function DashboardView() {
           <DialogHeader><DialogTitle>Delete tab</DialogTitle></DialogHeader>
           <p className="text-sm text-muted-foreground">This tab has cards. Move them to another tab, or delete them with the tab.</p>
           <div className="flex flex-col gap-2 py-2">
-            <label className="flex items-center gap-2 text-sm">
+            <label htmlFor="reassign-target" className="flex items-center gap-2 text-sm">
               <span>Move cards to</span>
-              <select aria-label="reassign target" className="h-8 rounded border bg-background px-1 text-sm"
-                value={reassignTo ?? ""} onChange={(e) => setReassignTo(e.target.value)}>
-                {(draftTabs ?? []).filter((t) => t.key !== deletingTabKey).map((t) => (
-                  <option key={t.key} value={t.key}>{t.name}</option>
-                ))}
-              </select>
+              <Select value={reassignTo ?? ""} onValueChange={setReassignTo}>
+                <SelectTrigger size="sm" id="reassign-target" aria-label="reassign target"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(draftTabs ?? []).filter((t) => t.key !== deletingTabKey).map((t) => (
+                    <SelectItem key={t.key} value={t.key}>{t.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </label>
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="outline" aria-label="reassign and delete"

@@ -9,8 +9,7 @@ import {
   CircleX,
   type LucideIcon,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
 /**
  * THE WORKFLOW STATE VOCABULARY: Kestra's states on egret's tokens (spec §8.1).
@@ -32,13 +31,19 @@ import { cn } from "@/lib/utils";
 export type StateTone = "muted" | "primary" | "success" | "highlight" | "destructive" | "neutral";
 type Tone = StateTone;
 
-const TONE_CLASS: Record<Tone, string> = {
-  muted: "border-transparent bg-muted text-foreground",
-  primary: "border-transparent bg-primary/15 text-foreground",
-  success: "border-transparent bg-success/15 text-foreground",
-  highlight: "border-transparent bg-highlight/15 text-foreground",
-  destructive: "border-transparent bg-destructive/15 text-foreground",
-  neutral: "border-transparent bg-muted-foreground/15 text-foreground",
+/**
+ * Each workflow tone on the one `StatusBadge` (KI-222). The names differ from
+ * the badge's for a historical reason: here `muted` is pending (the badge's
+ * `neutral`, `bg-muted`) and `neutral` is finished without an outcome (the
+ * badge's `inactive`, `bg-muted-foreground/15`). The paint is unchanged.
+ */
+const STATUS_TONE_OF: Record<Tone, StatusTone> = {
+  muted: "neutral",
+  primary: "primary",
+  success: "success",
+  highlight: "highlight",
+  destructive: "destructive",
+  neutral: "inactive",
 };
 
 interface StateLook {
@@ -138,9 +143,10 @@ export function StateChip({ state, kind }: { state: string; kind: "execution" | 
   const { tone, icon: Icon } = look ?? UNKNOWN;
   const word = flowLook ? flowLook.word : look ? stateWord(state) : state;
   return (
-    <Badge variant="outline" data-state={state} className={cn(TONE_CLASS[tone])}>
-      <Icon aria-hidden="true" />
-      {word}
-    </Badge>
+    <StatusBadge tone={STATUS_TONE_OF[tone]} icon={Icon} data-state={state}>
+      {/* A fragment, not a string: the word is already cased above, and an
+          unknown state is shown exactly as the server wrote it. */}
+      <>{word}</>
+    </StatusBadge>
   );
 }

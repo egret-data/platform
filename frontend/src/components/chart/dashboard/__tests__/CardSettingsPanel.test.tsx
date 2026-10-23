@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { CardSettingsPanel } from "../CardSettingsPanel";
 import type { DashboardParameter } from "@/api/dashboards";
 import type { DraftCard, DraftTab } from "../tabs";
@@ -20,16 +21,20 @@ describe("CardSettingsPanel (chart card)", () => {
     render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
     expect(screen.queryByLabelText(/^map /)).toBeNull();
   });
-  it("sets on-click to cross-filter", () => {
+  it("sets on-click to cross-filter", async () => {
+    const user = userEvent.setup();
     const onUpdateOptions = vi.fn();
     render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("on click"), { target: { value: "crossfilter" } });
+    await user.click(screen.getByRole("combobox", { name: "on click" }));
+    await user.click(await screen.findByRole("option", { name: "Cross-filter" }));
     expect(onUpdateOptions).toHaveBeenCalledWith({ clickBehavior: { type: "crossfilter", parameterMapping: {} } });
   });
-  it("moves the card to another tab", () => {
+  it("moves the card to another tab", async () => {
+    const user = userEvent.setup();
     const onMoveToTab = vi.fn();
     render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={onMoveToTab} />);
-    fireEvent.change(screen.getByLabelText("move card to tab"), { target: { value: "tb" } });
+    await user.click(screen.getByRole("combobox", { name: "move card to tab" }));
+    await user.click(await screen.findByRole("option", { name: "B" }));
     expect(onMoveToTab).toHaveBeenCalledWith("tb");
   });
   it("turns on hide-when-empty and writes only that key", () => {

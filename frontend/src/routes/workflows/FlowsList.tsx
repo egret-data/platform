@@ -22,6 +22,9 @@ import {
   type NamespaceNode,
 } from "@/components/workflows/namespaceTree";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 /**
  * Where the tree's collapsed namespaces are kept, per viewer and per
@@ -259,7 +262,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
             </Button>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <ScrollX>
             {/* A hand-written <table>, not `FilterableTable` (FE-PAGE-4): the
                 list is grouped by a namespace tree, one <tbody> per namespace
                 with its header row first — the shape of the grouped Explore
@@ -289,7 +292,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                       node.flows.map((f) => (
                         <tr key={f.id} className="border-t hover:bg-accent">
                           <td className="py-1" style={{ paddingLeft: indent(depth + 1) }}>
-                            <Link className="font-medium hover:underline" to={`${base}/flows/${f.id}/edit`}>
+                            <Link className={ENTITY_LINK_CLASS} to={`${base}/flows/${f.id}/edit`}>
                               {f.flow_id}
                             </Link>
                           </td>
@@ -315,12 +318,18 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                 );
               })}
             </table>
-          </div>
+          </ScrollX>
         )}
       </ListStates>
   );
 
   if (pinned) return content;
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (!pinned && isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
+  }
+
   return (
     <ListPageShell
       title="Flows"

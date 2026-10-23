@@ -29,6 +29,8 @@ import { editorUrl, engineUrl, type EditorSubject } from "@/routes/governance/en
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 import type { PolicySource } from "@/routes/governance/engines/profilePolicies";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 export const NO_POLICY = "This profile has no policy.";
 export const NO_MATCH = "No policy matches these filters.";
@@ -182,7 +184,7 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
       value: (r) => r.name,
       cell: (r) =>
         sourceOf(r) === "operator" ? (
-          <Link to={editHref(r)} className="break-all font-medium text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring">
+          <Link to={editHref(r)} className={cn(ENTITY_LINK_CLASS, "break-all focus-visible:ring-2 focus-visible:ring-ring")}>
             {r.name}
           </Link>
         ) : (

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { FilterPill } from "../FilterPill";
 import type { DashboardParameter } from "@/api/dashboards";
 
@@ -57,15 +58,18 @@ describe("FilterPill", () => {
     expect(onChange).toHaveBeenCalledWith("last30");
   });
 
-  it("temporal_unit renders a unit dropdown and selects a unit", () => {
+  it("temporal_unit renders a unit dropdown and selects a unit", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     render(<FilterPill
       param={{ id: "p", name: "Date grouping", slug: "dg", type: "temporal_unit", operator: "is", default: "month" }}
       value="month" options={[]} onChange={onChange} />);
     fireEvent.click(screen.getByLabelText("Date grouping"));
-    const sel = screen.getByLabelText("Date grouping value") as HTMLSelectElement;
-    expect(sel).toBeTruthy();
-    fireEvent.change(sel, { target: { value: "quarter" } });
+    await user.click(screen.getByRole("combobox", { name: "Date grouping value" }));
+    // The two groups survive the move off <optgroup>.
+    expect(screen.getByText("Group by")).toBeInTheDocument();
+    expect(screen.getByText("Extract")).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "Quarter" }));
     expect(onChange).toHaveBeenCalledWith("quarter");
   });
 

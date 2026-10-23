@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { useState } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { FilterPill } from "../FilterPill";
 import type { DashboardParameter } from "@/api/dashboards";
 
@@ -41,12 +42,23 @@ const openPill = (param: DashboardParameter, value: unknown, opts: string[], onC
 };
 
 describe("FilterPill tier2d", () => {
-  it("boolean renders a 3-state Any/True/False select and encodes the choice", () => {
+  it("boolean renders a 3-state Any/True/False select and encodes the choice", async () => {
+    const user = userEvent.setup();
     const onChange = openPill(p({ type: "boolean", operator: "is" }), "", []);
-    const sel = screen.getByLabelText("F value") as HTMLSelectElement;
-    expect(Array.from(sel.options).map((o) => o.value)).toEqual(["", "true", "false"]);
-    fireEvent.change(sel, { target: { value: "true" } });
+    const sel = screen.getByRole("combobox", { name: "F value" });
+    expect(sel).toHaveTextContent("Any");
+    await user.click(sel);
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["Any", "True", "False"]);
+    await user.click(screen.getByRole("option", { name: "True" }));
     expect(onChange).toHaveBeenCalledWith("true");
+  });
+
+  it("boolean: Any stores the empty string, not the item's sentinel", async () => {
+    const user = userEvent.setup();
+    const onChange = openPill(p({ type: "boolean", operator: "is" }), "true", []);
+    await user.click(screen.getByRole("combobox", { name: "F value" }));
+    await user.click(await screen.findByRole("option", { name: "Any" }));
+    expect(onChange).toHaveBeenCalledWith("");
   });
 
   it("widget=input renders a text input for a category and writes a scalar string", () => {
@@ -70,18 +82,21 @@ describe("FilterPill tier2d", () => {
     expect(onChange).toHaveBeenCalledWith("2024-03");
   });
 
-  it("quarter-year renders a year input + a quarter select and encodes 'YYYY-Q'", () => {
+  it("quarter-year renders a year input + a quarter select and encodes 'YYYY-Q'", async () => {
+    const user = userEvent.setup();
     const param = p({ type: "date", operator: "quarter-year" });
     const onChange = vi.fn();
     render(<ControlledPill param={param} initial="" opts={[]} onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: param.name }));
     fireEvent.change(screen.getByLabelText("F year"), { target: { value: "2024" } });
     expect(onChange).toHaveBeenCalledWith("2024-1");
-    fireEvent.change(screen.getByLabelText("F quarter"), { target: { value: "3" } });
+    await user.click(screen.getByRole("combobox", { name: "F quarter" }));
+    await user.click(await screen.findByRole("option", { name: "Q3" }));
     expect(onChange).toHaveBeenLastCalledWith("2024-3");
   });
 
-  it("quarter-year re-seeds local state when value is cleared externally while the popover stays open", () => {
+  it("quarter-year re-seeds local state when value is cleared externally while the popover stays open", async () => {
+    const user = userEvent.setup();
     const param = p({ type: "date", operator: "quarter-year" });
     const onChange = vi.fn();
     render(<ControlledPill param={param} initial="2024-3" opts={[]} onChange={onChange} />);
@@ -95,7 +110,8 @@ describe("FilterPill tier2d", () => {
     expect((screen.getByLabelText("F year") as HTMLInputElement).value).toBe("");
     // And the next quarter edit must NOT republish the stale "2024".
     onChange.mockClear();
-    fireEvent.change(screen.getByLabelText("F quarter"), { target: { value: "2" } });
+    await user.click(screen.getByRole("combobox", { name: "F quarter" }));
+    await user.click(await screen.findByRole("option", { name: "Q2" }));
     expect(onChange).not.toHaveBeenCalledWith("2024-2");
   });
 });

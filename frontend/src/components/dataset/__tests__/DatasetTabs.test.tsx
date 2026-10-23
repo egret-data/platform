@@ -1,13 +1,16 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
+
+const updateColumn = vi.hoisted(() => vi.fn());
 
 // Mock @/api/datasets so no real fetch is made; mutations are no-ops.
 vi.mock("@/api/datasets", () => ({
   useDatasetMutations: () => ({
     addColumn: { mutateAsync: vi.fn(), isPending: false },
-    updateColumn: { mutateAsync: vi.fn(), isPending: false },
+    updateColumn: { mutateAsync: updateColumn, isPending: false },
     deleteColumn: { mutateAsync: vi.fn(), isPending: false },
     addMetric: { mutateAsync: vi.fn(), isPending: false },
     updateMetric: { mutateAsync: vi.fn(), isPending: false },
@@ -110,8 +113,8 @@ test("ColumnsTab: '+ Calculated column' button renders", () => {
  * THE ROLE SELECT'S VOCABULARY, PINNED.
  *
  * `semantic_type` is now validated server-side against `SEMANTIC_TYPES` in `egret-analytics-api`,
- * which answers 400 for anything else. That makes this `<select>` and that Rust constant two halves
- * of one contract, and the failure mode of them drifting is specific and bad: add an `<option>`
+ * which answers 400 for anything else. That makes this picker and that Rust constant two halves
+ * of one contract, and the failure mode of them drifting is specific and bad: add an option
  * here without adding it there and the control offers a choice the API refuses, so the user picks a
  * role and gets an error toast from a dropdown that suggested it.
  *
@@ -125,19 +128,35 @@ test("ColumnsTab: '+ Calculated column' button renders", () => {
  * The values, not the labels: the API compares the `value`, and every reader (`map.tsx`,
  * `PreviewTab`) compares it with `===`. A label may be re-worded freely.
  */
-test("ColumnsTab: the Role select offers exactly the server's semantic_type vocabulary", () => {
-  renderWithProviders(
-    <ColumnsTab ws="eng" datasetId="ds1" columns={[physicalColumn]} />,
-  );
-  const select = screen.getByLabelText(`Role ${physicalColumn.column_name}`) as HTMLSelectElement;
-  const offered = Array.from(select.options).map((o) => o.value);
-  expect(offered).toStrictEqual([
+test("ColumnsTab: the Role select offers exactly the server's semantic_type vocabulary", async () => {
+  const user = userEvent.setup();
+  updateColumn.mockReset();
+  updateColumn.mockResolvedValue(undefined);
+  // The picker does not put values in the DOM, so each option is picked and the value it SAVES is
+  // read off the mutation. A pick of the option already selected saves nothing, so every option is
+  // picked from a row whose role is a different one.
+  const labels = ["—", "Category", "Country", "Currency", "Email", "URL", "Image", "Latitude", "Longitude"];
+  const saved: unknown[] = [];
+  for (const label of labels) {
+    const start = label === "Latitude" ? "longitude" : "latitude";
+    const { unmount } = renderWithProviders(
+      <ColumnsTab ws="eng" datasetId="ds1" columns={[{ ...physicalColumn, semantic_type: start }]} />,
+    );
+    await user.click(screen.getByRole("combobox", { name: `Role ${physicalColumn.column_name}` }));
+    const offered = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(offered).toStrictEqual(labels);
+    await user.click(screen.getByRole("option", { name: label }));
+    saved.push((updateColumn.mock.lastCall?.[0] as { body: { semantic_type: string } }).body.semantic_type);
+    unmount();
+  }
+  expect(saved).toStrictEqual([
     "", "category", "country", "currency", "email", "url", "image", "latitude", "longitude",
   ]);
   // If this failed, update `SEMANTIC_TYPES` in crates/egret-analytics-api/src/bi.rs, the literal in
   // its `the_allow_list_is_exactly_the_editor_vocabulary` test, and migration 0104's CHECK — all
   // three, or the new value is a 400 the moment someone picks it.
-});
+  // Nine render-open-pick rounds: past the 5s default on a loaded machine.
+}, 20_000);
 
 test("MetricsTab: metric row renders with correct metric_name", () => {
   renderWithProviders(

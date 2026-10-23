@@ -77,9 +77,10 @@ describe("UsersPage", () => {
     // "active"/"disabled" also appear as SummaryStrip labels, so scope the
     // status-badge assertions to each user's row.
     const aliceRow = screen.getByText("alice@example.com").closest("tr") as HTMLElement;
-    expect(within(aliceRow).getByText("active")).toBeInTheDocument();
+    // The shared `StatusBadge` shows the server's word in sentence case (KI-222).
+    expect(within(aliceRow).getByText("Active")).toBeInTheDocument();
     const bobRow = screen.getByText("bob@example.com").closest("tr") as HTMLElement;
-    expect(within(bobRow).getByText("disabled")).toBeInTheDocument();
+    expect(within(bobRow).getByText("Disabled")).toBeInTheDocument();
   });
 
   test("renders a user's group membership as a count chip in the Groups column", async () => {

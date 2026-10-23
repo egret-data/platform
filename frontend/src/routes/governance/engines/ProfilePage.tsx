@@ -17,6 +17,7 @@ import {
 import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 export const NO_ENGINE_BOUND = "No engine is bound to this profile.";
 
@@ -70,7 +71,7 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <FrameHeader
         label="Profile"
         title={name}
@@ -85,6 +86,6 @@ export default function ProfilePage() {
         }
       />
       {body}
-    </div>
+    </PageContainer>
   );
 }

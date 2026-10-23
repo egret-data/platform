@@ -99,7 +99,7 @@ describe("Sidebar – workspace zones", () => {
     expect(screen.queryByRole("link", { name: "Engines" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Workspace settings" })).toHaveAttribute(
       "href",
-      "/explore/eng/settings/members",
+      "/explore/eng/settings",
     );
     // Workflows is a GROUP (Flows/Executions), like Data API, so there is no
     // "Workflows" link; Pipelines was a W0 placeholder and stays gone.
@@ -206,6 +206,77 @@ describe("Sidebar – workspace zones", () => {
     // Unaffected groups still render.
     expect(screen.getByRole("link", { name: "SQL Lab" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Workspace settings" })).toBeInTheDocument();
+  });
+});
+
+// KI-231: an entry the reader cannot open is left out, on the server's word.
+// `/me/workspaces` → `permissions` is the PDP's answer for each page-gating
+// permission; a viewer holds none of them.
+describe("Sidebar – workspace permissions", () => {
+  const ALL = ["sql_lab", "datasets", "charts", "dashboards", "apps", "alerts", "data_api", "workflows"];
+  const VIEWER: Me = { user_id: "2", email: "viewer@example.com", platform_roles: [], permissions: [] };
+  const workspaces = (body: unknown) => () =>
+    Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
+  const GATED = ["Endpoints", "Clients", "Activity", "Flows", "Executions", "Namespaces", "Triggers"];
+
+  test("a viewer holding no page permission sees no Data API or Workflows entry", async () => {
+    renderSidebar(
+      "/explore/eng/datasets",
+      VIEWER,
+      workspaces([{ id: "1", slug: "eng", name: "Engineering", features: ALL, permissions: [] }]),
+    );
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Endpoints" })).not.toBeInTheDocument());
+    for (const label of GATED) expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
+    expect(screen.queryByText("Data API")).not.toBeInTheDocument();
+    expect(screen.queryByText("Workflows")).not.toBeInTheDocument();
+    // What a viewer can open stays.
+    expect(screen.getByRole("link", { name: "Datasets" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workspace settings" })).toHaveAttribute("href", "/explore/eng/settings");
+  });
+
+  test("each entry follows its own permission", async () => {
+    renderSidebar(
+      "/explore/eng/datasets",
+      VIEWER,
+      workspaces([
+        { id: "1", slug: "eng", name: "Engineering", features: ALL, permissions: ["data_api_endpoint:read"] },
+      ]),
+    );
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Clients" })).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Activity" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument();
+  });
+
+  test("the permissions of THIS workspace decide, not another's", async () => {
+    renderSidebar(
+      "/explore/eng/datasets",
+      VIEWER,
+      workspaces([
+        { id: "0", slug: "ops", name: "Ops", features: ALL, permissions: ["workflow:read"] },
+        { id: "1", slug: "eng", name: "Engineering", features: ALL, permissions: [] },
+      ]),
+    );
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument());
+  });
+
+  test("a server that sends no permissions hides nothing", async () => {
+    renderSidebar(
+      "/explore/eng/datasets",
+      VIEWER,
+      workspaces([{ id: "1", slug: "eng", name: "Engineering", features: ALL }]),
+    );
+    await waitFor(() => expect(screen.getByRole("link", { name: "Datasets" })).toBeInTheDocument());
+    for (const label of GATED) expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+  });
+
+  test("a workspace the reader is not a member of gets no sidebar (its refusal page)", async () => {
+    renderSidebar(
+      "/explore/other/datasets",
+      VIEWER,
+      workspaces([{ id: "1", slug: "eng", name: "Engineering", features: ALL, permissions: [] }]),
+    );
+    await waitFor(() => expect(screen.queryByTestId("app-sidebar")).not.toBeInTheDocument());
   });
 });
 
@@ -370,35 +441,29 @@ describe("Sidebar – Governance app", () => {
   const groupOf = (heading: string) =>
     screen.getByRole("button", { name: new RegExp(`^${heading}$`, "i") }).parentElement;
 
-  test("renders Classification, Lineage and Engine & policy groups at /governance routes", () => {
+  // KI-225: one group, not a group per page. Each page used to sit alone in a
+  // group of its own name, with its own chevron, and the first heading
+  // ("Governance overview") wrapped in the 224px rail.
+  test("one Governance group holds every item, at /governance routes; no one-item group", () => {
     renderSidebar("/governance/engines");
-    const engines = screen.getByRole("link", { name: "Engine & policy" });
-    const classifications = screen.getByRole("link", { name: "Classifications" });
-    const lineage = screen.getByRole("link", { name: "Data Lineage" });
-
-    expect(engines).toHaveAttribute("href", "/governance/engines");
-    expect(classifications).toHaveAttribute("href", "/governance/classifications");
-    expect(lineage).toHaveAttribute("href", "/governance/data-lineage");
-
-    expect(groupOf("Engine & policy")).toContainElement(engines);
-    expect(groupOf("Classification")).toContainElement(classifications);
-    expect(groupOf("Lineage")).toContainElement(lineage);
-  });
-
-  // #4a EP3: the "Policies" group is gone; "Engine & policy" is the last group.
-  test("the last group is \"Engine & policy\" with one item linking to /governance/engines; no group is \"Policies\"", () => {
-    renderSidebar("/governance");
     const headings = within(screen.getByTestId("app-sidebar"))
       .getAllByRole("button", { expanded: true })
       .map((b) => b.textContent);
-    expect(headings[headings.length - 1]).toBe("Engine & policy");
-    expect(headings).not.toContain("Policies");
-    const group = groupOf("Engine & policy")!;
-    const links = within(group).getAllByRole("link");
-    expect(links).toHaveLength(1);
-    expect(links[0]).toHaveTextContent("Engine & policy");
-    expect(links[0]).toHaveAttribute("href", "/governance/engines");
+    expect(headings).toEqual(["Governance"]);
+    const group = groupOf("Governance")!;
+    expect(within(group).getAllByRole("link")).toHaveLength(6);
+    expect(within(group).getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
+    expect(within(group).getByRole("link", { name: "Classifications" })).toHaveAttribute("href", "/governance/classifications");
+    expect(within(group).getByRole("link", { name: "Data Lineage" })).toHaveAttribute("href", "/governance/data-lineage");
     expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
+  });
+
+  // #4a EP3: "Engine & policy" is the last item.
+  test("Engine & policy is the last item and links to /governance/engines", () => {
+    renderSidebar("/governance");
+    const links = within(screen.getByTestId("app-sidebar")).getAllByRole("link");
+    expect(links[links.length - 1]).toHaveTextContent("Engine & policy");
+    expect(links[links.length - 1]).toHaveAttribute("href", "/governance/engines");
   });
 
   test("Engine & policy shows for a user holding only policy:read, and not for tag:read alone", () => {
@@ -434,16 +499,11 @@ describe("Sidebar – Governance app", () => {
     expect(screen.getByRole("link", { name: "People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 
-  test("the first group is \"Governance overview\" with one item, Overview, linking to the index", () => {
+  test("Overview is the first item and links to the index", () => {
     renderSidebar("/governance");
-    const headings = within(screen.getByTestId("app-sidebar"))
-      .getAllByRole("button", { expanded: true })
-      .map((b) => b.textContent);
-    expect(headings[0]).toBe("Governance overview");
-    const overview = screen.getByRole("link", { name: "Overview" });
-    expect(overview).toHaveAttribute("href", "/governance");
-    expect(groupOf("Governance overview")).toContainElement(overview);
-    expect(within(groupOf("Governance overview")!).getAllByRole("link")).toHaveLength(1);
+    const links = within(screen.getByTestId("app-sidebar")).getAllByRole("link");
+    expect(links[0]).toHaveTextContent("Overview");
+    expect(links[0]).toHaveAttribute("href", "/governance");
   });
 
   test("Overview is the current page on /governance and not on /governance/data", () => {
@@ -472,7 +532,7 @@ describe("Sidebar – Governance app", () => {
     const governance = headingsAt("/governance");
     const controlPlane = headingsAt("/control-plane/workspaces");
     const explore = headingsAt("/explore/ws1/sql");
-    expect(governance).toContain("Governance overview");
+    expect(governance).toEqual(["Governance"]);
     expect(controlPlane).toContain("Overview");
     for (const [a, b] of [
       [governance, controlPlane],

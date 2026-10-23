@@ -34,7 +34,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -42,6 +41,7 @@ import { Label } from "@/components/ui/label";
 import { enginesQueryKey } from "./ControlPlaneEngines";
 import { ServerRefusal, isExternal, useCan } from "./externalEngine";
 import { engineDetailKey } from "./queryKeys";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /** The Ranger plugin name in the property keys: the engine type. */
 function pluginOf(engineType: string): string {
@@ -355,21 +355,21 @@ export function RangerCredentialSection({
       ? "This engine has no Ranger credential yet: egret creates one when the engine is applied bound to a policy profile."
       : null;
 
-  let state: { badge: string; variant: "secondary" | "outline"; text: string };
+  let state: { badge: string; tone: "success" | "neutral"; text: string };
   if (pending)
     state = {
       badge: "Previous credential pending",
-      variant: "outline",
+      tone: "neutral",
       text: external
         ? "Both the current and the previous credential authenticate until you confirm the engine runs the current one."
         : "Both credentials authenticate until the current one has been applied and its rollout completes; then egret retires the previous one. If the last apply failed, the pods still run the previous credential: save the engine's settings to apply the current one again.",
     };
   else if (currentId)
-    state = { badge: "Active", variant: "secondary", text: "One credential authenticates this engine's plugin." };
+    state = { badge: "Active", tone: "success", text: "One credential authenticates this engine's plugin." };
   else
     state = {
       badge: "No credential",
-      variant: "outline",
+      tone: "neutral",
       text: external
         ? "This engine was registered before engine credentials existed. Rotate to create one, then install it on the engine."
         : "egret creates one when the engine is applied bound to a policy profile.",
@@ -386,7 +386,7 @@ export function RangerCredentialSection({
       <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[10rem_1fr]">
         <dt className="text-muted-foreground">Status</dt>
         <dd className="space-y-1">
-          <Badge variant={state.variant}>{state.badge}</Badge>
+          <StatusBadge tone={state.tone}>{state.badge}</StatusBadge>
           <p className="text-muted-foreground">{state.text}</p>
         </dd>
         {/* Hidden while the retire dialog asks for the installed id: it must come

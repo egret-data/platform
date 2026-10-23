@@ -17,13 +17,16 @@ import {
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ExternalChip, isExternal, useCan } from "./externalEngine";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
 /**
  * Control Plane → Engines
  *
  * Platform-admin registry of query engines. Trino and StarRocks clusters can
- * both be provisioned on Kubernetes; RisingWave is a placeholder for a later
- * phase. Lists engines per type, shows a live health badge (per-row status
+ * both be provisioned on Kubernetes. Lists engines per type, shows a live health badge (per-row status
  * poll), and provisions a new engine against a catalog warehouse — the active
  * tab picks the engine kind for the Add dialog.
  */
@@ -33,14 +36,30 @@ type EngineType = {
   label: string;
 };
 
+// The engine types Egret provisions: always a tab each.
 const ENGINE_TYPES: EngineType[] = [
   { value: "trino", label: "Trino" },
   { value: "starrocks", label: "StarRocks" },
-  { value: "risingwave", label: "RisingWave" },
 ];
 
-// Trino and StarRocks provisioning are wired up; RisingWave is not yet.
-const PROVISIONABLE = new Set(["trino", "starrocks"]);
+const PROVISIONABLE = new Set(ENGINE_TYPES.map((t) => t.value));
+
+/** Labels for a type Egret does not provision but the registry may hold. */
+const OTHER_TYPE_LABEL: Record<string, string> = { risingwave: "RisingWave" };
+
+/**
+ * The tabs: the provisionable types, then any other type an engine in the
+ * list carries. There used to be a RisingWave tab with nothing behind it and
+ * a "later phase" sentence (KI-227); a type now gets a tab only when there is
+ * an engine of it to list, so no engine is ever left without one.
+ */
+function engineTabs(engines: Engine[]): EngineType[] {
+  const extra = [...new Set(engines.map((e) => e.type))]
+    .filter((t) => !PROVISIONABLE.has(t))
+    .sort()
+    .map((t) => ({ value: t, label: OTHER_TYPE_LABEL[t] ?? t }));
+  return [...ENGINE_TYPES, ...extra];
+}
 
 // The images the server pins for a new engine whose create body OMITS them
 // (`egret_perm::DEFAULT_ENGINE_IMAGES`). DISPLAY ONLY — placeholders and
@@ -114,6 +133,7 @@ export default function ControlPlaneEngines() {
   const canRegister = useCan("engine:create");
 
   const all = engines.data ?? [];
+  const tabs = engineTabs(all);
   const total = all.length;
   // An external engine's stored status is a placeholder egret never reads, so it
   // counts as neither running nor not running; it has its own figure.
@@ -122,13 +142,14 @@ export default function ControlPlaneEngines() {
   const running = managed.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
 
   return (
-    <div className="space-y-4" data-testid="engines-frame">
+    <PageContainer>
+      <div className="space-y-4" data-testid="engines-frame">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">Engines</h1>
+          <PageTitle>Engines</PageTitle>
           <p className="text-sm text-muted-foreground">
             Platform query engines. Provision a Trino or StarRocks cluster against a catalog
-            warehouse and monitor its health. RisingWave arrives in a later phase.
+            warehouse and monitor its health.
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -143,7 +164,7 @@ export default function ControlPlaneEngines() {
           <Button
             onClick={() => goCreate(activeType)}
             disabled={!canProvision}
-            title={canProvision ? undefined : "Coming soon"}
+            title={canProvision ? undefined : "Egret cannot provision this engine type."}
           >
             <Plus className="h-4 w-4" />
             Add engine
@@ -167,13 +188,13 @@ export default function ControlPlaneEngines() {
       ) : (
         <Tabs value={activeType} onValueChange={setActiveType}>
           <TabsList>
-            {ENGINE_TYPES.map((type) => (
+            {tabs.map((type) => (
               <TabsTrigger key={type.value} value={type.value}>
                 {type.label}
               </TabsTrigger>
             ))}
           </TabsList>
-          {ENGINE_TYPES.map((type) => (
+          {tabs.map((type) => (
             <TabsContent key={type.value} value={type.value} className="mt-4">
               <EngineTable
                 label={type.label}
@@ -189,7 +210,8 @@ export default function ControlPlaneEngines() {
           ))}
         </Tabs>
       )}
-    </div>
+      </div>
+    </PageContainer>
   );
 }
 
@@ -221,7 +243,7 @@ function EngineTable({
       cell: (e) => (
         <Link
           to={`/control-plane/engines/${e.id}`}
-          className="text-primary hover:underline"
+          className={ENTITY_LINK_CLASS}
         >
           {e.name}
         </Link>
@@ -284,11 +306,11 @@ function EngineTable({
           title={`No ${label} engines yet`}
           // No CTA button here: the page header already shows a persistent
           // "Add engine" action, so a second one would be redundant (and the
-          // wording adapts to whether this engine kind is provisionable yet).
+          // wording adapts to whether Egret provisions this engine kind).
           description={
             onAdd
               ? 'Use "Add engine" above to provision a cluster against a catalog warehouse.'
-              : "Support for this engine arrives in a later phase."
+              : "Egret cannot provision this engine type."
           }
         />
       }
@@ -296,19 +318,18 @@ function EngineTable({
   );
 }
 
-type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
 
 /**
  * A live Kubernetes phase OR — when the per-row poll has not answered — the
  * stored `engines.status`, which is why `deleting` is in the in-flight arm.
  * `deleting` is one of that column's four values
- * (`egret-engine-mgmt/src/store.rs`); it used to fall through to `secondary`
+ * (`egret-engine-mgmt/src/store.rs`); it used to fall through to `neutral`
  * while `EnginesTab`'s `EngineHealthBadge`, which reads the stored value
- * directly, painted it `warning`, so the two pages showed the same word in two
+ * directly, painted it `highlight`, so the two pages showed the same word in two
  * colours and a comment over there claimed they could not (whole-branch
  * review, F6).
  */
-function phaseVariant(phase: string): BadgeVariant {
+function phaseVariant(phase: string): StatusTone {
   switch (phase.toLowerCase()) {
     case "running":
     case "ready":
@@ -321,9 +342,9 @@ function phaseVariant(phase: string): BadgeVariant {
     case "creating":
     case "updating":
     case "deleting":
-      return "warning";
+      return "highlight";
     default:
-      return "secondary";
+      return "neutral";
   }
 }
 
@@ -337,5 +358,5 @@ function EngineStatusBadge({ id, fallback }: { id: string; fallback: string }) {
   });
 
   const phase = detail.data?.status.phase ?? fallback;
-  return <Badge variant={phaseVariant(phase)}>{phase}</Badge>;
+  return <StatusBadge tone={phaseVariant(phase)}>{phase}</StatusBadge>;
 }

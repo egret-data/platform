@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { FilterSettingsPanel } from "../FilterSettingsPanel";
 import type { DashboardParameter } from "@/api/dashboards";
 
@@ -40,12 +41,15 @@ describe("FilterSettingsPanel value sources", () => {
     fireEvent.change(screen.getByLabelText("custom values"), { target: { value: "West\nEast\n" } });
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ valuesSource: { type: "static", static: ["West", "East"] } }));
   });
-  it("From a card writes card + column", () => {
+  it("From a card writes card + column", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     render(<Harness spy={onChange} cardColumns={[{ cardId: "c1", label: "Sales", columns: ["region", "city"] }]} />);
-    fireEvent.click(screen.getByLabelText("values from card"));
-    fireEvent.change(screen.getByLabelText("values card"), { target: { value: "c1" } });
-    fireEvent.change(screen.getByLabelText("values column"), { target: { value: "city" } });
+    await user.click(screen.getByLabelText("values from card"));
+    // Choosing "From a card column" already picks the first card.
+    expect(screen.getByRole("combobox", { name: "values card" })).toHaveTextContent("Sales");
+    await user.click(screen.getByRole("combobox", { name: "values column" }));
+    await user.click(await screen.findByRole("option", { name: "city" }));
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ valuesSource: { type: "card", cardId: "c1", column: "city" } }));
   });
   it("does not offer value sources for a text parameter", () => {

@@ -22,6 +22,9 @@ import { PreviewTab } from "@/components/dataset/PreviewTab";
 import { UsageTab } from "@/components/dataset/UsageTab";
 import { DeleteDatasetDialog } from "@/components/dataset/DeleteDatasetDialog";
 import { refreshSummary } from "@/components/dataset/refreshSummary";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /** Compact "n unit(s)" stat chip for the header. */
 function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
@@ -84,17 +87,25 @@ export default function DatasetDetail() {
     }
   }, [ds, searchParams]);
 
-  if (isLoading) return <div className="p-4"><ListSkeleton cols={3} /></div>;
+  if (isLoading) return <PageContainer><ListSkeleton cols={3} /></PageContainer>;
   if (isError)
     return (
-      <div className="p-4">
+      <PageContainer>
         <Alert variant="destructive">
           <AlertDescription>{(error as Error)?.message ?? "Failed to load dataset."}</AlertDescription>
         </Alert>
-        <Link className="mt-3 inline-block text-sm underline" to={listHref}>← Back to datasets</Link>
-      </div>
+        <div className="mt-3">
+          <BackLink to={listHref}>Datasets</BackLink>
+        </div>
+      </PageContainer>
     );
-  if (!ds) return <div className="p-4">Not found. <Link className="underline" to={listHref}>Back</Link></div>;
+  if (!ds)
+    return (
+      <PageContainer>
+        <p className="mb-3">Not found.</p>
+        <BackLink to={listHref}>Datasets</BackLink>
+      </PageContainer>
+    );
 
   const source = ds.kind === "virtual" ? (ds.sql ?? "") : [ds.catalog, ds.schema, ds.table].filter(Boolean).join(".");
 
@@ -137,8 +148,8 @@ export default function DatasetDetail() {
   }
 
   return (
-    <div className="p-4">
-      <Link className="text-sm text-muted-foreground hover:underline" to={listHref}>← Datasets</Link>
+    <PageContainer>
+      <BackLink to={listHref}>Datasets</BackLink>
 
       {/* Header card */}
       <div className="mt-2 rounded-lg border bg-card p-4">
@@ -174,7 +185,7 @@ export default function DatasetDetail() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <h1 className="truncate text-lg font-semibold">{ds.name}</h1>
+                <PageTitle className="truncate">{ds.name}</PageTitle>
                 <Badge variant="secondary" className="gap-1">
                   {ds.kind === "virtual" ? <Sigma className="h-3 w-3" /> : <Table2 className="h-3 w-3" />}
                   {ds.kind}
@@ -273,6 +284,6 @@ export default function DatasetDetail() {
         toastOnSuccess={false}
         onDeleted={() => nav(listHref)}
       />
-    </div>
+    </PageContainer>
   );
 }

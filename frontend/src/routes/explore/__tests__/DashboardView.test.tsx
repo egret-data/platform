@@ -218,7 +218,8 @@ describe("DashboardView (Phase C — parameters)", () => {
 });
 
 describe("DashboardView (Phase C — mapping + injection)", () => {
-  it("shows an in-card column-to-filter overlay when a filter is selected in edit mode", () => {
+  it("shows an in-card column-to-filter overlay when a filter is selected in edit mode", async () => {
+    const user = userEvent.setup();
     dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
@@ -227,9 +228,9 @@ describe("DashboardView (Phase C — mapping + injection)", () => {
     expect(screen.getAllByLabelText("column to filter on").length).toBeGreaterThan(0);
     // Picking a real column must persist through updateCardOptions and read back as
     // the (controlled) select's value on re-render — the load-bearing round-trip.
-    const select = screen.getAllByLabelText("column to filter on")[0] as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "region" } });
-    expect((screen.getAllByLabelText("column to filter on")[0] as HTMLSelectElement).value).toBe("region");
+    await user.click(screen.getAllByRole("combobox", { name: "column to filter on" })[0]);
+    await user.click(await screen.findByRole("option", { name: "region" }));
+    expect(screen.getAllByRole("combobox", { name: "column to filter on" })[0]).toHaveTextContent("region");
   });
 });
 
@@ -270,7 +271,8 @@ describe("DashboardView (Rules of Hooks)", () => {
 });
 
 describe("DashboardView (Phase D1 — on-click config)", () => {
-  it("sets a card's click behaviour to a custom URL in edit mode", () => {
+  it("sets a card's click behaviour to a custom URL in edit mode", async () => {
+    const user = userEvent.setup();
     dashState.current = {
       data: { ...(dashState.loaded.data as object),
         cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {} }] },
@@ -279,7 +281,8 @@ describe("DashboardView (Phase D1 — on-click config)", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
-    fireEvent.change(screen.getByLabelText(/on click/i), { target: { value: "url" } });
+    await user.click(screen.getByRole("combobox", { name: /on click/i }));
+    await user.click(await screen.findByRole("option", { name: "Custom URL" }));
     const tpl = screen.getByLabelText(/url template/i);
     fireEvent.change(tpl, { target: { value: "https://x.com/{{region}}" } });
     expect((tpl as HTMLInputElement).value).toBe("https://x.com/{{region}}");

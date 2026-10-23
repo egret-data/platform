@@ -7,6 +7,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ScheduleRun, ScheduleSummary } from "@/api/alerts";
 
+/** Pick `option` in the shared `ui/select` picker named `label`: open it, then click the item. */
+async function pick(user: ReturnType<typeof userEvent.setup>, label: RegExp, option: string | RegExp) {
+  await user.click(screen.getByLabelText(label));
+  await user.click(await screen.findByRole("option", { name: option }));
+}
+
 // `vi.hoisted`: the mock factory is lifted above every `const`, so a plain
 // top-level spy is not initialised yet when the factory runs.
 const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
@@ -249,8 +255,8 @@ describe("Alerts & Reports editor page", () => {
     await goTo(user, /^schedule$/i);
     // The picker is the default path now; "every 5 minutes" is a dropdown
     // choice rather than an expression the user has to know how to write.
-    await user.selectOptions(screen.getByLabelText(/repeat/i), "minutes");
-    await user.selectOptions(screen.getByLabelText(/^every$/i), "5");
+    await pick(user, /repeat/i, "Every N minutes");
+    await pick(user, /^every$/i, "5 minutes");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -447,7 +453,7 @@ describe("Alerts & Reports editor page", () => {
     renderEditor("/explore/eng/alerts/new?type=report");
     await user.type(screen.getByLabelText(/^name$/i), "weekly pack");
     await goTo(user, /^contents$/i);
-    await user.selectOptions(screen.getByLabelText(/^format$/i), "png");
+    await pick(user, /^format$/i, "PNG image");
     await user.click(screen.getByRole("button", { name: /add another/i }));
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
@@ -519,7 +525,7 @@ describe("Alerts & Reports editor page", () => {
 
     expect(await screen.findByRole("heading", { name: /new report/i })).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole("tab", { name: /^contents$/i }));
-    expect(screen.getByLabelText(/^dashboard$/i)).toHaveValue("d2");
+    expect(screen.getByLabelText(/^dashboard$/i)).toHaveTextContent("Revenue");
   });
 
   it("sends a slack destination as a channel, never a token in the row", async () => {
@@ -867,7 +873,7 @@ describe("Data API alert condition (Task 6)", () => {
     renderDataapiEditor();
     await user.type(screen.getByLabelText(/^name$/i), "Latency up");
     await user.click(screen.getByRole("button", { name: "what" }));
-    await user.selectOptions(screen.getByLabelText(/^endpoint$/i), "ep2");
+    await pick(user, /^endpoint$/i, "Users API");
     await user.click(screen.getByRole("button", { name: /^save$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -904,7 +910,7 @@ describe("Data API alert condition (Task 6)", () => {
     const user = userEvent.setup();
     renderDataapiEditor("s1");
     await user.click(screen.getByRole("button", { name: "what" }));
-    expect(await screen.findByLabelText(/^endpoint$/i)).toHaveValue("gone");
+    expect(await screen.findByLabelText(/^endpoint$/i)).toHaveTextContent(/^gone \(not visible/);
 
     await user.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(updateMutate).toHaveBeenCalled());
@@ -918,7 +924,7 @@ describe("Data API alert condition (Task 6)", () => {
     await user.click(screen.getByRole("button", { name: "what" }));
     expect(screen.queryByLabelText(/^error code$/i)).not.toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText(/^metric$/i), "error_code_count");
+    await pick(user, /^metric$/i, "Count of a specific error code");
     await user.type(screen.getByLabelText(/^error code$/i), "rate_limited");
     await user.click(screen.getByRole("button", { name: /^save$/i }));
 
@@ -933,7 +939,7 @@ describe("Data API alert condition (Task 6)", () => {
     renderDataapiEditor();
     await user.type(screen.getByLabelText(/^name$/i), "Too few calls");
     await user.click(screen.getByRole("button", { name: "what" }));
-    await user.selectOptions(screen.getByLabelText(/^metric$/i), "call_count");
+    await pick(user, /^metric$/i, "Call count");
     await user.click(screen.getByRole("button", { name: /^save$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -957,10 +963,10 @@ describe("Data API alert condition (Task 6)", () => {
     renderDataapiEditor();
     await user.type(screen.getByLabelText(/^name$/i), "Slow endpoint");
     await user.click(screen.getByRole("button", { name: "what" }));
-    await user.selectOptions(screen.getByLabelText(/^metric$/i), "p95_duration_ms");
+    await pick(user, /^metric$/i, "p95 latency");
     await user.clear(screen.getByLabelText(/^window/i));
     await user.type(screen.getByLabelText(/^window/i), "60");
-    await user.selectOptions(screen.getByLabelText(/^condition$/i), ">=");
+    await pick(user, /^condition$/i, ">=");
     await user.clear(screen.getByLabelText(/^threshold$/i));
     await user.type(screen.getByLabelText(/^threshold$/i), "500");
     await user.click(screen.getByRole("button", { name: /^save$/i }));

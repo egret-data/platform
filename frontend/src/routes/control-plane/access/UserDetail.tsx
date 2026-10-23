@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, KeyRound, Trash2 } from "lucide-react";
+import { KeyRound, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -22,7 +22,6 @@ import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
 import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,17 +44,9 @@ import {
 } from "@/components/ui/table";
 import { usersQueryKey } from "./UsersPage";
 import { rolesQueryKey } from "./RolesPage";
-
-/** Two-letter avatar initials from the name (or email when unnamed). */
-function initials(u: AccessUser): string {
-  const name = u.name?.trim();
-  if (name) {
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return name.slice(0, 2).toUpperCase();
-  }
-  return (u.email ?? "?").slice(0, 2).toUpperCase();
-}
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * Control Plane → Access control → Users → a single user.
@@ -151,22 +142,22 @@ export default function UserDetail() {
 
   if (usersQ.isLoading || rolesQ.isLoading) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/users">Users</BackLink>
         <ListSkeleton rows={6} cols={2} />
-      </div>
+      </PageContainer>
     );
   }
   if (usersQ.isError || !user) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/users">Users</BackLink>
         <Alert variant="destructive">
           <AlertDescription>
             {usersQ.error?.message ?? "User not found."}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -174,66 +165,56 @@ export default function UserDetail() {
   const isSelf = user.id === me?.user_id;
 
   return (
-    <div className="space-y-6">
-      <BackLink />
-
-      {/* Identity header */}
-      <div className="flex flex-wrap items-center gap-3">
-        <Avatar className="h-11 w-11">
-          <AvatarFallback className="bg-primary/10 font-medium text-primary">
-            {initials(user)}
-          </AvatarFallback>
-        </Avatar>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="truncate text-2xl font-semibold leading-tight">
-              {user.name?.trim() || user.email}
-            </h1>
+    <PageContainer className="space-y-6">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/users", label: "Users" }}
+        title={user.name?.trim() || user.email}
+        titleClassName="min-w-0 truncate"
+        status={
+          <>
             {isActive ? (
-              <Badge
-                className="border-transparent"
-                style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
-              >
-                active
-              </Badge>
+              <StatusBadge tone="success">active</StatusBadge>
             ) : (
-              <Badge variant="secondary">disabled</Badge>
+              <StatusBadge tone="inactive">disabled</StatusBadge>
             )}
             <Badge variant="outline" className="font-normal">
               {user.provider}
             </Badge>
-          </div>
-          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
-        </div>
-        {isAdmin && (
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => (isActive ? setDisableOpen(true) : setStatus("active"))}
-            >
-              {isActive ? "Disable" : "Enable"}
-            </Button>
-            {user.provider === "local" && (
-              <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
-                <KeyRound className="mr-1 h-4 w-4" />
-                Reset password
+          </>
+        }
+        description={<span className="block truncate">{user.email}</span>}
+        actions={
+          isAdmin && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => (isActive ? setDisableOpen(true) : setStatus("active"))}
+              >
+                {isActive ? "Disable" : "Enable"}
               </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              disabled={isSelf}
-              title={isSelf ? "You cannot delete your own account" : undefined}
-              onClick={() => setDeleteOpen(true)}
-            >
-              <Trash2 className="mr-1 h-4 w-4" />
-              Delete
-            </Button>
-          </div>
-        )}
-      </div>
+              {user.provider === "local" && (
+                <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
+                  <KeyRound className="mr-1 h-4 w-4" />
+                  Reset password
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                disabled={isSelf}
+                title={isSelf ? "You cannot delete your own account" : undefined}
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="mr-1 h-4 w-4" />
+                Delete
+              </Button>
+            </>
+          )
+        }
+      />
 
       {/* Details */}
       <section className="space-y-3">
@@ -328,21 +309,10 @@ export default function UserDetail() {
         canDisable={isAdmin}
         disableBlockedReason={lastActiveAdminReason(user, usersQ.data ?? [])}
       />
-    </div>
+    </PageContainer>
   );
 }
 
-function BackLink() {
-  return (
-    <Link
-      to="/control-plane/users"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Users
-    </Link>
-  );
-}
 
 function ResetPasswordDialog({
   userId,

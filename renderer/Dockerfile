@@ -9,6 +9,11 @@ FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 WORKDIR /app
 
+# The base image's global npm 11.16.0 bundles tar 7.5.15 (CVE-2026-59873, CRITICAL); npm 11.19.0
+# is the first release that bundles a fixed tar (7.5.19). Drop this line once the Playwright image
+# ships a newer npm.
+RUN npm install -g npm@11.19.0 && npm cache clean --force
+
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 

@@ -35,6 +35,7 @@ import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
 import { TERM } from "@/routes/governance/glossary";
 import { NotEnforcedBadge, useRuleEnforcementIn, type EnforcementAnswer } from "@/routes/governance/NotEnforced";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -381,7 +382,7 @@ function RuleTable({
             <TableCell className="whitespace-normal">
               <div className="space-y-0.5">
                 <p className="text-sm font-medium break-words">
-                  <Link to={ruleHref(rule.id, back)} className="text-primary hover:underline">
+                  <Link to={ruleHref(rule.id, back)} className={ENTITY_LINK_CLASS}>
                     {rule.name}
                   </Link>
                 </p>

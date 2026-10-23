@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Database as DatabaseIcon,
   Loader2,
   Lock,
   Pencil,
@@ -55,30 +54,27 @@ import {
 import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
 import { Switch } from "@/components/ui/switch";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { Forbidden } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
-function statusVariant(status: string): "default" | "destructive" | "secondary" {
-  if (status === "ok") return "default";
+function statusTone(status: string): StatusTone {
+  if (status === "ok") return "success";
   if (status === "error") return "destructive";
-  return "secondary";
+  return "neutral";
 }
 
-/** Turn the raw status enum into a human-readable label (variant mapping unchanged). */
+/** Turn the raw status enum into a human-readable label (tone mapping unchanged). */
 function humanizeStatus(status: string): string {
   if (status === "ok") return "Healthy";
   if (status === "error") return "Error";
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
+/** The shared refusal (KI-231): a 403, or the redacted listing a member who
+ *  may only query gets, both mean this section is not theirs to manage. */
 function AdminOnlyNotice() {
-  return (
-    <Alert>
-      <DatabaseIcon className="h-4 w-4" />
-      <AlertTitle>Insufficient permissions</AlertTitle>
-      <AlertDescription>
-        Requires workspace-admin to manage engines.
-      </AlertDescription>
-    </Alert>
-  );
+  return <Forbidden level="section" reason="Only a workspace admin can manage engine connections." />;
 }
 
 export default function DatabasesPage() {
@@ -193,7 +189,7 @@ export default function DatabasesPage() {
       sortable: true,
       value: (conn) => conn.status,
       cell: (conn) => (
-        <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+        <StatusBadge tone={statusTone(conn.status)}>{humanizeStatus(conn.status)}</StatusBadge>
       ),
     },
     {
@@ -423,7 +419,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
             ) : null}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+            <StatusBadge tone={statusTone(conn.status)}>{humanizeStatus(conn.status)}</StatusBadge>
             <Badge
               variant="outline"
               className="gap-1 text-muted-foreground"
@@ -461,7 +457,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
           ) : catalogs.length === 0 ? (
             <p className="p-3 text-xs text-muted-foreground">No catalogs.</p>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollX>
               <table className="w-full text-left text-xs">
                 <thead className="text-muted-foreground">
                   <tr className="border-b">
@@ -488,7 +484,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollX>
           )}
         </div>
       )}

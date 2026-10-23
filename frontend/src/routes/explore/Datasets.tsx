@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Search, Star, Trash2, FolderPlus, ListChecks, BadgeCheck } from "lucide-react";
 import { toast } from "sonner";
 import { BulkMoveToFolderMenu, moveEach } from "@/components/explore/BulkMoveToFolderMenu";
@@ -29,6 +29,8 @@ import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { EntityLink } from "@/components/ui/entity-link";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "column_count" | "updated_at";
 
@@ -180,7 +182,7 @@ export default function Datasets() {
               <Star className={`h-4 w-4 ${d.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
             </Button>
           )}
-          <Link className="font-medium hover:underline" to={d.id}>{d.name}</Link>
+          <EntityLink to={d.id}>{d.name}</EntityLink>
           {d.certified && <BadgeCheck className="h-3.5 w-3.5 text-primary" aria-label="Certified" />}
         </span>
       </td>
@@ -322,7 +324,7 @@ export default function Datasets() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="overflow-x-auto">
+            <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -364,7 +366,7 @@ export default function Datasets() {
                 })
               )}
             </table>
-            </div>
+            </ScrollX>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked datasets." : "No datasets match the current filters."}</p>
           )}

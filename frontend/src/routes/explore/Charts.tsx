@@ -24,6 +24,8 @@ import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { EntityLink } from "@/components/ui/entity-link";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "viz_type" | "updated_at";
 const vizMeta = (v: string) => CHART_TYPES.find((t) => t.key === v);
@@ -163,10 +165,10 @@ export default function Charts() {
                 <Star className={`h-4 w-4 ${c.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
               </Button>
             )}
-            <Link className="inline-flex items-center gap-2 font-medium hover:underline" to={`/explore/${ws}/charts/${c.id}`}>
+            <EntityLink className="inline-flex items-center gap-2" to={`/explore/${ws}/charts/${c.id}`}>
               {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
               {c.name}
-            </Link>
+            </EntityLink>
           </span>
         </td>
         <td className="text-muted-foreground">{vizLabel(c.viz_type)}</td>
@@ -299,7 +301,7 @@ export default function Charts() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="overflow-x-auto">
+            <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -338,7 +340,7 @@ export default function Charts() {
                 })
               )}
             </table>
-            </div>
+            </ScrollX>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked charts." : "No charts match the current filters."}</p>
           )}

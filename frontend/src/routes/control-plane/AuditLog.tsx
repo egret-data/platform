@@ -5,8 +5,8 @@ import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 import type { ControlPlaneAuditListAuditParams } from "@/api/generated/model/controlPlaneAuditListAuditParams";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -25,17 +25,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 const COLUMNS = ["Time", "Actor", "Action", "Resource", "Decision", "Detail"];
 
 const PAGE_SIZE = 100;
-
-/** datetime-local value → ISO 8601, or undefined when empty/invalid. */
-function toIso(local: string): string | undefined {
-  if (!local) return undefined;
-  const d = new Date(local);
-  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
-}
 
 /**
  * Control Plane → System → Audit log.
@@ -53,8 +49,8 @@ export default function AuditLog() {
   const [kind, setKind] = useState("changes");
   const [decision, setDecision] = useState("all");
   const [action, setAction] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState<Date | null>(null);
+  const [to, setTo] = useState<Date | null>(null);
 
   // Keyset pagination: accumulate pages, remember the next cursor.
   const [entries, setEntries] = useState<AuditEntryDto[]>([]);
@@ -62,8 +58,8 @@ export default function AuditLog() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
 
   const actionParam = action.trim() || undefined;
-  const fromIso = toIso(from);
-  const toIsoValue = toIso(to);
+  const fromIso = from?.toISOString();
+  const toIsoValue = to?.toISOString();
 
   const params: ControlPlaneAuditListAuditParams = useMemo(
     () => ({
@@ -116,9 +112,9 @@ export default function AuditLog() {
     "Failed to load the audit log.";
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Audit log</h1>
+        <PageTitle>Audit log</PageTitle>
         <p className="text-sm text-muted-foreground">
           Every authorization decision and grant change, newest first.
           Platform-admin only.
@@ -174,24 +170,12 @@ export default function AuditLog() {
 
             <div className="space-y-1.5">
               <Label htmlFor="audit-from">From</Label>
-              <Input
-                id="audit-from"
-                type="datetime-local"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                className="w-52"
-              />
+              <DateTimePicker id="audit-from" value={from} onChange={setFrom} />
             </div>
 
             <div className="space-y-1.5">
               <Label htmlFor="audit-to">To</Label>
-              <Input
-                id="audit-to"
-                type="datetime-local"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                className="w-52"
-              />
+              <DateTimePicker id="audit-to" value={to} onChange={setTo} defaultTime="23:59" />
             </div>
           </div>
 
@@ -256,7 +240,7 @@ export default function AuditLog() {
             </div>
           )}
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -296,17 +280,9 @@ function AuditRow({ entry }: { entry: AuditEntryDto }) {
       </TableCell>
       <TableCell>
         {entry.decision === "allow" ? (
-          <Badge
-            className="border-transparent"
-            style={{
-              backgroundColor: "var(--success)",
-              color: "var(--success-foreground)",
-            }}
-          >
-            allow
-          </Badge>
+          <StatusBadge tone="success">allow</StatusBadge>
         ) : entry.decision === "deny" ? (
-          <Badge variant="destructive">deny</Badge>
+          <StatusBadge tone="destructive">deny</StatusBadge>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}

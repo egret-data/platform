@@ -16,10 +16,10 @@ const EN = "docs/en/frontend-rules.md";
 const VI = "docs/vi/frontend-rules.md";
 
 const GROUPS = {
-  PAGE: 5,
-  STATE: 4,
+  PAGE: 10,
+  STATE: 5,
   ACTION: 5,
-  VISUAL: 6,
+  VISUAL: 8,
   FORM: 4,
   DATA: 3,
   ROUTE: 3,
@@ -35,10 +35,10 @@ const EXPECTED_IDS = Object.entries(GROUPS).flatMap(([group, n]) =>
 // Spec §5: every rule a reviewer must confirm, because lint cannot check it or
 // because its check is a test or the gate that a change must add or run.
 const CHECKLIST_IDS = [
-  ...["PAGE-1", "PAGE-2", "PAGE-3", "PAGE-4", "PAGE-5"],
-  ...["STATE-1", "STATE-2", "STATE-3", "STATE-4"],
+  ...["PAGE-1", "PAGE-2", "PAGE-3", "PAGE-4", "PAGE-5", "PAGE-6", "PAGE-7", "PAGE-8", "PAGE-9", "PAGE-10"],
+  ...["STATE-1", "STATE-2", "STATE-3", "STATE-4", "STATE-5"],
   ...["ACTION-2", "ACTION-3", "ACTION-4", "ACTION-5"],
-  ...["VISUAL-2", "VISUAL-4", "VISUAL-5", "VISUAL-6"],
+  ...["VISUAL-2", "VISUAL-4", "VISUAL-5", "VISUAL-6", "VISUAL-7", "VISUAL-8"],
   ...["FORM-1", "FORM-2", "FORM-3", "FORM-4"],
   ...["DATA-1", "DATA-2", "DATA-3"],
   ...["ROUTE-1", "ROUTE-2", "ROUTE-3"],

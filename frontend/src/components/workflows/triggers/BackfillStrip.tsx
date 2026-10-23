@@ -1,6 +1,5 @@
 import { useId, useState } from "react";
 import { Pause, Play, Trash2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -25,6 +24,7 @@ import {
   ticksText,
   type TriggerRow,
 } from "@/components/workflows/triggers/triggersModel";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * Whether the Backfill button of a trigger without one can be used, and why not
@@ -134,7 +134,7 @@ export function BackfillStrip({
           <div className="grid gap-1">
             <Progress value={b.progress} aria-label={`Backfill progress of ${name}`} className="h-2" />
             <span className="text-xs text-muted-foreground">
-              {b.paused ? <Badge variant="secondary">Paused</Badge> : backfillStatus(b)}
+              {b.paused ? <StatusBadge tone="highlight">Paused</StatusBadge> : backfillStatus(b)}
               {frozen ? <span className="ml-2">Frozen while the trigger is off</span> : null}
             </span>
           </div>

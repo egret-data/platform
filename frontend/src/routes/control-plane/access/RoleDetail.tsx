@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, UserCog, X } from "lucide-react";
+import { Plus, Trash2, X } from "lucide-react";
 
 import {
   type AccessRole,
@@ -46,6 +46,8 @@ import {
   permissionsQueryKey,
   rolesQueryKey,
 } from "./RolesPage";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
 const NO_PARENT = "__none__";
 const roleQueryKey = (id: string) => ["control-plane", "access", "role", id] as const;
@@ -234,22 +236,22 @@ export default function RoleDetail() {
 
   if (roleQ.isLoading || rolesQ.isLoading) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/roles">Roles</BackLink>
         <ListSkeleton rows={6} cols={2} />
-      </div>
+      </PageContainer>
     );
   }
   if (roleQ.isError || !role) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/roles">Roles</BackLink>
         <Alert variant="destructive">
           <AlertDescription>
             {roleQ.error?.message ?? "Role not found."}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -257,41 +259,41 @@ export default function RoleDetail() {
   const canEdit = isAdmin && !isSuperuser;
 
   return (
-    <div className="space-y-6">
-      <BackLink />
-
-      {/* Identity header */}
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
-          <UserCog className="h-5 w-5" />
-        </span>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="truncate text-2xl font-semibold leading-tight">{role.name}</h1>
-            {seeded && (
-              <Badge variant="secondary" className="font-normal">
-                built-in
-              </Badge>
-            )}
-          </div>
-          <p className="text-sm text-muted-foreground">
+    <PageContainer className="space-y-6">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/roles", label: "Roles" }}
+        title={role.name}
+        titleClassName="min-w-0 truncate"
+        status={
+          seeded && (
+            <Badge variant="secondary" className="font-normal">
+              built-in
+            </Badge>
+          )
+        }
+        description={
+          <>
             {role.scope === "platform" ? "Platform role" : "Workspace role"} · {heldCount}{" "}
             permission{heldCount === 1 ? "" : "s"} · {role.assigneeCount} assignee
             {role.assigneeCount === 1 ? "" : "s"}
-          </p>
-        </div>
-        {isAdmin && !seeded && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
-            <Trash2 className="mr-1 h-4 w-4" />
-            Delete role
-          </Button>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          isAdmin &&
+          !seeded && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={() => setDeleteOpen(true)}
+            >
+              <Trash2 className="mr-1 h-4 w-4" />
+              Delete role
+            </Button>
+          )
+        }
+      />
 
       <RoleImpactNotice role={role} roles={roles} />
 
@@ -501,18 +503,7 @@ export default function RoleDetail() {
           setDeleteOpen(false);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }
 
-function BackLink() {
-  return (
-    <Link
-      to="/control-plane/roles"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Roles
-    </Link>
-  );
-}

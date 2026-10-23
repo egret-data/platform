@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, ChevronsUpDown, Plus, Trash2, UsersRound, X } from "lucide-react";
+import { ChevronsUpDown, Plus, Trash2, X } from "lucide-react";
 
 import {
   type AccessGroup,
@@ -41,6 +41,8 @@ import {
 import { groupsQueryKey } from "./GroupsPage";
 import { usersQueryKey } from "./UsersPage";
 import { rolesQueryKey } from "./RolesPage";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
 const membersQueryKey = (id: string) =>
   ["control-plane", "access", "group", id, "members"] as const;
@@ -155,53 +157,53 @@ export default function GroupDetail() {
 
   if (groupsQ.isLoading || rolesQ.isLoading) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/groups">Groups</BackLink>
         <ListSkeleton rows={6} cols={2} />
-      </div>
+      </PageContainer>
     );
   }
   if (groupsQ.isError || !group) {
     return (
-      <div className="space-y-5">
-        <BackLink />
+      <PageContainer className="space-y-5">
+        <BackLink to="/control-plane/groups">Groups</BackLink>
         <Alert variant="destructive">
           <AlertDescription>
             {groupsQ.error?.message ?? "Group not found."}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <BackLink />
-
-      {/* Identity header */}
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
-          <UsersRound className="h-5 w-5" />
-        </span>
-        <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold leading-tight">{group.name}</h1>
-          <p className="text-sm text-muted-foreground">
+    <PageContainer className="space-y-6">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/groups", label: "Groups" }}
+        title={group.name}
+        titleClassName="min-w-0 truncate"
+        description={
+          <>
             {isOidc ? "Synced from OIDC" : "Local group"} · {group.memberCount} member
             {group.memberCount === 1 ? "" : "s"}
-          </p>
-        </div>
-        {isAdmin && !isOidc && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
-            <Trash2 className="mr-1 h-4 w-4" />
-            Delete group
-          </Button>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          isAdmin &&
+          !isOidc && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={() => setDeleteOpen(true)}
+            >
+              <Trash2 className="mr-1 h-4 w-4" />
+              Delete group
+            </Button>
+          )
+        }
+      />
 
       {isOidc && (
         <Alert>
@@ -349,21 +351,10 @@ export default function GroupDetail() {
           setDeleteOpen(false);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }
 
-function BackLink() {
-  return (
-    <Link
-      to="/control-plane/groups"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Groups
-    </Link>
-  );
-}
 
 /** A searchable single-user picker: search by email/name, click to set the
  * pending selection (the caller confirms with a separate Add button). */

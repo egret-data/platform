@@ -21,6 +21,9 @@ import {
   namesNobodySentence,
   policyTypeWord,
 } from "@/routes/governance/handwritten/handwrittenText";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 /** A People page's principal as route B names it: a user by id, a group or role by name. */
 export type PrincipalSubject = { kind: "user" | "group" | "role"; id: string };
@@ -176,7 +179,7 @@ function Group({
                   <TableCell className="whitespace-normal align-top">
                     <span className="flex flex-wrap items-center gap-1.5">
                       {href ? (
-                        <Link to={href} className="break-all font-medium text-primary hover:underline">
+                        <Link to={href} className={cn(ENTITY_LINK_CLASS, "break-all")}>
                           {p.name}
                         </Link>
                       ) : (
@@ -207,7 +210,7 @@ function Group({
                     {p.engines.length > 0 ? [...p.engines].sort(byName).map((e) => e.name).join(", ") : "No engine"}
                   </TableCell>
                   <TableCell data-label="State" className="whitespace-normal align-top text-sm">
-                    <Badge variant={p.enabled ? "secondary" : "outline"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
+                    <StatusBadge tone={p.enabled ? "success" : "inactive"}>{p.enabled ? "Enabled" : "Disabled"}</StatusBadge>
                     {p.denyAllElse ? <span className="mt-1 block text-xs">{DENY_ALL_ELSE}</span> : null}
                     {p.unmodelled.map((u) => (
                       <span key={u} className="mt-1 block text-xs">

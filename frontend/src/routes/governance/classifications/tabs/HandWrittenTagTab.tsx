@@ -6,7 +6,6 @@ import type { TagPolicyRow } from "@/api/generated/model";
 import { useControlPlaneGovernanceTagHandwritten } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
@@ -16,6 +15,9 @@ import { DENY_ALL_ELSE, policyTypeWord } from "@/routes/governance/handwritten/h
 import { UnreadablePolicies } from "@/routes/governance/handwritten/UnreadablePolicies";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { TERM } from "@/routes/governance/glossary";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 export const TAG_POLICIES_NEED_POLICY_READ =
   "Manual tag policies are read with the policy:read permission, which this account does not have.";
@@ -112,7 +114,7 @@ function Body({ tagId }: { tagId: string }) {
                     <TableCell className="whitespace-normal align-top">
                       <span className="block">
                         {href ? (
-                          <Link to={href} className="break-all font-medium text-primary hover:underline">
+                          <Link to={href} className={cn(ENTITY_LINK_CLASS, "break-all")}>
                             {p.name}
                           </Link>
                         ) : (
@@ -143,7 +145,7 @@ function Body({ tagId }: { tagId: string }) {
                       <HandWrittenItems items={p.items} />
                     </TableCell>
                     <TableCell data-label="State" className="whitespace-normal align-top text-sm">
-                      <Badge variant={p.enabled ? "secondary" : "outline"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
+                      <StatusBadge tone={p.enabled ? "success" : "inactive"}>{p.enabled ? "Enabled" : "Disabled"}</StatusBadge>
                       {p.denyAllElse ? <span className="mt-1 block text-xs">{DENY_ALL_ELSE}</span> : null}
                       {p.unmodelled.map((u) => (
                         <span key={u} className="mt-1 block text-xs">

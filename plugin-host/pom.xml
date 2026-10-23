@@ -37,6 +37,22 @@
     <plugins.dir>${project.build.directory}/plugins</plugins.dir>
   </properties>
 
+  <!-- Netty arrives transitively with io.kestra:core (4.2.16.Final with rc13). netty-handler
+       4.2.16 has CVE-2026-75595 (CRITICAL, fixed in 4.2.17), so every Netty module is overridden to
+       one 4.2.17.Final through Netty's BOM, keeping the modules on a single version. Drop this
+       once the Kestra version brings 4.2.17 or later itself. -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>4.2.17.Final</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>io.kestra</groupId>

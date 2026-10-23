@@ -12517,7 +12517,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin",
+            "description": "Missing storage:read permission, or the caller is not a platform admin and the key is under a prefix egret writes for its users, or under the storage of a warehouse or lakehouse catalog (a table's data or metadata file, whose raw bytes would skip its column masks and row filters)",
             "content": {
               "application/json": {
                 "schema": {
@@ -59093,6 +59093,16 @@
               "type": "string"
             },
             "description": "Module keys this workspace currently has switched on. Populated\nwherever a caller reads a workspace's entitlements back (`list_ws`,\n`get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty\nby the create/lifecycle handlers, which echo the resource they just\nmutated rather than reading entitlement state."
+          },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The caller's own permissions in this workspace among\n[`PAGE_PERMISSIONS`]: the ones that decide whether a whole Explore page\nopens. Only `/api/me/workspaces` fills it, from the same PDP decision\nthe page's routes ask, so the UI can leave out the entries the caller\ncannot open (KI-231). The routes stay the gate. Absent everywhere else."
           }
         }
       },

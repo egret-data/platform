@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { useControlPlaneCatalogRegistryCreateRegistryCatalog } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
@@ -43,6 +43,8 @@ import {
   submitProblem,
 } from "./kinds/forms";
 import { EGRET_WAREHOUSE_KIND, KIND_OPTIONS } from "./kinds/pickers";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /** `CreateRegistryCatalogBody.name`, and `is_valid_catalog_name` behind it. */
 const NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
@@ -194,22 +196,18 @@ export default function CatalogCreate() {
   const option = KIND_OPTIONS.find((o) => o.kind === kind);
 
   return (
-    <div className="space-y-4">
-      <Link
-        to="/control-plane/catalogs"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Catalogs
-      </Link>
-
-      <div className="max-w-3xl">
-        <h1 className="text-2xl font-semibold leading-tight">New catalog</h1>
-        <p className="text-sm text-muted-foreground">
-          A catalog is a set of tables an engine can query. Choose what it reads, then attach it
-          to an engine and assign it to a workspace from its page.
-        </p>
-      </div>
+    <PageContainer width="narrow" className="space-y-4">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/catalogs", label: "Catalogs" }}
+        title="New catalog"
+        description={
+          <>
+            A catalog is a set of tables an engine can query. Choose what it reads, then attach it
+            to an engine and assign it to a workspace from its page.
+          </>
+        }
+      />
 
       {error && (
         <Alert variant="destructive">
@@ -337,7 +335,7 @@ export default function CatalogCreate() {
           Create catalog
         </Button>
       </div>
-    </div>
+    </PageContainer>
   );
 }
 

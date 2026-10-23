@@ -44,7 +44,7 @@ export function useWorkspaceFeatures(): string[] {
 /**
  * The route to send a user to when they land on the workspace root (or an
  * unknown path): the first enabled module in nav order (per `EXPLORE_MODULES`
- * — the same order Sidebar renders), or Workspace settings → Members when
+ * — the same order Sidebar renders), or Workspace settings when
  * every module is switched off (so a workspace with e.g. SQL Lab disabled
  * doesn't redirect straight into a page `RequireFeature` will immediately
  * bounce off).
@@ -52,7 +52,9 @@ export function useWorkspaceFeatures(): string[] {
 export function useDefaultExplorePath(): string {
   const enabled = useWorkspaceFeatures();
   const first = EXPLORE_MODULES.find((m) => enabled.includes(m.key));
-  return first ? first.path : "settings/members";
+  // `settings`, not one section: its index opens the first section this
+  // reader may open (`SettingsIndex`).
+  return first ? first.path : "settings";
 }
 
 /**
@@ -69,4 +71,23 @@ export function useDefaultExplorePath(): string {
  */
 export function exploreRedirectTo(workspace: string | undefined, defaultPath: string): string {
   return `/explore/${workspace ?? ""}/${defaultPath}`;
+}
+
+/**
+ * Whether the caller holds `perm` in the current route's workspace, for
+ * leaving out a sidebar or settings entry they cannot open (KI-231).
+ *
+ * The answer comes from `/me/workspaces` → `permissions`, which the server
+ * computes with the same PDP decision the page's routes ask; the routes stay
+ * the gate. Like `useWorkspaceFeatures` this is OPTIMISTIC: while the list is
+ * loading, for a workspace not in it, or from a server that does not send
+ * `permissions`, every permission reads as held, so an entry is only ever
+ * hidden on the server's own word that it would refuse. A `perm` of
+ * `undefined` (an entry with no gate) is always held.
+ */
+export function useWorkspacePermission(): (perm: string | undefined) => boolean {
+  const { workspace } = useParams();
+  const { data } = useMyWorkspaces(true);
+  const held = data?.find((w) => w.slug === workspace)?.permissions;
+  return (perm) => perm === undefined || held === undefined || held.includes(perm);
 }

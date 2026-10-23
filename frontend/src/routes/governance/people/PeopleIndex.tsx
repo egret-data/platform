@@ -20,6 +20,8 @@ import { principalUrl } from "@/routes/governance/people/peopleUrl";
 import { UnmatchedNames } from "@/routes/governance/people/UnmatchedNames";
 import { ReusedNames } from "@/routes/governance/people/ReusedNames";
 import { CheckAccessDialog } from "@/routes/governance/people/CheckAccessDialog";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 type PersonKind = "user" | "group" | "role";
 type TabId = PersonKind | "unmatched" | "reused";
@@ -265,7 +267,7 @@ function NameLink({ row }: { row: PersonRow }) {
       ? principalUrl({ kind: "user", userId: row.key })
       : principalUrl({ kind: row.kind === "group" ? "group" : "role", name: row.key });
   return (
-    <Link to={to} className="break-all font-medium text-primary hover:underline">
+    <Link to={to} className={cn(ENTITY_LINK_CLASS, "break-all")}>
       {row.label}
     </Link>
   );

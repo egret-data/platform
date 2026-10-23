@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
+import { Forbidden } from "@/routes/Forbidden";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 
 /** Small dot colour for a role, using semantic design tokens (mirrors Members). */
@@ -121,12 +122,7 @@ export default function AccessRequests() {
       {q.isLoading ? (
         <ListSkeleton rows={4} cols={5} />
       ) : forbidden ? (
-        <p
-          className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground"
-          role="alert"
-        >
-          Only workspace admins can review requests.
-        </p>
+        <Forbidden level="section" reason="Only a workspace admin can review access requests." />
       ) : q.isError ? (
         <p className="py-6 text-sm text-destructive" role="alert">
           Couldn&apos;t load requests. {String(q.error)}

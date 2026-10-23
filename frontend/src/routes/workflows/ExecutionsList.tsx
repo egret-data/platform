@@ -53,6 +53,8 @@ import {
   type ExecutionFilters,
 } from "@/routes/workflows/executionsListModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 /** One page as the list shows it: the rows, the whole match's size, and whether the server's worker runs. */
 interface ListPage {
@@ -307,6 +309,12 @@ export default function ExecutionsList({
   }
 
   if (embedded) return <div className="grid gap-0">{body}</div>;
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (!embedded && isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
+  }
+
   return (
     <ListPageShell title="Executions" toolbar={refresh}>
       {body}
@@ -365,7 +373,7 @@ export function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListI
       {showFlow ? (
         <TableCell>
           {row.flow_id ? (
-            <Link className="font-medium hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_id)}/edit`}>
+            <Link className={ENTITY_LINK_CLASS} to={`${base}/flows/${encodeURIComponent(row.flow_id)}/edit`}>
               {row.flow_key}
             </Link>
           ) : (

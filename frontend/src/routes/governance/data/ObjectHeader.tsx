@@ -9,6 +9,7 @@ import { dottedPath, KIND_ICON, type NodeKind } from "@/routes/governance/data/C
 import { engineTypeLabel, type EngineInfo } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /** What the header's tag section shows; `null` for an object that cannot carry tags (no section at all). */
 export type HeaderTags = null | { state: "loading" } | { state: "error" } | { state: "ok"; tags: TagDto[] };
@@ -102,9 +103,9 @@ export function ObjectHeader({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           {/* Takes focus when the page opens from the folded tree, or the column panel closes with no opener (D6, D7). */}
-          <h1 tabIndex={-1} className="text-2xl font-semibold break-all outline-none">
+          <PageTitle tabIndex={-1} className="break-all outline-none">
             {name}
-          </h1>
+          </PageTitle>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
             {kindMeta ? (
               <span className="inline-flex items-center gap-1">

@@ -19,6 +19,8 @@ import {
 } from "@/components/workflows/namespaceTree";
 import { namespaceHref, OWN_COUNTS_NOTE } from "@/components/workflows/namespaces/namespaceTabs";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 /** The table's column count, for the skeleton. */
 const COLS = 4;
@@ -195,6 +197,12 @@ export default function NamespacesList() {
     return known.map((ns) => ({ value: ns, label: ns }));
   }, [rows, prefix]);
 
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
+  }
+
   return (
     <ListPageShell title="Namespaces">
       <ListStates
@@ -370,9 +378,11 @@ function NamespaceRow({
               tabIndex={-1}
               aria-label={empty ? `${node.path} ${EMPTY_SEGMENT_LABEL}` : node.path}
               title={node.path}
-              className={`rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                parentOnly ? "text-muted-foreground" : "font-medium"
-              } ${empty ? "italic" : ""}`}
+              // One name colour in every list (KI-223): a parent-only segment is
+              // told apart by its "Parent only" label, not by a muted name.
+              className={`rounded-sm ${ENTITY_LINK_CLASS} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                empty ? "italic" : ""
+              }`}
             >
               {empty ? EMPTY_SEGMENT_LABEL : node.label}
             </Link>

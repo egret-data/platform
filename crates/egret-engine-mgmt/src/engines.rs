@@ -534,6 +534,7 @@ pub(crate) struct PendingAttachment {
 
 /// An assembled provisioning request plus the internal secrets it rendered
 /// (Trino only). Hand it to [`apply_built`], which settles those secrets.
+#[derive(Clone)]
 pub(crate) struct BuiltReq {
     req: EngineProvisionReq,
     internal: Option<EngineInternalSecrets>,
@@ -918,7 +919,7 @@ pub(crate) enum ApplyBuiltError {
 /// this apply is still allowed to reach.
 pub(crate) async fn apply_built(
     st: &CpState,
-    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
     engine: &Engine,
     built: &BuiltReq,
     op: ApplyOp,
@@ -952,6 +953,35 @@ pub(crate) async fn apply_built(
             return Err(ApplyBuiltError::Conflict);
         }
     }
+    // KI-263: the provisioner call and the bookkeeping after it run in their
+    // own task. A request whose client goes away (a closed tab, a dropped
+    // connection) is dropped by the server, and with it anything it awaits;
+    // on Docker an update removes the old containers before it starts the new
+    // ones, so a drop between the two left the engine with none. The task is
+    // not owned by the request: it finishes either way, and a request still
+    // connected gets its result as before.
+    let task = tokio::spawn(finish_apply(
+        st.clone(),
+        prov,
+        engine.clone(),
+        built.clone(),
+        op,
+    ));
+    task.await.map_err(|e| {
+        tracing::error!(engine = %engine.name, error = %e, "the engine apply task stopped");
+        ApplyBuiltError::Failed(format!("the apply of engine {} stopped: {e}", engine.name))
+    })?
+}
+
+/// The part of [`apply_built`] past its guard: the provisioner call, then the
+/// catalog apply status and the internal secrets it settles.
+async fn finish_apply(
+    st: CpState,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    engine: Engine,
+    built: BuiltReq,
+    op: ApplyOp,
+) -> Result<(), ApplyBuiltError> {
     let res = match op {
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
@@ -977,7 +1007,7 @@ pub(crate) async fn apply_built(
         } else {
             Supersede::Keep
         };
-        if let Err(e) = commit_internal_secrets(st, engine, secrets, superseded).await {
+        if let Err(e) = commit_internal_secrets(&st, &engine, secrets, superseded).await {
             tracing::error!(engine = %engine.name, error = ?e,
                 "minted internal secrets but could not record them; \
                  the monitor fails until the next successful apply");
@@ -2119,6 +2149,7 @@ async fn ensure_root_password_secret(
 
 /// A Trino engine's coordinator↔worker shared secret (`TRINO_INTERNAL_SECRET`)
 /// and `egret-monitor` password, as resolved for ONE apply.
+#[derive(Clone)]
 struct EngineInternalSecrets {
     internal_id: Uuid,
     internal: String,
@@ -3578,7 +3609,7 @@ async fn create_engine(
         engine.namespace.clone(),
         engine.name.clone(),
     ));
-    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
+    if let Err(e) = apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Provision).await {
         compensate_failed_create(&st, undo).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -5993,7 +6024,7 @@ async fn update_trino_engine(
             return Err(e);
         }
     };
-    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+    if let Err(e) = apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update).await {
         restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -6537,7 +6568,7 @@ async fn restart_engine(
         // Restart has nothing to roll: re-apply the stored spec, which creates
         // the engine's pods or containers again (KI-213).
         let built = build_provision_req(&st, &engine).await?;
-        apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+        apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update)
             .await
             .map_err(|e| match e {
                 ApplyBuiltError::Conflict => apply_conflict(),
@@ -6639,7 +6670,7 @@ async fn rotate_engine_secrets(
         },
     )
     .await?;
-    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+    apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update)
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -6751,7 +6782,7 @@ async fn rotate_ranger_credential(
         },
     )
     .await?;
-    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+    apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update)
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -12716,7 +12747,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        let err = apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .expect_err(
                 "a lost race against a delete must surface as an error, not a silent apply",
@@ -12778,7 +12809,7 @@ mod tests {
         };
 
         render(&mut built, Uuid::new_v4().to_string());
-        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        let err = apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .expect_err("a credential the row does not name is refused");
         assert!(matches!(err, ApplyBuiltError::CredentialChanged));
@@ -12789,7 +12820,7 @@ mod tests {
         );
 
         render(&mut built, c1.to_string());
-        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        let err = apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .expect_err("the PREVIOUS credential would roll the cluster back");
         assert!(matches!(err, ApplyBuiltError::CredentialChanged));
@@ -12799,7 +12830,7 @@ mod tests {
         );
 
         render(&mut built, c2.to_string());
-        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .unwrap_or_else(|_| panic!("the current credential applies"));
         assert_eq!(
@@ -12943,7 +12974,7 @@ mod tests {
             .await
             .unwrap();
 
-        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .expect("an apply must succeed when the row merely advanced to running");
         assert_eq!(
@@ -13006,7 +13037,7 @@ mod tests {
             .await
             .unwrap();
 
-        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+        apply_built(&st, counting.clone(), &engine, &built, ApplyOp::Update)
             .await
             .expect_err("must refuse once the row is deleting");
         assert_eq!(
