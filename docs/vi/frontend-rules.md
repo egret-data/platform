@@ -60,6 +60,10 @@ Phần đầu của trang chi tiết, form hay trình sửa là `DetailHeader`: 
 Dải tab làm bằng link của router dùng `tabsListClass(variant)` và `tabsTriggerClass(variant)`, hai hàm này tô `aria-current="page"` giống một trigger đang chọn. Icon trong trigger được component tự giãn cách; không thêm margin. Các dải tự viết được phép là tab tài liệu mà người dùng mở, đóng, đổi tên hay kéo thả: `DashboardTabBar` (`frontend/src/components/chart/dashboard/DashboardTabBar.tsx`), `PanelTabStrip` (`frontend/src/components/workflows/panels/PanelTabStrip.tsx`) và dải file đang mở trong `NamespaceFiles` (`frontend/src/components/workflows/namespaces/files/NamespaceFiles.tsx`). Bộ chuyển statement của Data API (`frontend/src/routes/explore/dataapi/detail/Query.tsx`) là phần tử `role="tab"` thường để `fieldset` bị vô hiệu hoá không vô hiệu hoá được nó, và dùng `tabsTriggerClass("underline")`.
 **Làm thế này:** `frontend/src/components/ui/tabs.tsx`; tab bằng link router: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Kiểm bằng:** review và test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Vì sao:** KI-216: năm kiểu tab cho cùng một việc.
 
+#### FE-PAGE-10 — Màn hình nhỏ: thanh icon, bảng cuộn, tab xuống dòng · PHẢI
+Dưới 1024px, sidebar của ứng dụng là thanh icon, bất kể lựa chọn đã lưu, và nút thu gọn bị ẩn. Bảng rộng hơn chỗ của nó thì cuộn ngang bên trong khung chứa, và `ui/table` tô bóng cạnh bị cắt (`ScrollCue`). Dải tab pill xuống dòng. Dải tab gạch chân hay thanh mục bằng link router có thể bị cắt thì nằm trong `ScrollStrip`, nó tô bóng cạnh bị cắt. Không gì trên trang làm cả tài liệu cuộn ngang.
+**Làm thế này:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Kiểm bằng:** trình duyệt (`frontend/tests/e2e/small-screens.spec.ts`). **Vì sao:** KI-233, KI-234: ở 390px cột và tab bị cắt mà không có dấu hiệu gì, và ở 768px sidebar 224px chỉ để lại cho bảng 480px.
+
 ## 2. Trạng thái (FE-STATE)
 
 #### FE-STATE-1 — Loading, rỗng và lỗi, kiểm lỗi trước · PHẢI
@@ -77,6 +81,10 @@ Trạng thái rỗng vẽ `EmptyState`. "Rỗng" nghĩa là tập dữ liệu kh
 #### FE-STATE-4 — Chỉ báo trạng thái so sánh nội dung · PHẢI
 Chỉ báo trạng thái ("đã sửa", "khác bản đang chạy", "đã cũ") so sánh chính nội dung nó mô tả. Chỉ dùng timestamp khi không có nội dung, và khi đó liệt kê mọi nơi ghi timestamp ấy trong một comment.
 **Làm thế này:** ví dụ: `frontend/src/routes/explore/dataapi/endpointState.tsx` (so bản nháp với định nghĩa đang phục vụ). **Kiểm bằng:** review.
+
+#### FE-STATE-5 — Các trang trạng thái dùng chung một khung; từ chối là `Forbidden`, bên trong shell · PHẢI
+Trang không có nội dung riêng để hiện thì dùng `StatePage`: bị từ chối, trang không tồn tại, tính năng chưa làm, trang đã chuyển chỗ. Trang này vẽ bên trong shell của ứng dụng, ở mép trái của danh sách, với một `PageTitle`. Nó có nút *Go back* khi có lịch sử, và một link để đi tiếp. Từ chối luôn là `Forbidden`. Guard của route dùng nó. Trang mà server từ chối lần đọc chính của nó (`isForbidden(error)`) cũng dùng nó: vẽ thay cho trang và các nút của trang, không bao giờ là một hộp đỏ chứa chữ của API. Một phần của trang mà trang vẫn mở được thì dùng `level="section"`. Sidebar và thanh mục bỏ đi những mục người đọc không mở được, theo `/me/workspaces` → `permissions` (`useWorkspacePermission`). Chúng đọc theo kiểu lạc quan, và server vẫn là cổng kiểm soát.
+**Làm thế này:** `frontend/src/components/layout/StatePage.tsx`, `frontend/src/routes/Forbidden.tsx`, `frontend/src/hooks/useWorkspaceFeatures.ts`; ví dụ: `frontend/src/routes/explore/dataapi/Endpoints.tsx`. **Kiểm bằng:** test (`frontend/src/auth/__tests__/guards.test.tsx`, `frontend/src/components/layout/__tests__/Sidebar.test.tsx`). **Vì sao:** KI-230, KI-231: một lần từ chối thay cả ứng dụng bằng một thẻ trơn, và cùng một lần từ chối được viết theo bốn cách.
 
 ## 3. Thao tác và phản hồi (FE-ACTION)
 
@@ -279,10 +287,12 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-PAGE-7 — `h1` là một `PageTitle` nhìn thấy được: 20px, hoặc `compact` 16px trong thanh tiêu đề của công cụ.
 - [ ] FE-PAGE-8 — Phần đầu của trang chi tiết, form hay trình sửa là `DetailHeader` (hoặc `PageTitle` + `BackLink`); không ô icon, không nút icon mũi tên.
 - [ ] FE-PAGE-9 — Tab là `pill` cho các phần của trang và `underline` cho panel; tab bằng link router dùng `tabsTriggerClass`.
+- [ ] FE-PAGE-10 — Dưới 1024px sidebar là thanh icon; bảng cuộn kèm bóng ở cạnh; tab pill xuống dòng, dải có thể bị cắt dùng `ScrollStrip`.
 - [ ] FE-STATE-1 — Có đủ loading, rỗng và lỗi; kiểm `isError` trước; lỗi không hiển thị thành rỗng.
 - [ ] FE-STATE-2 — Nội dung đang tải là skeleton; spinner chỉ cho nút và thao tác tại chỗ; không có "Loading…" trơn.
 - [ ] FE-STATE-3 — Rỗng là `EmptyState` cho tập chưa lọc; filter không khớp thì nói vậy và cho xoá filter.
 - [ ] FE-STATE-4 — Chỉ báo trạng thái so sánh nội dung; nếu phải dùng timestamp thì comment liệt kê nơi ghi.
+- [ ] FE-STATE-5 — Trang trạng thái dùng `StatePage` bên trong shell; mọi từ chối là `Forbidden` (kể cả khi lần đọc chính bị từ chối); bỏ các mục người đọc không mở được.
 - [ ] FE-ACTION-2 — Thành công thì invalidate các query bị đổi; không toast khi điều hướng, có toast khi ở lại.
 - [ ] FE-ACTION-3 — Thất bại thì hiện lời server và không xoá gì người dùng đã nhập.
 - [ ] FE-ACTION-4 — Control bị vô hiệu hoá nói vì sao.
