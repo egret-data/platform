@@ -92,7 +92,7 @@ export function DateTimePicker({
           type="button"
           variant="outline"
           aria-describedby={valueId}
-          className={cn("w-52 justify-start font-normal tabular-nums", !shown && "text-muted-foreground", className)}
+          className={cn("h-10 w-52 justify-start font-normal tabular-nums", !shown && "text-muted-foreground", className)}
         >
           <CalendarIcon aria-hidden="true" />
           <span id={valueId}>{shown ?? placeholder}</span>
