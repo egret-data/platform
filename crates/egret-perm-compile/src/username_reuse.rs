@@ -66,8 +66,9 @@ pub enum PlaceType {
 }
 
 /// Where the name is written. A grant, rule or engine grant carries `id`
-/// (and, for a grant or rule, `position`; for a grant, `effect`); a policy
-/// carries `policyId`, `name`, `service` and `managedBy`.
+/// (and, for a grant or rule, `position`; for a grant, `effect`; for an engine
+/// grant, `engineId`); a policy carries `policyId`, `name`, `service` and
+/// `managedBy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Place {
@@ -75,6 +76,9 @@ pub struct Place {
     pub place_type: PlaceType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
+    /// The engine an engine grant belongs to: its page is where it is fixed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<Uuid>,
     /// `include` | `exclude`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
@@ -147,6 +151,7 @@ pub struct UsernameReuseReport {
 struct RefRow {
     place_type: String,
     place_id: Uuid,
+    engine_id: Option<Uuid>,
     username: String,
     position: String,
     effect: Option<String>,
@@ -186,21 +191,22 @@ struct PolicyRow {
 /// grant.
 const REFS: &str = "\
 WITH refs AS ( \
-    SELECT 'grant' AS place_type, g.id AS place_id, p.ref, p.mode::text AS position, \
-           g.effect::text AS effect, g.created_at AS parent_created, \
+    SELECT 'grant' AS place_type, g.id AS place_id, NULL::uuid AS engine_id, p.ref, \
+           p.mode::text AS position, g.effect::text AS effect, g.created_at AS parent_created, \
            NULL::timestamptz AS parent_updated \
       FROM perm.grant_principals p JOIN perm.grants g ON g.id = p.grant_id \
      WHERE p.kind = 'user' \
     UNION ALL \
-    SELECT 'rule', r.id, e.ref, e.mode::text, NULL, r.created_at, NULL \
+    SELECT 'rule', r.id, NULL, e.ref, e.mode::text, NULL, r.created_at, NULL \
       FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
      WHERE e.kind = 'user' \
     UNION ALL \
-    SELECT 'engine_grant', g.id, p.ref, 'include', 'allow', g.created_at, g.updated_at \
+    SELECT 'engine_grant', g.id, g.engine_id, p.ref, 'include', 'allow', g.created_at, \
+           g.updated_at \
       FROM perm.engine_grant_principals p JOIN perm.engine_grants g ON g.id = p.engine_grant_id \
      WHERE p.kind = 'user' \
 ) \
-SELECT r.place_type, r.place_id, r.ref AS username, r.position, r.effect, r.parent_created, \
+SELECT r.place_type, r.place_id, r.engine_id, r.ref AS username, r.position, r.effect, r.parent_created, \
        r.parent_updated, u.id AS holder_id, u.email::text AS holder_email, \
        u.created_at AS holder_created, l.minted_at, l.retired_at, l.minted_for, \
        ev.ts AS event_at, ev.action AS event_action \
@@ -283,6 +289,7 @@ fn ref_place(r: &RefRow) -> Place {
     Place {
         place_type,
         id: Some(r.place_id),
+        engine_id: r.engine_id,
         position: (place_type != PlaceType::EngineGrant).then(|| r.position.clone()),
         effect: (place_type == PlaceType::Grant)
             .then(|| r.effect.clone())
@@ -399,6 +406,7 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
     let place = Place {
         place_type: PlaceType::Policy,
         id: None,
+        engine_id: None,
         position: None,
         effect: None,
         policy_id: Some(p.policy_id),

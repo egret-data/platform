@@ -608,3 +608,18 @@ Deviations from the text above that the code forced or that implementation found
   copy; the row menu's new Disable uses the same confirmation as the user page.
 - **Row menu Disable/Enable** is shown to platform admins only, like the user page's buttons; Disable on your own
   row is `aria-disabled` with the reason as its title. Enable needs no confirmation, as on the user page.
+
+### Task 8 (Reused names tab, Overview link, Recent changes)
+
+- **`Place` gains `engineId`** for an engine grant (the report's `REFS` query reads `perm.engine_grants.engine_id`),
+  because an engine grant is fixed on its engine's page (`/governance/engines/{engineId}?tab=engine-permissions&grant=
+  {id}`) and the id alone reaches no page. The Overview sample of an engine grant still has no ref (Task 6).
+- **A policy place links to its profile's Policies tab** (`profileUrl(service, "policies")`): the editor URL needs the
+  policy kind, which the report does not carry.
+- **The tab is offered to platform admins only** (`me.platform_roles`); for anyone else `?kind=reused` falls back to
+  Users, like an unknown kind. A refused read (403) shows the shared `TabError`, never an empty state.
+- **Rows are ordered definite, possible, dead**, keeping the server's order within each verdict; `?q=` filters on the
+  username in the page, as Unmatched names does. A dead name that fails open says "Widens access" in words.
+- **Recent changes needs no client change:** the server's sentence ("{actor} deleted user {username}") is shown as
+  sent, with no target link, and the row reaches only `user:read` holders (D4). A test pins that rendering.
+- **Not checked for you:** `username_reuse` reads "engine usernames reused after a delete (needs `platform_admin`)".

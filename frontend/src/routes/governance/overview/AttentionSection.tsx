@@ -22,6 +22,7 @@ const CHECKS: Record<string, string> = {
   plugin_unmodelled: "engine plugin versions",
   tags_without_clearance: "classification clearances",
   catalogs_without_engine: "catalogs without an engine",
+  username_reuse: "engine usernames reused after a delete",
 };
 
 /** One line per check the reader may not run; checks sharing a sentence share a line. */

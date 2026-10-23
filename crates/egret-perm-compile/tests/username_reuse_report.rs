@@ -383,4 +383,6 @@ async fn an_engine_grant_unchanged_since_before_the_holder_is_definite() {
     assert_eq!(f[0]["kind"], "ref_predates_holder");
     assert_eq!(f[0]["verdict"], "definite", "{f:?}");
     assert_eq!(f[0]["place"]["type"], "engine_grant");
+    // The engine page is where an engine grant is fixed, so the place names it.
+    assert_eq!(f[0]["place"]["engineId"], engine.to_string(), "{f:?}");
 }

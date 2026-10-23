@@ -9,13 +9,19 @@ import type { PlaceType } from './placeType';
 
 /**
  * Where the name is written. A grant, rule or engine grant carries `id`
- * (and, for a grant or rule, `position`; for a grant, `effect`); a policy
- * carries `policyId`, `name`, `service` and `managedBy`.
+ * (and, for a grant or rule, `position`; for a grant, `effect`; for an engine
+ * grant, `engineId`); a policy carries `policyId`, `name`, `service` and
+ * `managedBy`.
  */
 export interface Place {
   type: PlaceType;
   /** @nullable */
   id?: string | null;
+  /**
+     * The engine an engine grant belongs to: its page is where it is fixed.
+     * @nullable
+     */
+  engineId?: string | null;
   /**
      * `include` | `exclude`.
      * @nullable

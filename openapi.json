@@ -49619,7 +49619,7 @@
       },
       "Place": {
         "type": "object",
-        "description": "Where the name is written. A grant, rule or engine grant carries `id`\n(and, for a grant or rule, `position`; for a grant, `effect`); a policy\ncarries `policyId`, `name`, `service` and `managedBy`.",
+        "description": "Where the name is written. A grant, rule or engine grant carries `id`\n(and, for a grant or rule, `position`; for a grant, `effect`; for an engine\ngrant, `engineId`); a policy carries `policyId`, `name`, `service` and\n`managedBy`.",
         "required": [
           "type"
         ],
@@ -49633,6 +49633,14 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "engineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The engine an engine grant belongs to: its page is where it is fixed."
           },
           "position": {
             "type": [
