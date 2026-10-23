@@ -82,11 +82,13 @@ describe("AuditLog", () => {
   test("renders decision and mutation rows with a destructive deny badge", async () => {
     renderPage();
 
-    // Decision row: action + a destructive "deny" badge.
+    // Decision row: action + a destructive "Deny" status badge (the shared
+    // `StatusBadge`: sentence case, the destructive tint — KI-222).
     expect(await screen.findByText("secret:read")).toBeInTheDocument();
-    const denyBadge = screen.getByText("deny");
+    const denyBadge = screen.getByText("Deny");
     expect(denyBadge).toHaveAttribute("data-slot", "badge");
-    expect(denyBadge.className).toContain("bg-destructive");
+    expect(denyBadge).toHaveAttribute("data-status-tone", "destructive");
+    expect(denyBadge.className).toContain("bg-destructive/15");
 
     // Mutation row: action renders; a null actor shows as "system".
     expect(screen.getByText("grant.create")).toBeInTheDocument();

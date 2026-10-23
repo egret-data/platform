@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Compass,
@@ -69,6 +69,10 @@ import { Switch } from "@/components/ui/switch";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { runBulk } from "@/lib/runBulk";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_IN_GROUP_CLASS } from "@/components/ui/entity-link";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 export const usersQueryKey = ["control-plane", "access", "users"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
@@ -158,25 +162,21 @@ export default function UsersPage() {
       sortable: true,
       value: (u) => `${u.name ?? ""} ${u.email}`.trim(),
       cell: (u) => (
-        <button
-          type="button"
-          onClick={() => navigate(`/control-plane/users/${u.id}`)}
-          className="group flex items-center gap-3 text-left"
-        >
+        <Link to={`/control-plane/users/${u.id}`} className="group flex items-center gap-3 text-left">
           <Avatar className="h-8 w-8">
             <AvatarFallback className="bg-primary/10 text-xs font-medium text-primary">
               {initials(u)}
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0">
-            <div className="truncate font-medium text-primary group-hover:underline">
+            <div className={`truncate ${ENTITY_LINK_IN_GROUP_CLASS}`}>
               {u.name?.trim() || u.email}
             </div>
             {u.name?.trim() ? (
               <div className="truncate text-xs text-muted-foreground">{u.email}</div>
             ) : null}
           </div>
-        </button>
+        </Link>
       ),
     },
     { key: "provider", label: "Provider", cell: (u) => <Badge variant="outline">{u.provider}</Badge> },
@@ -185,14 +185,9 @@ export default function UsersPage() {
       label: "Status",
       cell: (u) =>
         u.status === "active" ? (
-          <Badge
-            className="border-transparent"
-            style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
-          >
-            {u.status}
-          </Badge>
+          <StatusBadge tone="success">{u.status}</StatusBadge>
         ) : (
-          <Badge variant="secondary">{u.status}</Badge>
+          <StatusBadge tone="inactive">{u.status}</StatusBadge>
         ),
     },
     {
@@ -342,10 +337,10 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold leading-tight">Users</h1>
+          <PageTitle>Users</PageTitle>
           <p className="text-sm text-muted-foreground">
             Platform accounts, their status, and role assignments.
           </p>
@@ -514,7 +509,7 @@ export default function UsersPage() {
           setDeleteTarget(null);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }
 

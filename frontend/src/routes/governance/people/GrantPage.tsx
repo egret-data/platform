@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import type { GrantView } from "@/api/generated/model";
 import { getPermListGrantsQueryKey, usePermDeleteGrant, usePermListGrants } from "@/api/generated/perm/perm";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { AssignmentBadge, GrantDialog } from "@/routes/governance/GrantDialog";
@@ -23,6 +22,8 @@ import { GrantSentenceText, PrincipalNames } from "@/routes/governance/Principal
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
 import { Detail, ItemHeader, ItemMissing } from "@/routes/governance/people/itemParts";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /** What a workspace-assignment grant says instead of Edit and Delete. Also this module's bundle marker. */
 export const ASSIGNMENT_READ_ONLY =
@@ -97,10 +98,10 @@ export default function GrantPage() {
 
 function ItemFrame({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <ItemHeader kind="Grant" title={title} />
       {children}
-    </div>
+    </PageContainer>
   );
 }
 
@@ -143,14 +144,14 @@ function GrantBody({
   }
 
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <ItemHeader
         kind="Grant"
         title={<GrantSentenceText grant={g} workspaceName={workspaceName} />}
         actions={actions}
       />
       <div className="flex flex-wrap items-center gap-2">
-        {g.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
+        {g.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}
         {assignment !== null ? <AssignmentBadge workspaceLabel={workspaceName(assignment) ?? assignment} /> : null}
       </div>
       <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
@@ -177,6 +178,6 @@ function GrantBody({
           </Detail>
         ) : null}
       </dl>
-    </div>
+    </PageContainer>
   );
 }

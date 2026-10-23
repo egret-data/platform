@@ -22,6 +22,7 @@ import { useEndpointDetail } from "../EndpointDetail";
 import { ParamEditor } from "./ParamEditor";
 import { PreviewBlock, type PreviewHandle } from "./PreviewBlock";
 import type { StatementSource, StatementSpec } from "@/api/generated/model";
+import { tabsListClass, tabsTriggerClass } from "@/components/ui/tabs";
 
 /**
  * The SQL text of a statement, or `""` when a script builds it.
@@ -531,7 +532,7 @@ export default function Query() {
                 <div
                   role="tablist"
                   aria-label="Statements"
-                  className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+                  className={`min-w-0 flex-1 ${tabsListClass("underline")}`}
                 >
                   {statements.map((s, i) => (
                     <span
@@ -551,11 +552,8 @@ export default function Query() {
                           setSelected(i);
                         }
                       }}
-                      className={`cursor-pointer whitespace-nowrap rounded border px-2 py-1 font-mono text-xs transition-colors ${
-                        i === active
-                          ? "border-primary bg-primary/10 text-foreground"
-                          : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
-                      }`}
+                      // The panel tab style (FE-PAGE-9), keyed on `aria-selected`.
+                      className={`cursor-pointer font-mono ${tabsTriggerClass("underline")}`}
                     >
                       {/* A cleared name would render an empty, unhittable tab
                           — and clearing it is the first thing an author does

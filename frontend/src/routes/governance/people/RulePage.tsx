@@ -24,6 +24,7 @@ import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
 import { DATA_BASE } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
 import { effectSentence, notEnforcedWarning, PARTLY_ENFORCED, partlyEnforcedLines } from "@/routes/governance/ruleEffect";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 /** What a reader without `policy:update` reads instead of Edit and Delete. Also this module's bundle marker. */
 export const RULE_NEEDS_UPDATE = "Editing or deleting a rule needs the policy:update permission.";
@@ -58,10 +59,10 @@ export default function RulePage() {
 
   if (!rule) {
     return (
-      <div className="space-y-6 p-4">
+      <PageContainer className="space-y-6">
         <RuleHeader title={TERM.rule} />
         {body}
-      </div>
+      </PageContainer>
     );
   }
   const found = rule;
@@ -174,7 +175,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
   );
 
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <RuleHeader title={r.name} actions={actions} />
       <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
         <Detail term={TERM.kind}>
@@ -209,7 +210,7 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
         </Detail>
         <RuleEffectDetail rule={r} />
       </dl>
-    </div>
+    </PageContainer>
   );
 }
 

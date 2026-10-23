@@ -5,7 +5,6 @@ import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 import type { ControlPlaneAuditListAuditParams } from "@/api/generated/model/controlPlaneAuditListAuditParams";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,6 +24,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 const COLUMNS = ["Time", "Actor", "Action", "Resource", "Decision", "Detail"];
 
@@ -116,9 +118,9 @@ export default function AuditLog() {
     "Failed to load the audit log.";
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Audit log</h1>
+        <PageTitle>Audit log</PageTitle>
         <p className="text-sm text-muted-foreground">
           Every authorization decision and grant change, newest first.
           Platform-admin only.
@@ -256,7 +258,7 @@ export default function AuditLog() {
             </div>
           )}
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -296,17 +298,9 @@ function AuditRow({ entry }: { entry: AuditEntryDto }) {
       </TableCell>
       <TableCell>
         {entry.decision === "allow" ? (
-          <Badge
-            className="border-transparent"
-            style={{
-              backgroundColor: "var(--success)",
-              color: "var(--success-foreground)",
-            }}
-          >
-            allow
-          </Badge>
+          <StatusBadge tone="success">allow</StatusBadge>
         ) : entry.decision === "deny" ? (
-          <Badge variant="destructive">deny</Badge>
+          <StatusBadge tone="destructive">deny</StatusBadge>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}

@@ -7,6 +7,7 @@ import { TabError } from "@/routes/governance/tabParts";
 import { NotFound } from "@/routes/governance/engines/PageFrame";
 import PolicyEditorPage from "@/routes/governance/engines/PolicyEditorPage";
 import { engineUrl, profileParam } from "@/routes/governance/engines/engineUrl";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 export const NO_PROFILE_TO_EDIT = "This engine downloads no policy profile, so it has no policy to edit.";
 
@@ -49,7 +50,7 @@ export function EngineEditorRoute() {
       <PolicyEditorPage key={`${service}/${kind}/${policyId ?? "new"}`} service={service} subject={{ engineId: id }} />
     );
   }
-  return <div className="p-4">{body}</div>;
+  return <PageContainer width="narrow">{body}</PageContainer>;
 }
 
 /** The editor under an unbound profile's page: `/governance/engines/profiles/:service/advanced/policies/…`. */
@@ -57,8 +58,8 @@ export function ProfileEditorRoute() {
   const { service, kind = "", policyId } = useParams();
   const name = profileParam(service);
   return (
-    <div className="p-4">
+    <PageContainer width="narrow">
       <PolicyEditorPage key={`${name}/${kind}/${policyId ?? "new"}`} service={name} subject={{ profile: name }} />
-    </div>
+    </PageContainer>
   );
 }

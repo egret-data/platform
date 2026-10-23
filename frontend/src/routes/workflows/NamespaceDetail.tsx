@@ -29,6 +29,7 @@ import { Forbidden } from "@/routes/Forbidden";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import FlowsList from "@/routes/workflows/FlowsList";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /**
  * THE TAB SLOTS. One body per tab, rendered with `NamespaceTabProps` once the
@@ -172,7 +173,7 @@ function NamespaceFrame({ ws, namespace, tab }: { ws: string; namespace: string;
     <div className="flex h-full min-h-0 flex-col">
       <header className="px-4 pt-4">
         {crumbs}
-        <h1 className="mt-1 break-all text-xl font-semibold">{namespace}</h1>
+        <PageTitle className="mt-1 break-all">{namespace}</PageTitle>
       </header>
       {detail ? (
         <Tabs

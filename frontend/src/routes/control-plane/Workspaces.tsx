@@ -19,7 +19,6 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -47,6 +46,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { EntityLink } from "@/components/ui/entity-link";
 
 const SLUG_RE = /^[a-z0-9-]+$/;
 
@@ -115,14 +118,10 @@ export default function Workspaces() {
       className: "font-medium",
       value: (w) => `${w.name} ${w.slug}`,
       cell: (w) => (
-        <button
-          type="button"
-          onClick={() => navigate(`/control-plane/workspaces/${w.id}`)}
-          className="group flex flex-col items-start text-left"
-        >
-          <span className="text-primary group-hover:underline">{w.name}</span>
+        <div className="flex flex-col items-start">
+          <EntityLink to={`/control-plane/workspaces/${w.id}`}>{w.name}</EntityLink>
           <span className="font-mono text-xs text-muted-foreground">{w.slug}</span>
-        </button>
+        </div>
       ),
     },
     {
@@ -152,14 +151,9 @@ export default function Workspaces() {
       value: (w) => w.status,
       cell: (w) =>
         w.status === "active" ? (
-          <Badge
-            className="border-transparent"
-            style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
-          >
-            active
-          </Badge>
+          <StatusBadge tone="success">active</StatusBadge>
         ) : (
-          <Badge variant="secondary">archived</Badge>
+          <StatusBadge tone="inactive">archived</StatusBadge>
         ),
     },
     {
@@ -203,10 +197,10 @@ export default function Workspaces() {
   ];
 
   return (
-    <div className="space-y-4">
+    <PageContainer className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold leading-tight">Workspaces</h1>
+          <PageTitle>Workspaces</PageTitle>
           <p className="text-sm text-muted-foreground">
             Every workspace is an independent data platform with its own members and
             resources — create, rename, archive, or open one to manage it.
@@ -301,7 +295,7 @@ export default function Workspaces() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </PageContainer>
   );
 }
 

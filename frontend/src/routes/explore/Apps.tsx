@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { FolderPlus, ListChecks, Loader2, Search, Star, Trash2 } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { type AppSummary, useAppCapabilities, useAppMutations, useApps, useCreateApp } from "@/api/apps";
@@ -35,6 +35,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { EntityLink } from "@/components/ui/entity-link";
 
 type SortKey = "name" | "status" | "updated_at";
 
@@ -124,10 +125,10 @@ function StatusBadge({ app }: { app: AppSummary }) {
  */
 function AppName({ ws, app }: { ws: string; app: AppSummary }) {
   if (app.latest_version_no != null) {
-    return <Link className="font-medium hover:underline" to={`/explore/${ws}/apps/${app.id}`}>{app.name}</Link>;
+    return <EntityLink to={`/explore/${ws}/apps/${app.id}`}>{app.name}</EntityLink>;
   }
   if (app.can_write) {
-    return <Link className="font-medium hover:underline" to={`/explore/${ws}/apps/${app.id}/edit`}>{app.name}</Link>;
+    return <EntityLink to={`/explore/${ws}/apps/${app.id}/edit`}>{app.name}</EntityLink>;
   }
   return <span className="font-medium">{app.name}</span>;
 }

@@ -56,6 +56,7 @@ import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
 import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /** Loads distinct column values for one category/id parameter (hook is called
  * unconditionally inside this child so the Rules of Hooks are respected). */
@@ -689,9 +690,9 @@ export default function DashboardView() {
       <div className={`mb-3 flex items-center justify-between border-b pb-3 ${narrowViewport ? "flex-wrap gap-y-2" : ""}`}>
         {editing ? (
           <input aria-label="dashboard name" value={draftName} onChange={(e) => setDraftName(e.target.value)}
-            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-semibold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
         ) : (
-          <h1 className={`text-xl font-bold ${narrowViewport ? "min-w-0 basis-full" : ""}`}>{dash.name}</h1>
+          <PageTitle className={narrowViewport ? "min-w-0 basis-full" : undefined}>{dash.name}</PageTitle>
         )}
         <div className={`flex items-center gap-2 ${narrowViewport ? "min-w-0 flex-wrap gap-y-2" : ""}`}>
           {!editing && (

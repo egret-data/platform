@@ -1,3 +1,5 @@
+import { STATUS_TONE } from "@/components/ui/status-badge";
+
 /**
  * THE TINTED STATUS CHIP, AND WHY ITS INK IS `--foreground` ON EVERY TINT.
  *
@@ -53,16 +55,20 @@
  * a visible one; a chip that passes only `bg-…` inherits the default variant's
  * `bg-primary` underneath. Every value here is complete enough to hand straight
  * to `className`.
+ *
+ * The values now live in `components/ui/status-badge.tsx` (`STATUS_TONE`), the
+ * one status badge every area uses (KI-222); this map is the Data API's view of
+ * it, kept so the tests that bind each call site to a tone keep reading it.
  */
 export const CHIP_TONE = {
   /** A healthy, serving, current state. */
-  success: "border-transparent bg-success/15 text-foreground",
+  success: STATUS_TONE.success,
   /** A stopped, expired or failing state. */
-  destructive: "border-transparent bg-destructive/15 text-foreground",
+  destructive: STATUS_TONE.destructive,
   /** Behind, stale, worth a look — never `destructive`, which claims broken. */
-  highlight: "border-transparent bg-highlight/15 text-foreground",
+  highlight: STATUS_TONE.highlight,
   /** Deliberately the ABSENCE of a state colour: nothing to report. */
-  neutral: "border-transparent bg-muted text-foreground",
+  neutral: STATUS_TONE.neutral,
 } as const;
 
 export type ChipTone = keyof typeof CHIP_TONE;

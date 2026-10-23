@@ -2128,10 +2128,9 @@ describe("VersionsSection", () => {
  * but this route was missed: its visible title is a breadcrumb-style `h2`
  * (the endpoint name), and nothing above it carries a level-1 heading, so a
  * screen-reader user landing here got no page-level heading at all and the
- * document's heading outline started at level 2. Fixed with an `sr-only` h1,
- * the same idiom `SqlLab.tsx`/`ChartExplore.tsx` use for a page whose visible
- * design has no room for one — this page already has its title on screen (the
- * `h2` breadcrumb), so a second *visible* h1 would read as two titles.
+ * document's heading outline started at level 2. Fixed first with an
+ * `sr-only` h1; since KI-214 the endpoint name on screen IS that h1, the
+ * compact tool title (FE-PAGE-7), so the page has one title, visible.
  */
 describe("EndpointDetail — document heading", () => {
   it("exposes exactly one level-1 heading, naming the endpoint", async () => {
@@ -2139,6 +2138,9 @@ describe("EndpointDetail — document heading", () => {
     const headings = await screen.findAllByRole("heading", { level: 1 });
     expect(headings).toHaveLength(1);
     expect(headings[0]).toHaveTextContent("Weekly rollup");
+    // Visible, at the compact tool scale — not an `sr-only` twin of an `h2`.
+    expect(headings[0]).not.toHaveClass("sr-only");
+    expect(headings[0]).toHaveAttribute("data-page-title", "compact");
   });
 });
 

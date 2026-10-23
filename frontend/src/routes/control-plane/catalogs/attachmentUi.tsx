@@ -48,9 +48,9 @@ import {
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { CatalogAttachmentDto } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { catalogKey, catalogsQueryKey } from "../queryKeys";
+import { StatusBadge as SharedStatusBadge } from "@/components/ui/status-badge";
 
 /**
  * Is this engine a StarRocks one?
@@ -75,29 +75,30 @@ export const isStarRocksType = (t: string): boolean => t.toLowerCase() === "star
 export function StatusBadge({ a }: { a: CatalogAttachmentDto }) {
   if (a.applyStatus === "failed")
     return (
-      <Badge variant="destructive" title={a.applyError ?? undefined}>
+      <SharedStatusBadge tone="destructive" title={a.applyError ?? undefined}>
         failed
-      </Badge>
+      </SharedStatusBadge>
     );
   if (a.applyStatus === "pending")
     return (
-      <Badge
-        variant="outline"
+      <SharedStatusBadge
+        tone="highlight"
         title="egret has recorded this attachment and has not yet been able to tell the engine. A StarRocks FE takes 5-10 minutes to come up after create; the bootstrap or Retry converges it."
       >
         pending
-      </Badge>
+      </SharedStatusBadge>
     );
-  if (a.applyStatus === "applied") return <Badge variant="secondary">applied</Badge>;
+  if (a.applyStatus === "applied") return <SharedStatusBadge tone="success">applied</SharedStatusBadge>;
   // `applyStatus` is generated as `string`, not an enum, so this arm is
   // reachable. It renders the value egret actually sent, neutrally: falling
   // through to the `applied` badge would be a false green asserting a property
   // nothing measured — and nothing would even hint that the value was
   // unrecognised (SP3c review F5).
   return (
-    <Badge variant="outline" className="text-muted-foreground italic">
-      {a.applyStatus}
-    </Badge>
+    // Shown exactly as sent (no sentence case): a node, not a string.
+    <SharedStatusBadge tone="neutral" className="italic">
+      <>{a.applyStatus}</>
+    </SharedStatusBadge>
   );
 }
 

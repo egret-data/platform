@@ -34,7 +34,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -53,31 +52,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
-type BadgeVariant =
-  | "default"
-  | "secondary"
-  | "destructive"
-  | "success"
-  | "warning"
-  | "processing"
-  | "outline";
 
 /** Distinct colors per Trino query state. */
-function stateVariant(state: string): BadgeVariant {
+function stateVariant(state: string): StatusTone {
   switch (state.toUpperCase()) {
     case "RUNNING":
-      return "processing";
+      return "primary";
     case "QUEUED":
     case "PLANNING":
     case "STARTING":
-      return "warning";
+      return "highlight";
     case "FINISHED":
       return "success";
     case "FAILED":
       return "destructive";
     default:
-      return "secondary";
+      return "neutral";
   }
 }
 
@@ -283,7 +275,7 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
                     </TableCell>
                     <TableCell>{q.user}</TableCell>
                     <TableCell>
-                      <Badge variant={stateVariant(q.state)}>{q.state}</Badge>
+                      <StatusBadge tone={stateVariant(q.state)}>{q.state}</StatusBadge>
                     </TableCell>
                     <TableCell
                       className="max-w-[320px] truncate font-mono text-xs text-muted-foreground"
@@ -345,9 +337,9 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
             <DialogTitle className="flex items-center gap-2">
               <span className="font-mono text-sm">{selectedQid}</span>
               {detail.data && (
-                <Badge variant={stateVariant(detail.data.state)}>
+                <StatusBadge tone={stateVariant(detail.data.state)}>
                   {detail.data.state}
-                </Badge>
+                </StatusBadge>
               )}
             </DialogTitle>
             <DialogDescription>Query detail, refreshed while running.</DialogDescription>

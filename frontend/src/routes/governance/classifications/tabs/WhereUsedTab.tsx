@@ -12,6 +12,8 @@ import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useRemoveClassification, type RemoveTarget } from "@/routes/governance/RemoveClassificationDialog";
 import { pathToUrl } from "@/routes/governance/data/objectPath";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
@@ -123,7 +125,7 @@ function BiName({ o }: { o: BiObject }) {
   return (
     <Link
       to={`/explore/${encodeURIComponent(o.workspaceSlug)}/${path}/${encodeURIComponent(o.id)}`}
-      className="font-medium text-primary hover:underline"
+      className={ENTITY_LINK_CLASS}
     >
       {o.name}
     </Link>
@@ -216,7 +218,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                         <TableCell>
                           <Link
                             to={pathToUrl({ catalog: t.catalogName, schema: t.schema, object: t.table })}
-                            className="font-mono text-primary hover:underline"
+                            className={cn(ENTITY_LINK_CLASS, "font-mono")}
                           >
                             {t.table}
                           </Link>

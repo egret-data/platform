@@ -42,6 +42,9 @@ import {
   SecretDataFields,
   type SecretDataHandle,
 } from "@/routes/control-plane/SecretDataFields";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 export const secretsQueryKey = ["control-plane", "secrets"] as const;
 
@@ -77,7 +80,7 @@ export default function ControlPlaneSecrets() {
       value: (s) => `${s.name} ${s.keys.join(" ")}`,
       cell: (s) => (
         <div>
-          <Link to={`/control-plane/secrets/${s.id}`} className="text-primary hover:underline">
+          <Link to={`/control-plane/secrets/${s.id}`} className={ENTITY_LINK_CLASS}>
             {s.name}
           </Link>
           {s.system_managed && (
@@ -162,10 +165,11 @@ export default function ControlPlaneSecrets() {
   ];
 
   return (
-    <div className="space-y-4" data-testid="secrets-frame">
+    <PageContainer>
+      <div className="space-y-4" data-testid="secrets-frame">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">Secrets</h1>
+          <PageTitle>Secrets</PageTitle>
           <p className="text-sm text-muted-foreground">
             Global named secrets that storage and database connections across the platform can
             reference. Values are never displayed. Secrets marked System are created by egret for
@@ -225,7 +229,8 @@ export default function ControlPlaneSecrets() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </div>
+      </div>
+    </PageContainer>
   );
 }
 

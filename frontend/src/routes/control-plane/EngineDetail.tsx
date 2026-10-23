@@ -2,12 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft,
   Loader2,
   MoreHorizontal,
   Plus,
   RotateCw,
-  Server,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -83,7 +81,7 @@ import {
 } from "@/components/ui/select";
 import {
   AttachmentActions,
-  StatusBadge,
+  StatusBadge as AttachmentStatusBadge,
   appliedCell,
   isStarRocksType,
   useAttachmentActions,
@@ -113,12 +111,13 @@ import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 import ExternalEngineDetail from "./ExternalEngineDetail";
 import { OpenInEnginePolicyLink, WarningCallout, isExternal } from "./externalEngine";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
-type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
-
-function phaseVariant(phase: string): BadgeVariant {
+function phaseVariant(phase: string): StatusTone {
   switch (phase.toLowerCase()) {
     case "running":
     case "ready":
@@ -131,9 +130,9 @@ function phaseVariant(phase: string): BadgeVariant {
     case "creating":
     case "updating":
     case "deleting":
-      return "warning";
+      return "highlight";
     default:
-      return "secondary";
+      return "neutral";
   }
 }
 
@@ -156,7 +155,7 @@ function statusDescription(
 ): { text: string; title?: string } {
   if (!message) return { text: `Phase: ${phase}` };
   const variant = phaseVariant(phase);
-  if (variant === "warning" && INTERNAL_ERROR_RE.test(message)) {
+  if (variant === "highlight" && INTERNAL_ERROR_RE.test(message)) {
     return { text: "Starting up — the engine isn't reachable yet.", title: message };
   }
   return { text: message };
@@ -434,39 +433,33 @@ export default function EngineDetail() {
   if (data && isExternal(data)) return <ExternalEngineDetail engine={data} />;
 
   return (
-    <div className="space-y-5">
-      <Link
-        to="/control-plane/engines"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Engines
-      </Link>
-
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Server className="h-6 w-6" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-2xl font-semibold leading-tight">
-            {data?.name ?? "Engine"}
-          </h1>
-          <p className="font-mono text-xs text-muted-foreground">
-            {data ? `${data.namespace}` : ""}
-          </p>
-          {data && <EngineHeaderMeta engine={data} />}
-        </div>
-        {data && (
-          <div className="flex shrink-0 items-center gap-2">
-            <Badge variant="secondary">{data.type}</Badge>
-            <Badge variant={phaseVariant(data.status.phase)}>
-              {data.status.phase === "deleting" ? "Deleting — retry" : data.status.phase}
-            </Badge>
-            <OpenInEnginePolicyLink engineId={id} />
-            <EngineActions engine={data} engineId={id} />
-          </div>
-        )}
-      </div>
+    <PageContainer className="space-y-5">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/engines", label: "Engines" }}
+        title={data?.name ?? "Engine"}
+        titleClassName="min-w-0 truncate"
+        status={
+          data && (
+            <>
+              <Badge variant="secondary">{data.type}</Badge>
+              <StatusBadge tone={phaseVariant(data.status.phase)}>
+                {data.status.phase === "deleting" ? "Deleting — retry" : data.status.phase}
+              </StatusBadge>
+            </>
+          )
+        }
+        description={data ? <span className="font-mono text-xs">{data.namespace}</span> : undefined}
+        meta={data && <EngineHeaderMeta engine={data} />}
+        actions={
+          data && (
+            <>
+              <OpenInEnginePolicyLink engineId={id} />
+              <EngineActions engine={data} engineId={id} />
+            </>
+          )
+        }
+      />
 
       {engine.isError && !data ? (
         <Alert variant="destructive">
@@ -484,7 +477,7 @@ export default function EngineDetail() {
           <EngineTabs engine={data} engineId={id} />
         </>
       )}
-    </div>
+    </PageContainer>
   );
 }
 
@@ -745,7 +738,7 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
 /**
  * Phase-aware empty state for the pods table (no pods reported yet). The copy
  * and affordance track {@link phaseVariant}:
- *   - warning phases (provisioning/pending/creating/updating) → a skeleton +
+ *   - highlight phases (provisioning/pending/creating/updating) → a skeleton +
  *     "waiting for the operator" reassurance (pods are on their way);
  *   - destructive phases (failed/error) → the operator's `message` in a
  *     destructive Alert, or a generic fallback when none was reported;
@@ -763,7 +756,7 @@ function StatusEmptyState({
 }) {
   const variant = phaseVariant(phase);
 
-  if (variant === "warning") {
+  if (variant === "highlight") {
     return (
       <div className="space-y-3 py-1">
         <p className="text-sm text-muted-foreground">
@@ -847,12 +840,12 @@ function PodHealthTable({
                 {pod.name}
               </TableCell>
               <TableCell>
-                <Badge variant={phaseVariant(pod.phase)}>{pod.phase}</Badge>
+                <StatusBadge tone={phaseVariant(pod.phase)}>{pod.phase}</StatusBadge>
               </TableCell>
               <TableCell>
-                <Badge variant={pod.ready ? "success" : "secondary"}>
+                <StatusBadge tone={pod.ready ? "success" : "neutral"}>
                   {pod.ready ? "Ready" : "Not ready"}
-                </Badge>
+                </StatusBadge>
               </TableCell>
               <TableCell className="text-right">
                 {!docker && (
@@ -1593,7 +1586,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                     {r.isPrimary ? <Badge variant="secondary">primary</Badge> : null}
                   </TableCell>
                   <TableCell>
-                    <StatusBadge a={r.a} />
+                    <AttachmentStatusBadge a={r.a} />
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {appliedCell(r.a)}

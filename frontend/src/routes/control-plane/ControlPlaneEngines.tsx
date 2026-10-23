@@ -17,6 +17,10 @@ import {
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ExternalChip, isExternal, useCan } from "./externalEngine";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
 /**
  * Control Plane → Engines
@@ -122,10 +126,11 @@ export default function ControlPlaneEngines() {
   const running = managed.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
 
   return (
-    <div className="space-y-4" data-testid="engines-frame">
+    <PageContainer>
+      <div className="space-y-4" data-testid="engines-frame">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">Engines</h1>
+          <PageTitle>Engines</PageTitle>
           <p className="text-sm text-muted-foreground">
             Platform query engines. Provision a Trino or StarRocks cluster against a catalog
             warehouse and monitor its health. RisingWave arrives in a later phase.
@@ -189,7 +194,8 @@ export default function ControlPlaneEngines() {
           ))}
         </Tabs>
       )}
-    </div>
+      </div>
+    </PageContainer>
   );
 }
 
@@ -221,7 +227,7 @@ function EngineTable({
       cell: (e) => (
         <Link
           to={`/control-plane/engines/${e.id}`}
-          className="text-primary hover:underline"
+          className={ENTITY_LINK_CLASS}
         >
           {e.name}
         </Link>
@@ -296,19 +302,18 @@ function EngineTable({
   );
 }
 
-type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
 
 /**
  * A live Kubernetes phase OR — when the per-row poll has not answered — the
  * stored `engines.status`, which is why `deleting` is in the in-flight arm.
  * `deleting` is one of that column's four values
- * (`egret-engine-mgmt/src/store.rs`); it used to fall through to `secondary`
+ * (`egret-engine-mgmt/src/store.rs`); it used to fall through to `neutral`
  * while `EnginesTab`'s `EngineHealthBadge`, which reads the stored value
- * directly, painted it `warning`, so the two pages showed the same word in two
+ * directly, painted it `highlight`, so the two pages showed the same word in two
  * colours and a comment over there claimed they could not (whole-branch
  * review, F6).
  */
-function phaseVariant(phase: string): BadgeVariant {
+function phaseVariant(phase: string): StatusTone {
   switch (phase.toLowerCase()) {
     case "running":
     case "ready":
@@ -321,9 +326,9 @@ function phaseVariant(phase: string): BadgeVariant {
     case "creating":
     case "updating":
     case "deleting":
-      return "warning";
+      return "highlight";
     default:
-      return "secondary";
+      return "neutral";
   }
 }
 
@@ -337,5 +342,5 @@ function EngineStatusBadge({ id, fallback }: { id: string; fallback: string }) {
   });
 
   const phase = detail.data?.status.phase ?? fallback;
-  return <Badge variant={phaseVariant(phase)}>{phase}</Badge>;
+  return <StatusBadge tone={phaseVariant(phase)}>{phase}</StatusBadge>;
 }

@@ -50,6 +50,7 @@ import { FlowRevisions } from "@/routes/workflows/FlowRevisions";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import FlowTriggersTab from "@/components/workflows/triggers/FlowTriggersTab";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /** The flow detail's tabs (W7a spec §3; W7b adds Executions; W7e adds Triggers). */
 export const FLOW_TABS = ["edit", "revisions", "executions", "triggers"] as const;
@@ -446,13 +447,13 @@ function FlowWorkspace({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-start justify-between gap-3 px-4 pt-4">
-        <div className="min-w-0">
-          <Link className="text-sm text-muted-foreground hover:underline" to={`${base}/flows`}>
-            ← Flows
-          </Link>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <h1 className="truncate text-xl font-semibold">{flow.flow_id}</h1>
+      <DetailHeader
+        className="px-4 pt-4"
+        back={{ to: `${base}/flows`, label: "Flows" }}
+        title={flow.flow_id}
+        titleClassName="min-w-0 truncate"
+        status={
+          <div className="flex flex-wrap items-center gap-2">
             <StateChip state={flow.state} kind="flow" />
             {/* The latest version, shown apart from the chip (the user's ruling, 2026-10-10):
                 a snapshot to compare and restore, never what runs. */}
@@ -467,9 +468,10 @@ function FlowWorkspace({
               </Badge>
             )}
           </div>
-          <p className="text-sm text-muted-foreground">{flow.namespace}</p>
-        </div>
-        {manage && (
+        }
+        description={flow.namespace}
+        actions={
+          manage && (
           <div className="flex flex-col items-end gap-1">
             <div className="flex flex-wrap items-center justify-end gap-2">
               <ReasonButton enablement={saveState} reasonId={`${reasonsId}-save`} variant="outline" onClick={save}>
@@ -504,8 +506,9 @@ function FlowWorkspace({
               ]}
             />
           </div>
-        )}
-      </header>
+          )
+        }
+      />
       {/* KI-013: a Run here creates an execution that nothing runs. */}
       {!flow.worker_enabled && <WorkerOffNotice className="mx-4 mt-3 w-auto" />}
 

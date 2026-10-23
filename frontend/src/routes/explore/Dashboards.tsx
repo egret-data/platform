@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search, Star, Trash2, FolderPlus, ListChecks, BadgeCheck } from "lucide-react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { BulkMoveToFolderMenu, moveEach } from "@/components/explore/BulkMoveToFolderMenu";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
@@ -23,6 +23,7 @@ import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { EntityLink } from "@/components/ui/entity-link";
 
 type SortKey = "name" | "card_count" | "updated_at";
 
@@ -194,7 +195,7 @@ export default function Dashboards() {
               <Star className={`h-4 w-4 ${d.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
             </Button>
           )}
-          <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
+          <EntityLink to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</EntityLink>
           {/* Same mark the datasets list uses (Datasets.tsx), so "trusted" reads identically
               wherever content is listed rather than being a per-page invention. */}
           {d.certified && <BadgeCheck className="h-3.5 w-3.5 text-primary" aria-label="Certified" />}

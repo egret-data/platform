@@ -24,6 +24,7 @@ import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { EntityLink } from "@/components/ui/entity-link";
 
 type SortKey = "name" | "viz_type" | "updated_at";
 const vizMeta = (v: string) => CHART_TYPES.find((t) => t.key === v);
@@ -163,10 +164,10 @@ export default function Charts() {
                 <Star className={`h-4 w-4 ${c.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
               </Button>
             )}
-            <Link className="inline-flex items-center gap-2 font-medium hover:underline" to={`/explore/${ws}/charts/${c.id}`}>
+            <EntityLink className="inline-flex items-center gap-2" to={`/explore/${ws}/charts/${c.id}`}>
               {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
               {c.name}
-            </Link>
+            </EntityLink>
           </span>
         </td>
         <td className="text-muted-foreground">{vizLabel(c.viz_type)}</td>

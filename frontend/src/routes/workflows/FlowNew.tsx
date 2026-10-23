@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Lock, Save } from "lucide-react";
 import { ApiError } from "@/api/client";
@@ -19,6 +19,7 @@ import {
 } from "@/routes/workflows/FlowEditPage";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /** The create page's starting text (spec §5.4), verbatim. */
 export const NEW_FLOW_TEMPLATE = `id: hello
@@ -116,29 +117,28 @@ export default function FlowNew() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-start justify-between gap-3 px-4 pt-4">
-        <div className="min-w-0">
-          <Link className="text-sm text-muted-foreground hover:underline" to={`/explore/${ws}/workflows/flows`}>
-            ← Flows
-          </Link>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold">New flow</h1>
-            {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
-          </div>
-          <p className="text-sm text-muted-foreground">
+      <DetailHeader
+        className="px-4 pt-4"
+        back={{ to: `/explore/${ws}/workflows/flows`, label: "Flows" }}
+        title="New flow"
+        status={dirty && <Badge variant="secondary">Unsaved changes</Badge>}
+        description={
+          <>
             The flow&apos;s namespace and id come from its <code>namespace:</code> and <code>id:</code>.
-          </p>
-        </div>
-        {!noPermission && (
-          <div className="flex flex-col items-end gap-1">
-            <ReasonButton enablement={saveState} reasonId={reasonId} onClick={save}>
-              <Save aria-hidden />
-              Save
-            </ReasonButton>
-            <DisabledReasons actions={[{ id: reasonId, label: "Save", enablement: saveState }]} />
-          </div>
-        )}
-      </header>
+          </>
+        }
+        actions={
+          !noPermission && (
+            <div className="flex flex-col items-end gap-1">
+              <ReasonButton enablement={saveState} reasonId={reasonId} onClick={save}>
+                <Save aria-hidden />
+                Save
+              </ReasonButton>
+              <DisabledReasons actions={[{ id: reasonId, label: "Save", enablement: saveState }]} />
+            </div>
+          )
+        }
+      />
       {noPermission && (
         <Alert className="mx-4 mt-3 w-auto">
           <Lock aria-hidden />

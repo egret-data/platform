@@ -34,6 +34,7 @@ import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/gener
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
 import { EndpointRowStateBadge, pendingRoute } from "./endpointState";
+import { EntityLink } from "@/components/ui/entity-link";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -468,9 +469,9 @@ export default function Endpoints() {
             {!showTrash && (
               <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
             )}
-            <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
+            <EntityLink to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
               {e.name}
-            </Link>
+            </EntityLink>
           </span>
         </td>
         {/* The URL callers use — the LIVE route, which a draft edit does not

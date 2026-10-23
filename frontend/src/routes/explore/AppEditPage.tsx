@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, History, Loader2, RefreshCw, Rocket } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { History, Loader2, RefreshCw, Rocket } from "lucide-react";
+import { useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { requestAppTicket, useApp, usePublishApp } from "@/api/apps";
@@ -9,6 +9,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { describeFailure } from "@/lib/apps/failures";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /**
  * The editor for one app: egret's header over an iframe that shows marimo from the APPS origin.
@@ -78,12 +80,9 @@ export default function AppEditPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b px-4 py-2">
-        <Button size="icon" variant="ghost" asChild aria-label="Back to apps">
-          <Link to={`/explore/${ws}/apps`}>
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-        </Button>
-        <h1 className="truncate text-base font-semibold">{app?.name ?? "App"}</h1>
+        {/* A tool header (FE-PAGE-7): the back link and the compact title. */}
+        <BackLink to={`/explore/${ws}/apps`}>Apps</BackLink>
+        <PageTitle size="compact" className="truncate">{app?.name ?? "App"}</PageTitle>
         {app &&
           (app.latest_version_no == null ? (
             <Badge variant="outline">Draft only</Badge>

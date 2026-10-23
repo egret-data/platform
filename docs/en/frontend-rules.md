@@ -12,11 +12,11 @@ The rules every change under `frontend/` follows. This file is normative; [`ui-c
 ## 1. Page frame (FE-PAGE)
 
 #### FE-PAGE-1 — A list page uses `ListPageShell` · MUST
-A list page uses `ListPageShell`, and that shell owns the page's single `h1`. Order: title, then the toolbar (`ListToolbarButton`), then `SummaryStrip`, then the table.
+A list page uses `ListPageShell`, and that shell owns the page's single `h1` (a `PageTitle`) inside a full-width `PageContainer`. Order: title, then the toolbar (`ListToolbarButton`), then `SummaryStrip`, then the table. A list page that cannot use the shell (Control Plane lists with a summary line under the title) uses `PageContainer` and `PageTitle` directly.
 **Do this:** `frontend/src/components/explore/ListPageShell.tsx`, `frontend/src/components/explore/ListToolbarButton.tsx`, `frontend/src/components/explore/SummaryStrip.tsx`. **Checked by:** review. **Why:** [ui-conventions §1](ui-conventions.md#1-the-list-page).
 
 #### FE-PAGE-2 — Detail sections are tabs, and shareable state lives in the URL · MUST
-A detail page with sections uses `ui/tabs`. The selected tab, and any filter or selection a user would want to share, live in the URL (`?tab=`, `?q=`). The Back button walks them.
+A detail page with sections uses `ui/tabs` (FE-PAGE-9 says which of its two styles). The selected tab, and any filter or selection a user would want to share, live in the URL (`?tab=`, `?q=`). The Back button walks them.
 **Do this:** `frontend/src/components/ui/tabs.tsx`. **Checked by:** review.
 
 #### FE-PAGE-3 — Create on a page or in a dialog by size · MUST
@@ -33,6 +33,30 @@ A tabular list uses `FilterableTable` or `ui/table`. A hand-written `<table>` is
 #### FE-PAGE-5 — Settings are `Setting | Details | Value` tables · MUST
 Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection`, in the `Setting | Details | Value` shape. A flat property map is one searchable key/value list, not a bespoke form per field.
 **Do this:** `frontend/src/components/config/ConfigTable.tsx` (`ConfigTable`, `ConfigTableRow`), `frontend/src/components/form/ConfigSection.tsx`. **Checked by:** review. **Why:** [ui-conventions §4](ui-conventions.md#4-setting--details--value-tables-and-when-a-card-is-still-right).
+
+#### FE-PAGE-6 — Every page sits in `PageContainer`, at one left edge · MUST
+A routed page's outer element is `PageContainer` (`p-4` inside `main`), so every page starts at the same left edge.
+- `width="full"` (the default): lists, tables, Control Plane pages, detail pages, and tool pages (SQL Lab, the chart editor, a dashboard, the flow editor, an endpoint's detail).
+- `width="narrow"`: forms and form editors (an alert or report, every create or register page, Choose a visualization). The content is a 960px column (`max-w-page`, the `--container-page` token in `frontend/src/index.css`) that starts at the list's left edge. Never centred (`mx-auto`), and no other page-level `max-w-*`.
+- Workspace settings keeps its section nav at the left edge and caps the pane beside it at `max-w-page` (`data-settings-pane`).
+
+**Do this:** `frontend/src/components/layout/PageContainer.tsx`; a narrow page: `frontend/src/routes/explore/ScheduleDetail.tsx`. **Checked by:** browser (`frontend/tests/e2e/page-frame.spec.ts`). **Why:** KI-215: left edges at 248, 256, 264, 384 and 448px moved the content sideways by up to 200px between pages.
+
+#### FE-PAGE-7 — One title scale: `PageTitle` · MUST
+A page's `h1` is `PageTitle`: `page` (20px, `text-xl`) on every list, detail, form and settings page; `compact` (16px, `text-base`) only in the header bar of a full-height tool (SQL Lab, an endpoint's detail, an app's viewer and editor). The chart editor's title is its name field at the same 16px. No other size is a page title, and a page title is visible: an `sr-only` `h1` is only for a branch that has no title to show yet (loading, error) or a title that is an input.
+**Do this:** `frontend/src/components/layout/PageTitle.tsx`. **Checked by:** browser (`frontend/tests/e2e/page-frame.spec.ts`) and test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Why:** KI-214: titles came in 13, 16, 18, 20 and 24px.
+
+#### FE-PAGE-8 — Detail pages use `DetailHeader` · MUST
+A detail, form or editor page's header is `DetailHeader`: back link (`BackLink`, an arrow and the list's name) above the title, a status beside the title, the page's actions top right, a description, and a row of facts (`DetailFact`) under it. No coloured icon tile. The back link is omitted only where the page has no parent list (Workspace settings). A header with a part `DetailHeader` cannot carry (a colour swatch, a focus-target `h1`) keeps its own markup but uses `PageTitle` and `BackLink`. A tool page's header bar uses `BackLink` and a `compact` `PageTitle`, never an arrow icon button.
+**Do this:** `frontend/src/components/layout/DetailHeader.tsx` (`DetailHeader`, `BackLink`), `frontend/src/components/layout/DetailFact.tsx`; example: `frontend/src/routes/control-plane/SecretDetail.tsx`. **Checked by:** review. **Why:** KI-224: four header forms, and a back link that was small grey text.
+
+#### FE-PAGE-9 — Two tab styles: pill for page sections, underline for panels · MUST
+`TabsList` has two variants and no others.
+- `pill` (the default): the sections of a page (a dataset's Columns / Metrics, an alert's sections, a catalog's tabs, a flow's Edit / Revisions / Executions / Triggers).
+- `underline`: panels inside an editor or a tool (the chart editor's Data / Display, SQL Lab's Results / History, an endpoint's sections, the dashboard info panel).
+
+A tab strip made of router links uses `tabsListClass(variant)` and `tabsTriggerClass(variant)`, which style `aria-current="page"` like an active trigger. An icon in a trigger is spaced by the component; do not add margins. Allowed hand-written strips are document tabs a user opens, closes, renames or drags: `DashboardTabBar` (`frontend/src/components/chart/dashboard/DashboardTabBar.tsx`), `PanelTabStrip` (`frontend/src/components/workflows/panels/PanelTabStrip.tsx`) and the open-files strip in `NamespaceFiles` (`frontend/src/components/workflows/namespaces/files/NamespaceFiles.tsx`). The Data API statement switcher (`frontend/src/routes/explore/dataapi/detail/Query.tsx`) is a plain `role="tab"` element so that a disabled `fieldset` cannot disable it, and wears `tabsTriggerClass("underline")`.
+**Do this:** `frontend/src/components/ui/tabs.tsx`; router-link tabs: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Checked by:** review and test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Why:** KI-216: five tab styles for the same job.
 
 ## 2. States (FE-STATE)
 
@@ -99,6 +123,14 @@ Icons come from `lucide-react`, and a page has at most one `--highlight` emphasi
 #### FE-VISUAL-6 — Charts keep the Metabase palette and its cues · MUST
 Charts keep the Metabase series palette and its colour-independent cues: line styles and marker shapes per series, and the `aria` data description. Decal patterns stay off, as decided in chart 05 (#360); `palette.ts` records why. Literal colours inside chart option builders are allowed; ECharts needs concrete values.
 **Do this:** `frontend/src/components/chart/echarts/palette.ts`. **Checked by:** review.
+
+#### FE-VISUAL-7 — Names in lists are `EntityLink`s · MUST
+An object's name in a list or table is a link to that object, painted the same everywhere (Explore, Governance, Control Plane): the text colour, `font-medium`, underlined on hover. Never `text-primary`: teal is the action colour. A name inside a larger clickable row uses `ENTITY_LINK_IN_GROUP_CLASS` with `group` on the row. A name that navigates is a link, not a button with `onClick`.
+**Do this:** `frontend/src/components/ui/entity-link.tsx` (`EntityLink`, `ENTITY_LINK_CLASS`, `ENTITY_LINK_IN_GROUP_CLASS`). **Checked by:** review. **Why:** KI-223: teal names in Control Plane and Governance, black names in Explore.
+
+#### FE-VISUAL-8 — A status is a `StatusBadge` · MUST
+A state (active, archived, disabled, allow, deny, success, failed, paused, live) is shown with `StatusBadge`: a light tint of a state token (`success`, `destructive`, `highlight`, `primary`, `neutral`, `inactive`), the ink in `--foreground`, the word in sentence case (`active` renders *Active*). Never a solid fill (`backgroundColor: var(--success)`), never a dot with plain text, never `Badge`'s raw-palette `success`/`warning`/`processing` variants for a state. A type or a count (`s3`, `trino`, `built-in`, `3`) is not a status and stays a plain `Badge`.
+**Do this:** `frontend/src/components/ui/status-badge.tsx` (`StatusBadge`, `STATUS_TONE`); with a glyph: `frontend/src/components/workflows/StateChip.tsx`. **Checked by:** review and test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`); the ink contrast is measured by `frontend/tests/e2e/dataapi-badge-ink.spec.ts` (through `routes/explore/dataapi/chipTone.ts`, which reads `STATUS_TONE`). **Why:** KI-222: a solid green *active* in Control Plane, a tinted *Active* in Explore, a dot in settings.
 
 ## 5. Forms (FE-FORM)
 
@@ -241,6 +273,10 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-PAGE-3 — Create on a page when several sections or a read-once result, in a dialog for one to three fields; entry points are links.
 - [ ] FE-PAGE-4 — Tabular lists use `FilterableTable` or `ui/table`; a hand-written `<table>` is a specialised grid with a comment.
 - [ ] FE-PAGE-5 — Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection` in `Setting | Details | Value` shape.
+- [ ] FE-PAGE-6 — The page sits in `PageContainer`: `full` for lists, details and tools, `narrow` (960px, not centred) for forms; no other page-level `max-w-*`.
+- [ ] FE-PAGE-7 — The `h1` is a visible `PageTitle`: 20px, or `compact` 16px in a tool's header bar.
+- [ ] FE-PAGE-8 — A detail, form or editor header is `DetailHeader` (or `PageTitle` + `BackLink`); no icon tile, no arrow icon button.
+- [ ] FE-PAGE-9 — Tabs are `pill` for page sections and `underline` for panels; router-link tabs use `tabsTriggerClass`.
 - [ ] FE-STATE-1 — Loading, empty and error all render; `isError` is checked first; error never renders as empty.
 - [ ] FE-STATE-2 — Loading content is a skeleton; spinners only for buttons and in-place actions; no bare "Loading…".
 - [ ] FE-STATE-3 — Empty is `EmptyState` for the unfiltered collection; a filter miss says so and offers to clear.
@@ -253,6 +289,8 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-VISUAL-4 — Numbers use `tabular-nums`; colour changes checked in light and dark on every surface.
 - [ ] FE-VISUAL-5 — (SHOULD) Icons from `lucide-react`; at most one `--highlight` per page; `--accent` is not emphasis.
 - [ ] FE-VISUAL-6 — Charts keep the Metabase palette, line styles, marker shapes and the `aria` description; decals stay off.
+- [ ] FE-VISUAL-7 — Names in lists are `EntityLink`s: text colour, underline on hover, never `text-primary`.
+- [ ] FE-VISUAL-8 — States are `StatusBadge`s (tint, foreground ink, sentence case); types and counts stay `Badge`.
 - [ ] FE-FORM-1 — Form state in `useState` or a dedicated hook; no form library.
 - [ ] FE-FORM-2 — Every input has a `Label` whose `htmlFor` matches its `id` (lint checks only the label side).
 - [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
@@ -310,7 +348,7 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 
 | Rule | Debt | Grep count |
 |---|---|---|
-| FE-PAGE-1 | control-plane and governance list pages hand-roll their frame | (1) 42 route files with their own `<h1>`; (2) 42 of them do not mention `ListPageShell` |
+| FE-PAGE-1, FE-PAGE-7 | route files that still write a raw `<h1>` rather than `PageTitle` (recounted 2026-10-23 after U1: the 403, 404 and placeholder state pages, the print view, and `sr-only` titles of loading and error branches) | (1) 9 route files with their own `<h1>`; (2) 9 of them do not mention `ListPageShell` |
 | FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 17 lines |
 | FE-STATE-2 | "Loading…" texts; spinners used for content (not counted) | (4) 28 lines |
 | FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 6 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |

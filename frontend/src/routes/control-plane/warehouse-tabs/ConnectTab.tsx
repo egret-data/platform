@@ -134,7 +134,7 @@ SELECT * FROM demo_ns.events;`;
         </Alert>
 
         <Tabs defaultValue="pyiceberg">
-          <TabsList>
+          <TabsList variant="underline">
             {engines.map((e) => (
               <TabsTrigger key={e.key} value={e.key}>
                 {e.label}

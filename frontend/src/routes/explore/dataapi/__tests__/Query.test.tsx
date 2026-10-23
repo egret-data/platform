@@ -944,7 +944,7 @@ describe("Query section — dirtiness and save", () => {
     // The visible breadcrumb heading (`h2`), not `getByText` — the page also
     // carries an `sr-only` `h1` with the same name, so a bare text match is
     // now ambiguous.
-    expect(screen.getByRole("heading", { level: 2, name: "Endpoint B" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Endpoint B" })).toBeInTheDocument();
     expect(screen.queryByDisplayValue("SELECT A")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 2, name: "Endpoint A" })).not.toBeInTheDocument();
   });

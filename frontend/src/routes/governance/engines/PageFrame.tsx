@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ENGINES_BASE, type EditorSubject, type EngineTab } from "@/routes/governance/engines/engineUrl";
 import type { ProfilePolicies } from "@/routes/governance/engines/profilePolicies";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /**
  * The frame the engine page and the profile page share (spec §6): a header
@@ -72,7 +73,10 @@ export interface TabContext {
   policies: ProfilePolicies;
 }
 
-/** The page's header: its `h1` and a line of facts, named for the page's subject. */
+/**
+ * The page's header: the way back to Engine & policy, its `h1` and a line of
+ * facts, named for the page's subject. The shared `DetailHeader` (KI-224).
+ */
 export function FrameHeader({
   label,
   title,
@@ -85,12 +89,14 @@ export function FrameHeader({
   actions?: ReactNode;
 }) {
   return (
-    <section aria-label={label} className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0 space-y-1">
-        <h1 className="break-words text-2xl font-semibold">{title}</h1>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">{facts}</div>
-      </div>
-      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+    <section aria-label={label}>
+      <DetailHeader
+        className=""
+        back={{ to: ENGINES_BASE, label: "Engine & policy" }}
+        title={title}
+        meta={<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">{facts}</div>}
+        actions={actions}
+      />
     </section>
   );
 }

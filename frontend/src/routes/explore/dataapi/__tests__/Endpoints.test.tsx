@@ -730,7 +730,7 @@ describe("Endpoints — page scaffold", () => {
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     renderEndpoints();
     const h1 = await screen.findByRole("heading", { level: 1, name: "Endpoints" });
-    expect(h1.className).toContain("text-lg");
+    expect(h1.className).toContain("text-xl"); // PageTitle, FE-PAGE-7
     expect(screen.queryByRole("heading", { level: 2, name: "Endpoints" })).not.toBeInTheDocument();
   });
 

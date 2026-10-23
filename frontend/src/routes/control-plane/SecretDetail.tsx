@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, HardDrive, KeyRound, Loader2, RotateCw, Trash2 } from "lucide-react";
+import { HardDrive, KeyRound, Loader2, RotateCw, Trash2 } from "lucide-react";
 
 import {
   type Secret,
@@ -38,6 +38,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
 const TABS = ["overview", "usage"] as const;
 
@@ -84,29 +86,21 @@ export default function SecretDetail() {
     },
   });
 
-  const backLink = (
-    <Link
-      to="/control-plane/secrets"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Secrets
-    </Link>
-  );
+  const back = { to: "/control-plane/secrets", label: "Secrets" };
 
   if (secretsQ.isLoading) {
     return <p className="p-6 text-sm text-muted-foreground">Loading secret…</p>;
   }
   if (!secret) {
     return (
-      <div className="space-y-5">
-        {backLink}
+      <PageContainer className="space-y-5">
+        <BackLink to={back.to}>{back.label}</BackLink>
         <Alert variant="destructive">
           <AlertDescription>
             {secretsQ.error?.message ?? "This secret wasn't found."}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -114,31 +108,27 @@ export default function SecretDetail() {
   const system = secret.system_managed;
 
   return (
-    <div className="space-y-5">
-      {backLink}
-
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <KeyRound className="h-6 w-6" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-2xl font-semibold leading-tight">{secret.name}</h1>
-              <div className="mt-1 flex items-center gap-2">
-                <Badge variant="outline" className="font-mono text-xs">
-                  {secret.type}
-                </Badge>
-                {system && (
-                  <Badge variant="secondary" className="text-xs">
-                    System
-                  </Badge>
-                )}
-              </div>
-            </div>
-          </div>
-          {system && <p className="text-sm text-muted-foreground">{SYSTEM_SECRET_REASON}</p>}
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
+    <PageContainer className="space-y-5">
+      <DetailHeader
+        className=""
+        back={back}
+        title={secret.name}
+        titleClassName="min-w-0 truncate"
+        status={
+          <>
+            <Badge variant="outline" className="font-mono text-xs">
+              {secret.type}
+            </Badge>
+            {system && (
+              <Badge variant="secondary" className="text-xs">
+                System
+              </Badge>
+            )}
+          </>
+        }
+        description={system ? SYSTEM_SECRET_REASON : undefined}
+        meta={
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-muted-foreground">
             <span>
               <span className="text-xs uppercase tracking-wide">Used by</span>{" "}
               <span className="text-foreground">
@@ -152,35 +142,37 @@ export default function SecretDetail() {
               </span>
             </span>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={system}
-            title={system ? SYSTEM_SECRET_REASON : undefined}
-            onClick={() => setRotateOpen(true)}
-          >
-            <RotateCw className="mr-1 h-4 w-4" /> Rotate value
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="text-destructive hover:text-destructive"
-            disabled={system || inUse}
-            title={
-              system
-                ? SYSTEM_SECRET_REASON
-                : inUse
-                  ? `In use by ${secret.used_by} connection${secret.used_by === 1 ? "" : "s"}`
-                  : undefined
-            }
-            onClick={() => setDeleteOpen(true)}
-          >
-            <Trash2 className="mr-1 h-4 w-4" /> Delete
-          </Button>
-        </div>
-      </div>
+        }
+        actions={
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={system}
+              title={system ? SYSTEM_SECRET_REASON : undefined}
+              onClick={() => setRotateOpen(true)}
+            >
+              <RotateCw className="mr-1 h-4 w-4" /> Rotate value
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-destructive hover:text-destructive"
+              disabled={system || inUse}
+              title={
+                system
+                  ? SYSTEM_SECRET_REASON
+                  : inUse
+                    ? `In use by ${secret.used_by} connection${secret.used_by === 1 ? "" : "s"}`
+                    : undefined
+              }
+              onClick={() => setDeleteOpen(true)}
+            >
+              <Trash2 className="mr-1 h-4 w-4" /> Delete
+            </Button>
+          </>
+        }
+      />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
@@ -211,7 +203,7 @@ export default function SecretDetail() {
         confirmText="delete"
         onConfirm={() => deleteMut.mutate()}
       />
-    </div>
+    </PageContainer>
   );
 }
 

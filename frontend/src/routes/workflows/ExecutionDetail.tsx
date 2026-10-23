@@ -60,6 +60,7 @@ import { fullTimestamp } from "@/lib/relativeTime";
 import { Forbidden } from "@/routes/Forbidden";
 import ExecutionOverview from "@/routes/workflows/ExecutionOverview";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /**
  * The execution's Topology tab (W7c spec §6.3). Through `lazy()` only: it brings `@xyflow/react`
@@ -263,16 +264,14 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
   const parent = execution.parent_execution_id ?? execution.trigger_execution_id ?? null;
 
   return (
-    <header className="flex flex-wrap items-start justify-between gap-3 px-4 pt-4">
-      <div className="min-w-0">
-        <Link className="text-sm text-muted-foreground hover:underline" to={`${base}/executions`}>
-          ← Executions
-        </Link>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <h1 className="truncate font-mono text-lg font-semibold">{execution.id}</h1>
-          <StateChip state={execution.state} kind="execution" />
-        </div>
-        <dl data-testid="execution-summary" className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+    <DetailHeader
+      className="px-4 pt-4"
+      back={{ to: `${base}/executions`, label: "Executions" }}
+      title={execution.id}
+      titleClassName="min-w-0 truncate font-mono"
+      status={<StateChip state={execution.state} kind="execution" />}
+      meta={
+        <dl data-testid="execution-summary" className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
           <Fact term="Flow">
             {execution.flow_id ? (
               <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(execution.flow_id)}/edit`}>
@@ -332,10 +331,12 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
             </Fact>
           ) : null}
         </dl>
-      </div>
-      {/* Every action needs `workflow:manage`; a user without it does not see them (spec §5.2). */}
-      {execution.can_manage ? <ExecutionActions ws={ws} execution={execution} /> : null}
-    </header>
+      }
+      actions={
+        /* Every action needs `workflow:manage`; a user without it does not see them (spec §5.2). */
+        execution.can_manage ? <ExecutionActions ws={ws} execution={execution} /> : null
+      }
+    />
   );
 }
 
