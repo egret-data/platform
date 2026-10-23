@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useRemoveClassification, type RemoveTarget } from "@/routes/governance/RemoveClassificationDialog";
 import { pathToUrl } from "@/routes/governance/data/objectPath";
-import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
+import { ACTIONS_CELL, Section, STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
@@ -102,7 +102,7 @@ function Removes({
   return (
     <ul className="space-y-0.5">
       {items.map((i) => (
-        <li key={i.key} className="flex items-center justify-end gap-1">
+        <li key={i.key} className="flex items-center justify-end gap-1 max-sm:justify-start">
           <span className={i.column === undefined ? "text-xs" : "font-mono text-xs"}>{i.text}</span>
           <IconButton aria-label={`Remove ${tagName} from ${i.label}`} onClick={() => onRemove(i.column, i.label)}>
             <X aria-hidden className="size-3.5" />
@@ -196,9 +196,11 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
         ) : (
           groups.map((g) => (
             <div key={g.label} className="space-y-1">
-              <h3 className="font-mono text-sm font-medium">{g.label}</h3>
+              {/* A long catalog.schema wraps at 390 px instead of running past the card (U3). */}
+              <h3 className="break-all font-mono text-sm font-medium">{g.label}</h3>
               <div className="overflow-x-auto rounded-md border">
-                <Table aria-label={g.label}>
+                {/* Cards below sm (U3): a pinned Remove column covered the table names at 390 px. */}
+                <Table aria-label={g.label} className={STACKED_TABLE}>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Table</TableHead>
@@ -221,7 +223,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                             {t.table}
                           </Link>
                         </TableCell>
-                        <TableCell className="whitespace-normal">
+                        <TableCell data-label="Attached to" className="whitespace-normal">
                           <Carries t={t} />
                         </TableCell>
                         {canRemove ? (
@@ -250,7 +252,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
           <EmptyState icon={LayoutDashboard} title="No BI object carries this classification." />
         ) : readable.length > 0 ? (
           <div className="overflow-x-auto rounded-md border">
-            <Table aria-label="BI objects">
+            <Table aria-label="BI objects" className={STACKED_TABLE}>
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
@@ -267,13 +269,15 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                       <TableCell className="whitespace-normal">
                         <BiName o={o} />
                       </TableCell>
-                      <TableCell>
+                      <TableCell data-label="Kind">
                         <span className="inline-flex items-center gap-1.5">
                           <Icon className="h-4 w-4 text-muted-foreground" aria-hidden />
                           {k.word}
                         </span>
                       </TableCell>
-                      <TableCell className="font-mono text-xs">{o.workspaceSlug}</TableCell>
+                      <TableCell data-label="Workspace" className="font-mono text-xs">
+                        {o.workspaceSlug}
+                      </TableCell>
                     </TableRow>
                   );
                 })}

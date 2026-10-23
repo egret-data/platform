@@ -247,6 +247,7 @@ function PrincipalListEditor({
                 onAdd={add}
                 help={groupHelp}
                 listInFlow={listInFlow}
+                clearOnPick
               />
             ) : (
             <>
@@ -376,6 +377,7 @@ function PrincipalSearchField({
   onAdd,
   help,
   listInFlow = false,
+  clearOnPick = false,
 }: {
   /** `any`: users and groups at once, each result naming its kind (a rule's exemptions). */
   kind: "user" | "group" | "any";
@@ -385,6 +387,12 @@ function PrincipalSearchField({
   /** Rendered under the field and before the suggestions (see `listInFlow` on `PrincipalListEditor`). */
   help?: ReactNode;
   listInFlow?: boolean;
+  /**
+   * Empties the field after a pick (a rule's exemptions: each search there finds
+   * one user or group). Without it the text stays, so several picks come from
+   * the same results (D9a).
+   */
+  clearOnPick?: boolean;
 }) {
   const noticeId = `${useId()}-notice`;
   const [q, setQ] = useState("");
@@ -436,6 +444,7 @@ function PrincipalSearchField({
     onPick: (i) => {
       onAdd({ kind: pickable[i].kind, ref: pickable[i].ref });
       setNotice(null);
+      if (clearOnPick) setQ("");
     },
   });
 

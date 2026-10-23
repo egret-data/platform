@@ -24,6 +24,11 @@ export type ObjectPath = { catalog: string; schema?: string; object?: string; co
 
 export const DATA_BASE = "/governance/data";
 
+/** A rule's page, opened from the Data page at `back`, so its way back returns there (`?from=data:`, spec C1). */
+export function dataRuleUrl(ruleId: string, back: string): string {
+  return `/governance/rules/${encodeURIComponent(ruleId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
+}
+
 /** The URL of `p`. A column needs an object, and an object a schema; a level without its parent is dropped. */
 export function pathToUrl(p: ObjectPath, tab?: string): string {
   const segments = [p.catalog];
