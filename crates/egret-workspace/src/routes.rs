@@ -82,7 +82,35 @@ pub struct WorkspaceDto {
     /// mutated rather than reading entitlement state.
     #[serde(default)]
     pub features: Vec<String>,
+    /// The caller's own permissions in this workspace among
+    /// [`PAGE_PERMISSIONS`]: the ones that decide whether a whole Explore page
+    /// opens. Only `/api/me/workspaces` fills it, from the same PDP decision
+    /// the page's routes ask, so the UI can leave out the entries the caller
+    /// cannot open (KI-231). The routes stay the gate. Absent everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
 }
+
+/// The workspace permissions that decide whether a whole page of a workspace
+/// opens, as the routes behind those pages check them:
+///
+/// - `data_api_endpoint:read`: Data API → Endpoints and Activity
+///   (`egret-dataapi`'s `EP_READ`).
+/// - `service_account:read`: Data API → Clients (`SA_READ`).
+/// - `workflow:read`: every Workflows page (`egret-workflow`'s `WF_READ`).
+/// - `workspace:manage_members`: the Workspace settings sections Members,
+///   Roles, Access requests, Shared objects, Engines and Notifications.
+///
+/// Literal strings, as `egret-bi`'s `kind_perms` does, to keep this crate free
+/// of a dependency on each module. `/api/me/workspaces` reports which of these
+/// the caller holds; adding a key here is all a new gated page needs.
+pub const PAGE_PERMISSIONS: &[&str] = &[
+    "data_api_endpoint:read",
+    "service_account:read",
+    "workflow:read",
+    "workspace:manage_members",
+];
+
 impl From<crate::model::Workspace> for WorkspaceDto {
     fn from(w: crate::model::Workspace) -> Self {
         WorkspaceDto {
@@ -94,6 +122,7 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             created_by: w.created_by.map(|u| u.to_string()),
             owner_name: w.owner_name,
             features: Vec::new(),
+            permissions: None,
         }
     }
 }
@@ -633,14 +662,28 @@ async fn list_my_workspaces(
         .await
         .map_err(AuthError)?;
 
-    Ok(Json(
-        list.into_iter()
-            .map(|w| {
-                let off = disabled.get(&w.id.0);
-                dto_with_features(w, off)
-            })
-            .collect(),
-    ))
+    let subject = egret_core::authz::AuthTarget::subject(&p);
+    let mut out = Vec::with_capacity(list.len());
+    for w in list {
+        let resource = egret_core::authz::Resource::Workspace(w.id);
+        let mut held = Vec::new();
+        for perm in PAGE_PERMISSIONS {
+            if st
+                .pdp
+                .authorize(&subject, perm, &resource)
+                .await
+                .map_err(AuthError)?
+                .allow
+            {
+                held.push((*perm).to_string());
+            }
+        }
+        let off = disabled.get(&w.id.0);
+        let mut dto = dto_with_features(w, off);
+        dto.permissions = Some(held);
+        out.push(dto);
+    }
+    Ok(Json(out))
 }
 
 pub fn me_router() -> Router<WorkspaceState> {

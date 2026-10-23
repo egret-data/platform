@@ -641,3 +641,78 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
     assert!(!ws2_features.contains(&"datasets"));
     assert!(ws2_features.contains(&"apps"));
 }
+
+/// KI-231: `/me/workspaces` tells the UI which page-gating permissions the
+/// caller holds in each workspace, so the sidebar can leave out Endpoints,
+/// Clients, Workflows and the admin-only settings sections for a viewer. The
+/// answer must be the PDP's, per workspace: a viewer holds none of them, an
+/// admin of another workspace holds all of them THERE and still none here.
+#[tokio::test]
+async fn my_workspaces_reports_the_page_permissions_the_caller_holds_in_each_workspace() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let (audit, _audit_rx) = egret_audit::AuditSink::new(16);
+    let st = ws_state_with_audit(&db, audit).await;
+    let creator = seed_user(&db).await;
+    let caller = seed_user(&db).await;
+    let viewed = st
+        .workspaces
+        .create(&uniq("perm-view"), "Viewed", creator)
+        .await
+        .unwrap();
+    let administered = st
+        .workspaces
+        .create(&uniq("perm-admin"), "Administered", creator)
+        .await
+        .unwrap();
+    st.members
+        .add(viewed.id, "user", caller.0, "ws_viewer", creator)
+        .await
+        .unwrap();
+    st.members
+        .add(administered.id, "user", caller.0, "ws_admin", creator)
+        .await
+        .unwrap();
+    let cookie = login_cookie(caller, &st.sessions).await;
+    let app = axum::Router::new().nest("/me", me_router()).with_state(st);
+
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/me/workspaces")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let perms_of = |id: Uuid| -> Vec<String> {
+        let ws = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["id"] == id.to_string())
+            .unwrap_or_else(|| panic!("workspace {id} missing from {json}"));
+        let mut v: Vec<String> = ws["permissions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no permissions array on {ws}"))
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    assert_eq!(perms_of(viewed.id.0), Vec::<String>::new());
+    let mut every: Vec<String> = egret_workspace::routes::PAGE_PERMISSIONS
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    every.sort();
+    assert_eq!(perms_of(administered.id.0), every);
+}

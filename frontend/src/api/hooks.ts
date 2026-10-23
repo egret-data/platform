@@ -19,7 +19,20 @@ export interface Me {
 /** `features` = the feature entitlement keys this workspace currently has
  * switched on (a subset of whatever the catalog defines) — drives both the
  * Sidebar's per-item visibility and `RequireFeature`'s route gate. */
-export interface WorkspaceSummary { id: string; slug: string; name: string; features: string[]; }
+export interface WorkspaceSummary {
+  id: string;
+  slug: string;
+  name: string;
+  features: string[];
+  /**
+   * The caller's own page-gating permissions in this workspace (the server's
+   * `PAGE_PERMISSIONS`: `data_api_endpoint:read`, `service_account:read`,
+   * `workflow:read`, `workspace:manage_members`), as the PDP answers them.
+   * Absent from a server that predates it; read through
+   * `useWorkspacePermission`, which treats absent as "unknown, show it".
+   */
+  permissions?: string[];
+}
 
 export function useMe() {
   return useQuery<Me | null>({
