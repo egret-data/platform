@@ -230,6 +230,7 @@ const EXPECTED: &[(&str, &str, Family)] = &[
     (action::ENGINE_GRANT_CREATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_UPDATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_DELETE, "engine_grant", Family::Policy),
+    (action::USER_DELETE, "user", Family::User),
 ];
 
 #[test]

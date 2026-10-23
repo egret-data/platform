@@ -295,11 +295,16 @@ impl UserRepo {
     /// profiles of engine grants that target this user (they cascade with the
     /// row; their compiled policies name the freed username), through
     /// `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx`.
+    /// Since the username-takeover fix (spec 2026-10-23 §4.3) that pass also
+    /// covers the profiles reached through the user's roles, workspace
+    /// memberships and clearances, and the delete records a `user:delete`
+    /// governance event, by `actor`, on the same transaction.
     pub async fn hard_delete(
         &self,
         target: UserId,
+        actor: &egret_core::Principal,
         recompiler: &dyn crate::groups::GroupMembershipRecompiler,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<DeletedUser>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         // Fix round 1: hold this user's membership lock, so no ADD can commit
         // between reading their groups and the DELETE that removes them
@@ -350,11 +355,13 @@ impl UserRepo {
         // as an idempotent success rather than an error — see the doc comment
         // above. `fetch_one` would turn that into a `RowNotFound` and, via
         // `db_err`, a 500 for a caller that never asked for one.
-        let res: std::result::Result<Option<(String, String)>, sqlx::Error> =
-            sqlx::query_as("DELETE FROM users WHERE id = $1 RETURNING name, email")
-                .bind(target.0)
-                .fetch_optional(&mut *tx)
-                .await;
+        let res: std::result::Result<Option<DeletedUser>, sqlx::Error> = sqlx::query_as(
+            "DELETE FROM users WHERE id = $1 \
+             RETURNING name, email, username::text AS username, provider",
+        )
+        .bind(target.0)
+        .fetch_optional(&mut *tx)
+        .await;
         let deleted = match res {
             Ok(row) => row,
             Err(e) => {
@@ -371,9 +378,45 @@ impl UserRepo {
         if !groups.is_empty() || !services.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
+        // Who was deleted, on this transaction: the event exists exactly when
+        // the delete committed. The username is retired for good (migration
+        // 0208), so this is where a later audit learns whose it was.
+        if let Some(d) = &deleted {
+            egret_audit::governance::record_change(
+                &mut tx,
+                egret_audit::governance::Change {
+                    action: egret_audit::governance::action::USER_DELETE,
+                    resource_type: egret_audit::governance::resource::USER,
+                    resource_id: target.0.to_string(),
+                    summary: serde_json::json!({
+                        "before": {
+                            "username": d.username,
+                            "email": d.email,
+                            "name": d.name,
+                            "provider": d.provider,
+                        },
+                        "after": null,
+                    }),
+                    principal: actor,
+                },
+            )
+            .await
+            .map_err(db_err)?;
+        }
         tx.commit().await.map_err(db_err)?;
         Ok(deleted)
     }
+}
+
+/// What [`UserRepo::hard_delete`] removed, from its own `RETURNING`: the
+/// columns a later audit needs to name the person (the row is gone).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct DeletedUser {
+    pub name: String,
+    pub email: String,
+    /// `None` when they never got one.
+    pub username: Option<String>,
+    pub provider: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -711,7 +754,20 @@ mod tests {
             .unwrap();
         assert!(sessions.validate(&issued.token).await.unwrap().is_some());
 
-        repo.hard_delete(uid, &NoProfiles).await.unwrap();
+        repo.hard_delete(
+            uid,
+            &egret_core::Principal {
+                user_id: UserId(Uuid::nil()),
+                email: "deleter@test.local".into(),
+                platform_roles: vec![],
+                permissions: vec![],
+                group_ids: vec![],
+                impersonator: None,
+            },
+            &NoProfiles,
+        )
+        .await
+        .unwrap();
 
         assert!(
             repo.find_by_id(uid).await.unwrap().is_none(),

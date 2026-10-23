@@ -72,7 +72,7 @@ async fn the_next_person_never_gets_a_deleted_users_name() {
         repo.ensure_username(first).await.unwrap(),
         format!("bob_{tag}")
     );
-    repo.hard_delete(first, &Recorder::default())
+    repo.hard_delete(first, &deleter(), &Recorder::default())
         .await
         .expect("delete");
 
@@ -114,7 +114,9 @@ async fn a_direct_write_of_a_retired_name_is_refused() {
     let tag = t();
     let first = user(&db, &format!("bob_{tag}@a.test")).await;
     repo.ensure_username(first).await.unwrap();
-    repo.hard_delete(first, &Recorder::default()).await.unwrap();
+    repo.hard_delete(first, &deleter(), &Recorder::default())
+        .await
+        .unwrap();
 
     let next = user(&db, &format!("other_{tag}@b.test")).await;
     let err = sqlx::query("UPDATE users SET username = $2 WHERE id = $1")
@@ -448,5 +450,18 @@ async fn sql_slug_matches_slugify_localpart() {
             egret_auth::users::slugify_localpart_for_tests(&email),
             "{email:?}"
         );
+    }
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
     }
 }

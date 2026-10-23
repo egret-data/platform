@@ -507,3 +507,18 @@ Deviations from the text above that the code forced or that implementation found
   Unicode `to_lowercase` for a few non-ASCII letters (for example U+212A KELVIN SIGN lowercases to ASCII `k` in
   Rust). Every non-ASCII character becomes `-` either way, and step 4a reads only service-account emails, which
   are built from an ASCII slug, so the difference cannot reach the ledger.
+
+### Task 2 (`hard_delete` arms and the `user:delete` event)
+
+- **The event tests live in `egret-controlplane`** (`tests/governance_changes.rs`), not in
+  `egret-perm-compile/tests/user_delete_recompile.rs`: they drive `DELETE /users/{id}` through the control-plane
+  router, and `egret-perm-compile` cannot depend on `egret-controlplane`. The service-account `username` is
+  asserted in `egret-dataapi/tests/audit.rs`.
+- **No real 23503 path exists today** (every FK to `users` has an `ON DELETE` rule), so the "refused delete leaves
+  no event" test creates a table of its own with a bare FK to `users` on the per-process test DB.
+- **`DeletedUser` also carries `provider`**, which the event summary needs (§4.4); `RETURNING` reads
+  `username::text`.
+- **The event is recorded after the recompile, just before commit.** Any failure before it (the row delete's
+  23503, a refused recompile) leaves no event; a failure of the event insert refuses the delete.
+- **Feed (D4).** `governance_changes.rs` adds `("user:read", Family::User)` to its family loop; the entry gate is
+  unchanged. The sentence is "{actor} deleted user {username, else email, else id}" with no target link.

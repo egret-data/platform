@@ -831,3 +831,140 @@ async fn engine_grant_events_render_in_the_feed() {
     );
     assert_eq!(e[1]["targetExists"], false, "the grant row does not exist");
 }
+
+// ── user:delete (username-takeover spec §4.4, decision D4) ──────────────
+
+async fn delete_user(st: &CpState, token: &str, id: Uuid) -> StatusCode {
+    let req = HttpRequest::builder()
+        .method("DELETE")
+        .uri(format!("/users/{id}"))
+        .header("Cookie", format!("egret_session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    control_plane_router()
+        .with_state(st.clone())
+        .oneshot(req)
+        .await
+        .unwrap()
+        .status()
+}
+
+/// A user with a minted username, the one a later audit must be able to name.
+async fn named_user(f: &Fixture, username: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, 'Bob', $2) \
+         RETURNING id",
+    )
+    .bind(format!("{username}@egret.local"))
+    .bind(username)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("user")
+}
+
+async fn user_delete_events(f: &Fixture, id: Uuid) -> Vec<(String, Option<String>, Value)> {
+    sqlx::query_as(
+        "SELECT resource_type, resource_id, detail FROM audit.audit_log \
+          WHERE kind = 'mutation' AND action = 'user:delete' AND resource_id = $1",
+    )
+    .bind(id.to_string())
+    .fetch_all(&f.db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_user_delete_records_who_was_deleted() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let bob_name = unique("bob");
+    let bob = named_user(&f, &bob_name).await;
+    let admin = session(&f, &["user:delete"]).await;
+    let st = state(&f, Some(90)).await;
+
+    assert_eq!(delete_user(&st, &admin, bob).await, StatusCode::NO_CONTENT);
+
+    let events = user_delete_events(&f, bob).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let (resource_type, resource_id, detail) = &events[0];
+    assert_eq!(resource_type, "user");
+    assert_eq!(resource_id.as_deref(), Some(bob.to_string().as_str()));
+    assert_eq!(detail["before"]["username"], json!(bob_name));
+    assert_eq!(
+        detail["before"]["email"],
+        json!(format!("{bob_name}@egret.local"))
+    );
+    assert_eq!(detail["before"]["name"], json!("Bob"));
+    assert_eq!(detail["before"]["provider"], json!("local"));
+    assert_eq!(detail["after"], Value::Null);
+}
+
+/// The event is written in the delete's own transaction: a delete that is
+/// refused at the row DELETE (a content-ownership FK, 23503 → 409) leaves no
+/// event naming a user who still exists.
+#[tokio::test]
+async fn a_refused_user_delete_leaves_no_event() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let bob = named_user(&f, &unique("bob")).await;
+    // A table of this test's own, with an FK to users and no ON DELETE rule.
+    sqlx::query("CREATE TABLE udel_blocker (owner uuid NOT NULL REFERENCES users(id))")
+        .execute(&f.db.pool)
+        .await
+        .expect("blocker table");
+    sqlx::query("INSERT INTO udel_blocker VALUES ($1)")
+        .bind(bob)
+        .execute(&f.db.pool)
+        .await
+        .expect("blocker row");
+    let admin = session(&f, &["user:delete"]).await;
+    let st = state(&f, Some(90)).await;
+
+    let status = delete_user(&st, &admin, bob).await;
+    sqlx::query("DROP TABLE udel_blocker")
+        .execute(&f.db.pool)
+        .await
+        .expect("drop blocker");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(user_delete_events(&f, bob).await.is_empty());
+}
+
+/// D4: the event carries the deleted person's email, so it is its own family,
+/// read with `user:read`. A `policy:read` reader does not see it.
+#[tokio::test]
+async fn a_user_delete_event_is_read_with_user_read_only() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let bob_name = unique("bob");
+    let bob = named_user(&f, &bob_name).await;
+    let admin = session(&f, &["user:delete"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let user_reader = session(&f, &["policy:read", "user:read"]).await;
+    let st = state(&f, Some(90)).await;
+    assert_eq!(delete_user(&st, &admin, bob).await, StatusCode::NO_CONTENT);
+
+    for token in [&policy_reader, &tag_reader] {
+        let (status, body) = changes(&st, token, "").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !actions(&body).contains(&"user:delete".to_string()),
+            "a reader without user:read sees a deleted user's email: {body}"
+        );
+    }
+    let (status, body) = changes(&st, &user_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entry = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["action"] == "user:delete")
+        .unwrap_or_else(|| panic!("no user:delete entry: {body}"));
+    assert!(
+        entry["sentence"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(" deleted user {bob_name}")),
+        "{entry}"
+    );
+}

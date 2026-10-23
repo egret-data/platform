@@ -259,7 +259,7 @@ async fn every_membership_writer_calls_the_recompile_port() {
         "a rename moves the members off the old name AND onto the new one"
     );
 
-    users.hard_delete(uid, &rc).await.unwrap();
+    users.hard_delete(uid, &deleter(), &rc).await.unwrap();
     assert_eq!(
         rc.take(),
         vec![Call::Lock(vec![renamed.clone()]), Call::Recompile],
@@ -650,4 +650,17 @@ async fn a_rename_racing_a_create_of_the_new_name_is_a_conflict() {
         matches!(&err, egret_core::Error::Conflict(m) if m == &format!("group already exists: {target}")),
         "{err:?}"
     );
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }

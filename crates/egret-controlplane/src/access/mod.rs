@@ -370,7 +370,7 @@ async fn delete_user(
     // are recompiled in the delete's own transaction
     // (`egret_auth::groups`' module doc).
     st.users
-        .hard_delete(user_id, &egret_perm_compile::PermGroupRecompiler)
+        .hard_delete(user_id, &p, &egret_perm_compile::PermGroupRecompiler)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

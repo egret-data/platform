@@ -389,7 +389,7 @@ async fn an_add_during_a_user_delete_leaves_no_stale_username() {
     let delete = {
         let users = UserRepo::new(db.clone());
         let pausing = pausing.clone();
-        tokio::spawn(async move { users.hard_delete(UserId(uid), &*pausing).await })
+        tokio::spawn(async move { users.hard_delete(UserId(uid), &deleter(), &*pausing).await })
     };
     h.reached
         .await
@@ -517,4 +517,17 @@ async fn a_membership_add_racing_a_compile_that_mints_the_same_user_both_commit(
         vec![username],
         "A's role grant names U by the minted username"
     );
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }
