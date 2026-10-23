@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -77,6 +77,32 @@ function Choice<T extends string>({ id, label, value, options, onChange }: {
   );
 }
 
+/**
+ * The filter's slug: its name in URLs and in `{{slug}}` (KI-065). Typed freely and committed on
+ * blur or Enter; the route makes the committed text URL-safe and unique and rewrites the
+ * `{{slug}}` references on the dashboard's cards. A blank box goes back to the current slug.
+ */
+function SlugField({ id, slug, onCommit }: { id: string; slug: string; onCommit: (slug: string) => void }) {
+  const [draft, setDraft] = useState(slug);
+  useEffect(() => setDraft(slug), [slug]);
+  const commit = () => {
+    if (draft.trim() === "" || draft === slug) { setDraft(slug); return; }
+    onCommit(draft.trim());
+  };
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id} className={FIELD_LABEL}>URL name</Label>
+      <Input id={id} aria-label="parameter URL name" aria-describedby={`${id}-help`} className="font-mono" value={draft}
+        onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }} />
+      <p id={`${id}-help`} className="text-xs text-muted-foreground">
+        In links as <code>?{slug}=…</code> and in text cards as <code>{`{{${slug}}}`}</code>. Changing it
+        updates the cards on this dashboard; links already shared stop setting this filter.
+      </p>
+    </div>
+  );
+}
+
 /** Label on the left, switch on the right: the card settings panel's on/off row. */
 function Toggle({ id, label, ariaLabel, checked, onChange }: {
   id: string; label: ReactNode; ariaLabel: string; checked: boolean; onChange: (v: boolean) => void;
@@ -122,6 +148,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], va
       <Field id={`${id}-name`} label="Name">
         <Input id={`${id}-name`} aria-label="parameter name" value={param.name} onChange={(e) => onChange({ ...param, name: e.target.value })} />
       </Field>
+      <SlugField id={`${id}-slug`} slug={param.slug} onCommit={(slug) => onChange({ ...param, slug })} />
       <Field id={`${id}-type`} label="Type">
         <Select value={param.type}
           onValueChange={(v) => { const t = v as ParamType; onChange({ ...param, type: t, operator: OPERATORS[t][0] }); }}>

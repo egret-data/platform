@@ -48,7 +48,7 @@ import { DashboardViewActionRows, dashboardWidthClass } from "@/components/chart
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
 import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
-import { slugify, applyParamsToChart, paramFiltersForCard, temporalOverridesForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
+import { slugify, nextParameterSlug, renameSlugReferences, applyParamsToChart, paramFiltersForCard, temporalOverridesForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -478,6 +478,20 @@ export default function DashboardView() {
     const id = `new-${slug}-${cardSeqRef.current++}`;
     setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
     openPanel({ kind: "filter", paramId: id });
+  }
+
+  /** A filter edited in its settings panel. Its slug is settled by `nextParameterSlug` (KI-065), and
+   *  when it changes, the `{{slug}}` references on the dashboard's cards are rewritten to follow. */
+  function changeParameter(next: DashboardParameter) {
+    const prev = parameters.find((x) => x.id === next.id);
+    if (!prev) return;
+    const others = parameters.filter((x) => x.id !== next.id).map((x) => x.slug);
+    const saved = (dashboard.parameters ?? []).some((x) => x.id === next.id);
+    const slug = nextParameterSlug(prev, next, others, saved);
+    setDraftParameters(parameters.map((x) => (x.id === next.id ? { ...next, slug } : x)));
+    if (slug !== prev.slug) {
+      setDraftCards((cur) => (cur ?? cardsAsDraft()).map((c) => ({ ...c, options: renameSlugReferences(c.options, prev.slug, slug) })));
+    }
   }
 
   function addSection(layout: SectionLayout) {
@@ -962,7 +976,7 @@ export default function DashboardView() {
             onAddChart={(c) => addCard(c)}
             onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
-            onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
+            onChangeParam={changeParameter}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
             onClose={() => setEditPanel(null)}
             onBack={() => setEditPanel({ kind: "add" })}

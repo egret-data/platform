@@ -12,6 +12,44 @@ export function slugify(name: string, existing: string[]): string {
   return `${base}_${i}`;
 }
 
+/**
+ * The slug a filter should have after an edit in its settings panel (KI-065). The slug is the
+ * filter's name in URLs (`?region=…`) and in `{{region}}` on text, heading and link cards.
+ *
+ * - An explicit edit of the slug wins, made URL-safe and unique among `otherSlugs`.
+ * - A filter that is not saved yet, whose slug is still the one derived from its name, follows
+ *   its name: "Filter" → "Order status" gives `order_status`, not `filter`.
+ * - A saved filter keeps its slug when renamed, so links already shared keep working.
+ */
+export function nextParameterSlug(
+  prev: DashboardParameter,
+  next: DashboardParameter,
+  otherSlugs: string[],
+  saved: boolean,
+): string {
+  if (next.slug !== prev.slug) return slugify(next.slug, otherSlugs);
+  if (!saved && next.name !== prev.name && prev.slug === slugify(prev.name, otherSlugs)) {
+    return slugify(next.name, otherSlugs);
+  }
+  return prev.slug;
+}
+
+/** `value` with every `{{from}}` (spaces inside the braces allowed) written as `{{to}}`, in every
+ *  string it holds: a text or heading card's text, a link card's URL and label, a click-behaviour
+ *  URL template. Used when a filter's slug changes, so the references on the same dashboard
+ *  follow it. Another slug that merely starts with `from` (`{{from_2}}`) is left alone. */
+export function renameSlugReferences<T>(value: T, from: string, to: string): T {
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, "g");
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return v.replace(re, `{{${to}}}`);
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}
+
 export const isBlank = (v: unknown) => v === undefined || v === null || v === "";
 
 const RELATIVE_LABELS: Record<string, string> = {
