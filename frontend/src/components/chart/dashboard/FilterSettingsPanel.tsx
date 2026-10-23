@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -83,11 +83,14 @@ function Choice<T extends string>({ id, label, value, options, onChange }: {
  * `{{slug}}` references on the dashboard's cards. A blank box goes back to the current slug.
  */
 function SlugField({ id, slug, onCommit }: { id: string; slug: string; onCommit: (slug: string) => void }) {
+  // Seeded once: the caller keys this field on the slug, so a new slug is a new field.
   const [draft, setDraft] = useState(slug);
-  useEffect(() => setDraft(slug), [slug]);
   const commit = () => {
     if (draft.trim() === "" || draft === slug) { setDraft(slug); return; }
     onCommit(draft.trim());
+    // Back to the slug in force: a changed one remounts this field anyway, and text that
+    // normalises to the same slug ("Region" for `region`) must not linger as if it were pending.
+    setDraft(slug);
   };
   return (
     <div className="space-y-1.5">
@@ -148,7 +151,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], va
       <Field id={`${id}-name`} label="Name">
         <Input id={`${id}-name`} aria-label="parameter name" value={param.name} onChange={(e) => onChange({ ...param, name: e.target.value })} />
       </Field>
-      <SlugField id={`${id}-slug`} slug={param.slug} onCommit={(slug) => onChange({ ...param, slug })} />
+      <SlugField key={`${param.id}:${param.slug}`} id={`${id}-slug`} slug={param.slug} onCommit={(slug) => onChange({ ...param, slug })} />
       <Field id={`${id}-type`} label="Type">
         <Select value={param.type}
           onValueChange={(v) => { const t = v as ParamType; onChange({ ...param, type: t, operator: OPERATORS[t][0] }); }}>
