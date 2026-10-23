@@ -5,8 +5,8 @@ Plan: [`../plans/2026-10-23-username-takeover.md`](../plans/2026-10-23-username-
 Programme: KI fix programme, security package. Follow-up of the #692 review (one of eight follow-ups; the other
 seven are non-goals, §11).
 
-The user settled the scope on 2026-10-23 (§3, D1–D3). This document implements those decisions and records the
-choices the code forced (§4). The only open question is in §12.
+The user settled the scope on 2026-10-23 (§3, D1–D5). This document implements those decisions and records the
+choices the code forced (§4). The open questions of §12 are answered (D4, D5).
 
 ## 1. Problem
 
@@ -71,6 +71,11 @@ them.
   disabled automatically.
 - Also in scope: close `hard_delete`'s recompile gaps; emit `user:delete` through `record_change`; decide the JWT
   question.
+- **D4** (answers Q1). `user:delete` events are a separate `User` event family, readable with `user:read`, not
+  `policy:read`, because they carry the deleted person's email (PII). §4.4 says how the feed gates it.
+- **D5.** The Platform docs (`egret-data/docs`) are updated in a separate docs PR after the code PR merges, by the
+  controller, not in this PR. `docs/vi/specs/2026-10-23-username-takeover-design.md` is written as a Vietnamese
+  reference translation of this spec once the code is done (the English text is canonical).
 
 ## 4. Design
 
@@ -244,8 +249,17 @@ Option<String> }>` (`RETURNING name, email, username`). In the same transaction,
 - `action::USER_DELETE = "user:delete"`, `resource::USER = "user"`, `resource_id` = the user id;
 - summary `{"before": {"username", "email", "name", "provider"}, "after": null}`.
 
-The pair joins `FAMILIES` (family `Policy`) and `GOVERNANCE_ACTIONS`. This covers both callers (`DELETE
-/users/{id}` and the service-account delete). The service-account route keeps its own `service_account:delete` sink
+The pair joins `FAMILIES` under a new family `User` (D4) and `GOVERNANCE_ACTIONS`. This covers both callers
+(`DELETE /users/{id}` and the service-account delete).
+
+**Who reads it (D4).** `GET /governance/changes` builds the list of families a reader may see from one
+permission per family (`governance_changes.rs`: `policy:read` → `Policy`, `tag:read` → `Tag`) and passes it to
+`governance_changes_via`, which filters `FAMILIES` by it. `User` joins that loop with `user:read`. The route's
+entry gate (`require_governance_read`: `policy:read` or `tag:read`) is unchanged: the feed stays a Governance
+page, and `user:delete` rows are an extra family inside it for a reader who also holds `user:read`. A
+`policy:read` reader without `user:read` sees no `user:delete` row; a `user:read`-only principal still gets 403
+from the feed (it is not a Governance reader). Platform admins hold all three. The route's description and the
+Overview client's Recent changes label (Task 8) follow. The service-account route keeps its own `service_account:delete` sink
 event and adds `username` to it.
 
 **API copy.** The `DELETE /users/{id}` 204 description becomes: "User hard-deleted along with sessions, group
@@ -453,12 +467,19 @@ Also not here:
 - a separate namespace for `svc-` names;
 - linking a returning person to their old username;
 - free-text and engine-side ownership remediation;
-- `docs/vi` mirrors (working spec and plan; confirm with the user).
+- the Platform docs in `egret-data/docs` (D5: a separate docs PR after this one merges);
+- a `docs/vi` mirror of the plan. The spec gets a Vietnamese reference translation at the end (D5).
 
-## 12. Open question
+## 12. Open questions (answered 2026-10-23)
 
-**Q1. Who may read the `user:delete` event?** `record_change` requires a family in `FAMILIES`, and the family
+**Q1. Who may read the `user:delete` event?** **Answered (D4): a separate `User` family, read with `user:read`.**
+The text below is the question as it was asked. `record_change` requires a family in `FAMILIES`, and the family
 decides the reader. With the default, `Policy`, every `policy:read` holder sees the deleted user's username and
 email in Governance > Recent changes. The alternative is a third family, `User` (`user:read`), which needs a feed
 filter change (`governance_changes_via` and the Overview client). Default: `Policy`, because the username is what a
 policy reader needs to understand dead refs. Only Task 2 changes if the answer is `User`.
+
+**Q2. Where do the Platform docs and the `docs/vi` copy go?** **Answered (D5):** the Platform docs are a separate
+docs PR after the code PR merges, written by the controller (plan Task 9 is out of this PR). The `docs/vi` copy of
+this spec is a Vietnamese reference translation, written after the code is done because the spec may still change
+during implementation; its header says it is a reference, links to this file and says the English text wins.

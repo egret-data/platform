@@ -63,8 +63,9 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
   - Do not push until the user says so.
 - **Stacks:** the demo stack on `127.0.0.1:18080` belongs to another session. Never stop, reset or seed it. The
   live check uses its own compose project, `egret-takeover`, on port 18380.
-- **Docs rule (`CLAUDE.md`):** this changes user-visible UI, API and behaviour. Task 9 updates the Platform docs in
-  `egret-data/docs`. Confirm that repo's location with the user before editing it.
+- **Docs rule (`CLAUDE.md`):** this changes user-visible UI, API and behaviour. The Platform docs in
+  `egret-data/docs` are updated in a **separate docs PR after this code PR merges**, by the controller (user
+  decision D5, 2026-10-23). Task 9 is therefore out of this PR's scope.
 
 ## File structure
 
@@ -73,7 +74,8 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
 | `migrations/0208_username_ledger.sql` | new: ledger, triggers, `username_ledger_backfill()`, `username_reuse_baseline` | 1 |
 | `crates/egret-auth/tests/username_ledger.rs` | new | 1 |
 | `crates/egret-auth/src/users.rs` | docs of `ensure_username_via`; `hard_delete` (actor, event, `DeletedUser`); `set_status_in_tx` | 1, 2, 5 |
-| `crates/egret-audit/src/governance.rs` | `USER_DELETE`, `USER`, `FAMILIES`, `GOVERNANCE_ACTIONS` | 2 |
+| `crates/egret-audit/src/governance.rs` | `USER_DELETE`, `USER`, `Family::User`, `FAMILIES`, `GOVERNANCE_ACTIONS` | 2 |
+| `crates/egret-controlplane/src/governance_changes.rs` | `user:read` → `Family::User` in the feed; `user:delete` sentence | 2 |
 | `crates/egret-perm-compile/src/group_membership.rs` | role and workspace arms in `lock_affected_by_user_delete_in_tx` | 2 |
 | `crates/egret-perm-compile/tests/user_delete_recompile.rs` | new | 2 |
 | `crates/egret-controlplane/src/access/mod.rs` | actor to `hard_delete`; `UserDto.username`; status path; group role routes | 2, 5, 7 |
@@ -181,6 +183,9 @@ signature does not change.
      `audit.audit_log` row with `action = 'user:delete'`, `resource_type = 'user'`, `resource_id = id`, and
      `detail.before.username`, `detail.before.email`. It is written in the delete's own transaction: a forced
      failure after the event (the 23503 path) leaves no event row.
+  5b. `a_user_delete_event_is_read_with_user_read_only` (D4): through `GET /governance/changes`, a reader with
+     `policy:read` but not `user:read` does not see the `user:delete` row; a reader with `policy:read` and
+     `user:read` does, with the sentence "Deleted user {username or email}" after the actor.
   6. `a_service_account_delete_names_its_username`: the SA delete event carries `username`.
 
   Expected on the base: 1–4 still name the user; 5 finds no row.
@@ -191,10 +196,13 @@ signature does not change.
     deduplicates before the one `lock_services_in_tx`.
   - `hard_delete(target, actor, recompiler)` → `Option<DeletedUser>`, with `RETURNING name, email, username,
     provider` and `record_change` before commit.
-  - Add the audit constants, `FAMILIES` (family `Policy`, see spec Q1) and `GOVERNANCE_ACTIONS`.
+  - Add the audit constants, `Family::User`, `FAMILIES` (family `User`, spec D4) and `GOVERNANCE_ACTIONS`.
+  - `governance_changes.rs`: add `("user:read", Family::User)` to the family loop (the entry gate stays
+    `require_governance_read`), the `user:delete` sentence and truncated phrase, and the route description.
   - Update both callers. Update `NoProfiles` and the other test call sites.
-- [ ] **Step 3: Green.** Run Step 1, plus `cargo test -p egret-audit`, `-p egret-auth`, and `-p egret-perm-compile
-  --test group_races --test group_grants --test engine_grants_routes`.
+- [ ] **Step 3: Green.** Run Step 1, plus `cargo test -p egret-audit`, `-p egret-auth`, `-p egret-controlplane --test
+  governance_changes`, and `-p egret-perm-compile --test group_races --test group_grants --test
+  engine_grants_routes`.
 - [ ] **Step 4: Commit** `fix(perm): recompile role, workspace and clearance profiles on user delete; record user:delete`.
 
 ## Task 3: One engine-admin set, and an in-transaction `egret-admin` writer (spec §4.2)
@@ -313,15 +321,20 @@ signature does not change.
     profile page), holder and evidence time;
   - it renders a 403 with the existing `TabError`;
   - the tab is hidden for non-admins;
-  - Recent changes renders `user:delete` as "Deleted user bob".
+  - Recent changes renders `user:delete` as "Deleted user bob". The row only reaches readers holding `user:read`
+    (spec D4); the client needs no filter of its own, because the server leaves the row out for others.
 - [ ] **Step 2: Implement.** Use the existing `UnmatchedNames` table pattern and `STACKED_TABLE` at 390 px.
 - [ ] **Step 3: Green.** Run lint, tsc, vitest and `npm run build`, plus `npm run test:bundle:governance-people`
   and `test:bundle:governance-overview`.
 - [ ] **Step 4: Commit** `feat(governance): Reused names tab and username_reuse finding`.
 
-## Task 9: Platform docs (`CLAUDE.md` docs rule)
+## Task 9: Platform docs (`CLAUDE.md` docs rule) — OUT OF THIS PR'S SCOPE
 
-- [ ] Update the `egret-data/docs` Platform pages for users and admins: Delete vs Disable, retired usernames,
+**User decision D5 (2026-10-23):** the controller updates the Platform docs in a separate docs PR after this code PR
+merges. Nothing below is done in this PR; it is kept as the content brief for that docs PR. The code PR's Docs box
+names the follow-up docs PR instead of being ticked.
+
+- [ ] (docs PR) Update the `egret-data/docs` Platform pages for users and admins: Delete vs Disable, retired usernames,
   `egret-admin` following admins (disabled admins excluded), and the Reused names report. Refresh the screenshots of
   the delete dialog and the Reused names tab. **Confirm the repo path with the user first.** If it is not
   available, record it as a PR checklist item and do not tick the Docs box.
@@ -400,9 +413,10 @@ scratchpad, not git.
 
 ## Self-review
 
-- **Spec coverage:** §4.1 → T1; §4.3 + event → T2; §4.2 → T3–T5; §4.5 → T6; §4.4 UI → T7–T8; docs → T9; §4.6
-  needs no code (observed in T11.9).
+- **Spec coverage:** §4.1 → T1; §4.3 + event → T2; §4.2 → T3–T5; §4.5 → T6; §4.4 UI → T7–T8; docs → T9 (separate
+  docs PR, D5); §4.6 needs no code (observed in T11.9). The `docs/vi` reference translation of the spec is written
+  after the code is done (D5).
 - **Ordering and green main:** every task ends green. T2 depends on T1 only for the ledger-backed claim in its
   docs. T4 depends on T3. T6 depends on T1 (baseline) and T2 (event). T7 and T8 depend on T6's OpenAPI.
-- **Open question:** spec §12 Q1 (family of `user:delete`). Only T2's `FAMILIES` line and T8's feed filter change
-  if it is answered `User`.
+- **Open questions:** spec §12 Q1 and Q2 are answered (D4: `user:delete` is family `User`, read with `user:read`;
+  D5: Platform docs in a separate PR, `docs/vi` spec as a reference translation at the end).
