@@ -65,7 +65,7 @@ pub async fn starrocks_decides(
     .await
 }
 
-/// [`starrocks_decides`] for a Trino plugin (Ranger 2.5.0).
+/// [`starrocks_decides`] for a Trino plugin (Ranger 2.8.0, the one modelled).
 pub async fn trino_decides(
     db: &Db,
     service_id: i64,
@@ -80,7 +80,7 @@ pub async fn trino_decides(
         access,
         resource,
         EngineType::Trino,
-        PluginVersion::Ranger2_5_0,
+        PluginVersion::Ranger2_8_0,
     )
     .await
 }

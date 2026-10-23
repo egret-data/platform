@@ -477,3 +477,32 @@ impl RoleRepo {
 pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
 }
+
+/// The engine admins: every ACTIVE user holding `platform_admin` at platform
+/// scope, directly or through a group (the two arms of
+/// [`RoleRepo::platform_admin_user_ids`]), ascending by id.
+///
+/// The one definition of "engine admin" (username-takeover spec 2026-10-23
+/// §4.2): engine apply seeds the `egret-admin - …` policies from it and every
+/// recompile converges them to it. A disabled admin is left out: the policy
+/// means "may do anything on this engine", and a disabled account may do
+/// nothing in egret; leaving them in would keep an already-minted engine JWT
+/// (or an alert running as them) at ALL access.
+pub async fn engine_admin_user_ids_via(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        "SELECT u.id FROM users u \
+          WHERE u.status = 'active' \
+            AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
+                          WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                            AND g.principal_type = 'user' AND g.principal_id = u.id) \
+              OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
+                           JOIN user_groups ug ON ug.group_id = g.principal_id \
+                          WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                            AND g.principal_type = 'group' AND ug.user_id = u.id)) \
+          ORDER BY u.id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(rows.into_iter().map(UserId).collect())
+}

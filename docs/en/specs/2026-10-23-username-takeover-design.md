@@ -522,3 +522,20 @@ Deviations from the text above that the code forced or that implementation found
   23503, a refused recompile) leaves no event; a failure of the event insert refuses the delete.
 - **Feed (D4).** `governance_changes.rs` adds `("user:read", Family::User)` to its family loop; the entry gate is
   unchanged. The sentence is "{actor} deleted user {username, else email, else id}" with no target link.
+
+### Task 3 (one engine-admin set, the in-transaction writer)
+
+- **`seed_admin_all_access` keeps building bodies from the name and type its caller passes**, not the row's: an
+  existing engine-mgmt test adopts a Trino profile through the StarRocks path, and the policy tests pass a body
+  service name that differs from the row. The in-transaction `sync_admin_all_access_in_tx` reads both from the
+  row. The infra-name guard uses the row's type in both, as `upsert_infra_policy` did.
+- **Empty set:** existing bodies are rewritten to `users: []`; with users, missing hierarchies are created
+  (apply's "create on apply"). `seed_admin_all_access` returns how many `egret-admin` policies the service has
+  afterwards.
+- **`is_admin_all_access_policy_name`** is added to `egret_policy_api::infra_names`, so the predicate keeps one
+  spelling.
+- **No separate `engine_apply_seeds_the_same_set` test.** `admin_usernames` is private to an apply path that
+  needs a provisioner; it now calls `engine_admin_user_ids_via` and sorts, and the existing engine-mgmt route
+  tests that seed admins stay green.
+- **The Ranger evaluator models only plugin 2.8.0 for Trino** (2.5.0 is refused), so Trino engine-level
+  assertions declare 2.8.0.

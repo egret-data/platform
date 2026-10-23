@@ -2494,22 +2494,32 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
     Ok((keystore, cert_pem))
 }
 
-/// Engine usernames of every platform admin (deduped). Unresolvable usernames
-/// are skipped; an empty list is valid (nothing to seed).
+/// Engine usernames of every engine admin
+/// (`egret_auth::roles::engine_admin_user_ids_via`: active platform admins,
+/// direct or through a group), sorted and deduped — the same set every
+/// recompile converges the `egret-admin` bodies to, so an apply and the next
+/// recompile write the same body. Unresolvable usernames are skipped; an empty
+/// list is valid.
 async fn admin_usernames(st: &CpState) -> Result<Vec<String>, CpError> {
-    let ids = st
-        .roles
-        .platform_admin_user_ids()
-        .await
-        .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?;
+    let ids = {
+        let mut conn = st
+            .engine_mgmt
+            .pool()
+            .acquire()
+            .await
+            .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?;
+        egret_auth::roles::engine_admin_user_ids_via(&mut conn)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?
+    };
     let mut names = Vec::new();
     for id in ids {
         if let Ok(u) = st.users.ensure_username(id).await {
-            if !names.contains(&u) {
-                names.push(u);
-            }
+            names.push(u);
         }
     }
+    names.sort();
+    names.dedup();
     Ok(names)
 }
 
