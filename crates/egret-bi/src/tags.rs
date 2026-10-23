@@ -130,6 +130,9 @@ impl BiError {
     }
 }
 
+/// The unique index on `lower(tags.name)` (migration 0207).
+const NAME_INDEX: &str = "tags_name_lower_key";
+
 impl TagRepo {
     pub fn new(db: Db) -> Self {
         Self { db }
@@ -138,14 +141,14 @@ impl TagRepo {
     /// Another classification whose name equals `name` ignoring case and
     /// surrounding spaces; `except` is the classification being renamed.
     ///
-    /// **Best-effort, not a guarantee.** There is deliberately no unique index
-    /// on `lower(tags.name)`: 50+ test fixtures reuse names, and existing
-    /// installs may already hold duplicates that must keep working. The check
-    /// runs in the HTTP handlers only, on create and real renames, and two
-    /// concurrent writes can both pass it (check-then-write). No lock is taken.
+    /// The handlers call it before a create or a rename for the coded
+    /// refusal. It takes no lock, so two concurrent writes can both pass it;
+    /// the unique index on `lower(name)` (migration 0207) refuses the second,
+    /// and [`Self::create`] and [`Self::update`] answer that with the same
+    /// `tag_name_taken`.
     ///
     /// Engines match a classification rule by NAME, so two classifications
-    /// with one name share every rule written on either (spec C10).
+    /// with one name would share every rule written on either (spec C10).
     pub async fn name_taken(
         &self,
         name: &str,
@@ -163,7 +166,8 @@ impl TagRepo {
         .await?)
     }
 
-    /// Create a tag. Validates `key`; a unique-key violation is `tag_key_taken`.
+    /// Create a tag. Validates `key`; a unique-key violation is `tag_key_taken`,
+    /// a unique-name violation `tag_name_taken`.
     pub async fn create(
         &self,
         key: &str,
@@ -188,6 +192,9 @@ impl TagRepo {
         .await;
         let id = match inserted {
             Ok(id) => id,
+            Err(sqlx::Error::Database(dbe)) if dbe.constraint() == Some(NAME_INDEX) => {
+                return Err(self.name_taken_refusal(name, None).await);
+            }
             Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
                 let holder: (Uuid, String) =
                     sqlx::query_as("SELECT id, name FROM tags WHERE key = $1")
@@ -209,6 +216,19 @@ impl TagRepo {
         self.get(id)
             .await?
             .ok_or_else(|| BiError::NotFound(format!("tag {id}")))
+    }
+
+    /// The refusal of a write the name index refused: `tag_name_taken` naming
+    /// the holder, read after the failed statement. A holder deleted in between
+    /// leaves a plain conflict.
+    async fn name_taken_refusal(&self, name: &str, except: Option<Uuid>) -> BiError {
+        match self.name_taken(name, except).await {
+            Ok(Some(existing)) => BiError::tag_name_taken(name, &existing),
+            Ok(None) => {
+                BiError::Conflict(format!("a classification named {name:?} already exists"))
+            }
+            Err(e) => e,
+        }
     }
 
     /// All tags, each with its assignment count, ordered by key.
@@ -366,13 +386,21 @@ impl TagRepo {
         .bind(description)
         .bind(color)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        .await;
+        let affected = match affected {
+            Ok(done) => done.rows_affected(),
+            Err(sqlx::Error::Database(dbe)) if dbe.constraint() == Some(NAME_INDEX) => {
+                drop(tx);
+                let name = renamed_to.unwrap_or_default();
+                return Err(self.name_taken_refusal(name, Some(id)).await);
+            }
+            Err(e) => return Err(e.into()),
+        };
         if affected == 0 {
             return Ok(None);
         }
         if renamed_to.is_some() {
-            Self::recompile_for_rename_in_tx(&mut tx, id, &key).await?;
+            Self::recompile_for_renames_in_tx(&mut tx, &[(id, key)]).await?;
         }
         if let Some(before) = &overlaps_before {
             egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, before).await?;
@@ -381,38 +409,44 @@ impl TagRepo {
         self.get(id).await
     }
 
-    /// The recompile half of [`Self::update`]'s rename. Runs on the caller's
-    /// transaction so a crash cannot leave the new name committed with the old
-    /// one still compiled — there is only one commit, the same property
+    /// The recompile half of [`Self::update`]'s rename, for the renamed
+    /// `(id, key)`s. Runs on the caller's transaction so a crash cannot leave
+    /// the new name committed with the old one still compiled — there is only
+    /// one commit, the same property
     /// `CatalogTagRepo::recompile_bound_services_in_tx` exists for.
     ///
     /// A recompile FAILURE fails the rename, deliberately: the alternative is a
     /// committed rename with policies still naming the old tag, which is the
     /// fail-open state this whole function exists to prevent.
-    async fn recompile_for_rename_in_tx(
+    async fn recompile_for_renames_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        tag_id: Uuid,
-        key: &str,
+        renamed: &[(Uuid, String)],
     ) -> Result<(), BiError> {
+        let ids: Vec<Uuid> = renamed.iter().map(|(id, _)| *id).collect();
         // The tag MAP the plugin downloads carries `t.name` too, so every
-        // service serving a warehouse that carries this tag must stop 304-ing.
+        // service serving a warehouse that carries these tags must stop 304-ing.
         let warehouses: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT warehouse_id FROM catalog_tag_assignments WHERE tag_id = $1 \
+            "SELECT DISTINCT warehouse_id FROM catalog_tag_assignments WHERE tag_id = ANY($1) \
              ORDER BY warehouse_id",
         )
-        .bind(tag_id)
+        .bind(&ids)
         .fetch_all(&mut **tx)
         .await?;
         for warehouse_id in warehouses {
             egret_catalog_registry::bump_bound_tag_versions(tx, warehouse_id).await?;
         }
-        let services = egret_perm_compile::affected_services_for_tag_rename(tx, key).await?;
+        let mut services = Vec::new();
+        for (_, key) in renamed {
+            services.extend(egret_perm_compile::affected_services_for_tag_rename(tx, key).await?);
+        }
+        services.sort_unstable();
+        services.dedup();
         egret_perm_compile::lock_services_in_tx(tx, &services).await?;
         for service_id in services {
             let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
             if !summary.skipped.is_empty() {
                 tracing::warn!(
-                    tag = %key,
+                    tags = ?renamed.iter().map(|(_, key)| key).collect::<Vec<_>>(),
                     service_id,
                     skipped_count = summary.skipped.len(),
                     "a tag rename's recompile skipped some grants/rules for this service"
@@ -420,6 +454,35 @@ impl TagRepo {
             }
         }
         Ok(())
+    }
+
+    /// The boot pass for the classifications migration 0207 renamed: SQL
+    /// cannot recompile, so the migration queues each rename in
+    /// `tag_rename_recompiles` and this runs [`Self::update`]'s own rename
+    /// recompile for them, then deletes the queue rows, in one transaction.
+    /// Returns how many renames it recompiled; nothing queued is a no-op.
+    ///
+    /// A failure leaves the rows queued for the next boot. Two servers booting
+    /// at once queue on the rows' locks, and the second finds them gone.
+    pub async fn recompile_queued_renames(&self) -> Result<usize, BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        let renamed: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT q.tag_id, t.key FROM tag_rename_recompiles q JOIN tags t ON t.id = q.tag_id \
+             ORDER BY q.tag_id FOR UPDATE OF q",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        if renamed.is_empty() {
+            return Ok(0);
+        }
+        Self::recompile_for_renames_in_tx(&mut tx, &renamed).await?;
+        let ids: Vec<Uuid> = renamed.iter().map(|(id, _)| *id).collect();
+        sqlx::query("DELETE FROM tag_rename_recompiles WHERE tag_id = ANY($1)")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(renamed.len())
     }
 
     /// Per tag, how many TABLES and COLUMNS carry it in egret catalogs

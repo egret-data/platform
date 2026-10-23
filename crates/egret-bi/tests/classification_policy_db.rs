@@ -35,7 +35,7 @@ async fn set_get_update_clear_and_cascade() {
 
     // A tag with no policy yet -> get returns None.
     let tag = tags
-        .create(&key, "Secret", "Restricted", "#000000", Some(by))
+        .create(&key, &key, "Restricted", "#000000", Some(by))
         .await
         .expect("create tag");
     assert_eq!(pol.get_policy(tag.id).await.expect("get"), None);
@@ -133,7 +133,7 @@ async fn set_policy_rejects_injection_payloads() {
     let by = seed_user(&db).await;
     let key = format!("secret-{}", Uuid::new_v4().simple());
     let tag = tags
-        .create(&key, "Secret", "Restricted", "#000000", Some(by))
+        .create(&key, &key, "Restricted", "#000000", Some(by))
         .await
         .expect("create tag");
 
