@@ -92,18 +92,6 @@ const DATAAPI_METRIC_HELP: Record<string, string> = {
 };
 
 /**
- * The create/edit form for one schedule.
- *
- * Sections follow Superset's — General · Condition/Contents · Schedule ·
- * Notification · Advanced — because they map to the model and users arriving
- * from Superset recognise them.
- *
- * Validation is deliberately NOT duplicated here beyond `required`: the server
- * owns the rules (they are also CHECK constraints), and a second copy in the
- * browser is a second thing to drift. What this component must do well is SHOW
- * the server's message against the form, which is what `error` below is for.
- */
-/**
  * The Timezone picker, memoised: it lists every IANA zone (about 400 items),
  * and a `ui/select` renders its items on every render even while closed, so
  * without `memo` each keystroke anywhere in the editor re-rendered all of them.
@@ -136,6 +124,42 @@ const TimezoneSelect = memo(function TimezoneSelect({
   );
 });
 
+/**
+ * The fixed item lists of the editor's pickers, built once. A `ui/select`
+ * renders its items on every render even while closed; elements that are the
+ * same object from one render to the next are skipped, so a keystroke in a
+ * text field does not re-render every hour and minute.
+ */
+const OPERATOR_ITEMS = OPERATORS.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>);
+const EVERY_MINUTES_ITEMS = [1, 2, 5, 10, 15, 20, 30].map((n) => (
+  <SelectItem key={n} value={String(n)}>{n} minutes</SelectItem>
+));
+const EVERY_HOURS_ITEMS = [1, 2, 3, 4, 6, 8, 12].map((n) => (
+  <SelectItem key={n} value={String(n)}>{n === 1 ? "hour" : `${n} hours`}</SelectItem>
+));
+const WEEKDAY_ITEMS = WEEKDAYS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>);
+const DAY_ITEMS = Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+  <SelectItem key={d} value={String(d)}>{d}</SelectItem>
+));
+const HOUR_ITEMS = Array.from({ length: 24 }, (_, h) => h).map((h) => (
+  <SelectItem key={h} value={String(h)}>{String(h).padStart(2, "0")}</SelectItem>
+));
+const MINUTE_ITEMS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+  <SelectItem key={m} value={String(m)}>{String(m).padStart(2, "0")}</SelectItem>
+));
+
+/**
+ * The create/edit form for one schedule.
+ *
+ * Sections follow Superset's — General · Condition/Contents · Schedule ·
+ * Notification · Advanced — because they map to the model and users arriving
+ * from Superset recognise them.
+ *
+ * Validation is deliberately NOT duplicated here beyond `required`: the server
+ * owns the rules (they are also CHECK constraints), and a second copy in the
+ * browser is a second thing to drift. What this component must do well is SHOW
+ * the server's message against the form, which is what `error` below is for.
+ */
 export function ScheduleEditor({
   ws,
   type,
@@ -702,11 +726,7 @@ export function ScheduleEditor({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {OPERATORS.map((o) => (
-                          <SelectItem key={o} value={o}>
-                            {o}
-                          </SelectItem>
-                        ))}
+                        {OPERATOR_ITEMS}
                       </SelectContent>
                     </Select>
                     <Input
@@ -849,11 +869,7 @@ export function ScheduleEditor({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {OPERATORS.map((o) => (
-                      <SelectItem key={o} value={o}>
-                        {o}
-                      </SelectItem>
-                    ))}
+                    {OPERATOR_ITEMS}
                   </SelectContent>
                 </Select>
                 <Input
@@ -1097,9 +1113,7 @@ export function ScheduleEditor({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {[1, 2, 5, 10, 15, 20, 30].map((n) => (
-                          <SelectItem key={n} value={String(n)}>{n} minutes</SelectItem>
-                        ))}
+{EVERY_MINUTES_ITEMS}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1116,9 +1130,7 @@ export function ScheduleEditor({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {[1, 2, 3, 4, 6, 8, 12].map((n) => (
-                          <SelectItem key={n} value={String(n)}>{n === 1 ? "hour" : `${n} hours`}</SelectItem>
-                        ))}
+{EVERY_HOURS_ITEMS}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1135,9 +1147,7 @@ export function ScheduleEditor({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {WEEKDAYS.map((d, i) => (
-                          <SelectItem key={d} value={String(i)}>{d}</SelectItem>
-                        ))}
+{WEEKDAY_ITEMS}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1154,9 +1164,7 @@ export function ScheduleEditor({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                          <SelectItem key={d} value={String(d)}>{d}</SelectItem>
-                        ))}
+{DAY_ITEMS}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1176,9 +1184,7 @@ export function ScheduleEditor({
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              {Array.from({ length: 24 }, (_, h) => h).map((h) => (
-                                <SelectItem key={h} value={String(h)}>{String(h).padStart(2, "0")}</SelectItem>
-                              ))}
+{HOUR_ITEMS}
                             </SelectContent>
                           </Select>
                           <span className="text-sm text-muted-foreground">:</span>
@@ -1192,9 +1198,7 @@ export function ScheduleEditor({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
-                            <SelectItem key={m} value={String(m)}>{String(m).padStart(2, "0")}</SelectItem>
-                          ))}
+{MINUTE_ITEMS}
                         </SelectContent>
                       </Select>
                     </div>
