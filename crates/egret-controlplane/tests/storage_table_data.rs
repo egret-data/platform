@@ -416,7 +416,7 @@ async fn a_data_steward_cannot_download_a_warehouse_table_file() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert_eq!(strings(&json(&body), "objects"), [data.clone()]);
+    assert_eq!(strings(&json(&body), "objects"), std::slice::from_ref(&data));
 }
 
 #[tokio::test]
