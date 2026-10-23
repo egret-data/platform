@@ -21,8 +21,15 @@ export const DASHBOARD_FIXED_WIDTH_PX = 1048;
  *  Tailwind's scanner emits only the classes it can see in the source, so an interpolated
  *  `max-w-[…]` would render as a class name with no rule behind it and the canvas would silently
  *  go full width. A test asserts the two agree. */
-export function dashboardWidthClass(width: "fixed" | "full"): string {
-  return width === "fixed" ? "mx-auto w-full max-w-[1048px]" : "";
+export function dashboardWidthClass(width: "fixed" | "full", sidePanel: "edit" | "info" | null = null): string {
+  if (width !== "fixed") return "";
+  // The measure is the CANVAS's. A side panel (the 340px edit panel, the 300px info panel, each
+  // after a 16px gap) sits beside the canvas, so the wrapper grows by it. Inside the 1048px it
+  // left the canvas 692px, under the grid's 753px breakpoint, and the cards flipped to the
+  // one-column phone layout while the author was editing them (KI-068).
+  if (sidePanel === "edit") return "mx-auto w-full max-w-[1404px]";
+  if (sidePanel === "info") return "mx-auto w-full max-w-[1364px]";
+  return "mx-auto w-full max-w-[1048px]";
 }
 
 /** Ghost icon button, matching the density of the surfaces this menu is rendered on. Callers

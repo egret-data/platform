@@ -26,7 +26,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
-import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
+import { mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
@@ -154,6 +154,8 @@ export default function DashboardView() {
     setOptionsBySlug((m) => (m[slug]?.join("") === vals.join("") ? m : { ...m, [slug]: vals }));
   }, []);
   // Drill state — must be declared above the early return (Rules of Hooks).
+  /** Where the pointer went down on a card, to tell a click from the end of a drag. */
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
   // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
@@ -678,7 +680,7 @@ export default function DashboardView() {
           </span>
         </div>
       )}
-<div className={dashboardWidthClass(effectiveWidth)}>
+<div className={dashboardWidthClass(effectiveWidth, editing ? (editPanel ? "edit" : null) : showInfo ? "info" : null)}>
       {dash.deleted_at && (
         <div className="mb-3 flex items-center justify-between rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
           <span>This dashboard is in the trash.</span>
@@ -867,7 +869,10 @@ export default function DashboardView() {
                 data-testid="dashcard-body"
                 role={editing && c.card_type !== "placeholder" ? "button" : undefined}
                 tabIndex={editing && c.card_type !== "placeholder" ? 0 : undefined}
-                onClick={editing && c.card_type !== "placeholder" ? () => openPanel({ kind: "card", cardId: c.id }) : undefined}
+                onMouseDown={editing ? (e) => { pressRef.current = { x: e.clientX, y: e.clientY }; } : undefined}
+                /* Not the click that ends a drag (KI-068): it opened the panel, which narrowed the
+                   canvas under the card that had just been placed. */
+                onClick={editing && c.card_type !== "placeholder" ? (e) => { if (!movedSincePress(pressRef.current, e)) openPanel({ kind: "card", cardId: c.id }); } : undefined}
                 /* Only a key pressed ON the card itself activates it (KI-059). The heading input, the text
                    textarea and any inline filter inside the card bubble their keydown up here, and
                    the preventDefault swallowed every space and newline typed into them. */
