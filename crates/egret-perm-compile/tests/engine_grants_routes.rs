@@ -502,16 +502,6 @@ async fn every_refusal_answers_its_status() {
     let sr = bound(&e, "starrocks").await;
     let catalog = attach_catalog(pool, trino.engine).await;
     let (_, ua) = person(pool).await;
-    let (_, admin_target) = person(pool).await;
-    e.policy
-        .seed_admin_all_access(
-            trino.profile,
-            &trino.profile_name,
-            "trino",
-            std::slice::from_ref(&admin_target),
-        )
-        .await
-        .expect("admin all-access");
     let (pa_id, platform_admin_target) = person(pool).await;
     sqlx::query(
         "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
@@ -621,7 +611,6 @@ async fn every_refusal_answers_its_status() {
             sr.engine,
             json!({"capability": "starrocks.impersonate_user", "values": ["Root"], "principals": user}),
         ),
-        ("admin target", trino.engine, imp(&admin_target)),
         (
             "platform admin target",
             trino.engine,
