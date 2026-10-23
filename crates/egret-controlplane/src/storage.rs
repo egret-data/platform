@@ -21,7 +21,7 @@ use egret_core::http::ErrorBody;
 use egret_core::Ack;
 
 use crate::error::CpError;
-use crate::storage_scope::{ConnView, KeyKind};
+use crate::storage_scope::{ConnView, KeyKind, TableDataLocation};
 use crate::CpState;
 
 /// Request body for creating/updating a global storage connection. A `new_secret`
@@ -111,7 +111,7 @@ struct DownloadQuery {
         (status = 200, description = "Object bytes streamed as an attachment", content_type = "application/octet-stream"),
         (status = 400, description = "Invalid key (a `.`/`..` or empty segment, a backslash or a control character, also once percent-decoded), or the object could not be read", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission, or the caller is not a platform admin and the key is under a prefix egret writes for its users, or under the storage of a warehouse or lakehouse catalog (a table's data or metadata file, whose raw bytes would skip its column masks and row filters)", body = ErrorBody),
         (status = 404, description = "No such storage connection", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -126,6 +126,9 @@ async fn download_object(
     let conn = get_conn(&st, id).await?;
     let view = conn_view(&st, &principal, &conn)?;
     let key = view.scope_key(&dq.key, KeyKind::Object)?;
+    if !view.admin {
+        view.refuse_table_data(&dq.key, &table_data_locations(&st.db).await?)?;
+    }
     let (store, bucket) = open_store(&st, &conn).await?;
     let uri = format!("s3://{bucket}/{key}");
     let bytes = store
@@ -147,6 +150,55 @@ async fn download_object(
         resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(resp)
+}
+
+/// Every place catalog tables keep their files (KI-236): the storage
+/// connection of each egret warehouse and of each registered catalog bound to
+/// one (Iceberg, Hive, Delta Lake, Hudi: the connection is where its tables
+/// live), plus each embedded lakekeeper warehouse's own storage profile, which
+/// is what the engines write to and is not changed by a later edit of the
+/// connection.
+async fn table_data_locations(db: &egret_metastore::Db) -> Result<Vec<TableDataLocation>, CpError> {
+    let internal = |e: sqlx::Error| {
+        tracing::error!(error = %e, "could not read where catalog tables keep their files");
+        CpError::Internal
+    };
+    let mut rows: Vec<(Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT s.bucket, s.key_prefix, 'warehouse «' || w.name || '»' \
+           FROM catalog.warehouses w \
+           JOIN storage.storage_connections s ON s.id = w.storage_conn_id \
+         UNION ALL \
+         SELECT s.bucket, s.key_prefix, 'catalog «' || c.name || '»' \
+           FROM registry.catalogs c \
+           JOIN storage.storage_connections s ON s.id = c.storage_connection_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .map_err(internal)?;
+    // The lakekeeper schema exists once the embedded catalog has started.
+    let (lakekeeper,): (bool,) =
+        sqlx::query_as("SELECT to_regclass('lakekeeper.warehouse') IS NOT NULL")
+            .fetch_one(&db.pool)
+            .await
+            .map_err(internal)?;
+    if lakekeeper {
+        rows.extend(
+            sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+                "SELECT storage_profile->>'bucket', storage_profile->>'key-prefix', \
+                        'warehouse «' || warehouse_name || '»' \
+                   FROM lakekeeper.warehouse",
+            )
+            .fetch_all(&db.pool)
+            .await
+            .map_err(internal)?,
+        );
+    }
+    Ok(rows
+        .into_iter()
+        .filter_map(|(bucket, prefix, owner)| {
+            Some(TableDataLocation::new(&bucket?, prefix.as_deref(), &owner))
+        })
+        .collect())
 }
 
 async fn get_conn(st: &CpState, id: Uuid) -> Result<StorageConn, CpError> {
