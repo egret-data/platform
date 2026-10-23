@@ -72,7 +72,11 @@ export default tseslint.config(
     files: EGRET_FILES,
     ignores: TESTS,
     plugins: { egret },
-    rules: { 'egret/no-arbitrary-text-size': 'error', 'egret/no-window-confirm': 'error' },
+    rules: {
+      'egret/no-arbitrary-text-size': 'error',
+      'egret/no-window-confirm': 'error',
+      'egret/no-native-select': 'error',
+    },
   },
   {
     files: ['src/**/*.tsx'],

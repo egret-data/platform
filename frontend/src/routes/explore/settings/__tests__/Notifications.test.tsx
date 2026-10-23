@@ -195,4 +195,27 @@ describe("Workspace settings — Notifications", () => {
     renderPage();
     expect(screen.queryByRole("button", { name: /remove slack app/i })).not.toBeInTheDocument();
   });
+
+  // KI-012: the page follows the other settings tabs. Its title is the same
+  // plain level-2 heading as General or Roles (no icon beside it), and
+  // Encryption is the shared picker, not the browser's own select.
+  it("titles the tab like the other settings tabs, with no icon in the heading", () => {
+    renderPage();
+    const heading = screen.getByRole("heading", { level: 2, name: "Notifications" });
+    expect(heading.querySelector("svg")).toBeNull();
+  });
+
+  it("picks Encryption with the shared select and saves the choice", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const encryption = screen.getByRole("combobox", { name: "Encryption" });
+    expect(encryption.tagName).toBe("BUTTON");
+    expect(encryption).toHaveTextContent("STARTTLS (usually port 587)");
+    await user.click(encryption);
+    await user.click(await screen.findByRole("option", { name: "TLS (usually port 465)" }));
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(saveMutate).toHaveBeenCalled());
+    expect(saveMutate.mock.calls[0][0].tls_mode).toBe("implicit");
+  });
 });

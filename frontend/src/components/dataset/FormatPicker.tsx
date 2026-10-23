@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { isNumericType, isTemporalType, type ColumnFormat } from "@/components/chart/format-types";
 import { cn } from "@/lib/utils";
 
@@ -85,6 +86,7 @@ export function FormatPicker({ value, onChange, type = "", className }: {
 }) {
   const kind = isTemporalType(type) ? "date" : type && !isNumericType(type) ? "text" : "number";
   const [open, setOpen] = useState(false);
+  const currencyId = useId();
   const [draft, setDraft] = useState<ColumnFormat>({});
 
   function openChange(o: boolean) {
@@ -121,11 +123,13 @@ export function FormatPicker({ value, onChange, type = "", className }: {
               ))}
               {draft.number_style === "currency" && (
                 <div className="px-2 pt-1">
-                  <Label className="text-xs">Currency</Label>
-                  <select className="mt-1 h-7 w-full rounded border bg-background px-1 text-xs"
-                    value={draft.currency ?? "USD"} onChange={(e) => patch({ currency: e.target.value })}>
-                    {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <Label htmlFor={currencyId} className="text-xs">Currency</Label>
+                  <Select value={draft.currency ?? "USD"} onValueChange={(v) => patch({ currency: v })}>
+                    <SelectTrigger id={currencyId} size="sm" className="mt-1 w-full px-2 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {CURRENCIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </div>
               )}
               <div className="grid grid-cols-3 gap-1.5 px-2 pt-1.5">

@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
@@ -20,6 +21,10 @@ interface Props {
 }
 
 /** Icon hinting a column's generic class. */
+/** The Role picker's "no role" item. A Radix item cannot carry `""`, which is what the column
+ *  stores for "no role", so the picker shows this and saves `""` in its place. */
+const NO_ROLE = "__no_role__";
+
 function classIcon(g: string) {
   if (g === "temporal") return <Clock className="h-3.5 w-3.5 text-muted-foreground" />;
   if (g === "numeric") return <Hash className="h-3.5 w-3.5 text-muted-foreground" />;
@@ -125,16 +130,17 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                   {/* w-28, not the w-24 this was: "Longitude" is the longest option in the list and
                       did not fit, and a select that clips its own selected value is how a reader
                       cannot tell Latitude from Longitude at a glance. */}
-                  <select className="h-7 w-28 rounded border bg-background px-1 text-xs" value={c.semantic_type}
-                    aria-label={`Role ${c.column_name}`}
-                    onChange={(e) => save(c.column_name, { semantic_type: e.target.value })}>
-                    <option value="">—</option>
-                    <option value="category">Category</option>
-                    <option value="country">Country</option>
-                    <option value="currency">Currency</option>
-                    <option value="email">Email</option>
-                    <option value="url">URL</option>
-                    <option value="image">Image</option>
+                  <Select value={c.semantic_type || NO_ROLE}
+                    onValueChange={(v) => save(c.column_name, { semantic_type: v === NO_ROLE ? "" : v })}>
+                    <SelectTrigger size="sm" className="w-28 px-2 text-xs" aria-label={`Role ${c.column_name}`}><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                    <SelectItem value={NO_ROLE}>—</SelectItem>
+                    <SelectItem value="category">Category</SelectItem>
+                    <SelectItem value="country">Country</SelectItem>
+                    <SelectItem value="currency">Currency</SelectItem>
+                    <SelectItem value="email">Email</SelectItem>
+                    <SelectItem value="url">URL</SelectItem>
+                    <SelectItem value="image">Image</SelectItem>
                     {/* Metabase's `type/Latitude` and `type/Longitude`, spelled as bare lowercase
                         words because that is what egret's readers compare against. The pin map's two
                         coordinate pickers default from these, which is the ONLY reason they exist —
@@ -154,9 +160,10 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                         the two are pinned from BOTH sides: a test in `DatasetTabs.test.tsx` asserts
                         this select's option values, and a Rust test asserts the constant. Neither
                         can see the other's file, which is why it takes two. */}
-                    <option value="latitude">Latitude</option>
-                    <option value="longitude">Longitude</option>
-                  </select>
+                    <SelectItem value="latitude">Latitude</SelectItem>
+                    <SelectItem value="longitude">Longitude</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.groupby} onCheckedChange={(v) => save(c.column_name, { groupby: v })} aria-label={`Dimension ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.filterable} onCheckedChange={(v) => save(c.column_name, { filterable: v })} aria-label={`Filterable ${c.column_name}`} /></td>

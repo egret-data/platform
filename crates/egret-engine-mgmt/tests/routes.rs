@@ -16023,3 +16023,180 @@ async fn ki213_restart_creates_an_engine_with_no_containers_again() {
         .collect();
     assert_eq!(recreated.len(), 1, "created again from the stored spec");
 }
+
+/// A Docker daemon for the real [`egret_provisioner::docker::DockerEngineProvisioner`]
+/// that can hold the first `create_and_start` after it is armed. An update
+/// removes every old container before it creates the first new one, so a held
+/// create is the moment between "removed" and "started" (KI-263).
+struct GatedDocker {
+    containers: std::sync::Mutex<Vec<egret_provisioner::docker::ContainerInfo>>,
+    armed: std::sync::atomic::AtomicBool,
+    /// Notified once the held create is reached (the old containers are gone).
+    held: tokio::sync::Notify,
+    /// The held create goes on once a permit is added.
+    gate: tokio::sync::Semaphore,
+}
+
+impl Default for GatedDocker {
+    fn default() -> Self {
+        Self {
+            containers: Default::default(),
+            armed: Default::default(),
+            held: Default::default(),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+impl GatedDocker {
+    fn names(&self) -> Vec<String> {
+        self.containers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_provisioner::docker::DockerApi for GatedDocker {
+    async fn ensure_image(&self, _image: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn create_and_start(
+        &self,
+        plan: &egret_provisioner::docker::ContainerPlan,
+        _network: &str,
+    ) -> Result<(), String> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.held.notify_one();
+            self.gate.acquire().await.expect("gate open").forget();
+        }
+        self.containers
+            .lock()
+            .unwrap()
+            .push(egret_provisioner::docker::ContainerInfo {
+                name: plan.name.clone(),
+                labels: plan.labels.clone(),
+                state: egret_provisioner::docker::ContainerState::Running {
+                    healthy: Some(true),
+                },
+            });
+        Ok(())
+    }
+    async fn list(
+        &self,
+        label_filter: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Vec<egret_provisioner::docker::ContainerInfo>, String> {
+        Ok(self
+            .containers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| label_filter.iter().all(|(k, v)| c.labels.get(k) == Some(v)))
+            .cloned()
+            .collect())
+    }
+    async fn restart(&self, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn stop_and_remove(&self, name: &str) -> Result<(), String> {
+        self.containers.lock().unwrap().retain(|c| c.name != name);
+        Ok(())
+    }
+    async fn log_tail(&self, _name: &str, _lines: usize) -> Result<String, String> {
+        Ok(String::new())
+    }
+}
+
+/// KI-263: on the Docker provisioner a settings save removes the engine's
+/// containers and then starts the new ones. A browser that goes away between
+/// the two (a closed tab, a dropped connection) drops the request; the swap
+/// must still finish, so the engine comes back without another save.
+#[tokio::test]
+async fn a_docker_settings_save_dropped_between_remove_and_start_still_starts_the_engine() {
+    let docker = Arc::new(GatedDocker::default());
+    let prov: Arc<dyn EngineProvisioningPort> =
+        Arc::new(egret_provisioner::docker::DockerEngineProvisioner::new(
+            docker.clone(),
+            "demo_net".into(),
+            "demo".into(),
+            vec!["trinodb/trino".into()],
+        ));
+    let Some(f) = setup_full(Some(prov), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ki263_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let body = |workers: u32| {
+        serde_json::json!({
+            "name": name,
+            "warehouseId": wh_id,
+            "coordinatorReplicas": 1,
+            "workerReplicas": workers,
+            "cpuMin": "1",
+            "cpuMax": "2",
+            "memory": "4Gi",
+            "trinoConfig": {
+                "coordinator": { "replicas": 1 },
+                "worker": { "replicas": workers }
+            }
+        })
+    };
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &token, Some(body(1))))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+    assert_eq!(docker.names().len(), 2, "coordinator + 1 worker");
+
+    // Save settings (2 workers); the client goes away once the old
+    // containers are removed and before the new ones start.
+    docker
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let save = tokio::spawn(f.app.clone().oneshot(req(
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(body(2)),
+    )));
+    tokio::time::timeout(std::time::Duration::from_secs(30), docker.held.notified())
+        .await
+        .expect("the save reached the start of the new containers");
+    assert!(docker.names().is_empty(), "the old containers are removed");
+    save.abort();
+    assert!(
+        save.await.unwrap_err().is_cancelled(),
+        "the request was dropped"
+    );
+    docker.gate.add_permits(1);
+
+    // The swap finishes on its own: no second save.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while docker.names().len() < 3 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        docker.names().len(),
+        3,
+        "coordinator + 2 workers after the dropped save: {:?}",
+        docker.names()
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert_eq!(j["status"]["phase"], "running", "body={j}");
+}

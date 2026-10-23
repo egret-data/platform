@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { AlertCircle, CheckCircle2, Mail } from "lucide-react";
+import { AlertCircle, CheckCircle2 } from "lucide-react";
 
 import {
   useSlackConfig,
@@ -12,6 +12,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 
@@ -88,12 +95,11 @@ export default function Notifications() {
   }
 
   return (
-    <div className="flex max-w-2xl flex-col gap-6 p-6">
-      <header>
-        <h2 className="flex items-center gap-2 text-lg font-semibold">
-          <Mail className="h-5 w-5" />
-          Notifications
-        </h2>
+    // No padding or width of its own: the settings shell places every tab's
+    // pane, so this heading starts where General's and Roles' do (KI-012).
+    <div className="flex flex-col gap-6">
+      <header className="space-y-3">
+        <h2 className="text-lg font-semibold">Notifications</h2>
         <SettingsNote>
           Alerts and reports in this workspace send mail through this relay, as this
           from-address. Each workspace has its own, so two teams never share an identity
@@ -140,16 +146,16 @@ export default function Notifications() {
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="smtp-tls">Encryption</Label>
-          <select
-            id="smtp-tls"
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-            value={tlsMode}
-            onChange={(e) => setTlsMode(e.target.value as TlsMode)}
-          >
-            <option value="starttls">STARTTLS (usually port 587)</option>
-            <option value="implicit">TLS (usually port 465)</option>
-            <option value="none">None — trusted internal relay only</option>
-          </select>
+          <Select value={tlsMode} onValueChange={(v) => setTlsMode(v as TlsMode)}>
+            <SelectTrigger id="smtp-tls" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="starttls">STARTTLS (usually port 587)</SelectItem>
+              <SelectItem value="implicit">TLS (usually port 465)</SelectItem>
+              <SelectItem value="none">None — trusted internal relay only</SelectItem>
+            </SelectContent>
+          </Select>
           <p className="text-xs text-muted-foreground">
             Chosen explicitly rather than guessed from the port: guessing wrong can mean
             credentials sent in the clear.

@@ -195,7 +195,7 @@ async fn apply_trino(
     let built = build_provision_req_with(st, engine, opts)
         .await
         .map_err(ApplyError::Build)?;
-    apply_built(st, prov.as_ref(), engine, &built, ApplyOp::Update)
+    apply_built(st, prov.clone(), engine, &built, ApplyOp::Update)
         .await
         .map_err(|e| match e {
             ApplyBuiltError::Conflict | ApplyBuiltError::CredentialChanged => ApplyError::Conflict,

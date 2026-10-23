@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { CardFilterMapOverlay } from "../CardFilterMapOverlay";
 import {
   HEADER_COLUMN_TO_FILTER_ON, HINT_TEXT_CARD, NO_VALID_FIELDS, OTHER_TAB,
@@ -8,19 +9,28 @@ import {
 const pick = { kind: "pick" as const, header: HEADER_COLUMN_TO_FILTER_ON, columns: ["country", "city"] };
 
 describe("CardFilterMapOverlay", () => {
-  it("shows the header and the columns and writes the picked column", () => {
+  it("shows the header and the columns and writes the picked column", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     render(<CardFilterMapOverlay state={pick} value="" onChange={onChange} />);
     expect(screen.getByText(HEADER_COLUMN_TO_FILTER_ON)).toBeTruthy();
-    const sel = screen.getByLabelText("column to filter on") as HTMLSelectElement;
-    expect(Array.from(sel.options).map((o) => o.value)).toEqual(["", "country", "city"]);
-    fireEvent.change(sel, { target: { value: "city" } });
+    const sel = screen.getByRole("combobox", { name: "column to filter on" });
+    expect(sel).toHaveTextContent("Select a column…");
+    await user.click(sel);
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["country", "city"]);
+    await user.click(screen.getByRole("option", { name: "city" }));
     expect(onChange).toHaveBeenCalledWith("city");
   });
 
-  it("reflects the current mapping", () => {
-    render(<CardFilterMapOverlay state={pick} value="country" onChange={vi.fn()} />);
-    expect((screen.getByLabelText("column to filter on") as HTMLSelectElement).value).toBe("country");
+  it("reflects the current mapping, and unmaps through No column", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CardFilterMapOverlay state={pick} value="country" onChange={onChange} />);
+    const sel = screen.getByRole("combobox", { name: "column to filter on" });
+    expect(sel).toHaveTextContent("country");
+    await user.click(sel);
+    await user.click(await screen.findByRole("option", { name: "No column" }));
+    expect(onChange).toHaveBeenCalledWith("");
   });
 
   it("gives the select the card's width instead of a fixed 192px", () => {
