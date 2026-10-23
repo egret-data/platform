@@ -75,3 +75,21 @@ export function ScrollStrip({
     </div>
   );
 }
+
+/**
+ * A block that scrolls sideways, with the edge cue: the wrapper for a
+ * hand-written list `<table>` (the Explore lists), which `ui/table` does not
+ * reach. At 390px the dashboards list's Updated column sat past the edge with
+ * nothing to show it was there (KI-233).
+ */
+export function ScrollX({ className, children }: { className?: string; children: React.ReactNode }) {
+  const { setScroller, start, end } = useHorizontalOverflow<HTMLDivElement>();
+  return (
+    <div className="relative">
+      <div ref={setScroller} data-scroll-x className={cn("overflow-x-auto", className)}>
+        {children}
+      </div>
+      <ScrollCue start={start} end={end} />
+    </div>
+  );
+}

@@ -40,6 +40,7 @@ import { useDeleteServiceAccount } from "@/api/dataApi";
 import type { DataApiClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
 import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 /**
  * How many service-account groups render before the "Show more" button.
@@ -231,7 +232,7 @@ export default function Clients() {
         </div>
 
         {rows.length > 0 ? (
-          <div className="overflow-x-auto">
+          <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -252,7 +253,7 @@ export default function Clients() {
                 />
               ))}
             </table>
-          </div>
+          </ScrollX>
         ) : (
           <p className="text-muted-foreground">No service accounts match.</p>
         )}

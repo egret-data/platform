@@ -59,8 +59,8 @@ A tab strip made of router links uses `tabsListClass(variant)` and `tabsTriggerC
 **Do this:** `frontend/src/components/ui/tabs.tsx`; router-link tabs: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Checked by:** review and test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Why:** KI-216: five tab styles for the same job.
 
 #### FE-PAGE-10 — Small screens: the rail, scrolling tables, wrapping tabs · MUST
-Below 1024px the app sidebar is the icon rail, whatever the stored preference, and its toggle is hidden. A table wider than its room scrolls inside its container, and `ui/table` shades the clipped edge (`ScrollCue`). A pill tab strip wraps. An underline strip or a router-link section nav that can be clipped sits in `ScrollStrip`, which shades the clipped edge. Nothing on a page scrolls the document sideways.
-**Do this:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Checked by:** browser (`frontend/tests/e2e/small-screens.spec.ts`). **Why:** KI-233, KI-234: at 390px columns and tabs were cut off with no cue, and at 768px the 224px sidebar left a table 480px.
+Below 1024px the app sidebar is the icon rail, whatever the stored preference, and its toggle is hidden. A table wider than its room scrolls inside its container, and `ui/table` shades the clipped edge (`ScrollCue`); a hand-written list `<table>` sits in `ScrollX`, which does the same. A pill tab strip wraps. An underline strip or a router-link section nav that can be clipped sits in `ScrollStrip`, which shades the clipped edge. Nothing on a page scrolls the document sideways.
+**Do this:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `ScrollX`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Checked by:** browser (`frontend/tests/e2e/small-screens.spec.ts`). **Why:** KI-233, KI-234: at 390px columns and tabs were cut off with no cue, and at 768px the 224px sidebar left a table 480px.
 
 ## 2. States (FE-STATE)
 

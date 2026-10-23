@@ -36,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { EntityLink } from "@/components/ui/entity-link";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "status" | "updated_at";
 
@@ -450,7 +451,7 @@ export default function Apps() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="overflow-x-auto">
+            <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -491,7 +492,7 @@ export default function Apps() {
                 })
               )}
             </table>
-            </div>
+            </ScrollX>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked apps." : "No apps match the current filters."}</p>
           )}

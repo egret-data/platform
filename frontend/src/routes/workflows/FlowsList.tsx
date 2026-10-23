@@ -24,6 +24,7 @@ import {
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 /**
  * Where the tree's collapsed namespaces are kept, per viewer and per
@@ -261,7 +262,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
             </Button>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <ScrollX>
             {/* A hand-written <table>, not `FilterableTable` (FE-PAGE-4): the
                 list is grouped by a namespace tree, one <tbody> per namespace
                 with its header row first — the shape of the grouped Explore
@@ -317,7 +318,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                 );
               })}
             </table>
-          </div>
+          </ScrollX>
         )}
       </ListStates>
   );

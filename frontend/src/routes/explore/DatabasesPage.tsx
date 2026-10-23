@@ -56,6 +56,7 @@ import { Switch } from "@/components/ui/switch";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { Forbidden } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 function statusTone(status: string): StatusTone {
   if (status === "ok") return "success";
@@ -456,7 +457,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
           ) : catalogs.length === 0 ? (
             <p className="p-3 text-xs text-muted-foreground">No catalogs.</p>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollX>
               <table className="w-full text-left text-xs">
                 <thead className="text-muted-foreground">
                   <tr className="border-b">
@@ -483,7 +484,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollX>
           )}
         </div>
       )}

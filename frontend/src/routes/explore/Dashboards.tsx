@@ -24,6 +24,7 @@ import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 import { EntityLink } from "@/components/ui/entity-link";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "card_count" | "updated_at";
 
@@ -337,7 +338,7 @@ export default function Dashboards() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="overflow-x-auto">
+            <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -378,7 +379,7 @@ export default function Dashboards() {
                 })
               )}
             </table>
-            </div>
+            </ScrollX>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>
           )}

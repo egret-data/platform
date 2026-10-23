@@ -69,7 +69,7 @@ test.describe("Small screens — the rail, scrolling tables, wrapping tabs", () 
     // container, and the shade on the right edge says so.
     await page.goto(`/explore/${ws.slug}/dashboards`);
     await settle(page, "Dashboards");
-    const table = await page.locator("[data-slot=table-container]").first().evaluate((el) => ({
+    const table = await page.locator("[data-scroll-x], [data-slot=table-container]").first().evaluate((el) => ({
       scrolls: el.scrollWidth > el.clientWidth + 1,
       cue: !!el.parentElement?.querySelector("[data-scroll-cue=end]"),
     }));

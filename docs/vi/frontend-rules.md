@@ -61,8 +61,8 @@ Dải tab làm bằng link của router dùng `tabsListClass(variant)` và `tabs
 **Làm thế này:** `frontend/src/components/ui/tabs.tsx`; tab bằng link router: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Kiểm bằng:** review và test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Vì sao:** KI-216: năm kiểu tab cho cùng một việc.
 
 #### FE-PAGE-10 — Màn hình nhỏ: thanh icon, bảng cuộn, tab xuống dòng · PHẢI
-Dưới 1024px, sidebar của ứng dụng là thanh icon, bất kể lựa chọn đã lưu, và nút thu gọn bị ẩn. Bảng rộng hơn chỗ của nó thì cuộn ngang bên trong khung chứa, và `ui/table` tô bóng cạnh bị cắt (`ScrollCue`). Dải tab pill xuống dòng. Dải tab gạch chân hay thanh mục bằng link router có thể bị cắt thì nằm trong `ScrollStrip`, nó tô bóng cạnh bị cắt. Không gì trên trang làm cả tài liệu cuộn ngang.
-**Làm thế này:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Kiểm bằng:** trình duyệt (`frontend/tests/e2e/small-screens.spec.ts`). **Vì sao:** KI-233, KI-234: ở 390px cột và tab bị cắt mà không có dấu hiệu gì, và ở 768px sidebar 224px chỉ để lại cho bảng 480px.
+Dưới 1024px, sidebar của ứng dụng là thanh icon, bất kể lựa chọn đã lưu, và nút thu gọn bị ẩn. Bảng rộng hơn chỗ của nó thì cuộn ngang bên trong khung chứa, và `ui/table` tô bóng cạnh bị cắt (`ScrollCue`); `<table>` tự viết của danh sách nằm trong `ScrollX`, làm điều tương tự. Dải tab pill xuống dòng. Dải tab gạch chân hay thanh mục bằng link router có thể bị cắt thì nằm trong `ScrollStrip`, nó tô bóng cạnh bị cắt. Không gì trên trang làm cả tài liệu cuộn ngang.
+**Làm thế này:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `ScrollX`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Kiểm bằng:** trình duyệt (`frontend/tests/e2e/small-screens.spec.ts`). **Vì sao:** KI-233, KI-234: ở 390px cột và tab bị cắt mà không có dấu hiệu gì, và ở 768px sidebar 224px chỉ để lại cho bảng 480px.
 
 ## 2. Trạng thái (FE-STATE)
 

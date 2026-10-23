@@ -36,6 +36,7 @@ import { EndpointActionsMenu } from "./EndpointActionsMenu";
 import { EndpointRowStateBadge, pendingRoute } from "./endpointState";
 import { EntityLink } from "@/components/ui/entity-link";
 import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -704,7 +705,7 @@ export default function Endpoints() {
         </BulkBar>
 
         {rows.length > 0 ? (
-          <div className="overflow-x-auto">
+          <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -753,7 +754,7 @@ export default function Endpoints() {
                 })
               )}
             </table>
-          </div>
+          </ScrollX>
         ) : (
           <p className="text-muted-foreground">
             {onlyBookmarked ? "No bookmarked endpoints." : "No endpoints match the current filters."}
