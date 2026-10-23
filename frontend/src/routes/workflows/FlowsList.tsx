@@ -23,6 +23,7 @@ import {
 } from "@/components/workflows/namespaceTree";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 /**
  * Where the tree's collapsed namespaces are kept, per viewer and per
@@ -322,6 +323,12 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
   );
 
   if (pinned) return content;
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (!pinned && isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
+  }
+
   return (
     <ListPageShell
       title="Flows"

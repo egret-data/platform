@@ -5,6 +5,14 @@ import { canEnterControlPlane, canEnterGovernance } from "./appAccess";
 import { useMyWorkspaces } from "@/api/hooks";
 import { Forbidden } from "@/routes/Forbidden";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
+import { AppShell } from "@/components/layout/AppShell";
+
+// The area guards refuse INSIDE the app shell, so the reader keeps the header
+// (the app switcher, the workspace menu) and a way back (KI-230).
+const GOVERNANCE_REFUSAL = "Governance needs a governance permission such as tag:read or policy:read.";
+const CONTROL_PLANE_REFUSAL = "Control Plane needs a platform administrator or a Control Plane permission such as user:read.";
+const WORKSPACE_REFUSAL =
+  "This workspace does not exist, or you are not a member of it. Ask one of its admins to add you, or choose Request access in the workspace menu.";
 
 /**
  * Outer gate for every authenticated route (`/`, `/explore/*`, `/governance/*`, `/control-plane/*`
@@ -80,10 +88,13 @@ export function RequireControlPlaneAccess({ children }: { children: ReactNode })
   if (canEnterControlPlane(me)) return <>{children}</>;
   const onLanding = pathname === "/control-plane" || pathname === "/control-plane/";
   if (onLanding && canEnterGovernance(me)) return <Navigate to="/governance" replace />;
-  return <Forbidden />;
+  return (
+    <AppShell>
+      <Forbidden reason={CONTROL_PLANE_REFUSAL} />
+    </AppShell>
+  );
 }
 
-const GOVERNANCE_REFUSAL = "Governance needs a governance permission such as tag:read or policy:read.";
 
 /**
  * Outer gate for the whole `/governance/*` area: `platform_admin` OR any
@@ -92,7 +103,12 @@ const GOVERNANCE_REFUSAL = "Governance needs a governance permission such as tag
  */
 export function RequireGovernanceAccess({ children }: { children: ReactNode }) {
   const { me } = useAuth();
-  if (!canEnterGovernance(me)) return <Forbidden reason={GOVERNANCE_REFUSAL} />;
+  if (!canEnterGovernance(me))
+    return (
+      <AppShell>
+        <Forbidden reason={GOVERNANCE_REFUSAL} />
+      </AppShell>
+    );
   return <>{children}</>;
 }
 
@@ -100,6 +116,11 @@ export function RequireWorkspace({ children }: { children: ReactNode }) {
   const { workspace } = useParams();
   const { data, isLoading } = useMyWorkspaces(true);
   if (isLoading) return <div className="p-10">Loading…</div>;
-  if (!data?.some((w) => w.slug === workspace)) return <Forbidden />;
+  if (!data?.some((w) => w.slug === workspace))
+    return (
+      <AppShell>
+        <Forbidden reason={WORKSPACE_REFUSAL} />
+      </AppShell>
+    );
   return <>{children}</>;
 }

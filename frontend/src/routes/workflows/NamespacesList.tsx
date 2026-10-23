@@ -20,6 +20,7 @@ import {
 import { namespaceHref, OWN_COUNTS_NOTE } from "@/components/workflows/namespaces/namespaceTabs";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 /** The table's column count, for the skeleton. */
 const COLS = 4;
@@ -195,6 +196,12 @@ export default function NamespacesList() {
     if (prefix && !known.includes(prefix)) known.push(prefix);
     return known.map((ns) => ({ value: ns, label: ns }));
   }, [rows, prefix]);
+
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
+  }
 
   return (
     <ListPageShell title="Namespaces">
