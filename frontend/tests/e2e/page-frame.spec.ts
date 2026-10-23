@@ -70,9 +70,10 @@ interface Measured {
   titleWidth?: number;
   /** Left edge of the title's text box. */
   titleLeft?: number;
-  /** The route root's content box (its rect minus padding). */
+  /** The left edge of the route root's content box (its rect minus padding). */
   contentLeft?: number;
-  contentRight?: number;
+  /** The right edge of the route root's own box: what it takes of `main`. */
+  rootRight?: number;
   /** `main`'s content box: what the route is given. */
   availableRight?: number;
   /** The width the 960px column applies to: the root, or the settings pane. */
@@ -125,7 +126,7 @@ const measure = (page: Page, title: string, kind: Kind) =>
         titleWidth: round(h1.getBoundingClientRect().width),
         titleLeft: round(text.left),
         contentLeft: round(rootBox.left),
-        contentRight: round(rootBox.right),
+        rootRight: round(root.getBoundingClientRect().right),
         availableRight: round(mainBox.right),
         columnWidth: round(columnBox.right - columnBox.left),
       };
@@ -164,8 +165,8 @@ test.describe("Page frame — one title scale, one left edge", () => {
       // KI-215: full-width pages take what `main` gives; column pages are 960px.
       if (c.width === "full") {
         expect(
-          Math.abs(m.contentRight! - m.availableRight!),
-          `${c.kind}: full width (root ${m.contentRight} vs main ${m.availableRight})`,
+          Math.abs(m.rootRight! - m.availableRight!),
+          `${c.kind}: full width (root ${m.rootRight} vs main ${m.availableRight})`,
         ).toBeLessThanOrEqual(1);
       } else {
         expect(m.columnWidth, `${c.kind}: a ${COLUMN}px column`).toBeLessThanOrEqual(COLUMN);
