@@ -348,7 +348,7 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 
 | Rule | Debt | Grep count |
 |---|---|---|
-| FE-PAGE-1 | control-plane and governance list pages hand-roll their frame | (1) 42 route files with their own `<h1>`; (2) 42 of them do not mention `ListPageShell` |
+| FE-PAGE-1, FE-PAGE-7 | route files that still write a raw `<h1>` rather than `PageTitle` (recounted 2026-10-23 after U1: the 403, 404 and placeholder state pages, the print view, and `sr-only` titles of loading and error branches) | (1) 9 route files with their own `<h1>`; (2) 9 of them do not mention `ListPageShell` |
 | FE-PAGE-4 | hand-written `<table>` outside the shared tables (some are allowed specialised grids) | (3) 17 lines |
 | FE-STATE-2 | "Loading…" texts; spinners used for content (not counted) | (4) 28 lines |
 | FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 6 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |

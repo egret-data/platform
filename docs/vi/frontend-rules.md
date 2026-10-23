@@ -350,7 +350,7 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 
 | Rule | Nợ | Số đếm grep |
 |---|---|---|
-| FE-PAGE-1 | trang danh sách của control-plane và governance tự viết khung | (1) 42 file route có `<h1>` riêng; (2) 42 file trong số đó không nhắc tới `ListPageShell` |
+| FE-PAGE-1, FE-PAGE-7 | file route còn tự viết `<h1>` thay vì `PageTitle` (đếm lại 2026-10-23 sau U1: các trang trạng thái 403, 404 và placeholder, trang in, và tiêu đề `sr-only` của nhánh đang tải và lỗi) | (1) 9 file route có `<h1>` riêng; (2) 9 file trong số đó không nhắc tới `ListPageShell` |
 | FE-PAGE-4 | `<table>` tự viết ngoài các bảng dùng chung (một số là grid đặc thù được phép) | (3) 17 dòng |
 | FE-STATE-2 | chữ "Loading…"; spinner dùng cho nội dung (chưa đếm) | (4) 28 dòng |
 | FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 6 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
