@@ -3707,7 +3707,7 @@
           "control-plane-governance"
         ],
         "summary": "Hand-written tag policies of a classification.",
-        "description": "Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it; `sameName` lists other tags with this name, which those policies reach too. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.",
+        "description": "Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it. Classification names are unique ignoring case (migration 0207), so no other classification shares the name. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.",
         "operationId": "tag_handwritten",
         "parameters": [
           {
@@ -52259,22 +52259,6 @@
           "grace"
         ]
       },
-      "SameNameTag": {
-        "type": "object",
-        "required": [
-          "id",
-          "key"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "key": {
-            "type": "string"
-          }
-        }
-      },
       "Sample": {
         "type": "object",
         "required": [
@@ -54584,7 +54568,6 @@
           "tag",
           "state",
           "policies",
-          "sameName",
           "unreadable"
         ],
         "properties": {
@@ -54599,13 +54582,6 @@
             "items": {
               "$ref": "#/components/schemas/TagPolicyRow"
             }
-          },
-          "sameName": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SameNameTag"
-            },
-            "description": "Other tags with this name: engine tag policies on the name apply to\nthem too (CL10)."
           },
           "unreadable": {
             "type": "array",

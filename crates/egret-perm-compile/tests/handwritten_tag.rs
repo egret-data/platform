@@ -152,7 +152,6 @@ async fn tag_policies_match_by_name_through_the_tag_matcher() {
             .unwrap()
             .through_pattern
     );
-    assert!(r.same_name.is_empty());
 }
 
 #[tokio::test]
