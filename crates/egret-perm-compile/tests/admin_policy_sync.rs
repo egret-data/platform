@@ -589,3 +589,34 @@ async fn the_boot_pass_repairs_a_stale_body() {
         "a second pass wrote"
     );
 }
+
+#[tokio::test]
+async fn the_sync_rewrites_egret_admin_rows_its_def_no_longer_builds() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let admin = unique("adm");
+    let stranger = unique("strg");
+    // A Trino row carrying StarRocks-shaped `egret-admin` bodies (an engine
+    // adopted through the StarRocks path, or an older def's hierarchies).
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_trino(&policy).await.expect("def");
+    let name = unique("aps_foreign");
+    let svc = policy
+        .create_service(&name, "trino", &serde_json::json!({}))
+        .await
+        .expect("service")
+        .id;
+    let mut both = vec![admin.clone(), stranger.clone()];
+    both.sort();
+    policy
+        .seed_admin_all_access(svc, &name, "starrocks", &both)
+        .await
+        .expect("foreign seed");
+
+    reseed(&db, svc, std::slice::from_ref(&admin)).await;
+    let bodies = admin_bodies(&db, svc).await;
+    assert!(!bodies.is_empty());
+    for (policy_name, body) in &bodies {
+        assert_eq!(named(body), vec![admin.clone()], "{policy_name}");
+    }
+}

@@ -327,6 +327,34 @@ async fn write_admin_all_access_in_tx(
         .await?;
         changed |= wrote.is_some();
     }
+    // An `egret-admin - …` row the def no longer builds (an older def's
+    // hierarchy, or one seeded from another engine type's def) would keep its
+    // old names, ALL access included, forever: it is rewritten to name
+    // `users` as well, its resources untouched.
+    for (name, body) in &before {
+        if !is_admin_all_access_policy_name(name) || policies.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        present += 1;
+        let mut rewritten = body.clone();
+        if let Some(items) = rewritten["policyItems"].as_array_mut() {
+            for item in items {
+                item["users"] = Value::from(users.to_vec());
+            }
+        }
+        let wrote: Option<i64> = sqlx::query_scalar(
+            "UPDATE policy.authz_policies \
+                SET policy_jsonb = $3, version = version + 1, updated_at = now() \
+              WHERE service_id = $1 AND name = $2 AND policy_jsonb IS DISTINCT FROM $3 \
+             RETURNING id",
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(&rewritten)
+        .fetch_optional(&mut *conn)
+        .await?;
+        changed |= wrote.is_some();
+    }
     if changed {
         sqlx::query(
             "UPDATE policy.authz_services SET policy_version = policy_version + 1, \
