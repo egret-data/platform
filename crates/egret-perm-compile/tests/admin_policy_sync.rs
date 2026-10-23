@@ -48,7 +48,44 @@ async fn test_db() -> Option<Db> {
     .execute(&db.pool)
     .await
     .expect("demote every admin");
+    // Every test starts with no profile whose compile is broken
+    // ([`break_compiles_of`]).
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS test_broken_compiles (service_id bigint PRIMARY KEY); \
+         DELETE FROM test_broken_compiles; \
+         CREATE OR REPLACE FUNCTION test_break_compile() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             IF NEW.service_id IN (SELECT service_id FROM test_broken_compiles) THEN \
+                 RAISE EXCEPTION 'the test broke every compile of profile %', NEW.service_id; \
+             END IF; \
+             RETURN NEW; \
+         END $$; \
+         CREATE OR REPLACE TRIGGER test_break_compile BEFORE INSERT OR UPDATE ON perm.compile_runs \
+             FOR EACH ROW EXECUTE FUNCTION test_break_compile();",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("compile breaker");
     Some(db)
+}
+
+/// Make every compile of `service_id` fail inside its transaction: the
+/// compile's `perm.compile_runs` write raises, as a DB error, a refused model
+/// or a failed mint would. The `egret-admin` sync never writes that table.
+async fn break_compiles_of(db: &Db, service_id: i64) {
+    sqlx::query("INSERT INTO test_broken_compiles (service_id) VALUES ($1)")
+        .bind(service_id)
+        .execute(&db.pool)
+        .await
+        .expect("break the profile's compile");
+    // The arrangement: its compile does fail.
+    recompile_service(
+        &PermStore::new(db.pool.clone()),
+        &PolicyStore::new(db.clone()),
+        service_id,
+    )
+    .await
+    .expect_err("the profile's compile is broken");
 }
 
 fn unique(prefix: &str) -> String {
@@ -587,6 +624,121 @@ async fn the_boot_pass_repairs_a_stale_body() {
         version_and_updated(&db, svc).await,
         before,
         "a second pass wrote"
+    );
+}
+
+// ── review follow-ups: status and boot pass never wait on a compile ──────
+
+#[tokio::test]
+async fn disabling_an_admin_does_not_depend_on_a_profile_compiling() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (admin, name, svc) = admin_and_service(&db).await;
+    let other = unique("adm2");
+    let other_id = new_user(&db, Some(&other)).await;
+    make_admin_directly(&db, other_id).await;
+    reseed(&db, svc, &[name.clone(), other.clone()]).await;
+    break_compiles_of(&db, svc).await;
+
+    set_user_status_and_recompile(&db.pool, admin, "disabled")
+        .await
+        .expect("the kill switch waits on no compile");
+    let status: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(admin)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "disabled");
+    assert!(
+        !trino_can_select(&db, svc, &name).await,
+        "a disabled admin keeps engine ALL access"
+    );
+    assert!(
+        trino_can_select(&db, svc, &other).await,
+        "the other admin lost engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn the_boot_pass_repairs_healthy_engines_when_one_cannot_compile() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, broken) = admin_and_service(&db).await;
+    break_compiles_of(&db, broken).await;
+    let stranger = unique("strg");
+    new_user(&db, Some(&stranger)).await;
+    let healthy = seeded_service(&db, "trino", &[name.clone(), stranger.clone()]).await;
+
+    sync_admin_policies(&db.pool).await.expect("boot pass");
+    assert!(
+        !trino_can_select(&db, healthy, &stranger).await,
+        "one broken profile kept a healthy engine's stale egret-admin"
+    );
+    assert!(trino_can_select(&db, healthy, &name).await);
+}
+
+/// Waits until `handle` finished or `waiters` backends of this database wait
+/// on a lock, whichever comes first (a bounded poll, so a wrong guess about
+/// who blocks fails the assertion, not the suite).
+async fn finished_or_blocked(db: &Db, handle: &tokio::task::JoinHandle<()>, waiters: i64) {
+    for _ in 0..200 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if handle.is_finished() || n >= waiters {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_disable_racing_an_admin_grant_leaves_them_out_of_egret_admin() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, _name, svc) = admin_and_service(&db).await;
+    let target_name = unique("race");
+    let target = new_user(&db, Some(&target_name)).await;
+
+    // Hold the target's row, so the disable stops at its status write.
+    let mut holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(target)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let disable = {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            set_user_status_and_recompile(&pool, target, "disabled")
+                .await
+                .expect("disable");
+        })
+    };
+    finished_or_blocked(&db, &disable, 1).await;
+    // An admin grant for the target, concurrently: it reads the target as
+    // active unless the disable has locked the admin-policy profiles first.
+    let assign = {
+        let pool = db.pool.clone();
+        let role = platform_admin_role(&db).await;
+        tokio::spawn(async move {
+            assign_platform_role_and_recompile(&pool, "user", target, role)
+                .await
+                .expect("assign");
+        })
+    };
+    finished_or_blocked(&db, &assign, 2).await;
+    holder.rollback().await.unwrap();
+    disable.await.unwrap();
+    assign.await.unwrap();
+
+    assert!(
+        !trino_can_select(&db, svc, &target_name).await,
+        "a disabled user holds engine ALL access"
     );
 }
 

@@ -295,11 +295,20 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
 /// so disabling an admin must drop them from engine ALL access in the same
 /// commit, and enabling them must restore it.
 ///
-/// The affected set is the admin-policy services when the user holds
-/// `platform_admin` directly or through a group (whatever their current
-/// status), else empty: the rest of the compiled model names disabled users
-/// as it names active ones. Same order as every membership write: affected
-/// set, locks ascending, write, recompile.
+/// **Only the `egret-admin` sync runs, never a compile** (spec §13, review
+/// M5). Status changes nothing else in the compiled model (it names disabled
+/// users as it names active ones, and the impersonation check reads the
+/// grant, not the status), so a full recompile bought nothing but a
+/// dependency: one profile that could not compile refused the kill switch,
+/// and the user stayed active with their sessions live.
+///
+/// **The admin-policy profiles are locked whoever the user is** (review M4).
+/// Reading "do they hold `platform_admin`?" before any lock raced a
+/// concurrent grant: the grant's recompile read the user as still active and
+/// named them, then the disable committed having locked nothing. Locked
+/// first, the two queue. The mint lock follows the profile locks, before the
+/// `users` write, as in every compile (review I1). The sync is idempotent, so
+/// a non-admin's status change writes nothing.
 pub async fn set_user_status_and_recompile(
     pool: &PgPool,
     user_id: Uuid,
@@ -307,47 +316,68 @@ pub async fn set_user_status_and_recompile(
 ) -> Result<(), CompileError> {
     let db = |e: sqlx::Error| CompileError::Db(e.to_string());
     let mut tx = pool.begin().await.map_err(db)?;
-    let holds_admin: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
-                         WHERE r.name = $2 AND g.scope_type = 'platform' \
-                           AND ((g.principal_type = 'user' AND g.principal_id = $1) \
-                             OR (g.principal_type = 'group' AND g.principal_id IN \
-                                   (SELECT group_id FROM user_groups WHERE user_id = $1))))",
-    )
-    .bind(user_id)
-    .bind(crate::engine_grants::PLATFORM_ADMIN_ROLE)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(db)?;
-    let services = if holds_admin {
-        egret_policy::default_policies::admin_policy_services_via(&mut tx)
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
-    } else {
-        Vec::new()
-    };
-    lock_services_in_tx(&mut tx, &services).await?;
+    let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    lock_for_admin_sync_in_tx(&mut tx, &services).await?;
     egret_auth::users::UserRepo::set_status_in_tx(&mut tx, egret_core::UserId(user_id), status)
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
-    recompile_services_in_tx(&mut tx, &services).await?;
+    for &service_id in &services {
+        crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
+    }
     tx.commit().await.map_err(db)?;
     Ok(())
 }
 
+/// The locks an `egret-admin` sync outside a compile takes, in the compile's
+/// order: the profiles ascending, then the mint lock (the sync may mint an
+/// admin's missing username).
+async fn lock_for_admin_sync_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    services: &[i64],
+) -> Result<(), CompileError> {
+    lock_services_in_tx(tx, services).await?;
+    if !services.is_empty() {
+        crate::members::lock_compile_mints_in_tx(tx)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// The boot pass of the `egret-admin` sync (username-takeover spec 2026-10-23
-/// §4.2): recompile every service holding an `egret-admin` set, so a body
+/// §4.2): converge every service holding an `egret-admin` set, so a body
 /// written before the fix (or by an apply that raced an admin change) is
-/// converged at startup. One transaction, services locked ascending;
-/// idempotent (an unchanged body writes nothing). Returns how many services
-/// it reached.
+/// repaired at startup. The sync alone, one transaction per service (review
+/// L1): a profile that cannot compile still gets its `egret-admin` set
+/// repaired, and a service that fails is logged and skipped while every other
+/// engine is repaired. Idempotent (an unchanged body writes nothing). Returns
+/// how many services it repaired or found current.
 pub async fn sync_admin_policies(pool: &PgPool) -> Result<usize, CompileError> {
     let db = |e: sqlx::Error| CompileError::Db(e.to_string());
-    let mut tx = pool.begin().await.map_err(db)?;
-    let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
-    recompile_services_in_tx(&mut tx, &services).await?;
-    tx.commit().await.map_err(db)?;
-    Ok(services.len())
+    let services = {
+        let mut conn = pool.acquire().await.map_err(db)?;
+        egret_policy::default_policies::admin_policy_services_via(&mut conn)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?
+    };
+    let mut synced = 0;
+    for service_id in services {
+        let one = async {
+            let mut tx = pool.begin().await.map_err(db)?;
+            lock_for_admin_sync_in_tx(&mut tx, &[service_id]).await?;
+            crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
+            tx.commit().await.map_err(db)
+        };
+        match one.await {
+            Ok(()) => synced += 1,
+            Err(e) => tracing::warn!(
+                service_id,
+                error = %e,
+                "the boot sync could not converge this profile's egret-admin set"
+            ),
+        }
+    }
+    Ok(synced)
 }

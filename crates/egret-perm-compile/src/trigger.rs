@@ -1484,7 +1484,7 @@ async fn recompile_locked_service_in_tx(
 /// service holds any. The caller holds the profile lock; the usernames were
 /// minted by `premint_model_usernames`, and one still missing is minted here
 /// under the same mint lock. Writes nothing when the body is current.
-async fn sync_admin_policy_in_tx(
+pub(crate) async fn sync_admin_policy_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<(), CompileError> {
