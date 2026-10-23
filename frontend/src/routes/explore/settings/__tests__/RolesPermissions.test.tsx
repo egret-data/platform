@@ -97,7 +97,9 @@ describe("RolesPermissions page", () => {
     });
     renderPage();
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/only workspace admins/i);
+    // The shared refusal (KI-231).
+    expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can view the workspace roles.")).toBeInTheDocument();
   });
 
   it("shows a skeleton while the role catalog is loading", () => {
