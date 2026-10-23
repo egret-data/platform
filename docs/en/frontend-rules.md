@@ -143,8 +143,8 @@ Every input has a `Label` tied by `htmlFor`/`id`.
 **Do this:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Checked by:** lint (the label side: `jsx-a11y/label-has-associated-control` requires a `Label` to have `htmlFor` or a nested control) and review (every input has a label whose `htmlFor` matches its `id`; lint misses an unlabelled input and a mismatched id).
 
 #### FE-FORM-3 — Known values get a picker · MUST
-When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input.
-**Do this:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`; example: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Checked by:** review.
+When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input, and never the browser's own `<select>`: a picker is `Select` from `ui/select`. A date or a time is picked with `DateTimePicker`, never with the browser's `datetime-local`.
+**Do this:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`, `frontend/src/components/ui/date-time-picker.tsx`; example: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Checked by:** lint (`egret/no-native-select` fails a `<select>`) and review (a known set typed into a text input; lint cannot tell a free text field from a known one). **Why:** KI-217: 15 files drew the browser's select beside the shared one, with another height, border, radius and chevron.
 
 #### FE-FORM-4 — Errors sit beside their field · MUST
 A validation error shows beside its field, in the server's words when the server produced it.
@@ -293,7 +293,7 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-VISUAL-8 — States are `StatusBadge`s (tint, foreground ink, sentence case); types and counts stay `Badge`.
 - [ ] FE-FORM-1 — Form state in `useState` or a dedicated hook; no form library.
 - [ ] FE-FORM-2 — Every input has a `Label` whose `htmlFor` matches its `id` (lint checks only the label side).
-- [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
+- [ ] FE-FORM-3 — Known value sets get a picker or combobox with help, not a text input (lint checks only the `<select>` side).
 - [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words when the server produced it.
 - [ ] FE-DATA-1 — The API client was regenerated with `npm run gen:api`.
 - [ ] FE-DATA-2 — New endpoints through orval hooks, or a generated fetcher with a one-line comment naming the exception; hand-written keys from the domain's key factory.

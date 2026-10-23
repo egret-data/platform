@@ -145,8 +145,8 @@ Mọi input có một `Label` gắn qua `htmlFor`/`id`.
 **Làm thế này:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Kiểm bằng:** lint (phía label: `jsx-a11y/label-has-associated-control` đòi `Label` có `htmlFor` hoặc chứa control bên trong) và review (mọi input có label với `htmlFor` khớp `id` của nó; lint bỏ sót input không có label và id không khớp).
 
 #### FE-FORM-3 — Giá trị đã biết thì dùng picker · PHẢI
-Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn.
-**Làm thế này:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`; ví dụ: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Kiểm bằng:** review.
+Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn, và không bao giờ là `<select>` của trình duyệt: picker là `Select` của `ui/select`. Ngày hoặc giờ được chọn bằng `DateTimePicker`, không bao giờ bằng `datetime-local` của trình duyệt.
+**Làm thế này:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`, `frontend/src/components/ui/date-time-picker.tsx`; ví dụ: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Kiểm bằng:** lint (`egret/no-native-select` báo lỗi mọi `<select>`) và review (tập giá trị đã biết mà lại gõ vào ô chữ; lint không phân biệt được ô chữ tự do với ô có tập giá trị đã biết). **Vì sao:** KI-217: 15 file vẽ select của trình duyệt bên cạnh select dùng chung, khác chiều cao, viền, bo góc và mũi tên.
 
 #### FE-FORM-4 — Lỗi nằm cạnh field của nó · PHẢI
 Lỗi validate hiện cạnh field của nó, bằng chính lời của server nếu lỗi do server trả về.
@@ -295,7 +295,7 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-VISUAL-8 — Trạng thái là `StatusBadge` (nền nhạt, chữ màu foreground, viết hoa kiểu câu); loại và số đếm vẫn là `Badge`.
 - [ ] FE-FORM-1 — State của form bằng `useState` hoặc hook riêng; không thư viện form.
 - [ ] FE-FORM-2 — Mọi input có `Label` với `htmlFor` khớp `id` của nó (lint chỉ kiểm phía label).
-- [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp.
+- [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp, không dùng ô chữ (lint chỉ kiểm phía `<select>`).
 - [ ] FE-FORM-4 — Lỗi validate nằm cạnh field, bằng lời của server nếu lỗi do server trả về.
 - [ ] FE-DATA-1 — API client được sinh lại bằng `npm run gen:api`.
 - [ ] FE-DATA-2 — Endpoint mới qua hook của orval, hoặc một hàm fetch do orval sinh ra kèm một dòng chú thích nêu ngoại lệ; key tự viết lấy từ factory key của domain.

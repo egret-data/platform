@@ -4,6 +4,7 @@ import tseslint from "typescript-eslint";
 import noRawPalette from "../rules/no-raw-palette.js";
 import noArbitraryTextSize from "../rules/no-arbitrary-text-size.js";
 import noWindowConfirm from "../rules/no-window-confirm.js";
+import noNativeSelect from "../rules/no-native-select.js";
 
 const tester = new RuleTester({
   languageOptions: { parser: tseslint.parser, parserOptions: { ecmaFeatures: { jsx: true } } },
@@ -62,5 +63,21 @@ tester.run("no-window-confirm", noWindowConfirm, {
     conf('self.confirm("x")'),
     conf('window.confirm?.("x")'),
     conf('function g() { if (!window.confirm("Discard?")) return; }'),
+  ],
+});
+
+const sel = (code) => ({ code, errors: [{ messageId: "select" }] });
+
+tester.run("no-native-select", noNativeSelect, {
+  valid: [
+    "<Select value={v} onValueChange={f}><SelectTrigger /></Select>",
+    "<SelectPrimitive.Root />",
+    '<input type="text" />',
+    'document.createElement("div")',
+  ],
+  invalid: [
+    sel('<select value={v} onChange={f}><option value="a">A</option></select>'),
+    sel("<select />"),
+    sel("const x = cond ? <select aria-label=\"x\" /> : null;"),
   ],
 });
