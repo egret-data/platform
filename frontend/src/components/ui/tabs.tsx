@@ -21,11 +21,18 @@ import { cn } from "@/lib/utils"
  *
  * An icon in a trigger sits `gap-1.5` from its label at `size-4`; it used to
  * touch the label (the alert editor, the catalog detail).
+ *
+ * On a narrow screen a pill strip wraps; an underline strip scrolls, and a
+ * strip that can be clipped sits in `ScrollStrip` (`ui/scroll-cue`), which
+ * shades the clipped edge (KI-233).
  */
 export type TabsVariant = "pill" | "underline"
 
 const LIST_CLASS: Record<TabsVariant, string> = {
-  pill: "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
+  // `flex-wrap` + `max-w-full`: a strip wider than its room wraps onto a second
+  // row instead of running past the edge with no cue (KI-233); one row is
+  // still 40px (`min-h-10`). The Governance pages already did this by hand.
+  pill: "inline-flex h-auto min-h-10 max-w-full flex-wrap items-center justify-start rounded-md bg-muted p-1 text-muted-foreground",
   underline:
     "flex h-auto w-full items-end justify-start gap-4 overflow-x-auto border-b border-border bg-transparent p-0 text-muted-foreground",
 }
