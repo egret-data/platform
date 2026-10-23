@@ -66,6 +66,27 @@ describe("ControlPlaneEngines", () => {
     expect(await screen.findByText("analytics-trino")).toBeInTheDocument();
   });
 
+  // KI-227: no tab for an engine type Egret cannot provision, and no promise of
+  // a "later phase".
+  test("offers the Trino and StarRocks tabs only, and no later-phase promise", async () => {
+    renderPage();
+    await screen.findByText("analytics-trino");
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Trino", "StarRocks"]);
+    expect(screen.queryByText(/RisingWave/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/later phase/i)).not.toBeInTheDocument();
+  });
+
+  test("an engine of another type still gets a tab, so it is never unlisted", async () => {
+    vi.mocked(api.listEngines).mockResolvedValue([ENGINE, { ...ENGINE, id: "r1", name: "stream-rw", type: "risingwave" }]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("analytics-trino");
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Trino", "StarRocks", "RisingWave"]);
+    await user.click(screen.getByRole("tab", { name: "RisingWave" }));
+    expect(await screen.findByText("stream-rw")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Add engine/i })).toBeDisabled();
+  });
+
   test("shows a live status badge", async () => {
     renderPage();
     // "running" also appears as a SummaryStrip label, so scope to the engine row.

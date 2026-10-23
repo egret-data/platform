@@ -35,6 +35,8 @@ import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
 import { EndpointRowStateBadge, pendingRoute } from "./endpointState";
 import { EntityLink } from "@/components/ui/entity-link";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -515,6 +517,12 @@ export default function Endpoints() {
     );
   };
 
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(error)) {
+    return <Forbidden reason={refusalReason(error, "Viewing endpoints needs the data_api_endpoint:read permission in this workspace.")} />;
+  }
+
   // The canonical Explore list-page scaffold — `p-4` + a single `h1` — now
   // comes from `ListPageShell` rather than being hand-written here. Endpoints
   // is a top-level sidebar item, not a section nested under a `DataApiLayout`
@@ -697,7 +705,7 @@ export default function Endpoints() {
         </BulkBar>
 
         {rows.length > 0 ? (
-          <div className="overflow-x-auto">
+          <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -746,7 +754,7 @@ export default function Endpoints() {
                 })
               )}
             </table>
-          </div>
+          </ScrollX>
         ) : (
           <p className="text-muted-foreground">
             {onlyBookmarked ? "No bookmarked endpoints." : "No endpoints match the current filters."}

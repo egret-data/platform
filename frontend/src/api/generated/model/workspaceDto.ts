@@ -24,4 +24,13 @@ export interface WorkspaceDto {
      * mutated rather than reading entitlement state.
      */
   features?: string[];
+  /**
+     * The caller's own permissions in this workspace among
+     * [`PAGE_PERMISSIONS`]: the ones that decide whether a whole Explore page
+     * opens. Only `/api/me/workspaces` fills it, from the same PDP decision
+     * the page's routes ask, so the UI can leave out the entries the caller
+     * cannot open (KI-231). The routes stay the gate. Absent everywhere else.
+     * @nullable
+     */
+  permissions?: string[] | null;
 }

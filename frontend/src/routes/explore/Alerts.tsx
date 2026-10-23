@@ -35,6 +35,7 @@ import { humanizeCrontab } from "@/lib/humanizeCron";
 import type { RunState } from "@/api/alerts";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { EntityLink } from "@/components/ui/entity-link";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 /**
  * How each run state reads in the list.
@@ -627,7 +628,7 @@ export default function Alerts() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="overflow-x-auto">
+            <ScrollX>
               <table className="w-full text-sm">
                 <thead className="text-left text-muted-foreground">
                   <tr>
@@ -700,7 +701,7 @@ export default function Alerts() {
                   })
                 )}
               </table>
-            </div>
+            </ScrollX>
           ) : (
             <p className="text-muted-foreground">
               {onlyBookmarked

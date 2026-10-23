@@ -127,8 +127,9 @@ export default function ScheduleDetail() {
     <PageContainer width="narrow">
       <DetailHeader
         back={{ to: backHref, label: "Alerts & Reports" }}
+        /* The title wraps (DetailHeader's default): truncated, "New Data API
+           alert" read "New Data API a…" at 390px (KI-233). */
         title={heading}
-        titleClassName="min-w-0 truncate"
         /* Paused is the state that explains "why has this not fired?", so it
            earns the badge over the run state; an active schedule shows how its
            last run went instead, which is the other half of that question. A

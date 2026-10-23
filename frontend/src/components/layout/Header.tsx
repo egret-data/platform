@@ -87,7 +87,11 @@ export function Header() {
           than the viewport — a fixed w-56 trigger cannot shrink and pushes everything right. */}
       {app === "explore" && <WorkspaceSwitcher className={narrow ? "w-auto min-w-0 flex-1" : undefined} />}
 
-      <div className="flex-1" />
+      {/* The spacer pushes the actions right. Not beside a narrow switcher: two
+          `flex-1` items split the free room, and the switcher was left showing
+          "De" for "Default" at 390px (KI-233). The switcher's own `flex-1`
+          does the pushing there. */}
+      {!(app === "explore" && narrow) && <div className="flex-1" />}
 
       {showSwitcher && (
         <nav aria-label="Apps" className={`flex items-center ${narrow ? "gap-2" : "gap-3"}`}>

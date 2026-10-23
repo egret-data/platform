@@ -1,18 +1,29 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { ScrollCue, useHorizontalOverflow } from "@/components/ui/scroll-cue";
 
+/**
+ * A table wider than its room scrolls sideways inside its container, and a
+ * shade on the clipped edge says so (KI-233): at 390px a list's last columns
+ * used to sit past the edge with nothing to show they were there.
+ */
 function Table({ className, ...props }: React.ComponentProps<"table">) {
+  const { setScroller, start, end } = useHorizontalOverflow<HTMLDivElement>();
   return (
-    <div
-      data-slot="table-container"
-      className="relative w-full overflow-x-auto"
-    >
-      <table
-        data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
-        {...props}
-      />
+    <div className="relative w-full">
+      <div
+        ref={setScroller}
+        data-slot="table-container"
+        className="w-full overflow-x-auto"
+      >
+        <table
+          data-slot="table"
+          className={cn("w-full caption-bottom text-sm", className)}
+          {...props}
+        />
+      </div>
+      <ScrollCue start={start} end={end} />
     </div>
   );
 }

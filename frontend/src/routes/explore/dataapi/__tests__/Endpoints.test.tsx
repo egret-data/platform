@@ -247,6 +247,22 @@ describe("Endpoints", () => {
     expect(screen.queryByText(/no endpoints yet/i)).not.toBeInTheDocument();
   });
 
+  // KI-231: the server refusing the list is the shared refusal, not a red box
+  // with "forbidden" under a title bar still offering + Endpoint.
+  it("renders the shared refusal, without the page's actions, when the server refuses the list", async () => {
+    mockList({ isError: true, error: new ApiError(403, "forbidden") });
+    renderEndpoints();
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "You don't have access to this page." }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Viewing endpoints needs the data_api_endpoint:read permission in this workspace."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("forbidden")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "+ Endpoint" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download OpenAPI" })).not.toBeInTheDocument();
+  });
+
   it("groups rows under their folder", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW, LOOSE_ROW] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);

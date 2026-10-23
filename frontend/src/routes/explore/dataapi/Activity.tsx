@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import ActivityCallList, { type ActivityCallListHandle } from "./ActivityCallList";
 import { Caveat } from "./detail/Caveat";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 const RANGES: ActivityRange[] = ["1h", "24h", "7d", "30d"];
 
@@ -75,6 +76,12 @@ export default function Activity() {
   // switch (which puts the summary back into `isLoading`) must not read as an
   // empty range for the frame it is in flight.
   const rangeIsEmpty = summary != null && !hasCalls;
+
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(summaryQuery.error)) {
+    return <Forbidden reason={refusalReason(summaryQuery.error, "Viewing Data API activity needs the data_api_endpoint:read permission in this workspace.")} />;
+  }
 
   return (
     // The canonical Explore list-page scaffold — `p-4` + a single `h1` — comes

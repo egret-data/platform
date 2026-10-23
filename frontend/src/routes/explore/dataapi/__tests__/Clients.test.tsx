@@ -12,6 +12,7 @@ import * as api from "@/api/generated/data-api/data-api";
 import type { DataApiClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import Clients from "@/routes/explore/dataapi/Clients";
 import { expectChipTone, expectNoChipTone } from "./expectChipTone";
+import { ApiError } from "@/api/client";
 
 // The one rule this task exists to hold: `DataApiClientDto` (the list shape)
 // has no secret field — not a skipped one, an absent one. This string stands
@@ -145,6 +146,21 @@ describe("Clients", () => {
     renderClients();
     expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
     expect(screen.queryByText(/no service accounts yet/i)).not.toBeInTheDocument();
+  });
+
+  // KI-231: the shared refusal, not a red box with "forbidden" under the
+  // page's own "+ Service account".
+  it("renders the shared refusal, without the page's actions, when the server refuses the list", async () => {
+    mockAccounts({ isError: true, error: new ApiError(403, "forbidden") });
+    renderClients();
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "You don't have access to this page." }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Viewing clients needs the service_account:read permission in this workspace."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("forbidden")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /service account/i })).not.toBeInTheDocument();
   });
 
   it("shows the first-run CTA when there are genuinely no service accounts", async () => {

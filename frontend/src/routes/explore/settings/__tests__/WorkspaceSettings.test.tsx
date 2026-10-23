@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter, Routes, Route, Navigate } from "react-router-dom";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -52,7 +52,7 @@ vi.mock("@/api/accessRequests", () => ({
   useDenyRequest: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
-import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
+import WorkspaceSettings, { SettingsIndex } from "@/routes/explore/settings/WorkspaceSettings";
 import Members from "@/routes/explore/settings/Members";
 import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
@@ -68,7 +68,8 @@ function renderAt(path: string) {
         <MemoryRouter initialEntries={[path]}>
           <Routes>
             <Route path="/explore/:workspace/settings" element={<WorkspaceSettings />}>
-              <Route index element={<Navigate to="members" replace />} />
+              <Route index element={<SettingsIndex />} />
+              <Route path="general" element={<p>General pane</p>} />
               <Route path="members" element={<Members />} />
               <Route path="roles" element={<RolesPermissions />} />
               <Route path="shares" element={<SharedObjects />} />
@@ -83,7 +84,24 @@ function renderAt(path: string) {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
+/** `/me/workspaces` as the server sends it; `permissions` omitted = an older server. */
+function serveWorkspaces(permissions?: string[]) {
+  vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify([
+          { id: "1", slug: "demo", name: "Demo", features: [], ...(permissions ? { permissions } : {}) },
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ),
+  );
+}
+
+afterEach(() => vi.restoreAllMocks());
+
 beforeEach(() => {
+  serveWorkspaces();
   roleCatalogMock.mockReset();
   sharesMock.mockReset();
   membersMock.mockReset();
@@ -134,10 +152,10 @@ describe("WorkspaceSettings section navigation", () => {
     expect(screen.getByText(/what each workspace role can do/i)).toBeInTheDocument();
   });
 
-  it("redirects the settings index to members", () => {
+  it("redirects the settings index to members", async () => {
     renderAt("/explore/demo/settings");
 
-    expect(links("Members").some(isActive)).toBe(true);
+    await waitFor(() => expect(links("Members").some(isActive)).toBe(true), { timeout: 5000 });
   });
 
   it("marks Shared objects active at /shares", () => {
@@ -145,5 +163,51 @@ describe("WorkspaceSettings section navigation", () => {
 
     expect(links("Shared objects").every(isActive)).toBe(true);
     expect(screen.getByText(/everything shared inside/i)).toBeInTheDocument();
+  });
+});
+
+// KI-005: one Collapse on the page, the app sidebar's.
+describe("WorkspaceSettings has no Collapse of its own", () => {
+  it("renders no collapse control for the settings nav", async () => {
+    renderAt("/explore/demo/settings/members");
+    await screen.findAllByRole("link", { name: "Members" });
+    expect(screen.queryByRole("button", { name: /collapse/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /expand/i })).not.toBeInTheDocument();
+  });
+});
+
+// KI-231: a section the reader cannot open is left out, on the server's word.
+describe("WorkspaceSettings sections follow the reader's permissions", () => {
+  const ADMIN_ONLY = ["Members", "Roles & permissions", "Access requests", "Shared objects", "Engines", "Notifications"];
+
+  it("a member without workspace:manage_members sees General only, and lands on it", async () => {
+    serveWorkspaces([]);
+    renderAt("/explore/demo/settings");
+    expect(await screen.findByText("General pane")).toBeInTheDocument();
+    for (const name of ADMIN_ONLY) expect(screen.queryByRole("link", { name })).not.toBeInTheDocument();
+    expect(links("General").length).toBeGreaterThan(0);
+  });
+
+  it("an admin sees every section and lands on Members", async () => {
+    serveWorkspaces(["workspace:manage_members"]);
+    renderAt("/explore/demo/settings");
+    await waitFor(() => expect(links("Members").some(isActive)).toBe(true), { timeout: 5000 });
+    for (const name of [...ADMIN_ONLY, "General"]) expect(links(name).length).toBeGreaterThan(0);
+  });
+
+  it("a section opened by URL that the server refuses shows the shared refusal", async () => {
+    serveWorkspaces([]);
+    membersMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: Object.assign(new Error("forbidden"), { status: 403 }),
+    });
+    renderAt("/explore/demo/settings/members");
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "You don't have access to this section." }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can manage members.")).toBeInTheDocument();
+    expect(screen.getByText("403 — Forbidden")).toBeInTheDocument();
   });
 });

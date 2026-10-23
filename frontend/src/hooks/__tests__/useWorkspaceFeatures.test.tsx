@@ -75,10 +75,10 @@ describe("useDefaultExplorePath", () => {
     await waitFor(() => expect(result.current).toBe("alerts"));
   });
 
-  test("falls back to settings/members when every module is disabled", async () => {
+  test("falls back to Workspace settings when every module is disabled", async () => {
     const { result } = renderHook(() => useDefaultExplorePath(), {
       wrapper: wrap(() => wsResponse([])),
     });
-    await waitFor(() => expect(result.current).toBe("settings/members"));
+    await waitFor(() => expect(result.current).toBe("settings"));
   });
 });

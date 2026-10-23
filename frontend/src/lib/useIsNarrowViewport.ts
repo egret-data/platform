@@ -6,21 +6,26 @@ import { useEffect, useState } from "react";
  *  behaviour depend on which route is mounted. */
 export const NARROW_VIEWPORT_PX = 768;
 
-const QUERY = `(max-width: ${NARROW_VIEWPORT_PX - 1}px)`;
+/** Window width below which the app sidebar is an icon rail, whatever the stored
+ *  preference (KI-234): at 768px the 224px sidebar left a table 480px. Tailwind's
+ *  `lg`, so the Workspace settings nav changes form at the same width. */
+export const SIDEBAR_RAIL_BELOW_PX = 1024;
 
-export function useIsNarrowViewport(): boolean {
+/** Whether the window is narrower than `px` (default `NARROW_VIEWPORT_PX`). */
+export function useIsNarrowViewport(px: number = NARROW_VIEWPORT_PX): boolean {
+  const query = `(max-width: ${px - 1}px)`;
   const [narrow, setNarrow] = useState(() =>
     typeof window !== "undefined" && typeof window.matchMedia === "function"
-      ? window.matchMedia(QUERY).matches
+      ? window.matchMedia(query).matches
       : false,
   );
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    const mq = window.matchMedia(QUERY);
+    const mq = window.matchMedia(query);
     const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches);
     setNarrow(mq.matches);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
-  }, []);
+  }, [query]);
   return narrow;
 }
