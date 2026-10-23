@@ -4,6 +4,9 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { TabError } from "@/routes/governance/tabParts";
 import { PEOPLE_BASE, principalParam, principalUrl } from "@/routes/governance/people/peopleUrl";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink } from "@/components/layout/DetailHeader";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /**
  * `/governance/people/users/by-name/:username` (spec P1): grant principals
@@ -24,16 +27,16 @@ export default function ByNameRedirect() {
 
   if (found.isError) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <TabError what="user" onRetry={() => void found.refetch()} />
-      </div>
+      </PageContainer>
     );
   }
   if (found.data?.status !== 200) {
     return (
-      <div className="p-4">
+      <PageContainer>
         <ListSkeleton rows={2} cols={1} />
-      </div>
+      </PageContainer>
     );
   }
   const rows = found.data.data.items;
@@ -41,12 +44,12 @@ export default function ByNameRedirect() {
   if (row) return <Navigate to={principalUrl({ kind: "user", userId: row.key }, search.get("tab") ?? undefined)} replace />;
   const near = rows.find((r) => !!r.username);
   return (
-    <div className="space-y-4 p-4">
+    <PageContainer className="space-y-4">
       <div className="space-y-1">
-        <Link to={PEOPLE_BASE} className="text-sm text-muted-foreground hover:underline">
-          People & groups
-        </Link>
-        <h1 className="break-all text-lg font-semibold">{username}</h1>
+        <div>
+          <BackLink to={PEOPLE_BASE}>People & groups</BackLink>
+        </div>
+        <PageTitle className="break-all">{username}</PageTitle>
       </div>
       <Alert>
         <AlertDescription className="space-y-1">
@@ -69,6 +72,6 @@ export default function ByNameRedirect() {
           )}
         </AlertDescription>
       </Alert>
-    </div>
+    </PageContainer>
   );
 }

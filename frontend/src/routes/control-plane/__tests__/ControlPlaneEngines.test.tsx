@@ -70,7 +70,7 @@ describe("ControlPlaneEngines", () => {
     renderPage();
     // "running" also appears as a SummaryStrip label, so scope to the engine row.
     const row = (await screen.findByText("analytics-trino")).closest("tr")!;
-    expect(within(row).getByText("running")).toBeInTheDocument();
+    expect(within(row).getByText("Running")).toBeInTheDocument();
   });
 
   /**
@@ -89,7 +89,7 @@ describe("ControlPlaneEngines", () => {
     renderPage();
 
     const row = (await screen.findByText("analytics-trino")).closest("tr")!;
-    const deleting = within(row).getByText("deleting");
+    const deleting = within(row).getByText("Deleting");
     // Compared against `provisioning`, the arm it shares, rather than against a
     // literal class string: the point is that the two agree, not what the
     // palette happens to be.
@@ -97,7 +97,7 @@ describe("ControlPlaneEngines", () => {
     cleanup();
     renderPage();
     const row2 = (await screen.findByText("analytics-trino")).closest("tr")!;
-    expect(deleting.className).toBe(within(row2).getByText("provisioning").className);
+    expect(deleting.className).toBe(within(row2).getByText("Provisioning").className);
   });
 
   test("Add engine navigates to the create page with the active engine type", async () => {
@@ -155,7 +155,7 @@ describe("ControlPlaneEngines", () => {
       const row = (await screen.findByText("legacy-trino")).closest("tr")!;
       expect(within(row).getByText("External")).toBeInTheDocument();
       expect(within(row).getByText("trino.corp.example:8080")).toBeInTheDocument();
-      expect(within(row).queryByText("running")).not.toBeInTheDocument();
+      expect(within(row).queryByText("Running")).not.toBeInTheDocument();
       expect(vi.mocked(api.getEngine)).not.toHaveBeenCalledWith("x1");
     });
 

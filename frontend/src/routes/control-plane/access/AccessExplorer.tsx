@@ -26,6 +26,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Column, FilterableTable } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { errorStatus } from "@/lib/httpStatus";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 /** Which way the explorer reads: principal → their access, or object → who can access it. */
 type Direction = "principal" | "object";
@@ -70,9 +72,9 @@ export default function AccessExplorer() {
   };
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Access Explorer</h1>
+        <PageTitle>Access Explorer</PageTitle>
         <p className="text-sm text-muted-foreground">
           Explore access both ways — a user or group and everything they can reach, or an
           object and everyone who can reach it — with full provenance.
@@ -87,7 +89,7 @@ export default function AccessExplorer() {
       </Tabs>
 
       {direction === "principal" ? <PrincipalDirection /> : <ObjectDirection />}
-    </div>
+    </PageContainer>
   );
 }
 

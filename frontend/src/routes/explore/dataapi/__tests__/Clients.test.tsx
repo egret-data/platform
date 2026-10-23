@@ -717,7 +717,7 @@ describe("Clients — page scaffold", () => {
   it("renders its title as the page's own h1", async () => {
     renderClients();
     const h1 = await screen.findByRole("heading", { level: 1, name: "Clients" });
-    expect(h1.className).toContain("text-lg");
+    expect(h1.className).toContain("text-xl"); // PageTitle, FE-PAGE-7
     expect(screen.queryByRole("heading", { level: 2, name: "Clients" })).not.toBeInTheDocument();
   });
 

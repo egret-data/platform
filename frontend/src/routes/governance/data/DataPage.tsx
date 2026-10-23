@@ -5,6 +5,8 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { Button } from "@/components/ui/button";
 import { CatalogTree } from "@/routes/governance/data/CatalogTree";
 import { urlToPath } from "@/routes/governance/data/objectPath";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 /**
  * The Data area's frame (spec §2.2, Unity Catalog's Catalog Explorer): the
@@ -50,7 +52,7 @@ export default function DataPage() {
   const Toggle = treeOpen ? PanelLeftClose : PanelLeftOpen;
 
   return (
-    <div className="flex min-h-full flex-col gap-4 md:grid md:grid-cols-[18rem_minmax(0,1fr)] md:gap-6">
+    <PageContainer className="flex min-h-full flex-col gap-4 md:grid md:grid-cols-[18rem_minmax(0,1fr)] md:gap-6">
       <div className="md:hidden">
         <Button
           variant="outline"
@@ -73,7 +75,7 @@ export default function DataPage() {
       <section ref={pageRef} className="min-w-0">
         <Outlet />
       </section>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -81,9 +83,9 @@ export default function DataPage() {
 export function DataIndex() {
   return (
     <div className="space-y-4">
-      <h1 tabIndex={-1} className="text-2xl font-semibold outline-none">
+      <PageTitle tabIndex={-1} className="outline-none">
         Data
-      </h1>
+      </PageTitle>
       <EmptyState
         icon={Database}
         title="Pick a catalog"

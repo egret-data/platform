@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import { isFullConnection, useDatabases } from "@/api/databases";
 // creates is already in the list behind it when the user navigates back.
 import { useCreateEndpoint } from "@/api/dataApi";
 import { GOVERNED_BLOCKED_MESSAGE, governedWithoutPerPrincipal } from "./governance";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /**
  * Create an endpoint on a page with a URL (`/explore/:ws/data-api/endpoints/new`)
@@ -102,6 +103,7 @@ export default function EndpointCreate() {
 
   return (
     <ListPageShell
+      width="narrow"
       title="New endpoint"
       description="Publish a query as a REST endpoint. Everything else — parameters, output shape, cache, limits — is configured on the endpoint itself once it exists."
       back={
@@ -110,12 +112,7 @@ export default function EndpointCreate() {
            `ListPageShell` renders into the same right-hand group as `action` —
            so "leave without creating anything" was one control away from
            "create it", the two outcomes furthest apart on the page. */
-        <Link
-          className="text-sm text-muted-foreground hover:underline"
-          to={`/explore/${ws}/data-api/endpoints`}
-        >
-          ← Endpoints
-        </Link>
+        <BackLink to={`/explore/${ws}/data-api/endpoints`}>Endpoints</BackLink>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || create.isPending}>
@@ -123,7 +120,7 @@ export default function EndpointCreate() {
         </Button>
       }
     >
-      <div className="max-w-3xl space-y-4">
+      <div className="space-y-4">
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>

@@ -21,6 +21,7 @@ import {
   type FlowContext,
   type TriggerRow,
 } from "@/components/workflows/triggers/triggersModel";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 const KIND_ICONS: Record<TriggerKindDto, ComponentType<{ className?: string; "aria-hidden"?: boolean }>> = {
   schedule: Clock,
@@ -190,7 +191,7 @@ export function TriggersTable({
                   />
                 </TableCell>
                 <TableCell>
-                  <Link className="font-mono text-xs hover:underline" to={detailsHref(row)}>
+                  <Link className={`font-mono text-xs ${ENTITY_LINK_CLASS}`} to={detailsHref(row)}>
                     {row.trigger_id}
                   </Link>
                   {row.duplicate_id ? (

@@ -17,6 +17,7 @@ import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
 import { Section, TabError } from "@/routes/governance/tabParts";
 import { classificationRuleUrl } from "@/routes/governance/classifications/tagUrl";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /** How a listed rule reaches the classification: written on it, or on another one whose name matches. */
 function reachText(r: RuleView, tag: { key: string; name: string }): string {
@@ -79,7 +80,7 @@ export default function TagRulesSection({ tag, tagId }: { tag: { key: string; na
             {rules.map((r) => (
               <TableRow key={r.id}>
                 <TableCell className="whitespace-normal">
-                  <Link to={classificationRuleUrl(r.id, tagId)} className="font-medium text-primary hover:underline">
+                  <Link to={classificationRuleUrl(r.id, tagId)} className={ENTITY_LINK_CLASS}>
                     {r.name}
                   </Link>
                   <div>

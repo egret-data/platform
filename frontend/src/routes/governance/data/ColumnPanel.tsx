@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Plus, Tag as TagIcon, UserSearch } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
@@ -24,6 +24,7 @@ import { TERM } from "@/routes/governance/glossary";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { NotEnforcedBadge, useRuleEnforcementIn } from "@/routes/governance/NotEnforced";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants and rules.
@@ -406,7 +407,7 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
       <ul aria-label={`${TERM.rules} of ${path.column}`} className="space-y-1">
         {selected.map(({ rule, by }) => (
           <li key={rule.id} className="text-sm break-words">
-            <Link to={dataRuleUrl(rule.id, back)} className="font-medium text-primary hover:underline">
+            <Link to={dataRuleUrl(rule.id, back)} className={ENTITY_LINK_CLASS}>
               {rule.name}
             </Link>
             <span className="text-xs text-muted-foreground">
@@ -471,7 +472,7 @@ function GrantItem({ grant, sentence }: { grant: GrantView; sentence: string }) 
     <li className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm break-words">
       <span>{sentence}</span>
       <span>
-        {grant.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
+        {grant.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}
         {pattern}
       </span>
     </li>

@@ -23,6 +23,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /** One permission flattened out of its catalog group, carrying its area. */
 type PermRow = {
@@ -143,9 +146,9 @@ export default function PermissionsPage() {
   );
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Permissions</h1>
+        <PageTitle>Permissions</PageTitle>
         <p className="text-sm text-muted-foreground">
           The full catalog of platform permissions and how many roles each one is currently
           granted to. Change what a role grants on the Roles page.
@@ -200,7 +203,7 @@ export default function PermissionsPage() {
           navigate(`/control-plane/roles/${id}`);
         }}
       />
-    </div>
+    </PageContainer>
   );
 }
 
@@ -271,7 +274,7 @@ function PermissionRolesDialog({
                       <button
                         type="button"
                         onClick={() => onOpenRole(role.id)}
-                        className="truncate text-left text-sm font-medium text-primary hover:underline"
+                        className={`truncate text-left text-sm ${ENTITY_LINK_CLASS}`}
                       >
                         {name}
                       </button>

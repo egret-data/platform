@@ -19,6 +19,9 @@ import {
   NOT_DETERMINED,
   policyTypeWord,
 } from "@/routes/governance/handwritten/handwrittenText";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { cn } from "@/lib/utils";
 
 /** Which rows a placement shows (spec §6): access rows, masking and row-filter rows, or every row. */
 export type HandWrittenShow = "access" | "rules" | "all";
@@ -224,7 +227,7 @@ function PolicyRow({ p, profiles, target }: { p: HandWrittenPolicy; profiles: Ha
       <TableCell className="whitespace-normal align-top">
         <span className="flex flex-wrap items-center gap-1.5">
           {href ? (
-            <Link to={href} className="break-all font-medium text-primary hover:underline">
+            <Link to={href} className={cn(ENTITY_LINK_CLASS, "break-all")}>
               {p.name}
             </Link>
           ) : (
@@ -254,7 +257,7 @@ function PolicyRow({ p, profiles, target }: { p: HandWrittenPolicy; profiles: Ha
         <HandWrittenItems items={p.items} />
       </TableCell>
       <TableCell data-label="State" className="whitespace-normal align-top text-sm">
-        <Badge variant={p.enabled ? "secondary" : "outline"}>{p.enabled ? "Enabled" : "Disabled"}</Badge>
+        <StatusBadge tone={p.enabled ? "success" : "inactive"}>{p.enabled ? "Enabled" : "Disabled"}</StatusBadge>
         {p.denyAllElse ? <span className="mt-1 block text-xs">{DENY_ALL_ELSE}</span> : null}
         {p.unmodelled.map((u) => (
           <span key={u} className="mt-1 block text-xs">

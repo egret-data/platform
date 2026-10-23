@@ -212,7 +212,11 @@ describe("the engine page's failures (FE-STATE-1)", () => {
     serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: fail(404, "engine not found") }));
     openArea(`/governance/engines/${E_TR}`, READER);
     expect(await screen.findByText("No engine with this id.", {}, T)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
+    // The sentence's own link, not the header's back link (KI-224), which also goes there.
+    expect(within(screen.getByRole("alert")).getByRole("link", { name: "Engine & policy" })).toHaveAttribute(
+      "href",
+      "/governance/engines",
+    );
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
   });
 
@@ -269,7 +273,11 @@ describe("the profile page (EP13, EP15)", () => {
     serve(unbound());
     openArea("/governance/engines/profiles/ghost", READER);
     expect(await screen.findByText("No policy profile named ghost.", {}, T)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
+    // The sentence's own link, not the header's back link (KI-224), which also goes there.
+    expect(within(screen.getByRole("alert")).getByRole("link", { name: "Engine & policy" })).toHaveAttribute(
+      "href",
+      "/governance/engines",
+    );
   });
 
   it("shows a failing profile list with Retry", async () => {

@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowLeft,
   Boxes,
   Building2,
   Cable,
@@ -10,7 +9,6 @@ import {
   Cpu,
   Database,
   KeyRound,
-  Library,
   Settings2,
   ShieldCheck,
 } from "lucide-react";
@@ -34,6 +32,8 @@ import { ClientsTab } from "../warehouse-tabs/ClientsTab";
 import { ConnectTab } from "../warehouse-tabs/ConnectTab";
 import { RolesTab } from "../warehouse-tabs/RolesTab";
 import { SettingsTab } from "../warehouse-tabs/SettingsTab";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
 // Re-exported so this page stays the obvious home of its own key, as
 // `Catalogs.tsx` does for the list's. It is DEFINED in `../queryKeys` because
@@ -200,19 +200,11 @@ export default function CatalogDetail() {
     );
   };
 
-  const backLink = (
-    <Link
-      to="/control-plane/catalogs"
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Catalogs
-    </Link>
-  );
+  const backLink = <BackLink to="/control-plane/catalogs">Catalogs</BackLink>;
 
   if (catalogQ.isError) {
     return (
-      <div className="space-y-5">
+      <PageContainer className="space-y-5">
         {backLink}
         <Alert variant="destructive" data-testid="catalog-read-error">
           <AlertDescription>
@@ -230,78 +222,66 @@ export default function CatalogDetail() {
               : (catalogQ.error?.message ?? "Couldn't load this catalog.")}
           </AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
   if (!catalog) {
     return (
-      <div className="space-y-5">
+      <PageContainer className="space-y-5">
         {backLink}
         <ListSkeleton rows={6} cols={2} />
-      </div>
+      </PageContainer>
     );
   }
 
   const warning = attachmentWarning(catalog, now);
 
   return (
+    <PageContainer>
     <div className="space-y-5" data-testid="catalog-detail-frame">
-      {backLink}
-
-      <div className="min-w-0 space-y-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            {isEgretWarehouse(catalog) ? (
-              <Boxes className="h-6 w-6" />
-            ) : (
-              <Library className="h-6 w-6" />
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/catalogs", label: "Catalogs" }}
+        // Monospace: the name is the SQL identifier this catalog is addressed
+        // by on every engine, not a display label.
+        title={catalog.name}
+        titleClassName="min-w-0 truncate font-mono"
+        status={<Badge variant="secondary">{kindLabel(catalog)}</Badge>}
+        meta={
+          <>
+            <DetailFact
+              icon={Cpu}
+              label="Engines"
+              value={String(catalog.engines.length)}
+            />
+            <DetailFact
+              icon={Building2}
+              label="Workspaces"
+              value={String(catalog.workspaceIds.length)}
+            />
+            <DetailFact
+              icon={Clock}
+              label="Created"
+              value={new Date(catalog.createdAt).toLocaleString()}
+            />
+            <DetailFact
+              icon={Clock}
+              label="Updated"
+              value={new Date(catalog.updatedAt).toLocaleString()}
+            />
+            {catalog.warehouseId && (
+              // The catalog IS this warehouse. It used to link to
+              // `/control-plane/warehouses/{id}`; that path now redirects to
+              // THIS page, so the link would have pointed at itself. The
+              // identifier stays because it is what `catalog.warehouseId` is
+              // called everywhere else — in the legacy API paths the tabs below
+              // still call, and in `engines.warehouse_id`.
+              <DetailFact icon={Boxes} label="Warehouse" value={catalog.warehouseId} />
             )}
-          </div>
-          <div className="min-w-0">
-            {/* Monospace: the name is the SQL identifier this catalog is
-                addressed by on every engine, not a display label. */}
-            <h1 className="truncate font-mono text-2xl font-semibold leading-tight">
-              {catalog.name}
-            </h1>
-            <Badge variant="secondary" className="mt-1">
-              {kindLabel(catalog)}
-            </Badge>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-          <DetailFact
-            icon={Cpu}
-            label="Engines"
-            value={String(catalog.engines.length)}
-          />
-          <DetailFact
-            icon={Building2}
-            label="Workspaces"
-            value={String(catalog.workspaceIds.length)}
-          />
-          <DetailFact
-            icon={Clock}
-            label="Created"
-            value={new Date(catalog.createdAt).toLocaleString()}
-          />
-          <DetailFact
-            icon={Clock}
-            label="Updated"
-            value={new Date(catalog.updatedAt).toLocaleString()}
-          />
-          {catalog.warehouseId && (
-            // The catalog IS this warehouse. It used to link to
-            // `/control-plane/warehouses/{id}`; that path now redirects to
-            // THIS page, so the link would have pointed at itself. The
-            // identifier stays because it is what `catalog.warehouseId` is
-            // called everywhere else — in the legacy API paths the tabs below
-            // still call, and in `engines.warehouse_id`.
-            <DetailFact icon={Boxes} label="Warehouse" value={catalog.warehouseId} />
-          )}
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* The alarm an operator clicked on the list, restated where they land.
           The Engines tab now says the same thing per attachment, and in more
@@ -400,5 +380,6 @@ export default function CatalogDetail() {
         )}
       </Tabs>
     </div>
+    </PageContainer>
   );
 }

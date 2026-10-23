@@ -7,7 +7,6 @@ import type { GovernanceCatalog, GrantView } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -24,6 +23,7 @@ import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { TERM } from "@/routes/governance/glossary";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -268,7 +268,7 @@ function GrantTable({
               </TableCell>
               {extra ? <TableCell className={extra.mono ? "font-mono text-xs" : undefined}>{extra.cell(g)}</TableCell> : null}
               <TableCell>
-                {g.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
+                {g.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}
               </TableCell>
               {canWrite ? (
                 <TableCell className={`${ACTIONS_CELL} text-right`}>

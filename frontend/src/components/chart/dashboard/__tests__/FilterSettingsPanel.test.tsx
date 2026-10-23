@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { FilterSettingsPanel } from "../FilterSettingsPanel";
 import type { DashboardParameter } from "@/api/dashboards";
 
@@ -7,10 +8,11 @@ const p = (over: Partial<DashboardParameter>): DashboardParameter =>
   ({ id: "1", name: "Region", slug: "region", type: "category", operator: "is", ...over });
 
 describe("FilterSettingsPanel tier2d", () => {
-  it("type select offers boolean and location", () => {
+  it("type select offers boolean and location", async () => {
+    const user = userEvent.setup();
     render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()} />);
-    const sel = screen.getByLabelText("parameter type") as HTMLSelectElement;
-    const opts = Array.from(sel.options).map((o) => o.value);
+    await user.click(screen.getByRole("combobox", { name: "parameter type" }));
+    const opts = (await screen.findAllByRole("option")).map((o) => o.textContent);
     expect(opts).toContain("boolean");
     expect(opts).toContain("location");
   });
@@ -65,10 +67,12 @@ describe("FilterSettingsPanel base", () => {
     expect(onDelete).toHaveBeenCalled();
   });
 
-  it("changing type resets the operator to the first for that type", () => {
+  it("changing type resets the operator to the first for that type", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("parameter type"), { target: { value: "number" } });
+    await user.click(screen.getByRole("combobox", { name: "parameter type" }));
+    await user.click(await screen.findByRole("option", { name: "number" }));
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: "number", operator: "=" }));
   });
 
@@ -119,7 +123,8 @@ describe("FilterSettingsPanel base", () => {
     expect(screen.getByText(/its widget type is an input box/)).toBeTruthy();
   });
 
-  it("offers the move control between Required and Delete filter", () => {
+  it("offers the move control between Required and Delete filter", async () => {
+    const user = userEvent.setup();
     // Metabase's position (ParameterSettings.tsx:293): after the default/required block, before
     // the destructive actions. Asserted by DOM order, not by eye.
     const onMove = vi.fn();
@@ -128,7 +133,8 @@ describe("FilterSettingsPanel base", () => {
     const order = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label"));
     expect(order.indexOf("filter location")).toBeGreaterThan(order.indexOf("parameter required"));
     expect(order.indexOf("filter location")).toBeLessThan(order.indexOf("delete filter"));
-    fireEvent.change(screen.getByLabelText("filter location"), { target: { value: "bar" } });
+    await user.click(screen.getByRole("combobox", { name: "filter location" }));
+    await user.click(await screen.findByRole("option", { name: "Revenue" }));
     expect(onMove).toHaveBeenCalledWith("bar");
   });
 
@@ -140,9 +146,32 @@ describe("FilterSettingsPanel base", () => {
 
   it("hides the move control entirely for a caller that has not been wired for it", () => {
     // Every other W6 test in this file renders without `onMove`. If the control appeared anyway
-    // it would be a `<select>` whose changes go nowhere.
+    // it would be a picker whose changes go nowhere.
     render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()}
       moveDestinations={[{ cardId: "bar", label: "Revenue", tabName: null }]} />);
     expect(screen.queryByLabelText("filter location")).toBeNull();
+  });
+});
+
+// KI-235: the panel opens where the card settings panel does, so it is built
+// from the same parts: labelled fields, the shared Select, switches for on/off
+// rows and radio groups for one-of choices. Never the browser's own controls.
+describe("FilterSettingsPanel parts", () => {
+  it("uses the card settings panel's controls, and no browser select or radio", () => {
+    const other = p({ id: "2", name: "City", slug: "city" });
+    const { container } = render(
+      <FilterSettingsPanel param={p({ type: "text", operator: "is" })} allParameters={[p({}), other]}
+        onChange={vi.fn()} onDelete={vi.fn()}
+        moveDestinations={[{ cardId: "bar", label: "Revenue", tabName: null }]} hostCardId={null} onMove={vi.fn()} />,
+    );
+    expect(container.querySelector("select")).toBeNull();
+    expect(container.querySelector('input[type="radio"]')).toBeNull();
+    expect(screen.getByLabelText("parameter name").getAttribute("data-slot")).toBe("input");
+    for (const name of ["parameter type", "parameter operator", "filter location"]) {
+      expect(screen.getByRole("combobox", { name }).getAttribute("data-slot")).toBe("select-trigger");
+    }
+    expect(screen.getByRole("switch", { name: "parameter required" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "link City" })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "How should people filter on this?" })).toBeTruthy();
   });
 });

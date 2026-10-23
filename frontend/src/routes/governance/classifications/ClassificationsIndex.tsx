@@ -44,6 +44,7 @@ import {
   useCanManageTags,
 } from "@/routes/governance/classifications/tagParts";
 import { TERM } from "@/routes/governance/glossary";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 export const NO_CLASSIFICATION_YET = "No classification yet.";
 
@@ -133,7 +134,7 @@ export default function ClassificationsIndex() {
       cell: (t) => (
         <span className="flex items-center gap-2">
           <TagSwatch color={t.color} />
-          <Link to={tagUrl(t.id)} className="font-medium text-primary hover:underline">
+          <Link to={tagUrl(t.id)} className={ENTITY_LINK_CLASS}>
             {t.name}
           </Link>
         </span>

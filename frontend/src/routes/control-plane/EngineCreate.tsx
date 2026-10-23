@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import {
   type CreateEngineInput,
@@ -45,6 +45,8 @@ import { TrinoConfigEditor } from "./EngineDetail";
 import { warehousesQueryKey } from "./queryKeys";
 import { useEngineConfigForm } from "./useEngineConfigForm";
 import type { StarRocksDelegationOption } from "./useStarRocksConfigForm";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
 
 /**
  * A registry catalog can be ATTACHED here whatever its kind, but only an egret
@@ -302,25 +304,19 @@ export default function EngineCreate() {
   }
 
   return (
-    <div className="space-y-4">
-      <Link
-        to="/control-plane/engines"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Engines
-      </Link>
-
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">New engine</h1>
-          <p className="text-sm text-muted-foreground">
+    <PageContainer width="narrow" className="space-y-4">
+      <DetailHeader
+        className=""
+        back={{ to: "/control-plane/engines", label: "Engines" }}
+        title="New engine"
+        description={
+          <>
             {isStarRocks
               ? "Provision a StarRocks cluster against one or more registry catalogs and set its FE/CN sizing and delegation up front."
               : "Provision a query engine against one or more registry catalogs and configure it with the full Trino config surface up front."}
-          </p>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {error && (
         <Alert variant="destructive" data-testid="ec-error">
@@ -692,6 +688,6 @@ export default function EngineCreate() {
           Create engine
         </Button>
       </div>
-    </div>
+    </PageContainer>
   );
 }

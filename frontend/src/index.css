@@ -88,6 +88,9 @@
   --text-heading-sm--line-height: var(--text-base--line-height);
   --text-heading-sm--letter-spacing: var(--text-base--letter-spacing);
   --text-heading-sm--font-weight: 600;
+
+  /* The form/editor/settings column (FE-PAGE-6): `max-w-page`, 960px. */
+  --container-page: 60rem;
 }
 
 :root {

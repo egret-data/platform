@@ -168,7 +168,8 @@ describe("RolesPage", () => {
       </AuthContext.Provider>,
     );
 
-    await user.click(await screen.findByRole("button", { name: "custom_role" }));
+    // The name is a link (D4, KI-223): one colour and one behaviour for names in every list.
+    await user.click(await screen.findByRole("link", { name: "custom_role" }));
     expect(await screen.findByText("role detail page")).toBeInTheDocument();
   });
 

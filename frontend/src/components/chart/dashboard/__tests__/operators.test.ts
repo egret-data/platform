@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { OPERATORS } from "../ParameterEditor";
+import { OPERATORS } from "../operators";
 
 describe("OPERATORS", () => {
   it("has boolean and location types", () => {

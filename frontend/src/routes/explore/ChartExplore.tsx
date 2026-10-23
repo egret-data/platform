@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
@@ -49,9 +49,9 @@ import { FIELD_LABEL } from "@/components/chart/settings/FieldLabel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink, DetailHeader } from "@/components/layout/DetailHeader";
 
-const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
-const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
 
 const isValidViz = (v: string | null): v is VizType => CHART_TYPES.some((t) => t.key === v);
 
@@ -602,12 +602,14 @@ export default function ChartExplore() {
   // ── New-chart gallery: shown when creating a chart with no type chosen yet ──
   if (!id && !typeParam) {
     return (
-      <div className="mx-auto max-w-3xl p-6">
-        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
-        <h1 className="mb-1 mt-2 text-lg font-semibold">Choose a visualization</h1>
-        <p className="mb-4 text-sm text-muted-foreground">Pick a chart type to start building.</p>
+      <PageContainer width="narrow">
+        <DetailHeader
+          back={{ to: `/explore/${ws}/charts`, label: "Charts" }}
+          title="Choose a visualization"
+          description="Pick a chart type to start building."
+        />
         <ChartTypeGallery onSelect={(k) => { setViz(k); setSearchParams({ type: k }); }} />
-      </div>
+      </PageContainer>
     );
   }
 
@@ -615,22 +617,22 @@ export default function ChartExplore() {
   //    default builder while the chart is still loading or after it errors. ──
   if (id && existing.isLoading) {
     return (
-      <div className="mx-auto max-w-3xl p-6">
-        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+      <PageContainer width="narrow">
+        <BackLink to={`/explore/${ws}/charts`}>Charts</BackLink>
         <div className="mt-4">
           <ListSkeleton rows={4} cols={1} />
         </div>
-      </div>
+      </PageContainer>
     );
   }
   if (id && existing.isError) {
     return (
-      <div className="mx-auto max-w-3xl p-6">
-        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+      <PageContainer width="narrow">
+        <BackLink to={`/explore/${ws}/charts`}>Charts</BackLink>
         <Alert variant="destructive" className="mt-4">
           <AlertDescription>Failed to load this chart. Please try again.</AlertDescription>
         </Alert>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -640,7 +642,8 @@ export default function ChartExplore() {
   const pickerColumns = pickableColumns(columns, { recordsView, inUse: [descConfig, specForRun()] });
 
   return (
-    <div className="flex h-full min-h-0 gap-0">
+    // A tool page: full width on the shared left edge (FE-PAGE-6).
+    <PageContainer className="flex h-full min-h-0 gap-0">
       {/* Left panel */}
       {/* `scrollbar-gutter: stable` keeps a visible track instead of an overlay scrollbar that
           only appears mid-scroll. On macOS the overlay bar is hidden at rest, so a settings panel
@@ -652,19 +655,19 @@ export default function ChartExplore() {
           CONSEQUENCE of the panel rather than a number repeated at call sites; repeating it is
           what produced the eight different widths this replaces. */}
       <div className="w-[400px] shrink-0 overflow-y-auto [scrollbar-gutter:stable] border-r p-6 space-y-4">
-        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+        <BackLink to={`/explore/${ws}/charts`}>Charts</BackLink>
 
         <VizSwitcher viz={viz} onChange={changeViz} />
 
         <Tabs value={builderTab} onValueChange={setBuilderTab}>
-          <TabsList className={UNDERLINE_LIST}>
-            <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
-            <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
+          <TabsList variant="underline">
+            <TabsTrigger value="data">Data</TabsTrigger>
+            <TabsTrigger value="display">Display</TabsTrigger>
             {/* Metabase splits Data | Display | Axes, and the axis settings are the half of the
                 Display tab a reader goes looking for by name. Only the charts that HAVE axes
                 declare anything in that group, so only they get the tab. */}
             {showAxesTab && (
-              <TabsTrigger value="axes" className={UNDERLINE_TRIGGER}>Axes</TabsTrigger>
+              <TabsTrigger value="axes">Axes</TabsTrigger>
             )}
             {/* Its own tab, the way Metabase splits Columns | Conditional Formatting. Stacked in
                 with the rest, it made the pivot's panel the longest in the app and the reason it
@@ -685,7 +688,7 @@ export default function ChartExplore() {
                 neither of them draws the Axes tab, so 245 is the worst case rather than a
                 best one. */}
             {hasConditionalRules && (
-              <TabsTrigger value="rules" className={UNDERLINE_TRIGGER}>Conditional formatting</TabsTrigger>
+              <TabsTrigger value="rules">Conditional formatting</TabsTrigger>
             )}
           </TabsList>
 
@@ -1049,6 +1052,6 @@ export default function ChartExplore() {
         filters={recordsFilters ?? []}
         rowLimit={rowLimit}
       />
-    </div>
+    </PageContainer>
   );
 }

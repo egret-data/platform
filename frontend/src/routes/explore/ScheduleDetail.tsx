@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Activity,
   Bell,
@@ -18,7 +18,6 @@ import {
   type SectionKey,
 } from "@/components/alerts/ScheduleEditor";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DetailFact } from "@/components/layout/DetailFact";
 import { RunLogTable } from "@/components/alerts/RunLogTable";
@@ -27,6 +26,9 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StateBadge } from "./Alerts";
 import { humanizeCrontab } from "@/lib/humanizeCron";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /** The icon each section carries in the tab bar, in `SECTIONS` order. */
 const SECTION_ICONS: Record<SectionKey, typeof Bell> = {
@@ -119,58 +121,47 @@ export default function ScheduleDetail() {
   const Icon = isAlert ? Bell : isDataapiAlert ? Activity : FileBarChart;
 
   return (
-    // `4xl`, not `6xl`: with the section nav now horizontal there is no column
-    // beside the form to fill, and a 1150px-wide single-column form is past a
-    // readable measure. Everything on the page shares this one edge.
-    <div className="mx-auto max-w-4xl p-4">
-      <Link className="text-sm text-muted-foreground hover:underline" to={backHref}>
-        ← Alerts &amp; Reports
-      </Link>
-
-      <div className="mt-1 mb-4 min-w-0 space-y-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Icon className="h-6 w-6" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="truncate text-2xl font-semibold leading-tight">{heading}</h1>
-            {/* Paused is the state that explains "why has this not fired?", so
-                it earns the badge over the run state; an active schedule shows
-                how its last run went instead, which is the other half of that
-                question. A schedule that does not exist yet has neither. */}
-            {!isNew && existing && (
-              <div className="mt-1">
-                {existing.active ? (
-                  <StateBadge state={existing.last_state} />
-                ) : (
-                  <Badge variant="outline" className="gap-1 border-muted-foreground/30">
-                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
-                    Paused
-                  </Badge>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {!isNew && existing && (
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <DetailFact
-              icon={Icon}
-              label="Type"
-              value={isAlert ? "Alert" : isDataapiAlert ? "Data API alert" : "Report"}
-              to={backHref}
-            />
-            <DetailFact
-              icon={CalendarClock}
-              label="Runs"
-              value={humanizeCrontab(existing.crontab)}
-              title={existing.crontab}
-            />
-            <DetailFact icon={Globe} label="Timezone" value={existing.timezone} />
-          </div>
-        )}
-      </div>
+    // A form editor: the 960px column on the list's left edge (FE-PAGE-6). With
+    // the section nav horizontal there is no column beside the form to fill,
+    // and a full-width single-column form is past a readable measure.
+    <PageContainer width="narrow">
+      <DetailHeader
+        back={{ to: backHref, label: "Alerts & Reports" }}
+        title={heading}
+        titleClassName="min-w-0 truncate"
+        /* Paused is the state that explains "why has this not fired?", so it
+           earns the badge over the run state; an active schedule shows how its
+           last run went instead, which is the other half of that question. A
+           schedule that does not exist yet has neither. */
+        status={
+          !isNew && existing ? (
+            existing.active ? (
+              <StateBadge state={existing.last_state} />
+            ) : (
+              <StatusBadge tone="inactive">Paused</StatusBadge>
+            )
+          ) : undefined
+        }
+        meta={
+          !isNew && existing ? (
+            <>
+              <DetailFact
+                icon={Icon}
+                label="Type"
+                value={isAlert ? "Alert" : isDataapiAlert ? "Data API alert" : "Report"}
+                to={backHref}
+              />
+              <DetailFact
+                icon={CalendarClock}
+                label="Runs"
+                value={humanizeCrontab(existing.crontab)}
+                title={existing.crontab}
+              />
+              <DetailFact icon={Globe} label="Timezone" value={existing.timezone} />
+            </>
+          ) : undefined
+        }
+      />
 
       {isError ? (
         <Alert variant="destructive">
@@ -251,6 +242,6 @@ export default function ScheduleDetail() {
           </div>
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }

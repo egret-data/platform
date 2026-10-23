@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import type { PageKind, Principal } from "@/routes/governance/people/principalData";
 import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
+import { BackLink } from "@/components/layout/DetailHeader";
+import { PageTitle } from "@/components/layout/PageTitle";
 
 const KIND_LABEL: Record<PageKind, string> = { user: "User", group: "Group", role: "Role" };
 
@@ -105,15 +107,15 @@ export function PrincipalHeader({
   const title = principal?.kind === "user" ? principal.data.name || principal.data.email || keyName : keyName;
   return (
     <header className="space-y-2">
-      <Link to={PEOPLE_BASE} className="text-sm text-muted-foreground hover:underline">
-        People & groups
-      </Link>
+      <div>
+        <BackLink to={PEOPLE_BASE}>People & groups</BackLink>
+      </div>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs uppercase text-muted-foreground">{KIND_LABEL[kind]}</p>
-          <h1 tabIndex={-1} className="break-all text-lg font-semibold outline-none">
+          <PageTitle tabIndex={-1} className="break-all outline-none">
             {title}
-          </h1>
+          </PageTitle>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {onGrant && can("policy:update") ? (

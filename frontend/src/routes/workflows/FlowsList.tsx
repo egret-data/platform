@@ -22,6 +22,7 @@ import {
   type NamespaceNode,
 } from "@/components/workflows/namespaceTree";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /**
  * Where the tree's collapsed namespaces are kept, per viewer and per
@@ -289,7 +290,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                       node.flows.map((f) => (
                         <tr key={f.id} className="border-t hover:bg-accent">
                           <td className="py-1" style={{ paddingLeft: indent(depth + 1) }}>
-                            <Link className="font-medium hover:underline" to={`${base}/flows/${f.id}/edit`}>
+                            <Link className={ENTITY_LINK_CLASS} to={`${base}/flows/${f.id}/edit`}>
                               {f.flow_id}
                             </Link>
                           </td>

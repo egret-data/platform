@@ -22,6 +22,10 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { catalogsQueryKey, warehousesQueryKey } from "../queryKeys";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 // Re-exported so this page stays the obvious home of its own key
 // (`CatalogCreate.tsx` and this file's tests both import it from here). It is
@@ -140,7 +144,7 @@ function catalogColumns(
       cell: (c) => (
         <Link
           to={`/control-plane/catalogs/${c.id}`}
-          className="font-medium text-primary hover:underline"
+          className={ENTITY_LINK_CLASS}
         >
           {c.name}
         </Link>
@@ -199,9 +203,9 @@ function catalogColumns(
         const warning = attachmentWarning(c, now);
         if (!warning) return <span className="text-muted-foreground">—</span>;
         return (
-          <Badge variant={warning.level === "failed" ? "destructive" : "warning"}>
+          <StatusBadge tone={warning.level === "failed" ? "destructive" : "highlight"}>
             {warning.text}
-          </Badge>
+          </StatusBadge>
         );
       },
     },
@@ -405,10 +409,11 @@ export default function Catalogs() {
     );
 
   return (
-    <div className="space-y-4" data-testid="catalogs-frame">
+    <PageContainer>
+      <div className="space-y-4" data-testid="catalogs-frame">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">Catalogs</h1>
+          <PageTitle>Catalogs</PageTitle>
           <p className="text-sm text-muted-foreground">
             Every catalog the platform knows about — egret warehouses and external
             metastores alike. Attach one to an engine to make it queryable, and
@@ -512,7 +517,8 @@ export default function Catalogs() {
           </ul>
         ) : null}
       </ConfirmDeleteDialog>
-    </div>
+      </div>
+    </PageContainer>
   );
 }
 

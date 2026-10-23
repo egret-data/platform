@@ -61,7 +61,7 @@ export function DashboardInfoSidebar({
         <button type="button" aria-label="close info" className="text-muted-foreground hover:text-foreground" onClick={onClose}>✕</button>
       </div>
       <Tabs defaultValue="overview" onValueChange={(v) => { if (v === "history") onOpenHistory(); }}>
-        <TabsList className="mb-2">
+        <TabsList variant="underline" className="mb-2">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>

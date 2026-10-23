@@ -15,6 +15,9 @@ import { NavLink, Outlet, useParams } from "react-router-dom";
 
 import { useMyWorkspaces } from "@/api/hooks";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { DetailHeader } from "@/components/layout/DetailHeader";
+import { tabsListClass, tabsTriggerClass } from "@/components/ui/tabs";
 
 type SettingsItem = { to: string; label: string; icon: LucideIcon };
 type SettingsGroup = { heading: string; items: SettingsItem[] };
@@ -106,8 +109,8 @@ function NavItem({ item, collapsed }: { item: SettingsItem; collapsed: boolean }
  * Workspace settings shell.
  *
  * A settings-hub layout: a page title on top, then a grouped section nav on the
- * left with the active section rendered in the Outlet on the right. The h1 is a
- * full page title (text-2xl) so it clearly outranks each section's own heading.
+ * left with the active section rendered in the Outlet on the right. The h1 is
+ * the page title (`PageTitle`, 20px), above each section's own heading.
  * The desktop nav collapses to an icon rail (mirroring the main sidebar) to hand
  * the content pane more room; the choice is remembered. On narrow screens the
  * nav becomes a horizontally scrollable tab strip instead.
@@ -131,20 +134,24 @@ export default function WorkspaceSettings() {
     : "lg:grid-cols-[13rem_minmax(0,1fr)]";
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-6">
-      <header className="mb-6 space-y-1">
-        <h1 className="text-2xl font-semibold leading-tight">Workspace settings</h1>
-        <p className="text-sm text-muted-foreground">
-          {ws?.name
+    // The settings frame starts at the list's left edge; the section pane beside
+    // the nav is the 960px column (FE-PAGE-6). No back link: the section nav
+    // takes its place (FE-PAGE-8).
+    <PageContainer>
+      <DetailHeader
+        className="mb-6"
+        title="Workspace settings"
+        description={
+          ws?.name
             ? `Manage members, access, and configuration for ${ws.name}.`
-            : "Manage members, access, and this workspace’s configuration."}
-        </p>
-      </header>
+            : "Manage members, access, and this workspace’s configuration."
+        }
+      />
 
       {/* Mobile: horizontal scrollable tab strip (group headings dropped — the
           content pane needs the width more than the grouping does here). */}
       <nav
-        className="-mx-6 mb-5 flex gap-1 overflow-x-auto border-b border-border px-6 lg:hidden"
+        className={`-mx-4 mb-5 px-4 lg:hidden ${tabsListClass("underline")}`}
         aria-label="Workspace settings sections"
       >
         {ALL_ITEMS.map((item) => (
@@ -152,13 +159,7 @@ export default function WorkspaceSettings() {
             key={item.to}
             to={item.to}
             end
-            className={({ isActive }) =>
-              `-mb-px shrink-0 border-b-2 px-3 py-2 text-sm transition-colors ${
-                isActive
-                  ? "border-primary font-semibold text-foreground"
-                  : "border-transparent font-medium text-muted-foreground hover:border-border hover:text-foreground"
-              }`
-            }
+            className={tabsTriggerClass("underline")}
           >
             {item.label}
           </NavLink>
@@ -219,10 +220,10 @@ export default function WorkspaceSettings() {
           </button>
         </nav>
 
-        <div className="min-w-0">
+        <div className="min-w-0 max-w-page" data-settings-pane>
           <Outlet />
         </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }

@@ -1,6 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { useParams, useSearchParams } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { type Tag, useTags } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -18,22 +18,16 @@ import { ViewsTab } from "@/routes/governance/classifications/tabs/ViewsTab";
 import { WhereUsedTab } from "@/routes/governance/classifications/tabs/WhereUsedTab";
 import { CLASSIFICATIONS_BASE, type TagTab } from "@/routes/governance/classifications/tagUrl";
 import { TAG_TAB_LABEL, TERM } from "@/routes/governance/glossary";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /** The tabs in order (spec §5), labelled by the glossary's `TAG_TAB_LABEL`; the first is the absence of `?tab=`. */
 export const TAG_TABS: readonly TagTab[] = ["where-used", "clearance", "rules", "views", "handwritten"];
 
 export const NO_CLASSIFICATION_WITH_ID = "No classification with this id.";
 
-function BackLink() {
-  return (
-    <Link
-      to={CLASSIFICATIONS_BASE}
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" aria-hidden />
-      {TERM.classifications}
-    </Link>
-  );
+function BackToClassifications() {
+  return <BackLink to={CLASSIFICATIONS_BASE}>{TERM.classifications}</BackLink>;
 }
 
 /** Delete, for `tag:manage` or platform admin, through the consequence dialog (CL14). */
@@ -146,9 +140,9 @@ export default function TagPage() {
   }
 
   return (
-    <div className="space-y-6 p-4">
-      <BackLink />
+    <PageContainer className="space-y-6">
+      <BackToClassifications />
       {content}
-    </div>
+    </PageContainer>
   );
 }

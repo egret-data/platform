@@ -12466,7 +12466,7 @@
             }
           },
           "403": {
-            "description": "Missing storage:read permission, or the key is under a prefix egret writes for its users and the caller is not a platform admin",
+            "description": "Missing storage:read permission, or the caller is not a platform admin and the key is under a prefix egret writes for its users, or under the storage of a warehouse or lakehouse catalog (a table's data or metadata file, whose raw bytes would skip its column masks and row filters)",
             "content": {
               "application/json": {
                 "schema": {

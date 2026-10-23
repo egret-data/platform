@@ -1435,11 +1435,11 @@ describe("EngineDetail — Catalogs tab", () => {
     await openCatalogs();
 
     expect(await screen.findByRole("table")).toBeInTheDocument();
-    expect(within(catalogRow("sales")).getByText("applied")).toBeInTheDocument();
-    expect(within(catalogRow("events")).getByText("failed")).toBeInTheDocument();
+    expect(within(catalogRow("sales")).getByText("Applied")).toBeInTheDocument();
+    expect(within(catalogRow("events")).getByText("Failed")).toBeInTheDocument();
     // The two badges must not be one badge with two captions.
-    expect(within(catalogRow("sales")).getByText("applied").className).not.toBe(
-      within(catalogRow("events")).getByText("failed").className,
+    expect(within(catalogRow("sales")).getByText("Applied").className).not.toBe(
+      within(catalogRow("events")).getByText("Failed").className,
     );
     // `remote` is attached to sr-eu, not to this engine.
     expect(screen.queryByRole("row", { name: /remote/ })).not.toBeInTheDocument();

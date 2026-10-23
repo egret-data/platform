@@ -490,7 +490,7 @@ function TableDetailView({
         </div>
       ) : d ? (
         <Tabs defaultValue="schema" className="p-5">
-          <TabsList>
+          <TabsList variant="underline">
             <TabsTrigger value="schema">
               <Columns3 className="h-4 w-4" />
               Schema

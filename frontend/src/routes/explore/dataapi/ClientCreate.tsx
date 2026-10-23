@@ -19,6 +19,7 @@ import {
   useDataApiListServiceAccounts,
 } from "@/api/generated/data-api/data-api";
 import type { DataApiNewClientDto } from "@/api/generated/model";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 /**
  * The one fact about an issued client that must outlive the mount — and it is
@@ -182,6 +183,7 @@ export default function ClientCreate() {
   if (issued) {
     return (
       <ListPageShell
+        width="narrow"
         title="Client created"
         description={`Copy the secret now — this is the only time it is shown.${
           account ? ` It belongs to ${account.name}.` : ""
@@ -195,7 +197,7 @@ export default function ClientCreate() {
           </Button>
         }
       >
-        <div className="max-w-3xl space-y-4">
+        <div className="space-y-4">
           {/* One copy affordance, for the secret. The id and the token endpoint
               are plain text so that "Copy" is unambiguous — for a reader
               scanning the page and for a test querying by accessible name. */}
@@ -234,15 +236,14 @@ export default function ClientCreate() {
   if (spentClientId) {
     return (
       <ListPageShell
+        width="narrow"
         title="Client secret no longer available"
         description={`A client was already issued${account ? ` to ${account.name}` : ""} from this page. Its secret was shown once and cannot be shown again — reloading cannot bring it back.`}
         // Top-left, above the title — the `back` slot, not `toolbar`, which
         // `ListPageShell` renders into the same right-hand group as `action`.
         // See the form below for the measurement.
         back={
-          <Link className="text-sm text-muted-foreground hover:underline" to={clientsHref}>
-            ← Clients
-          </Link>
+          <BackLink to={clientsHref}>Clients</BackLink>
         }
         // Explicit, and it mints nothing on its own: it clears the marker and
         // returns the empty form. A URL that cannot be left forward is worse
@@ -259,7 +260,7 @@ export default function ClientCreate() {
           </Button>
         }
       >
-        <div className="max-w-3xl space-y-4">
+        <div className="space-y-4">
           <div className="space-y-4 rounded-lg border p-4">
             <Field label="Client ID" testId="client-id" value={spentClientId} />
             <p className="text-xs text-muted-foreground">
@@ -289,6 +290,7 @@ export default function ClientCreate() {
   // ── 3. The form ───────────────────────────────────────────────────────────
   return (
     <ListPageShell
+      width="narrow"
       title={account ? `New client for ${account.name}` : "New client"}
       description="Issues a fresh OAuth2 client_credentials pair. The secret appears on this page the moment it is created, and is never shown again."
       back={
@@ -300,9 +302,7 @@ export default function ClientCreate() {
            way out in the opposite corner. That inconsistency is the reason the
            `back` slot exists; this page and `ServiceAccountCreate` were simply
            not converted with it. */
-        <Link className="text-sm text-muted-foreground hover:underline" to={clientsHref}>
-          ← Clients
-        </Link>
+        <BackLink to={clientsHref}>Clients</BackLink>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || issue.isPending}>
@@ -310,7 +310,7 @@ export default function ClientCreate() {
         </Button>
       }
     >
-      <div className="max-w-3xl space-y-4">
+      <div className="space-y-4">
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>

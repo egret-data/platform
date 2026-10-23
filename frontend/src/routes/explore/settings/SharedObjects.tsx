@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { MoreHorizontal } from "lucide-react";
 
 import { useWorkspaceShares, type ObjectGrantRollup } from "@/api/workspaceAccess";
-import { EffectBadge, denyStyle } from "@/components/access/EffectBadge";
+import { EffectBadge } from "@/components/access/EffectBadge";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { errorStatus } from "@/lib/httpStatus";
 import { fullTimestamp } from "@/lib/relativeTime";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /** Object identifying a row's share target, used to open ShareDialog. */
 interface ShareTarget {
@@ -125,9 +126,7 @@ export default function SharedObjects() {
         const expired = new Date(r.expires_at) < new Date();
         if (expired) {
           return (
-            <Badge className="border font-normal" style={denyStyle}>
-              Expired
-            </Badge>
+            <StatusBadge tone="destructive">Expired</StatusBadge>
           );
         }
         return (

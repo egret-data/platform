@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Trash2, TriangleAlert, X } from "lucide-react";
+import { Loader2, Plus, Trash2, TriangleAlert, X } from "lucide-react";
 import { getPolicyAdminListPoliciesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 
 import {
@@ -61,6 +61,7 @@ import {
   profileUrl as profileUrlOf,
   type EditorSubject,
 } from "@/routes/governance/engines/engineUrl";
+import { BackLink } from "@/components/layout/DetailHeader";
 
 type PolicyKind = "access" | "masking" | "rowfilter";
 
@@ -581,13 +582,9 @@ export default function PolicyEditorPage({ service, subject }: { service: string
     }));
 
   const backLink = (
-    <Link
-      to={profileUrl}
-      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      {service || "Policies"}
-    </Link>
+    <div>
+      <BackLink to={profileUrl}>{service || "Policies"}</BackLink>
+    </div>
   );
 
   // DATA-SAFETY GUARD: when editing an existing policy, the form is seeded from

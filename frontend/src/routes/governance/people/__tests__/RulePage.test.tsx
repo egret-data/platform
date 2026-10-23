@@ -249,9 +249,10 @@ describe("RulePage: the way back", () => {
     renderAt("/governance/rules/r1?from=classification:t-pii", WRITER);
     const back = await screen.findByRole("link", { name: "Back to PII Data" });
     expect(back).toHaveAttribute("href", "/governance/classifications/t-pii?tab=rules");
-    // The arrow is shown, not read out.
-    expect(back).toHaveTextContent("← PII Data");
-    expect(within(back).getByText("←")).toHaveAttribute("aria-hidden");
+    // The arrow is shown, not read out: the shared `BackLink` draws it as an
+    // `aria-hidden` icon (KI-224), so the visible words are the label alone.
+    expect(back.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(back).toHaveTextContent(/PII Data$/);
     expect(screen.queryByRole("link", { name: /People & groups/ })).not.toBeInTheDocument();
   });
 

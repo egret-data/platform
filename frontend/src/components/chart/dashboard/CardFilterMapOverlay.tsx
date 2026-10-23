@@ -1,6 +1,12 @@
 import type React from "react";
 import { Info } from "lucide-react";
 import type { CardMapState } from "./card-map-state";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+/** The item that unmaps the card. The old native select let the user re-pick its "Select a column…"
+ *  placeholder to clear the mapping; a Radix item cannot carry "", so this sentinel stands in for it
+ *  and is converted back to "" before `onChange` sees it. Never a column name. */
+const UNMAPPED = "__unmapped__";
 
 interface Props {
   /** What to show, decided by `cardMapState`. */
@@ -40,11 +46,20 @@ export function CardFilterMapOverlay({ state, value, onChange }: Props) {
       {state.header && (
         <div className="w-full truncate text-xs font-medium text-muted-foreground">{state.header}</div>
       )}
-      <select aria-label="column to filter on" className="h-8 w-full rounded border bg-background px-2 text-sm"
-        value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">Select a column…</option>
-        {state.columns.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
+      {/* The stopPropagation on both halves is load-bearing: this overlay sits inside the card body,
+          which is a click target that opens the card settings panel (`DashboardView.tsx`, the
+          dashcard-body div), and React bubbles a click from the portalled list through the React
+          tree to it as well. Without it, opening the picker switches the panel to the card and the
+          overlay unmounts under the pointer. */}
+      <Select value={value} onValueChange={(v) => onChange(v === UNMAPPED ? "" : v)}>
+        <SelectTrigger size="sm" className="w-full" aria-label="column to filter on" onClick={(e) => e.stopPropagation()}>
+          <SelectValue placeholder="Select a column…" />
+        </SelectTrigger>
+        <SelectContent onClick={(e) => e.stopPropagation()}>
+          {value !== "" && <SelectItem value={UNMAPPED}>No column</SelectItem>}
+          {state.columns.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </>,
   );
 }

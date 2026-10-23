@@ -476,7 +476,7 @@ describe("the in-app back link asks before it discards an edit", () => {
     const user = userEvent.setup();
     renderDetail(makeEndpoint());
 
-    await user.click(screen.getByRole("link", { name: "← Endpoints" }));
+    await user.click(screen.getByRole("link", { name: "Endpoints" }));
 
     expect(screen.getByRole("heading", { name: "the endpoint list page" })).toBeInTheDocument();
   });
@@ -488,7 +488,7 @@ describe("the in-app back link asks before it discards an edit", () => {
     await user.click(screen.getByRole("button", { name: "make an edit" }));
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("link", { name: "← Endpoints" }));
+    await user.click(screen.getByRole("link", { name: "Endpoints" }));
 
     // The observable, not the click: the list route is NOT on screen.
     expect(screen.queryByRole("heading", { name: "the endpoint list page" })).toBeNull();
@@ -502,7 +502,7 @@ describe("the in-app back link asks before it discards an edit", () => {
     renderDetail(makeEndpoint());
 
     await user.click(screen.getByRole("button", { name: "make an edit" }));
-    await user.click(screen.getByRole("link", { name: "← Endpoints" }));
+    await user.click(screen.getByRole("link", { name: "Endpoints" }));
     const dialog = screen.getByRole("alertdialog");
     await user.click(within(dialog).getByRole("button", { name: "Stay on this page" }));
 
@@ -519,7 +519,7 @@ describe("the in-app back link asks before it discards an edit", () => {
     renderDetail(makeEndpoint());
 
     await user.click(screen.getByRole("button", { name: "make an edit" }));
-    await user.click(screen.getByRole("link", { name: "← Endpoints" }));
+    await user.click(screen.getByRole("link", { name: "Endpoints" }));
     const dialog = screen.getByRole("alertdialog");
     await user.click(within(dialog).getByRole("button", { name: "Discard changes and leave" }));
 
@@ -534,7 +534,7 @@ describe("the in-app back link asks before it discards an edit", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("button", { name: "Save" });
 
-    await user.click(screen.getByRole("link", { name: "← Endpoints" }));
+    await user.click(screen.getByRole("link", { name: "Endpoints" }));
 
     expect(screen.getByRole("heading", { name: "the endpoint list page" })).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).toBeNull();

@@ -55,14 +55,15 @@ import {
 import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
 import { Switch } from "@/components/ui/switch";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 
-function statusVariant(status: string): "default" | "destructive" | "secondary" {
-  if (status === "ok") return "default";
+function statusTone(status: string): StatusTone {
+  if (status === "ok") return "success";
   if (status === "error") return "destructive";
-  return "secondary";
+  return "neutral";
 }
 
-/** Turn the raw status enum into a human-readable label (variant mapping unchanged). */
+/** Turn the raw status enum into a human-readable label (tone mapping unchanged). */
 function humanizeStatus(status: string): string {
   if (status === "ok") return "Healthy";
   if (status === "error") return "Error";
@@ -193,7 +194,7 @@ export default function DatabasesPage() {
       sortable: true,
       value: (conn) => conn.status,
       cell: (conn) => (
-        <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+        <StatusBadge tone={statusTone(conn.status)}>{humanizeStatus(conn.status)}</StatusBadge>
       ),
     },
     {
@@ -423,7 +424,7 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
             ) : null}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+            <StatusBadge tone={statusTone(conn.status)}>{humanizeStatus(conn.status)}</StatusBadge>
             <Badge
               variant="outline"
               className="gap-1 text-muted-foreground"

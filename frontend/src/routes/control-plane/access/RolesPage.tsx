@@ -48,6 +48,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { EntityLink } from "@/components/ui/entity-link";
 
 export const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 export const permissionsQueryKey = ["control-plane", "access", "permissions"] as const;
@@ -225,14 +228,13 @@ export default function RolesPage() {
             <UserCog className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => openRole(r)}
+                <EntityLink
+                  to={`/control-plane/roles/${r.id}`}
                   title={r.description || undefined}
-                  className="min-w-0 truncate text-left font-medium text-primary hover:underline"
+                  className="min-w-0 truncate"
                 >
                   {r.name}
-                </button>
+                </EntityLink>
                 {isSeeded(r) && (
                   <Badge variant="secondary" className="shrink-0 font-normal">
                     built-in
@@ -316,10 +318,10 @@ export default function RolesPage() {
   const platform = rows.filter((r) => r.scope === "platform").length;
 
   return (
-    <div className="space-y-5">
+    <PageContainer className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold leading-tight">Roles</h1>
+          <PageTitle>Roles</PageTitle>
           <p className="text-sm text-muted-foreground">
             Platform roles apply across all of egret; workspace roles apply inside a single
             workspace and are assigned per-workspace on that workspace's Members page.
@@ -431,7 +433,7 @@ export default function RolesPage() {
       >
         {deleteTarget && <RoleImpactNotice role={deleteTarget} roles={rows} />}
       </ConfirmDeleteDialog>
-    </div>
+    </PageContainer>
   );
 }
 

@@ -38,6 +38,7 @@ import { Badge, type badgeVariants } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { VariantProps } from "class-variance-authority";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 /**
  * How an explain answer reads (`POST /perm/explain`), shared by the People
@@ -713,10 +714,9 @@ function DecidedBy({
   const clearingRoles = attribution.required_roles ?? null;
   return (
     <div data-testid="clearance-attribution" className="space-y-1">
-      <Badge variant="warning" className="gap-1">
-        <KeyRound className="h-3 w-3" />
+      <StatusBadge tone="highlight" icon={KeyRound}>
         Clearance required
-      </Badge>
+      </StatusBadge>
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <span className="text-muted-foreground">
           Gating tag{" "}

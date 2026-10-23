@@ -131,8 +131,8 @@ describe("SharedObjects page", () => {
     expect(screen.getByText("ws_editor")).toBeInTheDocument();
 
     // Allow / deny badges.
-    expect(screen.getByText("allow")).toBeInTheDocument();
-    expect(screen.getByText("deny")).toBeInTheDocument();
+    expect(screen.getByText("Allow")).toBeInTheDocument();
+    expect(screen.getByText("Deny")).toBeInTheDocument();
 
     // Summary line: "2 shares · 2 objects · 1 denied". `getByText` on the
     // label matches only that stat's own `<span>` (SummaryStrip renders the

@@ -28,6 +28,7 @@ import {
 import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
+import { PageContainer } from "@/components/layout/PageContainer";
 
 /**
  * An engine's page (spec §6): `/governance/engines/:id`, `policy:read`.
@@ -58,10 +59,10 @@ export default function EnginePage() {
 
   if (grantsQ.isError && (grantsQ.error as unknown as ApiError | null)?.status === 404) {
     return (
-      <div className="space-y-6 p-4">
+      <PageContainer className="space-y-6">
         <FrameHeader label="Engine" title="Engine" facts={<span className="break-all font-mono">{id}</span>} />
         <NotFound sentence="No engine with this id." />
-      </div>
+      </PageContainer>
     );
   }
 
@@ -119,7 +120,7 @@ export default function EnginePage() {
   };
 
   return (
-    <div className="space-y-6 p-4">
+    <PageContainer className="space-y-6">
       <FrameHeader
         label="Engine"
         title={engine?.name ?? "Engine"}
@@ -144,6 +145,6 @@ export default function EnginePage() {
         badges={overlaps.pairs ? { overlaps: overlaps.pairs.length } : undefined}
         render={body}
       />
-    </div>
+    </PageContainer>
   );
 }

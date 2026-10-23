@@ -1,4 +1,5 @@
 import type { DashboardParameter } from "@/api/dashboards";
+import { FIELD_LABEL } from "@/components/chart/settings/FieldLabel";
 import { FilterControl } from "./FilterPill";
 
 interface Props {
@@ -22,19 +23,17 @@ function isEmptyDefault(v: unknown): boolean {
 export function DefaultValueField({ param, options, onChange }: Props) {
   const hasDefault = !isEmptyDefault(param.default);
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>Default value</span>
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className={FIELD_LABEL}>Default value</span>
         {hasDefault && (
           <button type="button" aria-label="clear default value"
             className="text-xs text-muted-foreground hover:text-foreground"
             onClick={() => onChange(undefined)}>Clear</button>
         )}
       </div>
-      <div className="rounded border p-2">
-        <FilterControl param={param} value={param.default} options={options}
-          onChange={(v) => onChange(isEmptyDefault(v) ? undefined : v)} />
-      </div>
+      <FilterControl param={param} value={param.default} options={options}
+        onChange={(v) => onChange(isEmptyDefault(v) ? undefined : v)} />
     </div>
   );
 }

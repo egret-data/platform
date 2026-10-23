@@ -33,6 +33,8 @@ import { ScheduleActionsMenu } from "@/components/alerts/ScheduleActionsMenu";
 import { RunLogDrawer } from "@/components/alerts/RunLogDrawer";
 import { humanizeCrontab } from "@/lib/humanizeCron";
 import type { RunState } from "@/api/alerts";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { EntityLink } from "@/components/ui/entity-link";
 
 /**
  * How each run state reads in the list.
@@ -51,12 +53,12 @@ const STATE_LABEL: Record<RunState, string> = {
   grace: "On grace",
 };
 
-const STATE_VARIANT: Record<RunState, "default" | "secondary" | "destructive" | "outline"> = {
-  success: "default",
-  working: "secondary",
+const STATE_TONE: Record<RunState, StatusTone> = {
+  success: "success",
+  working: "primary",
   error: "destructive",
-  noop: "outline",
-  grace: "secondary",
+  noop: "neutral",
+  grace: "highlight",
 };
 
 /** Sentinel for the "has never run" facet option — `last_state` is null there,
@@ -65,7 +67,7 @@ const STATE_NEVER = "__never__";
 
 function StateBadge({ state }: { state: RunState | null | undefined }) {
   if (!state) return <span className="text-sm text-muted-foreground">Never run</span>;
-  return <Badge variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>;
+  return <StatusBadge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</StatusBadge>;
 }
 
 type SortKey = "name" | "last_state" | "next_run_at";
@@ -363,12 +365,7 @@ export default function Alerts() {
             {showTrash ? (
               <span className="font-medium">{s.name}</span>
             ) : (
-              <Link
-                className="font-medium hover:underline"
-                to={`/explore/${ws}/alerts/${s.id}`}
-              >
-                {s.name}
-              </Link>
+              <EntityLink to={`/explore/${ws}/alerts/${s.id}`}>{s.name}</EntityLink>
             )}
             {/* The Alerts tab now mixes two schedule types (spec §5.8) that can
                 share a name — each has its own name-uniqueness namespace
@@ -768,4 +765,4 @@ export default function Alerts() {
 }
 
 /** Exported for the run-log drawer, which shows the same vocabulary. */
-export { STATE_LABEL, STATE_VARIANT, StateBadge };
+export { STATE_LABEL, STATE_TONE, StateBadge };

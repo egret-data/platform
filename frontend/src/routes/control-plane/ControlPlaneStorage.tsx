@@ -40,6 +40,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { PageTitle } from "@/components/layout/PageTitle";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 export const storageQueryKey = ["control-plane", "storage"] as const;
 export const secretsQueryKey = ["control-plane", "secrets"] as const;
@@ -77,7 +80,7 @@ export default function ControlPlaneStorage() {
       cell: (c) => (
         <Link
           to={`/control-plane/storage/${c.id}`}
-          className="font-medium text-primary hover:underline"
+          className={ENTITY_LINK_CLASS}
         >
           {c.name}
         </Link>
@@ -143,10 +146,11 @@ export default function ControlPlaneStorage() {
   ];
 
   return (
-    <div className="space-y-4" data-testid="storage-frame">
+    <PageContainer>
+      <div className="space-y-4" data-testid="storage-frame">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold leading-tight">Storage</h1>
+          <PageTitle>Storage</PageTitle>
           <p className="text-sm text-muted-foreground">
             Global storage connections (S3-compatible object stores) available to catalogs and
             workspaces across the platform.
@@ -207,7 +211,8 @@ export default function ControlPlaneStorage() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </div>
+      </div>
+    </PageContainer>
   );
 }
 
