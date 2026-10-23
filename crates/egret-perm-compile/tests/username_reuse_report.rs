@@ -56,6 +56,30 @@ async fn user(db: &Db, username: Option<&str>) -> Uuid {
     .expect("user")
 }
 
+/// A user who held `username` before migration 0208: their ledger row is the
+/// backfill (`minted_at` NULL) that 0208's step 1 wrote, not a mint. A user
+/// INSERTed with a username now is minted (`minted_at` set), a name nobody
+/// held before, and so can be no takeover.
+async fn pre_0208_holder(db: &Db, username: &str) -> Uuid {
+    let id = user(db, None).await;
+    sqlx::query(
+        "INSERT INTO username_ledger (username, user_id, minted_for, source) \
+         VALUES ($1, $2, $2, 'backfill_user')",
+    )
+    .bind(username)
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("backfilled ledger row");
+    sqlx::query("UPDATE users SET username = $2 WHERE id = $1")
+        .bind(id)
+        .bind(username)
+        .execute(&db.pool)
+        .await
+        .expect("username");
+    id
+}
+
 async fn session_with(db: &Db, sessions: &SessionService, permissions: &[&str]) -> String {
     let uid = user(db, None).await;
     let role: Uuid =
@@ -217,9 +241,9 @@ async fn a_ref_older_than_its_holder_is_definite_with_an_event_and_possible_with
     .execute(&e.db.pool)
     .await
     .expect("event");
-    // The next person, minted the freed name later.
-    user(&e.db, Some(&with_event)).await;
-    user(&e.db, Some(&without)).await;
+    // The next person, minted the freed name later (before 0208).
+    pre_0208_holder(&e.db, &with_event).await;
+    pre_0208_holder(&e.db, &without).await;
 
     let f = findings_for(&e, &with_event).await;
     assert_eq!(f.len(), 1, "{f:?}");
@@ -270,8 +294,8 @@ async fn a_compiled_body_older_than_its_holder_is_definite_and_a_hand_written_on
     )
     .await;
     policy_naming(&e, "operator", "hand-written", &hand).await;
-    user(&e.db, Some(&compiled)).await;
-    user(&e.db, Some(&hand)).await;
+    pre_0208_holder(&e.db, &compiled).await;
+    pre_0208_holder(&e.db, &hand).await;
 
     let f = findings_for(&e, &compiled).await;
     assert_eq!(f.len(), 1, "{f:?}");
@@ -287,7 +311,7 @@ async fn a_compiled_body_older_than_its_holder_is_definite_and_a_hand_written_on
 async fn a_baseline_egret_admin_row_naming_a_non_admin_is_reported() {
     let Some(e) = env().await else { return };
     let carol = format!("carol_{}", tag());
-    let holder = user(&e.db, Some(&carol)).await;
+    let holder = pre_0208_holder(&e.db, &carol).await;
     sqlx::query(
         "INSERT INTO username_reuse_baseline (service_id, policy_id, policy_name, managed_by, \
            policy_updated_at, username, holder_id, holder_created_at, holder_is_active_admin) \
@@ -376,7 +400,7 @@ async fn an_engine_grant_unchanged_since_before_the_holder_is_definite() {
     .execute(&e.db.pool)
     .await
     .expect("principal");
-    user(&e.db, Some(&name)).await;
+    pre_0208_holder(&e.db, &name).await;
 
     let f = findings_for(&e, &name).await;
     assert_eq!(f.len(), 1, "{f:?}");
@@ -385,4 +409,218 @@ async fn an_engine_grant_unchanged_since_before_the_holder_is_definite() {
     assert_eq!(f[0]["place"]["type"], "engine_grant");
     // The engine page is where an engine grant is fixed, so the place names it.
     assert_eq!(f[0]["place"]["engineId"], engine.to_string(), "{f:?}");
+}
+
+#[tokio::test]
+async fn a_name_minted_after_0208_is_no_takeover_however_old_the_place() {
+    let Some(e) = env().await else { return };
+    // A newcomer gets a fresh name (a mint: nobody ever held it, 0208 seeded
+    // every name a ref, body or event knew), then a steward adds them to an
+    // old grant and an old hand-written policy. Neither was written for
+    // someone else.
+    let newbie = format!("newbie_{}", tag());
+    user(&e.db, Some(&newbie)).await;
+    old_grant(&e, "allow", "include", &newbie).await;
+    policy_naming(&e, "operator", "hand-written", &newbie).await;
+
+    let f = findings_for(&e, &newbie).await;
+    assert!(f.is_empty(), "{f:?}");
+}
+
+/// An `egret-admin` row of the 0208 baseline naming `username`, its body last
+/// written at `written`, with `holder` (and their `created_at`) as 0208 saw
+/// them.
+async fn baseline_admin_row(e: &Env, username: &str, holder: Option<Uuid>, written: &str) {
+    sqlx::query(
+        "INSERT INTO username_reuse_baseline (service_id, policy_id, policy_name, managed_by, \
+           policy_updated_at, username, holder_id, holder_created_at, holder_is_active_admin) \
+         VALUES (-1, -1, 'egret-admin - catalog', 'infra', $1::timestamptz, $2, $3, \
+                 (SELECT created_at FROM users WHERE id = $3), false)",
+    )
+    .bind(written)
+    .bind(username)
+    .bind(holder)
+    .execute(&e.db.pool)
+    .await
+    .expect("baseline row");
+}
+
+async fn created_long_ago(e: &Env, user: Uuid) {
+    sqlx::query("UPDATE users SET created_at = $2::timestamptz WHERE id = $1")
+        .bind(user)
+        .bind(LONG_AGO)
+        .execute(&e.db.pool)
+        .await
+        .expect("backdate");
+}
+
+async fn grant_platform_admin(e: &Env, user: Uuid) {
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
+         SELECT 'user', $1, id, 'platform' FROM roles \
+          WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .bind(user)
+    .execute(&e.db.pool)
+    .await
+    .expect("platform_admin");
+}
+
+async fn disable(e: &Env, user: Uuid) {
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(user)
+        .execute(&e.db.pool)
+        .await
+        .expect("disable");
+}
+
+#[tokio::test]
+async fn a_baseline_egret_admin_row_for_a_disabled_admin_is_no_takeover() {
+    let Some(e) = env().await else { return };
+    // The same person, an admin before the body was written, merely disabled
+    // when 0208 ran: the body named them because they were an admin.
+    let dana = format!("dana_{}", tag());
+    let holder = pre_0208_holder(&e.db, &dana).await;
+    created_long_ago(&e, holder).await;
+    grant_platform_admin(&e, holder).await;
+    disable(&e, holder).await;
+    baseline_admin_row(&e, &dana, Some(holder), "2021-01-01T00:00:00Z").await;
+
+    let f = findings_for(&e, &dana).await;
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[tokio::test]
+async fn a_baseline_egret_admin_row_naming_nobody_is_no_finding() {
+    let Some(e) = env().await else { return };
+    // A deleted admin's name: retired, it matches nobody and nobody can hold
+    // it again.
+    let gone = format!("goneadmin_{}", tag());
+    baseline_admin_row(&e, &gone, None, LONG_AGO).await;
+
+    let f = findings_for(&e, &gone).await;
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[tokio::test]
+async fn a_baseline_egret_admin_row_for_a_non_admin_who_predates_it_is_possible() {
+    let Some(e) = env().await else { return };
+    // Created before the body was written and no admin now: a demoted admin,
+    // or someone given a deleted admin's name later (a username is minted at
+    // first use, after `created_at`). The timestamps cannot tell.
+    let erin = format!("erin_{}", tag());
+    let holder = pre_0208_holder(&e.db, &erin).await;
+    created_long_ago(&e, holder).await;
+    baseline_admin_row(&e, &erin, Some(holder), "2021-01-01T00:00:00Z").await;
+
+    let f = findings_for(&e, &erin).await;
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["kind"], "admin_policy_named_non_admin");
+    assert_eq!(f[0]["verdict"], "possible", "{f:?}");
+}
+
+#[tokio::test]
+async fn a_live_egret_admin_body_naming_a_disabled_admin_is_stale_not_reuse() {
+    let Some(e) = env().await else { return };
+    let fred = format!("fred_{}", tag());
+    let holder = user(&e.db, Some(&fred)).await;
+    grant_platform_admin(&e, holder).await;
+    disable(&e, holder).await;
+    policy_naming(&e, "infra", "egret-admin - catalog", &fred).await;
+
+    let f = findings_for(&e, &fred).await;
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["kind"], "admin_policy_named_non_admin");
+    assert_eq!(f[0]["verdict"], "stale", "{f:?}");
+}
+
+#[tokio::test]
+async fn a_hand_written_name_0208_retired_says_how_to_fix_it_and_a_free_one_is_no_finding() {
+    let Some(e) = env().await else { return };
+    // 0208 step 3 retired a name a hand-written policy listed for someone who
+    // had not signed in: they were given another name.
+    let alice = format!("alice_{}", tag());
+    sqlx::query(
+        "INSERT INTO username_ledger (username, source, retired_at) \
+         VALUES ($1, 'backfill_policy', now())",
+    )
+    .bind(&alice)
+    .execute(&e.db.pool)
+    .await
+    .expect("retired by 0208");
+    policy_naming(&e, "operator", "pre-provisioned", &alice).await;
+    // Written after 0208 for a name nobody holds yet: still free, so the next
+    // person whose email slugs to it is given it.
+    let zed = format!("zed_{}", tag());
+    policy_naming(&e, "operator", "pre-provisioned", &zed).await;
+
+    let f = findings_for(&e, &alice).await;
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["verdict"], "dead");
+    let evidence = f[0]["evidence"].as_str().unwrap();
+    assert!(
+        evidence.contains("rewrite it to the name they were given"),
+        "{evidence}"
+    );
+    assert!(findings_for(&e, &zed).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_engine_grant_event_naming_the_user_as_an_object_is_definite() {
+    let Some(e) = env().await else { return };
+    let name = format!("egev_{}", tag());
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'starrocks', 'egret', '{}'::jsonb) RETURNING id",
+    )
+    .bind(format!("reuse-eng-{}", tag()))
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("engine");
+    // Changed since (so its `updated_at` proves nothing); only the event can.
+    let g: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.engine_grants (engine_id, capability, resource_values, created_at) \
+         VALUES ($1, 'starrocks.manage_blacklist', '{}', $2::timestamptz) RETURNING id",
+    )
+    .bind(engine)
+    .bind(LONG_AGO)
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("engine grant");
+    sqlx::query(
+        "INSERT INTO perm.engine_grant_principals (engine_grant_id, kind, ref) VALUES ($1, 'user', $2)",
+    )
+    .bind(g)
+    .bind(&name)
+    .execute(&e.db.pool)
+    .await
+    .expect("principal");
+    for detail in [
+        // An object of another shape, with no `ref`, is skipped.
+        json!({"before": null, "after": {"principals": [{"kind": "user"}]}}),
+        json!({"before": null, "after": {"principals": [{"kind": "user", "ref": name}]}}),
+    ] {
+        sqlx::query(
+            "INSERT INTO audit.audit_log (ts, kind, action, resource_type, resource_id, detail) \
+             VALUES ($1::timestamptz, 'mutation', 'engine_grant:create', 'engine_grant', $2, $3)",
+        )
+        .bind(LONG_AGO)
+        .bind(g.to_string())
+        .bind(detail)
+        .execute(&e.db.pool)
+        .await
+        .expect("event");
+    }
+    pre_0208_holder(&e.db, &name).await;
+
+    let f = findings_for(&e, &name).await;
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["verdict"], "definite", "{f:?}");
+    assert!(
+        f[0]["evidence"]
+            .as_str()
+            .unwrap()
+            .starts_with("governance event engine_grant:create"),
+        "{f:?}"
+    );
 }

@@ -13,4 +13,5 @@ export const Verdict = {
   definite: 'definite',
   possible: 'possible',
   dead: 'dead',
+  stale: 'stale',
 } as const;

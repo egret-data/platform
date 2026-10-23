@@ -56830,7 +56830,8 @@
         "enum": [
           "definite",
           "possible",
-          "dead"
+          "dead",
+          "stale"
         ]
       },
       "Via": {

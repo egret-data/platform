@@ -1303,15 +1303,31 @@ async fn username_reuse_is_a_finding_for_platform_admins_only() {
     .execute(&f.db.pool)
     .await
     .unwrap();
-    // The next person, given the freed name later.
-    sqlx::query(
-        "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, 'B', $2)",
+    // The next person, given the freed name later, before migration 0208: the
+    // ledger row is 0208's backfill, not a mint (a name minted since is one
+    // nobody held before, and no finding).
+    let holder: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name) VALUES ('local', $1, 'B') RETURNING id",
     )
     .bind(format!("{bob}@new.example"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO username_ledger (username, user_id, minted_for, source) \
+         VALUES ($1, $2, $2, 'backfill_user')",
+    )
     .bind(&bob)
+    .bind(holder)
     .execute(&f.db.pool)
     .await
     .unwrap();
+    sqlx::query("UPDATE users SET username = $2 WHERE id = $1")
+        .bind(holder)
+        .bind(&bob)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
     let admin = session(&f, &["platform_admin"]).await;
     let reader = session(&f, &["policy:read"]).await;
     let st = state(&f).await;
@@ -1320,6 +1336,14 @@ async fn username_reuse_is_a_finding_for_platform_admins_only() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let found = finding(&body, "username_reuse").unwrap_or_else(|| panic!("{body}"));
     assert_eq!(found["severity"], "critical", "{found}");
+    // Only what the evidence shows: written before the holder existed, not
+    // "for a deleted user".
+    let message = found["sentence"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("written for a username before the person who holds it now existed")
+            && !message.contains("deleted user"),
+        "{found}"
+    );
     assert_eq!(found["ref"], json!({"type": "reused_names"}));
     assert!(labels(&body, "username_reuse").contains(&bob), "{found}");
     assert!(

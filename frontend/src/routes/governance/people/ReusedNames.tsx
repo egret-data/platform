@@ -11,8 +11,8 @@ import { engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
 import { principalUrl } from "@/routes/governance/people/peopleUrl";
 import { STACKED_TABLE, TabError } from "@/routes/governance/tabParts";
 
-const VERDICT: Record<Verdict, string> = { definite: "Definite", possible: "Possible", dead: "Dead" };
-const VERDICT_ORDER: Record<Verdict, number> = { definite: 0, possible: 1, dead: 2 };
+const VERDICT: Record<Verdict, string> = { definite: "Definite", possible: "Possible", stale: "Stale", dead: "Dead" };
+const VERDICT_ORDER: Record<Verdict, number> = { definite: 0, possible: 1, stale: 2, dead: 3 };
 
 /** What each kind of finding means, in words. */
 const KIND: Record<ReuseKind, string> = {
@@ -85,7 +85,11 @@ export function ReusedNames({ q, onClearSearch }: { q: string; onClearSearch: ()
   const { findings, baselineTakenAt } = report.data.data;
   if (findings.length === 0) {
     return (
-      <EmptyState icon={CircleCheck} title="No engine username is written for anyone but the person it was written for." />
+      <EmptyState
+        icon={CircleCheck}
+        title="No reused engine usernames found."
+        description="Nothing names a username from before the person who holds it now existed, and every egret-admin policy names only active platform admins. History past audit retention cannot be checked."
+      />
     );
   }
   const needle = q.toLowerCase();
@@ -111,8 +115,9 @@ export function ReusedNames({ q, onClearSearch }: { q: string; onClearSearch: ()
       <p className="text-sm text-muted-foreground">
         Engine usernames written into grants, rules and policies for someone other than the person who holds the name now,
         for example before a user was deleted and the name went to someone else. Definite findings are proven by an event
-        or a timestamp; possible ones cannot be told apart from a later edit. Dead names match nobody, and nobody can be
-        given them again.
+        or a timestamp; possible ones cannot be told apart from a later edit. Stale ones are egret-admin policies that
+        still name someone who is no longer an active platform admin, not a reuse. Dead names match nobody, and nobody can
+        be given them again.
       </p>
       <Table className={STACKED_TABLE}>
         <TableHeader>

@@ -6,6 +6,10 @@
 //! policy still naming it. The ledger stops that from 0208 on; this reads what
 //! is left of the time before:
 //!
+//! A holder whose name was minted after 0208 (`minted_at` set) is never a
+//! finding: 0208 seeded every name a ref, body or event knew, so a minted name
+//! is one nobody held before and nothing was written for someone else.
+//!
 //! - `ref_predates_holder`: a `user` ref older than the person who now holds
 //!   the name. `definite` when a governance event named the ref before the
 //!   holder existed, or (an engine grant) the row was last changed before;
@@ -16,8 +20,13 @@
 //!   `definite` for `compiler`/`infra` bodies, `possible` for a hand-written
 //!   one (it may be a deliberate pre-provisioning);
 //! - `admin_policy_named_non_admin`: an `egret-admin` body naming someone who
-//!   is not an active platform admin, in the 0208 baseline or live (a live one
-//!   means the sync failed). `definite`;
+//!   is not an active platform admin, in the 0208 baseline or live. `definite`
+//!   when the body was last written before they existed; `stale` (live only)
+//!   when they hold a `platform_admin` grant (a disabled admin) or were minted
+//!   after 0208: no reuse, the sync has not caught up; otherwise `possible` (a
+//!   demoted admin, or someone given a deleted admin's name after their
+//!   `created_at`). A baseline row for a disabled admin, or naming nobody, is
+//!   no finding;
 //! - `holderless_ref`: a `user` ref, or a name in a hand-written body, that
 //!   nobody holds. `dead`: it is retired and matches nobody, forever; the row
 //!   says whether its position fails open.
@@ -54,6 +63,9 @@ pub enum Verdict {
     Possible,
     /// Nobody holds the name and nobody ever can again.
     Dead,
+    /// No reuse: a live `egret-admin` body still names someone who is no
+    /// longer an active platform admin, because the sync has not run since.
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -180,15 +192,22 @@ struct PolicyRow {
     holder_email: Option<String>,
     holder_created: Option<DateTime<Utc>>,
     holder_is_active_admin: Option<bool>,
+    /// Whether the holder holds `platform_admin` at all, whatever their status.
+    holder_holds_admin: Option<bool>,
     minted_at: Option<DateTime<Utc>>,
     retired_at: Option<DateTime<Utc>>,
     minted_for: Option<Uuid>,
+    ledger_source: Option<String>,
     from_baseline: bool,
 }
 
 /// Every `user` ref, its holder and ledger row, and the earliest governance
 /// event still in retention that names it on its own grant, rule or engine
-/// grant.
+/// grant. The events are read once, every name each one carries extracted
+/// (`events`), and joined: a per-ref scan of `audit.audit_log` would be a
+/// nested loop with no index on `(resource_type, resource_id)`. The two
+/// shapes are 0208 step 4b's: `"user:<name>"` strings and `{kind: "user",
+/// ref}` objects.
 const REFS: &str = "\
 WITH refs AS ( \
     SELECT 'grant' AS place_type, g.id AS place_id, NULL::uuid AS engine_id, p.ref, \
@@ -205,6 +224,21 @@ WITH refs AS ( \
            g.updated_at \
       FROM perm.engine_grant_principals p JOIN perm.engine_grants g ON g.id = p.engine_grant_id \
      WHERE p.kind = 'user' \
+), named AS ( \
+    SELECT a.id, a.ts, a.action, a.resource_type, a.resource_id, substr(s #>> '{}', 6) AS ref \
+      FROM audit.audit_log a, \
+           LATERAL jsonb_path_query(a.detail, \
+               'strict $.** ? (@.type() == \"string\" && @ starts with \"user:\")') AS s \
+     WHERE a.kind = 'mutation' AND a.resource_type IN ('perm_grant', 'perm_rule', 'engine_grant') \
+    UNION ALL \
+    SELECT a.id, a.ts, a.action, a.resource_type, a.resource_id, s #>> '{}' \
+      FROM audit.audit_log a, \
+           LATERAL jsonb_path_query(a.detail, \
+               'strict $.** ? (@.type() == \"object\" && @.kind == \"user\").ref') AS s \
+     WHERE a.kind = 'mutation' AND a.resource_type IN ('perm_grant', 'perm_rule', 'engine_grant') \
+), events AS ( \
+    SELECT DISTINCT ON (resource_type, resource_id, ref) resource_type, resource_id, ref, ts, action \
+      FROM named ORDER BY resource_type, resource_id, ref, ts, id \
 ) \
 SELECT r.place_type, r.place_id, r.engine_id, r.ref AS username, r.position, r.effect, r.parent_created, \
        r.parent_updated, u.id AS holder_id, u.email::text AS holder_email, \
@@ -213,28 +247,20 @@ SELECT r.place_type, r.place_id, r.engine_id, r.ref AS username, r.position, r.e
   FROM refs r \
   LEFT JOIN users u ON u.username = r.ref::citext \
   LEFT JOIN username_ledger l ON l.username = r.ref::citext \
-  LEFT JOIN LATERAL ( \
-      SELECT a.ts, a.action FROM audit.audit_log a \
-       WHERE a.kind = 'mutation' AND a.resource_id = r.place_id::text \
-         AND a.resource_type = CASE r.place_type WHEN 'grant' THEN 'perm_grant' \
+  LEFT JOIN events ev \
+         ON ev.resource_type = CASE r.place_type WHEN 'grant' THEN 'perm_grant' \
                                                  WHEN 'rule' THEN 'perm_rule' \
                                                  ELSE 'engine_grant' END \
-         AND (jsonb_path_exists(a.detail, 'strict $.** ? (@ == $s)', \
-                                jsonb_build_object('s', 'user:' || r.ref)) \
-           OR jsonb_path_exists(a.detail, \
-                                'strict $.** ? (@.type() == \"object\" && @.kind == \"user\" && @.ref == $s)', \
-                                jsonb_build_object('s', r.ref))) \
-       ORDER BY a.ts, a.id LIMIT 1 \
-  ) ev ON true \
+        AND ev.resource_id = r.place_id::text AND ev.ref = r.ref \
  ORDER BY r.ref, r.place_type, r.place_id";
 
 /// Every name in every policy body now, and every row of the 0208 baseline,
-/// with the holder, whether they are an active platform admin, and the ledger.
+/// with the holder now, whether they hold `platform_admin` (at all, and as an
+/// active user), and the ledger. A baseline holder deleted since is no holder.
 const POLICIES: &str = "\
 WITH admins AS ( \
-    SELECT u.id FROM users u \
-     WHERE u.status = 'active' \
-       AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
+    SELECT u.id, u.status FROM users u \
+     WHERE (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                      WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
                        AND g.principal_type = 'user' AND g.principal_id = u.id) \
          OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
@@ -245,8 +271,9 @@ WITH admins AS ( \
 SELECT p.id AS policy_id, p.name AS policy_name, s.name AS service, p.managed_by, \
        p.updated_at, n.name AS username, p.policy_jsonb AS body, u.id AS holder_id, \
        u.email::text AS holder_email, u.created_at AS holder_created, \
-       (u.id IN (SELECT id FROM admins)) AS holder_is_active_admin, \
-       l.minted_at, l.retired_at, l.minted_for, false AS from_baseline \
+       (u.id IN (SELECT id FROM admins WHERE status = 'active')) AS holder_is_active_admin, \
+       (u.id IN (SELECT id FROM admins)) AS holder_holds_admin, \
+       l.minted_at, l.retired_at, l.minted_for, l.source AS ledger_source, false AS from_baseline \
   FROM policy.authz_policies p \
   JOIN policy.authz_services s ON s.id = p.service_id \
  CROSS JOIN LATERAL policy_body_usernames(p.policy_jsonb) AS n(name) \
@@ -254,9 +281,9 @@ SELECT p.id AS policy_id, p.name AS policy_name, s.name AS service, p.managed_by
   LEFT JOIN username_ledger l ON l.username = n.name::citext \
 UNION ALL \
 SELECT b.policy_id, b.policy_name, COALESCE(s.name, b.service_id::text), b.managed_by, \
-       b.policy_updated_at, b.username::text, NULL::jsonb, b.holder_id, u.email::text, \
-       b.holder_created_at, b.holder_is_active_admin, l.minted_at, l.retired_at, \
-       l.minted_for, true \
+       b.policy_updated_at, b.username::text, NULL::jsonb, u.id, u.email::text, \
+       u.created_at, (u.id IN (SELECT id FROM admins WHERE status = 'active')), \
+       (u.id IN (SELECT id FROM admins)), l.minted_at, l.retired_at, l.minted_for, l.source, true \
   FROM username_reuse_baseline b \
   LEFT JOIN policy.authz_services s ON s.id = b.service_id \
   LEFT JOIN users u ON u.id = b.holder_id \
@@ -343,6 +370,8 @@ fn classify_ref(r: RefRow) -> Option<ReuseFinding> {
                 holder: None,
             })
         }
+        // Minted after 0208: nobody held the name before.
+        Some(h) if h.minted_at.is_some() => None,
         Some(h) => {
             let (verdict, at, evidence) =
                 if let Some(at) = r.event_at.filter(|at| *at < h.created_at) {
@@ -423,21 +452,54 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
     let is_admin_policy =
         p.managed_by == "infra" && is_admin_all_access_policy_name(&p.policy_name);
     if is_admin_policy && !p.holder_is_active_admin.unwrap_or(false) {
+        // Naming nobody: the name is retired and matches nobody.
+        let h = h?;
+        let (verdict, evidence) = if h.minted_at.is_some() || p.holder_holds_admin.unwrap_or(false)
+        {
+            // The same person, disabled or demoted after the body named them
+            // as an admin. The live sync converges the body; a baseline row
+            // records what that sync has since repaired.
+            if p.from_baseline {
+                return None;
+            }
+            (
+                Verdict::Stale,
+                "the egret-admin body still gives engine ALL access to someone who is no \
+                 longer an active platform admin; the sync has not run since"
+                    .to_string(),
+            )
+        } else if p.updated_at < h.created_at {
+            (
+                Verdict::Definite,
+                format!(
+                    "the egret-admin body{when} was last written before its holder existed, \
+                     and they are not a platform admin"
+                ),
+            )
+        } else {
+            (
+                Verdict::Possible,
+                format!(
+                    "the egret-admin body{when} names someone who holds no platform_admin \
+                     grant: a demoted admin, or someone given a deleted admin's name after \
+                     they joined"
+                ),
+            )
+        };
         return Some(ReuseFinding {
             kind: ReuseKind::AdminPolicyNamedNonAdmin,
-            verdict: Verdict::Definite,
+            verdict,
             username: p.username,
             place,
-            holder: h,
+            holder: Some(h),
             retired: None,
             evidence_at: Some(p.updated_at),
-            evidence: format!(
-                "the egret-admin body{when} gives engine ALL access to someone who is not an \
-                 active platform admin"
-            ),
+            evidence,
         });
     }
     match h {
+        // Minted after 0208: nobody held the name before.
+        Some(h) if h.minted_at.is_some() => None,
         Some(h) if p.updated_at < h.created_at => Some(ReuseFinding {
             kind: ReuseKind::PolicyPredatesHolder,
             verdict: if p.managed_by == "operator" {
@@ -453,10 +515,13 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
             evidence: format!("the policy body{when} was last written before its holder existed"),
         }),
         Some(_) => None,
+        // A name the ledger does not hold is free: the next person whose
+        // email slugs to it is given it (a pre-provisioned name).
+        None if p.ledger_source.is_none() => None,
         None if !p.from_baseline && p.managed_by == "operator" => Some(ReuseFinding {
             kind: ReuseKind::HolderlessRef,
             verdict: Verdict::Dead,
-            evidence: "no user holds this name; the hand-written policy names nobody".to_string(),
+            evidence: holderless_policy_evidence(p.minted_for, p.ledger_source.as_deref()),
             retired: Some(Retired {
                 retired_at: p.retired_at,
                 minted_for: p.minted_for,
@@ -471,6 +536,22 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
             holder: None,
         }),
         None => None,
+    }
+}
+
+/// The evidence of a hand-written body naming a retired name. A name 0208
+/// retired with no record of a holder (it found the name in a body, ref or
+/// event) may have been written for someone who had not signed in yet: they
+/// were given another name, and the body never applies to them.
+fn holderless_policy_evidence(minted_for: Option<Uuid>, source: Option<&str>) -> String {
+    let base = "no user holds this name; the hand-written policy names nobody";
+    match (minted_for, source) {
+        (None, Some(source)) if source.starts_with("backfill_") => format!(
+            "{base}. It was retired, with no record of who held it, when username reuse \
+             protection was installed: if it was written for someone who had not signed in \
+             yet, rewrite it to the name they were given"
+        ),
+        _ => base.to_string(),
     }
 }
 

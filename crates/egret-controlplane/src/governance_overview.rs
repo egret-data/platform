@@ -569,10 +569,11 @@ fn coordinate_path(coordinate: &str) -> String {
 // ── sources ─────────────────────────────────────────────────────────────
 
 /// Past username takeovers (username-takeover spec §4.5): `critical` when
-/// any finding is `definite`, else `warning` for `possible` ones. Refs nobody
-/// holds (`dead`) are no finding here: `unresolved_principals_fail_open`
-/// already reports the ones that fail open. Samples name the username and the
-/// place, never an email.
+/// any finding is `definite`, else `warning` for `possible` and `stale` ones.
+/// Refs nobody holds (`dead`) are no finding here:
+/// `unresolved_principals_fail_open` already reports the ones that fail open.
+/// The sentence says, per verdict, only what the evidence shows. Samples name
+/// the username and the place, never an email.
 async fn username_reuse(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     use egret_perm_compile::username_reuse::{findings_via, PlaceType, Verdict};
     let rows: Vec<_> = findings_via(c)
@@ -614,18 +615,53 @@ async fn username_reuse(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
             }
         })
         .collect();
+    let count = |v: Verdict| rows.iter().filter(|f| f.verdict == v).count();
     Ok(finding(
         "username_reuse",
         severity,
         rows.len(),
-        format!(
-            "{} written for a deleted user may now apply to the person who was later given \
-             their username.",
-            plural(rows.len(), "reference or policy", "references or policies")
+        reuse_sentence(
+            count(Verdict::Definite),
+            count(Verdict::Possible),
+            count(Verdict::Stale),
         ),
         sample,
         Some(Ref::ReusedNames),
     ))
+}
+
+/// What the `username_reuse` finding says: `definite` findings were written
+/// before the current holder of the name existed, `possible` ones may have
+/// been, and `stale` ones are `egret-admin` bodies the sync has not caught up
+/// with (no reuse).
+fn reuse_sentence(definite: usize, possible: usize, stale: usize) -> String {
+    const PLACES: (&str, &str) = ("reference or policy", "references or policies");
+    const WRITTEN: &str = "written for a username before the person who holds it now existed";
+    let mut parts = Vec::new();
+    if definite > 0 {
+        let verb = if definite == 1 { "was" } else { "were" };
+        parts.push(format!(
+            "{} {verb} {WRITTEN}.",
+            plural(definite, PLACES.0, PLACES.1)
+        ));
+    }
+    if possible > 0 && definite > 0 {
+        parts.push(format!("{possible} more may have been."));
+    } else if possible > 0 {
+        parts.push(format!(
+            "{} may have been {WRITTEN}.",
+            plural(possible, PLACES.0, PLACES.1)
+        ));
+    }
+    if stale > 0 {
+        let verb = if stale == 1 { "gives" } else { "give" };
+        parts.push(format!(
+            "{} still {verb} engine ALL access to someone who is no longer an active platform \
+             admin.",
+            plural(stale, "egret-admin policy", "egret-admin policies")
+        ));
+    }
+    parts.join(" ")
 }
 
 async fn unresolved_principals(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
@@ -1243,4 +1279,28 @@ async fn catalogs_without_engine(c: &mut PgConnection) -> Result<Option<Finding>
         sample,
         Some(Ref::Data),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reuse_sentence;
+
+    #[test]
+    fn the_reuse_sentence_claims_only_what_each_verdict_shows() {
+        assert_eq!(
+            reuse_sentence(2, 1, 0),
+            "2 references or policies were written for a username before the person who holds \
+             it now existed. 1 more may have been."
+        );
+        assert_eq!(
+            reuse_sentence(0, 1, 0),
+            "1 reference or policy may have been written for a username before the person who \
+             holds it now existed."
+        );
+        assert_eq!(
+            reuse_sentence(0, 0, 1),
+            "1 egret-admin policy still gives engine ALL access to someone who is no longer an \
+             active platform admin."
+        );
+    }
 }

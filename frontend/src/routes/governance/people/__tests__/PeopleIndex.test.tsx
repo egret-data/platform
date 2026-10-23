@@ -388,6 +388,15 @@ describe("People index: Reused names", () => {
       evidence: "policy last changed before ana@new.example",
     }),
     finding({
+      kind: "admin_policy_named_non_admin",
+      verdict: "stale",
+      username: "cy",
+      place: { type: "policy", policyId: 9, name: "egret-admin - catalog", service: "trino prod", managedBy: "infra" },
+      holder: { id: "u-cy", email: "cy@corp.example", createdAt: "2026-01-01T00:00:00Z", mintedAt: null },
+      evidenceAt: "2026-10-01T00:00:00Z",
+      evidence: "the egret-admin body still gives engine ALL access to someone who is no longer an active platform admin",
+    }),
+    finding({
       kind: "ref_predates_holder",
       verdict: "definite",
       username: "bob",
@@ -405,10 +414,10 @@ describe("People index: Reused names", () => {
     expect(await screen.findByRole("tab", { name: "Reused names", selected: true })).toBeInTheDocument();
     const table = await screen.findByRole("table");
     const rows = within(table).getAllByRole("row").slice(1);
-    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["bob", "ana", "ana", "gone"]);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["bob", "ana", "ana", "cy", "gone"]);
     expectStackedLabels(table);
 
-    const [bob, engineGrant, policy, gone] = rows;
+    const [bob, engineGrant, policy, stale, gone] = rows;
     expect(within(bob).getByText("Definite")).toBeInTheDocument();
     expect(within(bob).getByRole("link", { name: "Rule" })).toHaveAttribute("href", "/governance/rules/r-bob");
     expect(within(bob).getByRole("link", { name: "bob@new.example" })).toHaveAttribute(
@@ -428,6 +437,8 @@ describe("People index: Reused names", () => {
       "/governance/engines/profiles/trino%20prod?tab=policies",
     );
 
+    expect(within(stale).getByText("Stale")).toBeInTheDocument();
+
     expect(within(gone).getByText("Dead")).toBeInTheDocument();
     expect(within(gone).getByText("Widens access")).toBeInTheDocument();
     expect(within(gone).getByText("Nobody")).toBeInTheDocument();
@@ -441,10 +452,11 @@ describe("People index: Reused names", () => {
     expect(screen.queryByText("gone")).not.toBeInTheDocument();
   });
 
-  it("says when no name is reused", async () => {
+  it("says when no name is reused, and what it could not check", async () => {
     serve(() => page([]), undefined, { status: 200, body: { ...REPORT, findings: [] } });
     open("/governance/people?kind=reused", ADMIN);
-    expect(await screen.findByText("No engine username is written for anyone but the person it was written for.")).toBeInTheDocument();
+    expect(await screen.findByText("No reused engine usernames found.")).toBeInTheDocument();
+    expect(screen.getByText(/History past audit retention cannot be checked\./)).toBeInTheDocument();
   });
 
   it("shows a refused read as an error with a retry", async () => {
