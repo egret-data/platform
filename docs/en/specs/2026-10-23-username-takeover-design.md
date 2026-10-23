@@ -554,3 +554,15 @@ Deviations from the text above that the code forced or that implementation found
   the test makes the target a platform admin as well.
 - **Group tests seed the arrangement directly** (`sync_admin_all_access_in_tx` with the member's name), so each
   arrangement holds on the pre-fix code and the red is the change under test.
+
+### Task 5 (status, group-role routes, CLI, boot pass)
+
+- **Route tests** live in `egret-controlplane/tests/admin_policy_routes.rs` and assert the body read right after
+  the response (`PATCH /users/{id}` disable/enable; `POST`/`DELETE /groups/{id}/roles`). The engine-level
+  decisions for the same functions (`set_user_status_and_recompile`, the group unassign, the boot pass) are in
+  `egret-perm-compile/tests/admin_policy_sync.rs`.
+- **The boot pass is one transaction** over every admin-policy service (`recompile_services_in_tx`), spawned next
+  to `recompile_role_referencing_profiles` and logged, never blocking boot.
+- **No `create_admin_cli_syncs` test.** `init` is private to the `egret` binary and needs a full `Config`; it
+  calls the same `sync_admin_policies` the boot pass test covers, and a failure there only logs (the next boot
+  repairs).

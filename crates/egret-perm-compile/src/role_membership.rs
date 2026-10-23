@@ -288,3 +288,66 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     );
     Ok(services)
 }
+
+/// Set `user_id`'s status (`active` | `disabled`) and converge every
+/// `egret-admin` set it changes, in ONE transaction (username-takeover spec
+/// 2026-10-23 §4.2): the engine-admin set holds active platform admins only,
+/// so disabling an admin must drop them from engine ALL access in the same
+/// commit, and enabling them must restore it.
+///
+/// The affected set is the admin-policy services when the user holds
+/// `platform_admin` directly or through a group (whatever their current
+/// status), else empty: the rest of the compiled model names disabled users
+/// as it names active ones. Same order as every membership write: affected
+/// set, locks ascending, write, recompile.
+pub async fn set_user_status_and_recompile(
+    pool: &PgPool,
+    user_id: Uuid,
+    status: &str,
+) -> Result<(), CompileError> {
+    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let mut tx = pool.begin().await.map_err(db)?;
+    let holds_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
+                         WHERE r.name = $2 AND g.scope_type = 'platform' \
+                           AND ((g.principal_type = 'user' AND g.principal_id = $1) \
+                             OR (g.principal_type = 'group' AND g.principal_id IN \
+                                   (SELECT group_id FROM user_groups WHERE user_id = $1))))",
+    )
+    .bind(user_id)
+    .bind(crate::engine_grants::PLATFORM_ADMIN_ROLE)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db)?;
+    let services = if holds_admin {
+        egret_policy::default_policies::admin_policy_services_via(&mut tx)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    lock_services_in_tx(&mut tx, &services).await?;
+    egret_auth::users::UserRepo::set_status_in_tx(&mut tx, egret_core::UserId(user_id), status)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    recompile_services_in_tx(&mut tx, &services).await?;
+    tx.commit().await.map_err(db)?;
+    Ok(())
+}
+
+/// The boot pass of the `egret-admin` sync (username-takeover spec 2026-10-23
+/// §4.2): recompile every service holding an `egret-admin` set, so a body
+/// written before the fix (or by an apply that raced an admin change) is
+/// converged at startup. One transaction, services locked ascending;
+/// idempotent (an unchanged body writes nothing). Returns how many services
+/// it reached.
+pub async fn sync_admin_policies(pool: &PgPool) -> Result<usize, CompileError> {
+    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let mut tx = pool.begin().await.map_err(db)?;
+    let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    recompile_services_in_tx(&mut tx, &services).await?;
+    tx.commit().await.map_err(db)?;
+    Ok(services.len())
+}

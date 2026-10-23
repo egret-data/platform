@@ -142,6 +142,14 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     .execute(&db.pool)
     .await?;
 
+    // Username takeover (spec 2026-10-23 §4.2): with `--force` on an install
+    // that already has engines, the new admin joins every `egret-admin` set
+    // now rather than at the next boot.
+    if let Err(e) = egret_perm_compile::sync_admin_policies(&db.pool).await {
+        tracing::warn!(error = %e, "could not add the new admin to the engines' egret-admin \
+            policies; the boot pass will");
+    }
+
     tracing::info!(%email, "bootstrap admin created");
     // KI-146: a supplied password is never echoed into scroll-back or CI logs.
     println!("{}", admin_report(&email, &password));
@@ -2370,6 +2378,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                     error = %e,
                     "the boot recompile of role-referencing profiles did not run"
                 );
+            }
+        });
+    }
+    // Username takeover (spec 2026-10-23 §4.2): converge every `egret-admin`
+    // set to the active platform admins, repairing bodies written before the
+    // fix. Best-effort; a failure is logged and never blocks boot.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::sync_admin_policies(&pool).await {
+                Ok(n) => tracing::info!(services = n, "egret-admin policies synced at boot"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot sync of the egret-admin policies did not run"
+                ),
             }
         });
     }

@@ -220,6 +220,23 @@ impl UserRepo {
         Ok(())
     }
 
+    /// [`Self::set_status`] on the caller's transaction, so a status change and
+    /// the recompile it forces commit together
+    /// (`egret_perm_compile::set_user_status_and_recompile`).
+    pub async fn set_status_in_tx(
+        conn: &mut sqlx::PgConnection,
+        id: UserId,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE users SET status = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(status)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Set a local user's password hash (admin reset). Caller hashes the plaintext.
     pub async fn set_password(&self, id: UserId, password_hash: &str) -> Result<()> {
         sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")

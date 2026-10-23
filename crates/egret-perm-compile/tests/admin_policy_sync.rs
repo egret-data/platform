@@ -25,8 +25,8 @@ use egret_core::UserId;
 use egret_metastore::Db;
 use egret_perm::PermStore;
 use egret_perm_compile::{
-    assign_platform_role_and_recompile, recompile_service, unassign_platform_role_and_recompile,
-    PermGroupRecompiler,
+    assign_platform_role_and_recompile, recompile_service, set_user_status_and_recompile,
+    sync_admin_policies, unassign_platform_role_and_recompile, PermGroupRecompiler,
 };
 use egret_policy::default_policies::{admin_policy_services_via, sync_admin_all_access_in_tx};
 use egret_policy::PolicyStore;
@@ -495,4 +495,97 @@ fn deleter() -> egret_core::Principal {
         group_ids: vec![],
         impersonator: None,
     }
+}
+
+// ── part 3: status and the boot pass (Task 5) ───────────────────────────
+
+#[tokio::test]
+async fn disabling_an_admin_drops_them_and_enabling_restores() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (admin, name, svc) = admin_and_service(&db).await;
+    set_user_status_and_recompile(&db.pool, admin, "disabled")
+        .await
+        .expect("disable");
+    assert!(
+        !trino_can_select(&db, svc, &name).await,
+        "a disabled admin keeps engine ALL access"
+    );
+    set_user_status_and_recompile(&db.pool, admin, "active")
+        .await
+        .expect("enable");
+    assert!(
+        trino_can_select(&db, svc, &name).await,
+        "an enabled admin did not get engine ALL access back"
+    );
+}
+
+#[tokio::test]
+async fn disabling_a_group_admin_drops_them() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let gname = unique("gdis");
+    let member = new_user(&db, Some(&gname)).await;
+    admin_group(&db, "local", &[member]).await;
+    reseed(&db, svc, &[name, gname.clone()]).await;
+    set_user_status_and_recompile(&db.pool, member, "disabled")
+        .await
+        .expect("disable");
+    assert!(
+        !trino_can_select(&db, svc, &gname).await,
+        "a disabled group admin keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn unassigning_platform_admin_from_a_group_drops_its_members() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let gname = unique("grole");
+    let member = new_user(&db, Some(&gname)).await;
+    let (gid, _) = admin_group(&db, "local", &[member]).await;
+    reseed(&db, svc, &[name, gname.clone()]).await;
+    unassign_platform_role_and_recompile(&db.pool, "group", gid, platform_admin_role(&db).await)
+        .await
+        .expect("unassign from group");
+    assert!(
+        !trino_can_select(&db, svc, &gname).await,
+        "a member of a group that lost platform_admin keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn the_boot_pass_repairs_a_stale_body() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let stranger = unique("stranger");
+    // Written directly, as a pre-fix apply or a raced one left it.
+    reseed(&db, svc, &[name.clone(), stranger.clone()]).await;
+    assert!(
+        trino_can_select(&db, svc, &stranger).await,
+        "the arrangement"
+    );
+
+    assert!(sync_admin_policies(&db.pool).await.expect("boot pass") >= 1);
+    assert!(
+        !trino_can_select(&db, svc, &stranger).await,
+        "the boot pass left a non-admin in egret-admin"
+    );
+    assert!(
+        trino_can_select(&db, svc, &name).await,
+        "the boot pass dropped a real admin"
+    );
+
+    let before = version_and_updated(&db, svc).await;
+    sync_admin_policies(&db.pool)
+        .await
+        .expect("boot pass again");
+    assert_eq!(
+        version_and_updated(&db, svc).await,
+        before,
+        "a second pass wrote"
+    );
 }

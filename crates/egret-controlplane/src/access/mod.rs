@@ -299,13 +299,19 @@ async fn update_user(
             // Disabling is a stronger action than a plain profile update.
             egret_core::authz::require(&*st.pdp, &p, "user:disable").await?;
             guard_not_last_admin(&st, &p, user_id).await?;
-            st.users.set_status(user_id, status).await?;
+            // Username takeover (spec 2026-10-23 §4.2): a disabled admin
+            // leaves every `egret-admin` set in the same commit.
+            egret_perm_compile::set_user_status_and_recompile(st.roles.pool(), id, status)
+                .await
+                .map_err(CpError::from)?;
             // Immediate lockout: kill the user's live sessions now, rather than
             // waiting for `SessionService::validate` to reject them on their
             // next request.
             st.sessions.revoke_all_for_user(user_id).await?;
         } else {
-            st.users.set_status(user_id, status).await?;
+            egret_perm_compile::set_user_status_and_recompile(st.roles.pool(), id, status)
+                .await
+                .map_err(CpError::from)?;
         }
     }
 
@@ -849,7 +855,18 @@ async fn assign_group_role(
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    st.roles.assign("group", id, body.role_id).await?;
+    // Username takeover (spec 2026-10-23 §4.2, E10): a group's role grant
+    // changes who holds the role exactly as a user's does — for
+    // `platform_admin`, every member's engine ALL access — so it takes the
+    // same recompiling path.
+    egret_perm_compile::assign_platform_role_and_recompile(
+        st.roles.pool(),
+        "group",
+        id,
+        body.role_id,
+    )
+    .await
+    .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
@@ -889,7 +906,9 @@ async fn unassign_group_role(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
-    st.roles.unassign("group", id, role_id).await?;
+    egret_perm_compile::unassign_platform_role_and_recompile(st.roles.pool(), "group", id, role_id)
+        .await
+        .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,

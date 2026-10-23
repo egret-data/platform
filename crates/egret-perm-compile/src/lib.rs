@@ -128,7 +128,7 @@ pub use group_membership::PermGroupRecompiler;
 pub use members::lock_compile_mints_in_tx;
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,
-    unassign_platform_role_and_recompile,
+    set_user_status_and_recompile, sync_admin_policies, unassign_platform_role_and_recompile,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
