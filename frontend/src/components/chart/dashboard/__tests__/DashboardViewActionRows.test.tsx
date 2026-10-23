@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { DashboardViewActionRows } from "../DashboardActionsMenu.view";
@@ -85,17 +85,28 @@ describe("DashboardViewActionRows", () => {
     await vi.waitFor(() => expect(nav).toHaveBeenCalledWith("/explore/demo/dashboards/d2"));
   });
 
-  it("Move to trash trashes immediately, with NO confirmation, and returns to the list", async () => {
-    // The list page does not confirm this (Dashboards.tsx:117) and neither does this menu. The
-    // same action must not behave two ways depending on where it was invoked from.
+  it("Move to trash asks first, then trashes and returns to the list (KI-075)", async () => {
+    // The list page confirms this too: the same action must not behave two ways depending on
+    // where it was invoked from.
     const user = userEvent.setup();
     renderRows();
     await openMenu(user);
     await user.click(await screen.findByRole("button", { name: "Move to trash" }));
+    expect(trash.mutateAsync).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
     expect(trash.mutateAsync).toHaveBeenCalledWith("d1");
-    expect(screen.queryByRole("alertdialog")).toBeNull();
     await vi.waitFor(() => expect(success).toHaveBeenCalledWith("Moved to Trash"));
     expect(nav).toHaveBeenCalledWith("/explore/demo/dashboards");
+  });
+
+  it("cancelling the Move to trash confirmation trashes nothing (KI-075)", async () => {
+    const user = userEvent.setup();
+    renderRows();
+    await openMenu(user);
+    await user.click(await screen.findByRole("button", { name: "Move to trash" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    expect(trash.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("moving to another folder sets it and closes the menu", async () => {
