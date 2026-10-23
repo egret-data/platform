@@ -30,6 +30,7 @@ const USERS: api.AccessUser[] = [
     status: "active",
     roles: ["Admin"],
     groups: [],
+    username: "alice",
   },
   {
     id: "u2",
@@ -39,6 +40,7 @@ const USERS: api.AccessUser[] = [
     status: "disabled",
     roles: [],
     groups: ["Engineering"],
+    username: null,
   },
 ];
 
@@ -375,5 +377,86 @@ describe("UsersPage", () => {
     await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
     expect(await screen.findByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Assign roles" })).not.toBeInTheDocument();
+  });
+
+  // Username takeover (spec 2026-10-23 §4.4).
+  test("the row delete dialog names the retired username and offers Disable instead", async () => {
+    vi.mocked(api.deleteUser).mockClear();
+    vi.mocked(api.updateUser).mockClear();
+    vi.mocked(api.updateUser).mockResolvedValue(USERS[0]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const deleteDialog = await screen.findByRole("alertdialog");
+    expect(deleteDialog).toHaveTextContent("Their engine username alice is retired for good");
+
+    await user.click(within(deleteDialog).getByRole("button", { name: "Disable instead" }));
+    const disableDialog = await screen.findByRole("alertdialog");
+    expect(disableDialog).toHaveTextContent("Their engine username stays theirs.");
+    await user.click(within(disableDialog).getByRole("button", { name: "Disable user" }));
+    await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }));
+    expect(api.deleteUser).not.toHaveBeenCalled();
+  });
+
+  test("a disabled user's row delete dialog has no username and no Disable instead", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("bob@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for bob@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("They have no engine username yet.");
+    expect(within(dialog).queryByRole("button", { name: "Disable instead" })).not.toBeInTheDocument();
+  });
+
+  test("the row menu disables an active user after confirming", async () => {
+    vi.mocked(api.updateUser).mockClear();
+    vi.mocked(api.updateUser).mockResolvedValue(USERS[0]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    expect(screen.queryByRole("menuitem", { name: "Enable" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitem", { name: "Disable" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/signed out/i);
+    expect(api.updateUser).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Disable user" }));
+    await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }));
+  });
+
+  test("the row menu enables a disabled user", async () => {
+    vi.mocked(api.updateUser).mockClear();
+    vi.mocked(api.updateUser).mockResolvedValue(USERS[1]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("bob@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for bob@example.com/i }));
+    expect(screen.queryByRole("menuitem", { name: "Disable" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitem", { name: "Enable" }));
+    await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u2", { status: "active" }));
+  });
+
+  test("you cannot disable yourself from the row menu, and it says why", async () => {
+    const SELF_ME: Me = {
+      user_id: "u1",
+      email: "alice@example.com",
+      platform_roles: ["platform_admin"],
+      permissions: [],
+    };
+    const user = userEvent.setup();
+    renderPage(SELF_ME);
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    const item = await screen.findByRole("menuitem", { name: "Disable" });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveAttribute("title", "You cannot disable your own account");
   });
 });

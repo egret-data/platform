@@ -95,7 +95,7 @@ async fn full_role_lifecycle() {
     let direct = roles.roles_of("user", user_id.0).await.unwrap();
     assert!(direct.iter().any(|r| r.id == role_id));
 
-    // count_platform_admins: assign platform_admin to a temp user and check it counts.
+    // platform_admin_user_ids: assign platform_admin to a temp user and check it counts.
     //
     // Asserted against THIS user, not as a global before/after delta. The two
     // sibling tests in this binary each grant AND revoke platform_admin, and
@@ -123,9 +123,6 @@ async fn full_role_lifecycle() {
             .contains(&user_id),
         "the granted user must be counted as a platform admin"
     );
-    // The counting query itself still has to work; it just cannot be asserted
-    // as an exact delta from a concurrently-mutated global.
-    assert!(roles.count_platform_admins().await.unwrap() >= 1);
 
     // Update description.
     roles

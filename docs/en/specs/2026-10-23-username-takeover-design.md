@@ -588,3 +588,23 @@ Deviations from the text above that the code forced or that implementation found
 - **Tests:** `egret-perm-compile/tests/username_reuse_report.rs` (each rule, the 403/200 gate) and
   `egret-controlplane/tests/governance_attention.rs` (the finding for an admin, `notChecked` for a `policy:read`
   reader, no finding for a dead ref).
+
+### Task 7 (Delete steers to Disable)
+
+- **`ControlPlaneUserDto.username`** is read with the batched `UserRepo::usernames` (one query for the list, one
+  for the PATCH response), not by widening `egret_auth::User`; `POST /users` answers `null`.
+- **The last-admin guards count ACTIVE admins (§10, fixed here).** `guard_not_last_admin` (disable, delete) reads
+  `engine_admin_user_ids_via`. `guard_last_admin` (user and group role unassign) refuses a demotion that takes that
+  set from non-empty to empty, computed by `engine_admin_user_ids_without_grant_via` (the same query, skipping the
+  one grant being removed). Before, a disabled admin counted, so the last active admin could be disabled, deleted
+  or demoted while a disabled one remained; the 409 contract is otherwise unchanged. `RoleRepo::count_platform_admins`
+  lost its last caller and is removed. Still unguarded, as before: removing the last active admin from an admin
+  group, deleting that group, and `replace_platform_roles` (workspace route).
+- **The dialogs are shared** (`components/access/UserLifecycleDialogs.tsx`) by the Users list and the user page.
+  `ConfirmDeleteDialog`'s `description` widens from `string` to `ReactNode` (additive) so the username is bold.
+- **"Platform admin" in the disable dialog** reads the user's direct roles (`roles` on the DTO); a user who is an
+  admin only through a group does not get the "lose all-access" sentence.
+- **No bulk Disable confirmation exists** (the bulk bar runs at once with an undo toast), so the bulk path gets no new
+  copy; the row menu's new Disable uses the same confirmation as the user page.
+- **Row menu Disable/Enable** is shown to platform admins only, like the user page's buttons; Disable on your own
+  row is `aria-disabled` with the reason as its title. Enable needs no confirmation, as on the user page.

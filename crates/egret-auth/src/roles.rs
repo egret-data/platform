@@ -156,23 +156,11 @@ impl RoleRepo {
         .map_err(db_err)
     }
 
-    /// Count of principal assignments to the `platform_admin` role, used to
-    /// guard against removing the last platform admin.
-    pub async fn count_platform_admins(&self) -> Result<i64> {
-        sqlx::query_scalar(
-            "SELECT count(*) FROM access_grants pra \
-             JOIN roles r ON r.id = pra.role_id \
-             WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
-        )
-        .fetch_one(&self.db.pool)
-        .await
-        .map_err(db_err)
-    }
-
     /// User ids that hold the `platform_admin` role at platform scope — both
     /// DIRECT user grants AND users who hold it via a GROUP grant (group-granted
-    /// admins ARE expanded through `user_groups`; see the query below). Used to
-    /// count/enumerate the effective platform admins (e.g. the last-admin guard).
+    /// admins ARE expanded through `user_groups`; see the query below), whatever
+    /// their status. The last-admin guards count ACTIVE admins instead
+    /// ([`engine_admin_user_ids_via`]).
     pub async fn platform_admin_user_ids(&self) -> Result<Vec<UserId>> {
         // Both DIRECT user grants AND users who hold platform_admin via a GROUP
         // (OIDC groups sync into `user_groups`). The group arm expands each
@@ -489,18 +477,42 @@ pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// nothing in egret; leaving them in would keep an already-minted engine JWT
 /// (or an alert running as them) at ALL access.
 pub async fn engine_admin_user_ids_via(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
+    engine_admin_ids_query(conn, None).await
+}
+
+/// The engine admins as they would be without the platform-scope
+/// `platform_admin` grant held by (`principal_type`, `principal_id`), that is
+/// after that principal is demoted: the last-admin guard of the role unassign
+/// routes refuses a demotion that leaves this empty.
+pub async fn engine_admin_user_ids_without_grant_via(
+    conn: &mut sqlx::PgConnection,
+    principal_type: &str,
+    principal_id: Uuid,
+) -> Result<Vec<UserId>> {
+    engine_admin_ids_query(conn, Some((principal_type, principal_id))).await
+}
+
+async fn engine_admin_ids_query(
+    conn: &mut sqlx::PgConnection,
+    without_grant: Option<(&str, Uuid)>,
+) -> Result<Vec<UserId>> {
+    let (ptype, pid) = without_grant.unzip();
     let rows = sqlx::query_scalar::<_, Uuid>(
         "SELECT u.id FROM users u \
           WHERE u.status = 'active' \
             AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.principal_type = 'user' AND g.principal_id = u.id) \
+                            AND g.principal_type = 'user' AND g.principal_id = u.id \
+                            AND ($1::text IS NULL OR NOT (g.principal_type = $1 AND g.principal_id = $2))) \
               OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                            JOIN user_groups ug ON ug.group_id = g.principal_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.principal_type = 'group' AND ug.user_id = u.id)) \
+                            AND g.principal_type = 'group' AND ug.user_id = u.id \
+                            AND ($1::text IS NULL OR NOT (g.principal_type = $1 AND g.principal_id = $2)))) \
           ORDER BY u.id",
     )
+    .bind(ptype)
+    .bind(pid)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;

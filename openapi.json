@@ -13221,7 +13221,7 @@
         ],
         "responses": {
           "204": {
-            "description": "User hard-deleted along with sessions/group memberships/grants"
+            "description": "User hard-deleted along with sessions, group memberships and grants. Their engine username is retired permanently: no user can be given it again, so refs and policies naming it match nobody. To revoke access but keep the username, set `status` to `disabled` instead."
           },
           "400": {
             "description": "Caller attempted to delete their own account",
@@ -40906,6 +40906,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine username, `null` until one is minted. Read-only: a delete\nretires it for good (username-takeover spec 2026-10-23 §4.4), so the\ndelete dialog names it."
           }
         }
       },

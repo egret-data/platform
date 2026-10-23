@@ -10,7 +10,9 @@ interface ConfirmDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
-  description: string;
+  // A node, so a caller can mark up part of it (a name in bold); a plain string
+  // still works at every existing call site.
+  description: React.ReactNode;
   confirmText?: string; // text user must type, default "delete"
   // The confirm button's own label — defaults to "Delete" so every existing
   // call site (which reuses this component for genuine deletes) is

@@ -601,12 +601,12 @@ async fn pdp_backed_secret_reader_reads_but_cannot_create() {
 /// Build a `Fixture` backed by a dedicated, freshly-migrated Postgres DATABASE
 /// (not the shared one every other test in this file uses).
 ///
-/// `last_admin_guard` needs this: `guard_last_admin` blocks on
-/// `RoleRepo::count_platform_admins()` being GLOBALLY exactly 1, but dozens of
-/// other `#[tokio::test]`s in this file call `session_for(.., true)`, each
-/// inserting its own `platform_admin` assignment into the shared database, and
-/// tests run concurrently — so the ambient count there is never reliably 1. A
-/// private database (starting at 0 assignments) sidesteps the race instead of
+/// `last_admin_guard` needs this: `guard_last_admin` blocks when the GLOBAL set
+/// of active platform admins would become empty, but dozens of other
+/// `#[tokio::test]`s in this file call `session_for(.., true)`, each inserting
+/// its own `platform_admin` assignment into the shared database, and tests run
+/// concurrently — so the ambient count there is never reliably 1. A private
+/// database (starting at 0 assignments) sidesteps the race instead of
 /// asserting on an unstable global.
 ///
 /// Isolation is by **database**, not by `search_path` schema: the seam
@@ -3405,4 +3405,174 @@ async fn audit_hides_allowed_decisions_and_names_the_actor() {
     for e in entries {
         assert_eq!(e["actorEmail"], email.as_str(), "body={j}");
     }
+}
+
+/// Username takeover (spec 2026-10-23 §4.4 item 1): the user list carries the
+/// engine username — `null` until one is minted, then the minted name — so the
+/// delete dialog can say which name a delete retires.
+#[tokio::test]
+async fn the_user_list_carries_the_engine_username() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "uname_list_admin", true).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let minted = f
+        .users
+        .insert_local(&format!("minted_{tag}@egret.local"), "Minted", "x")
+        .await
+        .expect("insert minted user");
+    let unminted = f
+        .users
+        .insert_local(&format!("unminted_{tag}@egret.local"), "Unminted", "x")
+        .await
+        .expect("insert unminted user");
+    let name = f.users.ensure_username(minted).await.expect("mint");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/users", &admin, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    let row = |id: Uuid| {
+        j.as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["id"] == id.to_string())
+            .unwrap_or_else(|| panic!("user {id} listed; body={j}"))
+            .clone()
+    };
+    assert_eq!(row(minted.0)["username"], name.as_str());
+    assert!(row(unminted.0)["username"].is_null());
+
+    // The PATCH response is the same DTO.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{}", minted.0),
+            &admin,
+            Some(serde_json::json!({ "name": "Renamed" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(j["username"], name.as_str());
+}
+
+/// `guard_not_last_admin` and `guard_last_admin` count ACTIVE admins only
+/// (spec 2026-10-23 §10, the `engine_admin_user_ids_via` definition). With one
+/// active admin and one disabled admin, the active one is the last: disabling,
+/// deleting or demoting them must 409, though two admin rows exist.
+#[tokio::test]
+async fn the_last_active_admin_cannot_be_removed_while_a_disabled_admin_remains() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_last_active_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let _active = session_for(&f, "active_admin", true).await;
+    let _disabled = session_for(&f, "disabled_admin", true).await;
+    let admins: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT pra.principal_id, pra.role_id, u.email FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id JOIN users u ON u.id = pra.principal_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
+    )
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("the two platform_admin assignments");
+    assert_eq!(admins.len(), 2);
+    let (active_id, role_id, _) = admins
+        .iter()
+        .find(|(_, _, e)| e.starts_with("active_admin_"))
+        .cloned()
+        .unwrap();
+    let (disabled_id, _, _) = admins
+        .iter()
+        .find(|(_, _, e)| e.starts_with("disabled_admin_"))
+        .cloned()
+        .unwrap();
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(disabled_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("disable the second admin");
+
+    // A distinct caller holding the three permissions but not platform_admin,
+    // so neither the self-guard nor the caller's own admin row masks the guard.
+    let caller = session_for_with_permission(&f, "remover", "user:disable").await;
+    let caller_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM users WHERE starts_with(email, 'remover_')")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("caller id");
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission) \
+         SELECT g.role_id, p FROM access_grants g, unnest(ARRAY['user:update','user:delete','user:assign_role']) p \
+          WHERE g.principal_type = 'user' AND g.principal_id = $1",
+    )
+    .bind(caller_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("grant the other permissions");
+
+    let attempts = [
+        (
+            "PATCH",
+            format!("/users/{active_id}"),
+            Some(serde_json::json!({ "status": "disabled" })),
+        ),
+        ("DELETE", format!("/users/{active_id}"), None),
+        (
+            "DELETE",
+            format!("/users/{active_id}/roles/{role_id}"),
+            None,
+        ),
+    ];
+    for (method, uri, body) in attempts {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(method, &uri, &caller, body))
+            .await
+            .unwrap();
+        let (status, j) = into_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{method} {uri} on the last ACTIVE admin must 409; body={j}"
+        );
+        assert!(
+            j["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("last platform admin"),
+            "body={j}"
+        );
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(active_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("the active admin still exists");
+    assert_eq!(status, "active");
+
+    // The disabled admin is not an active admin: removing them is allowed.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{disabled_id}"),
+            &caller,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
