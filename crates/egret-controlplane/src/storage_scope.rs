@@ -17,6 +17,12 @@
 //!   not a platform admin gets a 403 that says so, and listings leave them
 //!   out. The match ignores case. A platform admin can open them: the role
 //!   already holds the platform's storage credentials and every other bypass.
+//! - Download only (KI-236): an object under the storage of a catalog (an
+//!   egret warehouse, or a registered lakehouse catalog bound to a storage
+//!   connection, see [`TableDataLocation`]) is a table's data or metadata file.
+//!   Reading it raw skips the column masks and row filters the engines apply,
+//!   so a caller who is not a platform admin gets a 403 that says so. Browse
+//!   still lists these objects: names and sizes are what `storage:read` is for.
 
 use std::sync::Arc;
 
@@ -78,6 +84,34 @@ impl SystemPrefixes {
             .iter()
             .find(|p| key.starts_with(p.as_str()) || key == p[..p.len() - 1])
             .map(String::as_str)
+    }
+}
+
+/// Where the files of catalog tables live: a bucket and a key prefix in it
+/// (`""`: the whole bucket), and the warehouse or catalog that keeps its
+/// tables there (KI-236).
+#[derive(Clone, Debug)]
+pub(crate) struct TableDataLocation {
+    bucket: String,
+    /// Lower-cased, without leading `/`; `""` or ending with exactly one `/`.
+    prefix: String,
+    owner: String,
+}
+
+impl TableDataLocation {
+    /// `owner` names what keeps tables there (`warehouse «sales»`), for the
+    /// refusal.
+    pub fn new(bucket: &str, prefix: Option<&str>, owner: &str) -> Self {
+        let p = prefix.unwrap_or("").trim_matches('/').to_lowercase();
+        Self {
+            bucket: bucket.to_string(),
+            prefix: if p.is_empty() { p } else { format!("{p}/") },
+            owner: owner.to_string(),
+        }
+    }
+
+    fn covers(&self, bucket: &str, abs_key_lower: &str) -> bool {
+        self.bucket.eq_ignore_ascii_case(bucket) && abs_key_lower.starts_with(&self.prefix)
     }
 }
 
@@ -161,6 +195,33 @@ impl<'a> ConnView<'a> {
             }
         }
         Ok(format!("{}{raw}", self.root))
+    }
+
+    /// Refuse to serve the bytes of `raw` (an object key the caller gave,
+    /// already accepted by [`Self::scope_key`]) when it lies under one of
+    /// `tables`, unless the caller is a platform admin (KI-236). Checked on
+    /// every percent-decoding of the key, as [`Self::scope_key`] does.
+    pub fn refuse_table_data(
+        &self,
+        raw: &str,
+        tables: &[TableDataLocation],
+    ) -> Result<(), CpError> {
+        if self.admin {
+            return Ok(());
+        }
+        for form in decoded_forms(raw) {
+            let abs = format!("{}{form}", self.root).to_lowercase();
+            if let Some(t) = tables.iter().find(|t| t.covers(self.bucket, &abs)) {
+                return Err(CpError::ForbiddenBecause(format!(
+                    "the {} keeps its tables' data and metadata files here; downloading one \
+                     would skip the column masks and row filters on those tables, so \
+                     storage:read lists them but cannot download them. Only a platform \
+                     admin can download them; query the table instead",
+                    t.owner
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The listing entry `abs_key` (from the bucket root) as the caller sees
@@ -397,6 +458,61 @@ mod tests {
         let v = view(&s, Some("sandbox"), false);
         assert_eq!(v.visible("sandbox/a.csv").as_deref(), Some("a.csv"));
         assert_eq!(v.visible("other/a.csv"), None);
+    }
+
+    fn tables() -> Vec<TableDataLocation> {
+        vec![
+            TableDataLocation::new("warehouse", Some("/Lake/"), "warehouse «sales»"),
+            TableDataLocation::new("whole", None, "catalog «hive_lake»"),
+        ]
+    }
+
+    #[test]
+    fn a_table_file_is_refused_to_a_non_admin_in_every_spelling() {
+        let s = sys();
+        let t = tables();
+        let v = view(&s, None, false);
+        for key in [
+            "lake/ns/t-1/data/x.parquet",
+            "LAKE/ns/t-1/metadata/00001.metadata.json",
+            "lake%2Fns/t/data/x.parquet",
+            "lake%252Fns/t/data/x.parquet",
+        ] {
+            let r = v.refuse_table_data(key, &t);
+            assert!(
+                matches!(r, Err(CpError::ForbiddenBecause(ref m)) if m.contains("warehouse «sales»")),
+                "{key}: {r:?}"
+            );
+        }
+        // Under the connection's Key prefix, the key the bucket sees counts.
+        let v = view(&s, Some("lake"), false);
+        assert!(v.refuse_table_data("ns/t/data/x.parquet", &t).is_err());
+        // A location without a prefix covers its whole bucket.
+        let v = ConnView::new(&s, "Whole", None, false).unwrap();
+        assert!(v.refuse_table_data("any/file.csv", &t).is_err());
+    }
+
+    #[test]
+    fn a_key_outside_every_table_location_still_downloads() {
+        let s = sys();
+        let t = tables();
+        let v = view(&s, None, false);
+        for key in ["landing/a.csv", "lakehouse/x.parquet", "lake"] {
+            assert!(v.refuse_table_data(key, &t).is_ok(), "{key}");
+        }
+        let other = ConnView::new(&s, "elsewhere", None, false).unwrap();
+        assert!(other
+            .refuse_table_data("lake/ns/t/data/x.parquet", &t)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_platform_admin_downloads_table_files() {
+        let s = sys();
+        let v = view(&s, None, true);
+        assert!(v
+            .refuse_table_data("lake/ns/t/data/x.parquet", &tables())
+            .is_ok());
     }
 
     #[test]
