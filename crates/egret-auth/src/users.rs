@@ -426,6 +426,17 @@ fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// unique violation aborts the *enclosing* transaction in Postgres, so the
 /// `continue` that tries `base-2` after `base` was taken would poison a
 /// caller's whole recompile instead of retrying inside it.
+///
+/// **A name is never minted twice (migration 0208, username-takeover spec
+/// §4.1).** Triggers on `users` insert every name a row takes into the
+/// append-only `username_ledger`, and a name stays there after its holder is
+/// deleted or renamed. So the `UPDATE` below also fails with 23505 on
+/// `username_ledger_pkey` for a name someone ever held, or that a stale ref,
+/// policy body or event named when 0208 ran, and the same `continue` tries the
+/// next suffix: the next person whose email slugs to a deleted user's name
+/// gets `base-2`, never the name refs still point at. The trigger runs inside
+/// this savepoint, so there is no check-then-insert race with a concurrent
+/// delete, and the loop itself needs no knowledge of the ledger.
 pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId) -> Result<String> {
     use sqlx::Connection as _;
 
@@ -531,6 +542,13 @@ fn slugify_localpart(email: &str) -> String {
     } else {
         slug
     }
+}
+
+/// [`slugify_localpart`], for the test that compares it with migration 0208's
+/// SQL `username_slug`. Not an API.
+#[doc(hidden)]
+pub fn slugify_localpart_for_tests(email: &str) -> String {
+    slugify_localpart(email)
 }
 
 /// Connection-generic core of [`UserRepo::usernames`] — SP4c Task 2.

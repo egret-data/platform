@@ -483,3 +483,27 @@ policy reader needs to understand dead refs. Only Task 2 changes if the answer i
 docs PR after the code PR merges, written by the controller (plan Task 9 is out of this PR). The `docs/vi` copy of
 this spec is a Vietnamese reference translation, written after the code is done because the spec may still change
 during implementation; its header says it is a reference, links to this file and says the English text wins.
+
+## 13. Implementation notes (append-only)
+
+Deviations from the text above that the code forced or that implementation found, recorded as they happen.
+
+### Task 1 (the ledger)
+
+- **The append-only guard is stricter than §4.1.** §4.1 lets `user_id` and `retired_at` change freely. The guard
+  lets `user_id` change only to NULL and `retired_at` only from NULL. Setting `user_id` to another user would hand
+  them the name: the record trigger returns early when the ledger row already names the writer as holder. A
+  `BEFORE TRUNCATE` trigger is added too, because a `TRUNCATE users … CASCADE` would empty the ledger without
+  firing any row trigger.
+- **Two helper SQL functions** are added: `username_slug(email)` (step 4a's slug, compared with
+  `slugify_localpart` by a test) and `policy_body_usernames(body)` (every `users[]` name of a body's six item
+  lists, `{…}` macros excluded), shared by step 3 and the baseline. The report (Task 6) can reuse the second.
+- **Step 4b also reads engine-grant events.** Engine-grant summaries name principals as `{"kind": "user", "ref":
+  …}` objects, not `"user:<name>"` strings, so step 4b reads both shapes. It reads the governance rows of
+  `perm_grant`, `perm_rule` and `engine_grant` only (the families that carry principals).
+- **`slugify_localpart_for_tests`** is a `#[doc(hidden)] pub` wrapper in `egret_auth::users`, for the slug
+  agreement test.
+- **`lower()` and non-ASCII.** The SQL slug lowercases with the database collation, which can differ from Rust's
+  Unicode `to_lowercase` for a few non-ASCII letters (for example U+212A KELVIN SIGN lowercases to ASCII `k` in
+  Rust). Every non-ASCII character becomes `-` either way, and step 4a reads only service-account emails, which
+  are built from an ASCII slug, so the difference cannot reach the ledger.
