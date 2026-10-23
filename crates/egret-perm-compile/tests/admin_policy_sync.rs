@@ -18,9 +18,16 @@
 #[path = "support/engine_eval.rs"]
 mod engine_eval;
 
+use egret_auth::groups::{GroupRepo, ReferenceDetail};
 use egret_auth::roles::engine_admin_user_ids_via;
+use egret_auth::users::UserRepo;
 use egret_core::UserId;
 use egret_metastore::Db;
+use egret_perm::PermStore;
+use egret_perm_compile::{
+    assign_platform_role_and_recompile, recompile_service, unassign_platform_role_and_recompile,
+    PermGroupRecompiler,
+};
 use egret_policy::default_policies::{admin_policy_services_via, sync_admin_all_access_in_tx};
 use egret_policy::PolicyStore;
 use engine_eval::{allowed, starrocks_decides, trino_decides};
@@ -78,12 +85,14 @@ async fn make_admin_directly(db: &Db, user: Uuid) {
     .expect("admin grant");
 }
 
-/// A group holding platform_admin, with `members`. Returns `(id, name)`.
-async fn admin_group(db: &Db, members: &[Uuid]) -> (Uuid, String) {
+/// A group (`source` `local` or `oidc`) holding platform_admin, with
+/// `members`. Returns `(id, name)`.
+async fn admin_group(db: &Db, source: &str, members: &[Uuid]) -> (Uuid, String) {
     let name = unique("admins");
     let gid: Uuid =
-        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, $2) RETURNING id")
             .bind(&name)
+            .bind(source)
             .fetch_one(&db.pool)
             .await
             .expect("group");
@@ -226,7 +235,7 @@ async fn the_engine_admin_set_excludes_disabled_admins() {
     let g = new_user(&db, None).await;
     make_admin_directly(&db, a).await;
     make_admin_directly(&db, b).await;
-    admin_group(&db, &[g]).await;
+    admin_group(&db, "local", &[g]).await;
     set_status(&db, b, "disabled").await;
 
     let mut conn = db.pool.acquire().await.unwrap();
@@ -305,4 +314,185 @@ async fn admin_policy_services_are_the_seeded_ones() {
     assert!(ids.contains(&seeded));
     assert!(!ids.contains(&bare));
     assert!(ids.is_sorted());
+}
+
+// ── part 2: every admin change converges egret-admin in its own commit (Task 4) ──
+//
+// Each test seeds `egret-admin` on a Trino profile with no engine (one the
+// compiler does not target: the sync must run before that early return), makes
+// the change through the production entry point, and asks the engine as the
+// demoted principal, with no recompile in between.
+
+/// An admin with a username and a Trino profile whose `egret-admin` names
+/// them. Returns `(admin id, admin username, service id)`.
+async fn admin_and_service(db: &Db) -> (Uuid, String, i64) {
+    let name = unique("adm");
+    let admin = new_user(db, Some(&name)).await;
+    make_admin_directly(db, admin).await;
+    let svc = seeded_service(db, "trino", std::slice::from_ref(&name)).await;
+    assert!(trino_can_select(db, svc, &name).await, "the arrangement");
+    (admin, name, svc)
+}
+
+#[tokio::test]
+async fn unassigning_platform_admin_drops_them_from_egret_admin() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (admin, name, svc) = admin_and_service(&db).await;
+    unassign_platform_role_and_recompile(&db.pool, "user", admin, platform_admin_role(&db).await)
+        .await
+        .expect("unassign");
+    assert!(
+        !trino_can_select(&db, svc, &name).await,
+        "a demoted admin keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn assigning_platform_admin_adds_them() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, _name, svc) = admin_and_service(&db).await;
+    // No username yet: the sync mints one.
+    let newcomer = new_user(&db, None).await;
+    assign_platform_role_and_recompile(&db.pool, "user", newcomer, platform_admin_role(&db).await)
+        .await
+        .expect("assign");
+    let username: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(newcomer)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let username = username.expect("minted at the sync");
+    assert!(
+        trino_can_select(&db, svc, &username).await,
+        "a new admin is not in egret-admin"
+    );
+}
+
+#[tokio::test]
+async fn leaving_a_platform_admin_group_drops_them() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let gname = unique("gadm");
+    let member = new_user(&db, Some(&gname)).await;
+    let (gid, _) = admin_group(&db, "local", &[member]).await;
+    reseed(&db, svc, &[name, gname.clone()]).await;
+    assert!(trino_can_select(&db, svc, &gname).await, "the arrangement");
+
+    GroupRepo::new(db.clone())
+        .remove_member(gid, UserId(member), &PermGroupRecompiler)
+        .await
+        .expect("remove member");
+    assert!(
+        !trino_can_select(&db, svc, &gname).await,
+        "an ex-member of the admin group keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_platform_admin_group_drops_its_members() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let gname = unique("gdel");
+    let member = new_user(&db, Some(&gname)).await;
+    let (gid, _) = admin_group(&db, "local", &[member]).await;
+    reseed(&db, svc, &[name, gname.clone()]).await;
+    assert!(trino_can_select(&db, svc, &gname).await, "the arrangement");
+
+    GroupRepo::new(db.clone())
+        .delete_local(gid, &PermGroupRecompiler, ReferenceDetail::CountOnly)
+        .await
+        .expect("delete group");
+    assert!(
+        !trino_can_select(&db, svc, &gname).await,
+        "a member of a deleted admin group keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn an_oidc_sync_that_removes_the_admin_group_drops_them() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (_admin, name, svc) = admin_and_service(&db).await;
+    let uname = unique("oidc");
+    let member = new_user(&db, Some(&uname)).await;
+    admin_group(&db, "oidc", &[member]).await;
+    reseed(&db, svc, &[name, uname.clone()]).await;
+    assert!(trino_can_select(&db, svc, &uname).await, "the arrangement");
+
+    // The next login claims no group.
+    GroupRepo::new(db.clone())
+        .sync_user_oidc_groups(UserId(member), &[], &PermGroupRecompiler)
+        .await
+        .expect("oidc sync");
+    assert!(
+        !trino_can_select(&db, svc, &uname).await,
+        "a user the IdP no longer puts in the admin group keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_admin_drops_them() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let (admin, name, svc) = admin_and_service(&db).await;
+    // A second admin, so the set is not empty and the body still matters.
+    let other = new_user(&db, Some(&unique("adm2"))).await;
+    make_admin_directly(&db, other).await;
+    UserRepo::new(db.clone())
+        .hard_delete(UserId(admin), &deleter(), &PermGroupRecompiler)
+        .await
+        .expect("delete")
+        .expect("existed");
+    assert!(
+        !trino_can_select(&db, svc, &name).await,
+        "a deleted admin's username keeps engine ALL access"
+    );
+}
+
+#[tokio::test]
+async fn a_recompile_of_an_untargeted_profile_still_syncs() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let stale = unique("stale");
+    // Seeded for someone who is no admin at all, as an old apply left it.
+    let svc = seeded_service(&db, "trino", std::slice::from_ref(&stale)).await;
+    assert!(trino_can_select(&db, svc, &stale).await, "the arrangement");
+    recompile_service(
+        &PermStore::new(db.pool.clone()),
+        &PolicyStore::new(db.clone()),
+        svc,
+    )
+    .await
+    .expect("recompile");
+    assert!(
+        !trino_can_select(&db, svc, &stale).await,
+        "a profile the compiler does not target keeps a stale egret-admin body"
+    );
+}
+
+/// Seed `egret-admin` for `names` directly, as an apply would have.
+async fn reseed(db: &Db, svc: i64, names: &[String]) {
+    let mut names = names.to_vec();
+    names.sort();
+    let mut tx = db.pool.begin().await.unwrap();
+    sync_admin_all_access_in_tx(&mut tx, svc, &names)
+        .await
+        .expect("seed");
+    tx.commit().await.unwrap();
+}
+
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: UserId(Uuid::nil()),
+        email: "deleter@aps.test".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }

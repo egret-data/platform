@@ -1447,10 +1447,19 @@ pub async fn recompile_service_in_tx(
 
 /// [`recompile_service_in_tx`] without its lock and pre-mint, for a caller
 /// that has already taken both over a whole set ([`recompile_services_in_tx`]).
+///
+/// **The `egret-admin` chokepoint (username-takeover spec 2026-10-23 §4.2,
+/// D2).** Every recompile path ends here, so the profile's `egret-admin - …`
+/// policies are converged to the current engine-admin set first: before the
+/// early return (a profile the compiler does not target still carries them)
+/// and before the compile (the impersonation near-root check reads the fresh
+/// body). A path that changes who is an admin therefore only has to put the
+/// admin-policy services in the set it locks ([`admin_policy_services_in`]).
 async fn recompile_locked_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
+    sync_admin_policy_in_tx(tx, service_id).await?;
     let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
@@ -1468,6 +1477,51 @@ async fn recompile_locked_service_in_tx(
     // the row with it (nothing changed on the engine).
     crate::compile_runs::record_compile_ok_in_tx(tx, service_id, &summary).await?;
     Ok(summary)
+}
+
+/// Rewrite `service_id`'s `egret-admin - …` policies to name exactly the
+/// engine admins (`egret_auth::roles::engine_admin_user_ids_via`), when the
+/// service holds any. The caller holds the profile lock; the usernames were
+/// minted by `premint_model_usernames`, and one still missing is minted here
+/// under the same mint lock. Writes nothing when the body is current.
+async fn sync_admin_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<(), CompileError> {
+    if !egret_policy::default_policies::admin_policy_services_via(tx)
+        .await
+        .map_err(db_err)?
+        .contains(&service_id)
+    {
+        return Ok(());
+    }
+    let users = crate::members::engine_admin_usernames_via(tx).await?;
+    let sync = egret_policy::default_policies::sync_admin_all_access_in_tx(tx, service_id, &users)
+        .await
+        .map_err(db_err)?;
+    if sync.changed {
+        tracing::info!(
+            service_id,
+            removed = ?sync.removed,
+            added = ?sync.added,
+            "egret-admin now names exactly the engine admins"
+        );
+    }
+    Ok(())
+}
+
+/// The services holding `egret-admin` policies, appended to an affected set
+/// whose change can alter who is an engine admin.
+async fn admin_policy_services_in(
+    conn: &mut sqlx::PgConnection,
+    ids: &mut Vec<i64>,
+) -> Result<(), CompileError> {
+    ids.extend(
+        egret_policy::default_policies::admin_policy_services_via(conn)
+            .await
+            .map_err(db_err)?,
+    );
+    Ok(())
 }
 
 /// Recompile `service_id`'s profile in its own, self-contained transaction —
@@ -1766,8 +1820,12 @@ pub async fn affected_services_for_role_membership(
     // F11: a platform admin is near-root as an impersonation target (egret
     // seeds them engine admin), so a change of who holds the role re-checks
     // every impersonation grant's target.
+    //
+    // Username takeover (spec 2026-10-23 §4.2): and every engine egret seeded
+    // an `egret-admin` set on, which names exactly the role's active holders.
     if role_name == crate::engine_grants::PLATFORM_ADMIN_ROLE {
         ids.extend(impersonation_grant_profiles_via(conn).await?);
+        admin_policy_services_in(conn, &mut ids).await?;
     }
 
     normalize_service_order(&mut ids);
@@ -1948,8 +2006,11 @@ pub async fn affected_services_for_group_membership(
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
+    // Username takeover (spec 2026-10-23 §4.2): and every `egret-admin` set,
+    // which names the group's members while it holds the role.
     if holds_platform_admin {
         ids.extend(impersonation_grant_profiles_via(conn).await?);
+        admin_policy_services_in(conn, &mut ids).await?;
     }
     normalize_service_order(&mut ids);
     Ok(ids)

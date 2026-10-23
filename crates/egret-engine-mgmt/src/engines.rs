@@ -2583,7 +2583,10 @@ pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Resu
 /// Recompile a profile egret has just seeded infra policies on, when its
 /// engines carry impersonation grants: a grant's target is re-checked against
 /// every policy of the profile (engine grants spec E11, security re-review
-/// M-a). The seeded users (platform admins, `egret_delegator`, `{USER}`) are
+/// M-a). The `egret-admin` set itself needs no recompile here: since the
+/// username-takeover fix every recompile converges it to the engine admins
+/// (`egret_perm_compile`'s `recompile_locked_service_in_tx`), and apply seeds
+/// that same set. The seeded users (platform admins, `egret_delegator`, `{USER}`) are
 /// refused as targets already, so this only re-applies a decision the check
 /// has made; it runs after the seed (the seed's upserts are not one
 /// transaction), fire-and-forget and logged with the repair URL.

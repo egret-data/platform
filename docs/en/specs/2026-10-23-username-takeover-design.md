@@ -539,3 +539,18 @@ Deviations from the text above that the code forced or that implementation found
   tests that seed admins stay green.
 - **The Ranger evaluator models only plugin 2.8.0 for Trino** (2.5.0 is refused), so Trino engine-level
   assertions declare 2.8.0.
+
+### Task 4 (`egret-admin` through the recompile chokepoint)
+
+- **The sync checks membership with `admin_policy_services_via`** (one query) at the top of every
+  `recompile_locked_service_in_tx`, and the usernames come from `members::engine_admin_usernames_via`, which mints
+  a missing one under the mint lock (the pre-mint sweep normally got there first).
+- **`replace_platform_roles` has no test of its own here.** It computes its affected set with the same
+  `affected_services_for_role_membership`, whose admin-policy arm `unassigning_platform_admin_drops_them_from_
+  egret_admin` and `assigning_platform_admin_adds_them` drive; `egret-perm-compile` cannot depend on
+  `egret-workspace`. The `egret-workspace` suite stays green.
+- **One existing test changed:** `engine_grants_compile.rs`'s "the target becomes an engine admin" seeded an
+  `egret-admin` body for a non-admin and recompiled. The recompile now rewrites that body to the real admins, so
+  the test makes the target a platform admin as well.
+- **Group tests seed the arrangement directly** (`sync_admin_all_access_in_tx` with the member's name), so each
+  arrangement holds on the pre-fix code and the red is the change under test.
