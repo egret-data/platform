@@ -623,3 +623,84 @@ Deviations from the text above that the code forced or that implementation found
 - **Recent changes needs no client change:** the server's sentence ("{actor} deleted user {username}") is shown as
   sent, with no target link, and the row reaches only `user:read` holders (D4). A test pins that rendering.
 - **Not checked for you:** `username_reuse` reads "engine usernames reused after a delete (needs `platform_admin`)".
+
+### Review follow-ups (independent review, 2026-10-23)
+
+- **M1: a name minted after 0208 is never a finding.** When the holder's ledger row is a mint (`minted_at` set), the
+  report skips the ref and policy rules. Comparing against `minted_at` instead of `created_at` would not have fixed
+  it: a grant from 2025 is older than any post-0208 mint. What holds is that 0208 seeded every name a ref, body or
+  retained event knew, so a minted name was named nowhere before its holder got it. Report tests now arrange a
+  pre-0208 holder with a backfill ledger row (`pre_0208_holder`): a plain `INSERT` of a username is a mint.
+- **M2: `egret-admin` rows say what is known, with a new verdict `stale`.** For an `egret-admin` body naming someone
+  who is not an active platform admin (holder read live, so a holder deleted since is no holder):
+  - names nobody: no finding (the name is retired and matches nobody);
+  - the holder holds a `platform_admin` grant at any status (a disabled admin), or was minted after 0208: no
+    reuse. A baseline row is no finding (the sync has since repaired that body). A live row is `stale`: "still
+    gives engine ALL access to someone who is no longer an active platform admin";
+  - the body was last written before the holder existed: `definite`;
+  - otherwise `possible`. A demoted admin and a takeover cannot be told apart here: usernames are minted at first
+    use, after `created_at`, so a `created_at` older than the body does not prove they held the name when it was
+    written.
+
+  With these rules no baseline row is a permanent false `critical`, so no acknowledge mechanism is added. The
+  Overview counts `stale` as a `warning`.
+- **L8: the Overview sentence states each verdict separately**, for example "2 references or policies were written
+  for a username before the person who holds it now existed. 1 more may have been. 1 egret-admin policy still gives
+  engine ALL access to someone who is no longer an active platform admin." The Reused names empty state reads "No
+  reused engine usernames found." and says that history past audit retention cannot be checked.
+- **M3: the events are read once.** `REFS` extracts every name from the `perm_grant`, `perm_rule` and `engine_grant`
+  mutation events in one CTE (`DISTINCT ON` the earliest per place and name) and joins it, instead of a `LATERAL`
+  scan per ref. No index was added. Measured with `EXPLAIN ANALYZE` on a copy of the migrated test template with
+  2,000 user refs and 40,000 audit rows (20,000 of them `perm_grant` mutations naming those refs): 43.6 s before
+  (51.0 s with JIT off), 3.5 s after (0.39 s with JIT off; local JIT compilation is most of the 3.5 s).
+- **M4, M5, I1: a status change runs the `egret-admin` sync only, never a compile.**
+  `set_user_status_and_recompile` always locks the admin-policy services (whoever the user is), then the mint lock,
+  then writes the status, then syncs each admin-policy service. This applies to both directions, in one
+  transaction.
+  - Why not "commit status and revoke sessions first, then recompile": that leaves a window, and after a failed
+    recompile an unbounded one, where a disabled admin keeps engine ALL access.
+  - Why not a full compile: status changes nothing else in the compiled model. Disabled users are named like active
+    ones, and the impersonation check reads the `platform_admin` grant (`is_platform_admin`), not the status. A
+    compile therefore only added a dependency: one profile that failed to compile refused the kill switch.
+  - Remaining failure modes are a database error or a failed mint of another admin's missing username. Sessions are
+    still revoked after the commit.
+  - Locking before reading closes the race with a concurrent `platform_admin` grant (M4). Taking the mint lock
+    before the `users` write follows the compile's order (I1).
+  - Tests: `disabling_an_admin_does_not_depend_on_a_profile_compiling` breaks one profile's compile with a test-only
+    trigger on `perm.compile_runs`. `a_disable_racing_an_admin_grant_leaves_them_out_of_egret_admin` holds the
+    user's row so the disable waits at its write while a grant runs.
+- **L1: the boot pass is the sync alone, one transaction per service.** A service that fails is logged and skipped.
+  A profile that cannot compile still gets its `egret-admin` set repaired.
+- **L2: `egret-admin` rows the current def does not build are rewritten too.** This holds for an older def's
+  hierarchies, or bodies seeded from the other engine type's def. Each `policyItems[].users` is set to the current
+  set and the resources are kept. These rows count in `present`.
+- **L3 did not reproduce; nothing changed.** On PostgreSQL 16.15, `strict $.** ? (…).ref` on an object without
+  `ref` yields nothing: an accessor reached through `.**` does not raise the missing-key error. `strict $ ? (…).ref`
+  does raise it. `the_backfill_skips_an_event_object_with_no_ref` pins the behaviour, and it passed before and after.
+  The report's event CTE uses the same path as step 4b.
+- **L4: a mint starts past the highest numeric suffix the ledger holds for the base.** It reads suffixes of 1 to 9
+  digits and tries the base itself first. The race-free insert is unchanged: the ledger read only picks where
+  probing starts. There are still at most 999 attempts.
+- **L5: a dead name in a hand-written body says how to fix it.** This applies when its ledger row is a 0208 backfill
+  with no recorded holder: "… if it was written for someone who had not signed in yet, rewrite it to the name they
+  were given". A name the ledger does not hold (pre-provisioned after 0208) is no finding: it is free, and the next
+  person whose email slugs to it is given it.
+- **Release note (for the PR body):** "Upgrading retires every username that a policy, grant, rule or retained
+  governance event names but no user holds. A hand-written policy that named someone who had not signed in yet
+  will not apply to them: they are given another name (for example `alice-2`). Governance > People > Reused names
+  lists such names as dead. Rewrite those policies to the name the person was given."
+- **L6:** the row-menu Disable on your own row stays listed, `aria-disabled`, with "You cannot disable your own
+  account" as visible text in the item. This is the in-menu reason pattern of `KvTable` and `FileTree`. The row
+  Delete item keeps its old `title`, unchanged here.
+- **L7: "Disable instead" is offered only when the viewer can disable** (`isAdmin`, as for the row Disable). For a
+  user the list shows as the last active platform admin it is `aria-disabled`, with the reason
+  (`lastActiveAdminReason`). The list carries direct roles only, so a group-only admin is not counted, and the
+  server's 409 stays the final word.
+- **I2: runbook, the ledger is data.** Restore schema and data together (a full `pg_restore` into an empty
+  database).
+  - A data-only restore into a freshly migrated database conflicts on the two `reserved` rows 0208 inserted
+    (`egret-lineage`, `egret_delegator`). The ledger's COPY then fails and the table stays empty.
+  - Without `--disable-triggers`, the `users` triggers also fire on every restored row and mint the names anew.
+  - If a data-only restore cannot be avoided: run it as a superuser with `--disable-triggers`. Before it, remove the
+    reserved rows in a session with `SET session_replication_role = replica` (the append-only guard refuses the
+    delete otherwise), so that the dump's copy of them restores.

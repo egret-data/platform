@@ -587,3 +587,81 @@ Các sai khác so với phần trên mà code buộc phải có hoặc quá trì
 - **Test:** `egret-perm-compile/tests/username_reuse_report.rs` (từng quy tắc, gate 403/200) và
   `egret-controlplane/tests/governance_attention.rs` (finding cho admin, `notChecked` cho người đọc
   `policy:read`, không có finding cho ref chết).
+
+### Theo sau review (review độc lập, 2026-10-23)
+
+- **M1: tên mint sau 0208 không bao giờ là finding.** Khi dòng ledger của holder là một mint (`minted_at` có giá
+  trị), báo cáo bỏ qua quy tắc ref và policy. So với `minted_at` thay cho `created_at` thì không sửa được: một grant
+  từ 2025 cũ hơn mọi mint sau 0208. Điều đúng là 0208 đã seed mọi tên mà một ref, body hoặc event còn trong
+  retention biết, nên một tên được mint thì chưa từng được ghi ở đâu trước khi holder nhận nó. Test báo cáo giờ dựng
+  holder trước 0208 bằng một dòng ledger backfill (`pre_0208_holder`): `INSERT` thẳng một username là một mint.
+- **M2: dòng `egret-admin` chỉ nói điều đã biết, với verdict mới `stale`.** Với body `egret-admin` ghi một người
+  không phải platform admin đang active (holder đọc live, nên holder đã bị xoá thì không còn là holder):
+  - không ghi ai: không có finding (tên đã retire và không khớp ai);
+  - holder giữ grant `platform_admin` ở bất kỳ trạng thái nào (admin bị disable), hoặc được mint sau 0208: không
+    phải reuse. Dòng baseline thì không có finding (sync đã sửa body đó). Dòng live là `stale`: "vẫn cho quyền ALL
+    trên engine cho một người không còn là platform admin đang active";
+  - body được ghi lần cuối trước khi holder tồn tại: `definite`;
+  - còn lại là `possible`. Ở đây không phân biệt được admin bị hạ quyền với takeover: username được mint lần dùng
+    đầu tiên, sau `created_at`, nên `created_at` cũ hơn body không chứng minh họ giữ tên khi body được ghi.
+
+  Với các quy tắc này không còn dòng baseline nào là `critical` sai vĩnh viễn, nên không thêm cơ chế acknowledge.
+  Overview tính `stale` là `warning`.
+- **L8: câu trên Overview nói riêng từng verdict**, ví dụ "2 references or policies were written for a username
+  before the person who holds it now existed. 1 more may have been. 1 egret-admin policy still gives engine ALL
+  access to someone who is no longer an active platform admin." Empty state của Reused names là "No reused engine
+  usernames found." và nói rằng lịch sử quá hạn retention của audit thì không kiểm được.
+- **M3: các event được đọc một lần.** `REFS` lấy mọi tên từ các mutation event `perm_grant`, `perm_rule` và
+  `engine_grant` trong một CTE (`DISTINCT ON` lấy cái sớm nhất theo vị trí và tên) rồi join, thay cho một lần quét
+  `LATERAL` cho mỗi ref. Không thêm index. Đo bằng `EXPLAIN ANALYZE` trên một bản sao của test template đã migrate,
+  với 2.000 user ref và 40.000 dòng audit (20.000 dòng là mutation `perm_grant` ghi các ref đó): trước 43,6 s (51,0 s
+  khi tắt JIT), sau 3,5 s (0,39 s khi tắt JIT; phần lớn 3,5 s là JIT compile ở máy local).
+- **M4, M5, I1: đổi status chỉ chạy sync `egret-admin`, không bao giờ compile.** `set_user_status_and_recompile`
+  luôn khoá các admin-policy service (bất kể user là ai), rồi mint lock, rồi ghi status, rồi sync từng admin-policy
+  service. Áp dụng cho cả hai chiều, trong một transaction.
+  - Vì sao không "commit status và thu hồi session trước, rồi recompile": như vậy để lại một khoảng thời gian (và
+    sau một recompile thất bại thì không giới hạn) mà admin bị disable vẫn giữ quyền ALL trên engine.
+  - Vì sao không compile đầy đủ: status không đổi gì khác trong model đã compile. User bị disable được ghi tên như
+    user active, và kiểm tra impersonation đọc grant `platform_admin` (`is_platform_admin`), không đọc status.
+    Compile vì thế chỉ thêm một sự phụ thuộc: một profile compile lỗi là chặn luôn kill switch.
+  - Các lỗi còn lại có thể xảy ra là lỗi database, hoặc mint thất bại username còn thiếu của một admin khác.
+    Session vẫn bị thu hồi sau commit.
+  - Khoá trước khi đọc đóng race với một grant `platform_admin` chạy đồng thời (M4). Lấy mint lock trước khi ghi
+    `users` theo đúng thứ tự của compile (I1).
+  - Test: `disabling_an_admin_does_not_depend_on_a_profile_compiling` làm hỏng compile của một profile bằng một
+    trigger chỉ dùng cho test trên `perm.compile_runs`. `a_disable_racing_an_admin_grant_leaves_them_out_of_egret_admin`
+    giữ dòng của user để lệnh disable chờ ở bước ghi trong khi một grant chạy.
+- **L1: boot pass chỉ là sync, một transaction cho mỗi service.** Service nào lỗi thì được log và bỏ qua. Một profile
+  không compile được vẫn được sửa tập `egret-admin`.
+- **L2: các dòng `egret-admin` mà def hiện tại không dựng cũng được ghi lại.** Điều này áp dụng cho hierarchy của def
+  cũ, hoặc body seed từ def của loại engine kia. Mỗi `policyItems[].users` được đặt thành tập hiện tại, resource giữ
+  nguyên. Các dòng này được tính vào `present`.
+- **L3 không tái hiện được; không đổi gì.** Trên PostgreSQL 16.15, `strict $.** ? (…).ref` trên một object không có
+  `ref` không trả về gì: accessor đi qua `.**` không báo lỗi thiếu key. `strict $ ? (…).ref` thì có báo.
+  `the_backfill_skips_an_event_object_with_no_ref` ghim hành vi này, và nó pass cả trước lẫn sau. CTE event của báo
+  cáo dùng cùng đường dẫn với bước 4b.
+- **L4: mint bắt đầu sau hậu tố số lớn nhất mà ledger giữ cho base.** Nó đọc hậu tố từ 1 đến 9 chữ số và thử chính
+  base trước. Insert không race vẫn giữ nguyên: lần đọc ledger chỉ chọn chỗ bắt đầu thử. Vẫn tối đa 999 lần thử.
+- **L5: tên chết trong body viết tay nói cách sửa.** Áp dụng khi dòng ledger của nó là backfill của 0208 không ghi
+  holder: "… if it was written for someone who had not signed in yet, rewrite it to the name they were given". Tên
+  mà ledger không giữ (pre-provision sau 0208) không phải finding: nó còn trống, và người tiếp theo có email slug ra
+  tên đó sẽ nhận nó.
+- **Release note (cho PR body):** "Upgrading retires every username that a policy, grant, rule or retained
+  governance event names but no user holds. A hand-written policy that named someone who had not signed in yet
+  will not apply to them: they are given another name (for example `alice-2`). Governance > People > Reused names
+  lists such names as dead. Rewrite those policies to the name the person was given."
+- **L6:** mục Disable trên menu dòng của chính bạn vẫn được liệt kê, `aria-disabled`, với "You cannot disable your
+  own account" là chữ hiển thị trong mục. Đây là mẫu lý do trong menu của `KvTable` và `FileTree`. Mục Delete giữ
+  `title` cũ, không đổi ở đây.
+- **L7: "Disable instead" chỉ hiện khi người xem có quyền disable** (`isAdmin`, như Disable trên dòng). Với một user
+  mà danh sách cho thấy là platform admin active cuối cùng, nút là `aria-disabled` kèm lý do
+  (`lastActiveAdminReason`). Danh sách chỉ có role trực tiếp, nên admin chỉ qua group không được đếm, và 409 của
+  server vẫn là câu trả lời cuối cùng.
+- **I2: runbook, ledger là dữ liệu.** Restore schema và dữ liệu cùng nhau (một `pg_restore` đầy đủ vào database
+  trống).
+  - Restore chỉ dữ liệu vào một database vừa migrate sẽ xung đột với hai dòng `reserved` mà 0208 đã insert
+    (`egret-lineage`, `egret_delegator`). Lệnh COPY của ledger khi đó lỗi và bảng để trống.
+  - Không có `--disable-triggers`, các trigger của `users` cũng chạy trên mọi dòng được restore và mint lại các tên.
+  - Nếu không tránh được restore chỉ dữ liệu: chạy bằng superuser với `--disable-triggers`. Trước đó, xoá các dòng
+    reserved trong một session có `SET session_replication_role = replica` (nếu không, guard append-only sẽ từ chối
+    lệnh xoá), để bản sao của chúng trong dump được restore.
