@@ -62,7 +62,8 @@ import type {
   UndoRequest,
   UndoResponse,
   UnresolvedPrincipal,
-  UserPrincipal
+  UserPrincipal,
+  UsernameReuseReport
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -4075,6 +4076,132 @@ export function usePermListUnresolvedPrincipals<TData = Awaited<ReturnType<typeo
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getPermListUnresolvedPrincipalsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permUsernameReuseResponse200 = {
+  data: UsernameReuseReport
+  status: 200
+}
+
+export type permUsernameReuseResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permUsernameReuseResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permUsernameReuseResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permUsernameReuseResponseSuccess = (permUsernameReuseResponse200) & {
+  headers: Headers;
+};
+export type permUsernameReuseResponseError = (permUsernameReuseResponse401 | permUsernameReuseResponse403 | permUsernameReuseResponse500) & {
+  headers: Headers;
+};
+
+export type permUsernameReuseResponse = (permUsernameReuseResponseSuccess | permUsernameReuseResponseError)
+
+export const getPermUsernameReuseUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/username-reuse`
+}
+
+/**
+ * Evidence of past username takeovers (before migration 0208 a deleted user's username could be minted for the next person): user refs and policy bodies older than the person who now holds the name, `egret-admin` bodies naming someone who is not an active platform admin, and refs nobody holds. Reported only; nothing is changed.
+ */
+export const permUsernameReuse = async ( options?: Parameters<typeof customInstance>[1]): Promise<permUsernameReuseResponse> => {
+
+  return customInstance<permUsernameReuseResponse>(getPermUsernameReuseUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermUsernameReuseQueryKey = () => {
+    return [
+    `/api/control-plane/perm/username-reuse`
+    ] as const;
+    }
+
+
+export const getPermUsernameReuseQueryOptions = <TData = Awaited<ReturnType<typeof permUsernameReuse>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermUsernameReuseQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permUsernameReuse>>> = ({ signal }) => permUsernameReuse({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermUsernameReuseQueryResult = NonNullable<Awaited<ReturnType<typeof permUsernameReuse>>>
+export type PermUsernameReuseQueryError = ErrorBody
+
+
+export function usePermUsernameReuse<TData = Awaited<ReturnType<typeof permUsernameReuse>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permUsernameReuse>>,
+          TError,
+          Awaited<ReturnType<typeof permUsernameReuse>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermUsernameReuse<TData = Awaited<ReturnType<typeof permUsernameReuse>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permUsernameReuse>>,
+          TError,
+          Awaited<ReturnType<typeof permUsernameReuse>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermUsernameReuse<TData = Awaited<ReturnType<typeof permUsernameReuse>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermUsernameReuse<TData = Awaited<ReturnType<typeof permUsernameReuse>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permUsernameReuse>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermUsernameReuseQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

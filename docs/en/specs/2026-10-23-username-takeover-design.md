@@ -1,6 +1,6 @@
 # Username takeover after user delete: design
 
-Status: design, 2026-10-23. Not implemented. Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
+Status: backend implemented (plan Tasks 1–6, 2026-10-23); frontend, docs and live check pending. Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
 Plan: [`../plans/2026-10-23-username-takeover.md`](../plans/2026-10-23-username-takeover.md).
 Programme: KI fix programme, security package. Follow-up of the #692 review (one of eight follow-ups; the other
 seven are non-goals, §11).
@@ -566,3 +566,25 @@ Deviations from the text above that the code forced or that implementation found
 - **No `create_admin_cli_syncs` test.** `init` is private to the `egret` binary and needs a full `Config`; it
   calls the same `sync_admin_policies` the boot pass test covers, and a failure there only logs (the next boot
   repairs).
+
+### Task 6 (the report and the attention signal)
+
+- **Wire shape, as built** (`UsernameReuseReport`): `{generatedAt, findings, baselineTakenAt}`. A finding is
+  `{kind, verdict, username, place, holder, retired, evidenceAt, evidence}`. `place` is one flat object,
+  `{type, id?, position?, effect?, policyId?, name?, service?, managedBy?}` (absent fields are omitted), which is
+  simpler for the generated client than a tagged union. `holder` is `{id, email, createdAt, mintedAt}` or `null`.
+  `retired` is set for `holderless_ref` only: `{retiredAt, mintedFor, failsOpen}`. `baselineTakenAt` is `null`
+  when 0208 kept no baseline row.
+- **`holderless_ref` from policies** covers hand-written (`operator`) bodies only, live (compiled and infra bodies
+  are rewritten by the compiler and the sync). Its `failsOpen` is true when the name is in `denyPolicyItems` or
+  `allowExceptions`.
+- **Baseline rows with no holder are not reported** (the live rules cover current bodies); baseline rows feed
+  `policy_predates_holder` and `admin_policy_named_non_admin` only.
+- **The gate is the `platform_admin` role on the principal** (`Principal::platform_roles`), the same pseudo-
+  permission `attention()` inserts into `held`.
+- **Attention:** kind `username_reuse`, `Requires::All(["platform_admin"])`, sample label = the username, detail
+  = the place in words, sample ref = grant, rule or profile (none for an engine grant); finding ref
+  `{"type": "reused_names"}`.
+- **Tests:** `egret-perm-compile/tests/username_reuse_report.rs` (each rule, the 403/200 gate) and
+  `egret-controlplane/tests/governance_attention.rs` (the finding for an admin, `notChecked` for a `policy:read`
+  reader, no finding for a dead ref).

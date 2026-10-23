@@ -6525,7 +6525,7 @@
           "control-plane-governance"
         ],
         "summary": "Recent governance changes, newest first.",
-        "description": "Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).",
+        "description": "Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader; user deletes for a reader who also holds `user:read`. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).",
         "operationId": "changes",
         "parameters": [
           {
@@ -10283,6 +10283,57 @@
           },
           "403": {
             "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/username-reuse": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "description": "Evidence of past username takeovers (before migration 0208 a deleted user's username could be minted for the next person): user refs and policy bodies older than the person who now holds the name, `egret-admin` bodies naming someone who is not an active platform admin, and refs nobody holds. Reported only; nothing is changed.",
+        "operationId": "username_reuse",
+        "responses": {
+          "200": {
+            "description": "Every finding, ordered by username",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsernameReuseReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -46484,6 +46535,36 @@
           }
         }
       },
+      "Holder": {
+        "type": "object",
+        "description": "Who holds the name now.",
+        "required": [
+          "id",
+          "email",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mintedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the name was minted for them; `null` when they held it before\nmigration 0208 (then `createdAt` is a lower bound)."
+          }
+        }
+      },
       "ImpersonationDto": {
         "type": "object",
         "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
@@ -49529,6 +49610,74 @@
           }
         }
       },
+      "Place": {
+        "type": "object",
+        "description": "Where the name is written. A grant, rule or engine grant carries `id`\n(and, for a grant or rule, `position`; for a grant, `effect`); a policy\ncarries `policyId`, `name`, `service` and `managedBy`.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/PlaceType"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "position": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`include` | `exclude`."
+          },
+          "effect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`allow` | `deny`."
+          },
+          "policyId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The profile (Ranger service) name."
+          },
+          "managedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PlaceType": {
+        "type": "string",
+        "enum": [
+          "grant",
+          "rule",
+          "engine_grant",
+          "policy"
+        ]
+      },
       "PluginEngine": {
         "type": "object",
         "required": [
@@ -51275,6 +51424,21 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Governance > People > Reused names (the username-reuse report).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reused_names"
+                ]
+              }
+            }
           }
         ],
         "description": "Where a finding or a sample is fixed; the client builds the URL."
@@ -51718,6 +51882,100 @@
           }
         },
         "additionalProperties": false
+      },
+      "Retired": {
+        "type": "object",
+        "description": "The ledger's record of a name nobody holds.",
+        "required": [
+          "failsOpen"
+        ],
+        "properties": {
+          "retiredAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "mintedFor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user it was minted for, when the ledger knows (no FK: they may be\ndeleted)."
+          },
+          "failsOpen": {
+            "type": "boolean",
+            "description": "Whether the position fails OPEN now that the name matches nobody: a\ndeny include, an allow exclude, a rule exemption's exclude, or a\nhand-written deny item or allow exception."
+          }
+        }
+      },
+      "ReuseFinding": {
+        "type": "object",
+        "required": [
+          "kind",
+          "verdict",
+          "username",
+          "place",
+          "evidence"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ReuseKind"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/Verdict"
+          },
+          "username": {
+            "type": "string"
+          },
+          "place": {
+            "$ref": "#/components/schemas/Place"
+          },
+          "holder": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Holder"
+              }
+            ]
+          },
+          "retired": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Retired",
+                "description": "Set for `holderless_ref`."
+              }
+            ]
+          },
+          "evidenceAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The time the evidence is from."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "The evidence, in words."
+          }
+        }
+      },
+      "ReuseKind": {
+        "type": "string",
+        "enum": [
+          "ref_predates_holder",
+          "policy_predates_holder",
+          "admin_policy_named_non_admin",
+          "holderless_ref"
+        ]
       },
       "RoleAssigneeDto": {
         "type": "object",
@@ -56483,6 +56741,33 @@
           }
         }
       },
+      "UsernameReuseReport": {
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "findings"
+        ],
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReuseFinding"
+            }
+          },
+          "baselineTakenAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When migration 0208 took the baseline; `null` when it kept no row."
+          }
+        }
+      },
       "ValidateFlowRequest": {
         "type": "object",
         "description": "`POST /flows/{id}/validate` body — the UNSAVED source being checked. See\nthis module's doc comment for why this is a body field and not simply\n\"validate the stored draft\".",
@@ -56523,6 +56808,14 @@
         "enum": [
           "not_null",
           "operator"
+        ]
+      },
+      "Verdict": {
+        "type": "string",
+        "enum": [
+          "definite",
+          "possible",
+          "dead"
         ]
       },
       "Via": {

@@ -53,4 +53,6 @@ export type Ref = {
 } | {
   name: string;
   type: 'data_catalog';
+} | {
+  type: 'reused_names';
 };

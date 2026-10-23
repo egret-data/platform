@@ -50,6 +50,11 @@ const TAG_READ: &str = "tag:read";
 const ENGINE_READ: &str = "engine:read";
 const CATALOG_READ: &str = "catalog_registry:read";
 const KNOWN_PERMISSIONS: [&str; 4] = [POLICY_READ, TAG_READ, ENGINE_READ, CATALOG_READ];
+/// Not a permission: the `platform_admin` role at platform scope, held as one
+/// in `held` (username-takeover spec §4.5). The username-reuse source shows
+/// emails and holders across workspaces, so only an admin runs it; everyone
+/// else gets it in `notChecked`.
+const PLATFORM_ADMIN: &str = "platform_admin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -103,6 +108,8 @@ pub enum Ref {
     DataCatalog {
         name: String,
     },
+    /// Governance > People > Reused names (the username-reuse report).
+    ReusedNames,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -294,6 +301,12 @@ pub const SOURCES: &[Source] = &[
         run: |c| Box::pin(tags_without_clearance(c)),
     },
     Source {
+        kind: "username_reuse",
+        what: "username reuse",
+        requires: Requires::All(&[PLATFORM_ADMIN]),
+        run: |c| Box::pin(username_reuse(c)),
+    },
+    Source {
         kind: "catalogs_without_engine",
         what: "catalog attachments",
         requires: GOVERNANCE,
@@ -342,6 +355,9 @@ async fn attention(
             Err(egret_core::Error::Forbidden) => {}
             Err(e) => return Err(e.into()),
         }
+    }
+    if p.platform_roles.iter().any(|r| r == PLATFORM_ADMIN) {
+        held.insert(PLATFORM_ADMIN);
     }
     let mut tx = begin_snapshot(&st).await?;
     let response = attention_via(&mut tx, &held, SOURCES).await;
@@ -551,6 +567,66 @@ fn coordinate_path(coordinate: &str) -> String {
 }
 
 // ── sources ─────────────────────────────────────────────────────────────
+
+/// Past username takeovers (username-takeover spec §4.5): `critical` when
+/// any finding is `definite`, else `warning` for `possible` ones. Refs nobody
+/// holds (`dead`) are no finding here: `unresolved_principals_fail_open`
+/// already reports the ones that fail open. Samples name the username and the
+/// place, never an email.
+async fn username_reuse(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
+    use egret_perm_compile::username_reuse::{findings_via, PlaceType, Verdict};
+    let rows: Vec<_> = findings_via(c)
+        .await?
+        .findings
+        .into_iter()
+        .filter(|f| f.verdict != Verdict::Dead)
+        .collect();
+    let severity = if rows.iter().any(|f| f.verdict == Verdict::Definite) {
+        Severity::Critical
+    } else {
+        Severity::Warning
+    };
+    let sample = rows
+        .iter()
+        .map(|f| {
+            let (detail, r#ref) = match f.place.place_type {
+                PlaceType::Grant => (
+                    "a grant".to_string(),
+                    f.place.id.map(|id| Ref::Grant { id }),
+                ),
+                PlaceType::Rule => ("a rule".to_string(), f.place.id.map(|id| Ref::Rule { id })),
+                PlaceType::EngineGrant => ("an engine grant".to_string(), None),
+                PlaceType::Policy => {
+                    let service = f.place.service.clone().unwrap_or_default();
+                    (
+                        format!(
+                            "policy {} on profile {service}",
+                            f.place.name.as_deref().unwrap_or("")
+                        ),
+                        Some(Ref::Profile { name: service }),
+                    )
+                }
+            };
+            Sample {
+                label: f.username.clone(),
+                detail: Some(detail),
+                r#ref,
+            }
+        })
+        .collect();
+    Ok(finding(
+        "username_reuse",
+        severity,
+        rows.len(),
+        format!(
+            "{} written for a deleted user may now apply to the person who was later given \
+             their username.",
+            plural(rows.len(), "reference or policy", "references or policies")
+        ),
+        sample,
+        Some(Ref::ReusedNames),
+    ))
+}
 
 async fn unresolved_principals(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     let rows: Vec<_> = egret_perm_compile::principal_refs::unresolved_principals_via(c)
