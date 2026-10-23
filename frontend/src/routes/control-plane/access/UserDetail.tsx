@@ -18,6 +18,7 @@ import {
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { RolesEditor } from "@/components/access/RolesEditor";
+import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
 import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -324,6 +325,8 @@ export default function UserDetail() {
           setDeleteOpen(false);
           setDisableOpen(true);
         }}
+        canDisable={isAdmin}
+        disableBlockedReason={lastActiveAdminReason(user, usersQ.data ?? [])}
       />
     </div>
   );

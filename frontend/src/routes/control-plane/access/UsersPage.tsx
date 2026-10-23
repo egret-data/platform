@@ -34,6 +34,7 @@ import {
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { ImpersonateDialog } from "@/components/ImpersonateDialog";
+import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
 import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
@@ -294,16 +295,23 @@ export default function UsersPage() {
             )}
             <DropdownMenuSeparator />
             {/* The detail page's guards: admins only, never yourself. Enable
-                needs no confirmation; Disable signs the user out (KI-209). */}
+                needs no confirmation; Disable signs the user out (KI-209).
+                On your own row Disable stays listed, aria-disabled, with the
+                reason in the item (FE-ACTION-4). */}
             {isAdmin &&
               (u.status === "active" ? (
                 <DropdownMenuItem
                   disabled={u.id === me?.user_id}
-                  title={u.id === me?.user_id ? "You cannot disable your own account" : undefined}
+                  className="items-start"
                   onClick={() => setDisableTarget(u)}
                 >
                   <UserX className="mr-2 h-4 w-4" />
-                  Disable
+                  <span className="flex flex-col">
+                    <span>Disable</span>
+                    {u.id === me?.user_id ? (
+                      <span className="text-xs text-muted-foreground">You cannot disable your own account</span>
+                    ) : null}
+                  </span>
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuItem
@@ -547,6 +555,8 @@ export default function UsersPage() {
           setDisableTarget(deleteTarget);
           setDeleteTarget(null);
         }}
+        canDisable={isAdmin}
+        disableBlockedReason={lastActiveAdminReason(deleteTarget, users.data ?? [])}
       />
       <DisableUserDialog
         user={disableTarget}

@@ -455,8 +455,39 @@ describe("UsersPage", () => {
     await screen.findByText("alice@example.com");
 
     await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
-    const item = await screen.findByRole("menuitem", { name: "Disable" });
+    const item = await screen.findByRole("menuitem", { name: /^Disable/ });
     expect(item).toHaveAttribute("aria-disabled", "true");
-    expect(item).toHaveAttribute("title", "You cannot disable your own account");
+    // Visible in the item, not only in a title a disabled item never shows.
+    expect(within(item).getByText("You cannot disable your own account")).toBeVisible();
+  });
+
+  test("the row delete dialog offers no Disable instead to a viewer who cannot disable", async () => {
+    const NON_ADMIN_ME: Me = { user_id: "2", email: "ops@example.com", platform_roles: [], permissions: [] };
+    const user = userEvent.setup();
+    renderPage(NON_ADMIN_ME);
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).queryByRole("button", { name: "Disable instead" })).not.toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/disable them instead/);
+  });
+
+  test("Disable instead says why for the last active platform admin and does nothing", async () => {
+    vi.mocked(api.listUsers).mockResolvedValue([{ ...USERS[0], roles: ["platform_admin"] }, USERS[1]]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    const button = within(dialog).getByRole("button", { name: "Disable instead" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription(/the last active platform admin cannot be disabled/);
+    await user.click(button);
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Disable user" })).not.toBeInTheDocument();
   });
 });

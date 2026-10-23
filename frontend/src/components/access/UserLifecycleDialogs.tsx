@@ -1,3 +1,4 @@
+import { useId } from "react";
 import type { AccessUser } from "@/api/access";
 import {
   AlertDialog,
@@ -26,6 +27,8 @@ export function DeleteUserDialog({
   onOpenChange,
   onConfirm,
   onDisableInstead,
+  canDisable,
+  disableBlockedReason,
 }: {
   user: AccessUser | null;
   open: boolean;
@@ -33,7 +36,13 @@ export function DeleteUserDialog({
   onConfirm: () => void;
   /** Closes this dialog and opens the disable confirmation. */
   onDisableInstead: () => void;
+  /** Whether the viewer may disable users at all; without it Disable is not offered. */
+  canDisable: boolean;
+  /** Why the server would refuse disabling this user (FE-ACTION-4); `null` when it would not. */
+  disableBlockedReason: string | null;
 }) {
+  const reasonId = useId();
+  const offerDisable = user?.status === "active" && canDisable;
   return (
     <ConfirmDeleteDialog
       open={open}
@@ -51,17 +60,32 @@ export function DeleteUserDialog({
           ) : (
             "They have no engine username yet."
           )}{" "}
-          To stop them signing in and keep their username, grants and history, disable them
-          instead.
+          {offerDisable
+            ? "To stop them signing in and keep their username, grants and history, disable them instead."
+            : null}
         </>
       }
       confirmText="delete"
       onConfirm={onConfirm}
     >
-      {user?.status === "active" && (
-        <Button type="button" variant="outline" size="sm" onClick={onDisableInstead}>
-          Disable instead
-        </Button>
+      {offerDisable && (
+        <span className="flex flex-col items-start gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-disabled={disableBlockedReason ? true : undefined}
+            aria-describedby={disableBlockedReason ? reasonId : undefined}
+            onClick={disableBlockedReason ? undefined : onDisableInstead}
+          >
+            Disable instead
+          </Button>
+          {disableBlockedReason ? (
+            <span id={reasonId} className="text-xs">
+              {disableBlockedReason}
+            </span>
+          ) : null}
+        </span>
       )}
     </ConfirmDeleteDialog>
   );
