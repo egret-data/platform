@@ -5,6 +5,7 @@
 //! via the PDP bypass) PUTs a table-level and a column-level tag → 200; GET
 //! `?schema=&table=` lists BOTH (distinguishing table vs column); DELETE removes
 //! one → 200 (GET then omits it). A plain user (no catalog_registry perm) PUT → 403.
+//! A warehouse or classification id that names nothing → a coded 404.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -140,7 +141,7 @@ async fn resource_tag_assign_list_unassign_and_gating() {
         .await
         .expect("create column tag");
 
-    let wh = Uuid::new_v4();
+    let wh = egret_test_db::seed_warehouse(&db.pool).await;
     let admin_tok = session_for(&sessions, admin).await;
     let plain_tok = session_for(&sessions, plain).await;
 
@@ -353,7 +354,7 @@ async fn a_table_level_assignment_is_refused_when_a_tag_mask_names_the_tag() {
     let sessions = st.sessions.clone();
     let token = session_for(&sessions, admin).await;
     let app = egret_bi::resource_tags_router().with_state(st);
-    let wh = Uuid::new_v4();
+    let wh = egret_test_db::seed_warehouse(&db.pool).await;
     let uri = format!("/control-plane/warehouses/{wh}/resource-tags");
 
     let put = |column: Option<&str>, tag_id: Uuid, table: &str| {
@@ -498,4 +499,98 @@ async fn a_table_level_assignment_is_refused_when_a_tag_mask_names_the_tag() {
             "the column-level remedy must be accepted; got {status}: {body}"
         );
     }
+}
+
+/// Spec §11.1: `catalog_tag_assignments.warehouse_id` has no foreign key, so a
+/// PUT naming a warehouse that does not exist answered 200 and stored a row no
+/// catalog serves; a `tag_id` naming no classification hit the tag foreign key
+/// and answered 500. Both are a coded 404 now, on PUT and DELETE alike, and
+/// nothing is stored.
+#[tokio::test]
+async fn an_unknown_warehouse_or_classification_is_a_coded_404() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = seed_user(&db, true).await;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let token = session_for(&st.sessions, admin).await;
+    let app = egret_bi::resource_tags_router().with_state(st);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag = TagRepo::new(db.clone())
+        .create(
+            &format!("nf-{suffix}"),
+            &format!("NF {suffix}"),
+            "",
+            "",
+            Some(admin),
+        )
+        .await
+        .expect("create tag");
+    let real_wh = egret_test_db::seed_warehouse(&db.pool).await;
+    let (no_wh, no_tag) = (Uuid::new_v4(), Uuid::new_v4());
+
+    for (method, wh, tag_id, code, field, id) in [
+        (
+            "PUT",
+            no_wh,
+            tag.id,
+            "warehouse_not_found",
+            "warehouseId",
+            no_wh,
+        ),
+        (
+            "DELETE",
+            no_wh,
+            tag.id,
+            "warehouse_not_found",
+            "warehouseId",
+            no_wh,
+        ),
+        ("PUT", real_wh, no_tag, "tag_not_found", "tagId", no_tag),
+        ("DELETE", real_wh, no_tag, "tag_not_found", "tagId", no_tag),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/control-plane/warehouses/{wh}/resource-tags"))
+                    .header("Cookie", format!("egret_session={token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "schema": "sales", "table": "orders", "tag_id": tag_id
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp).await).expect("JSON body");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {code}: {body}");
+        assert_eq!(body["code"], code, "{method}: {body}");
+        assert_eq!(body[field], id.to_string(), "{method}: {body}");
+        assert!(body["error"].is_string(), "{method}: {body}");
+    }
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalog_tag_assignments WHERE warehouse_id = $1 OR tag_id = $2",
+    )
+    .bind(no_wh)
+    .bind(no_tag)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 0, "a refused write stores nothing");
 }

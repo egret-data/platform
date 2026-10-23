@@ -15532,6 +15532,16 @@
               }
             }
           },
+          "404": {
+            "description": "`code` is `warehouse_not_found` (no warehouse has `warehouse_id`; the body adds `warehouseId`) or `tag_not_found` (no classification has `tag_id`; the body adds `tagId`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
@@ -15604,6 +15614,16 @@
           },
           "403": {
             "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment",
             "content": {
               "application/json": {
                 "schema": {
