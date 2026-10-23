@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { CardSettingsPanel } from "../CardSettingsPanel";
 import type { DraftCard } from "../tabs";
 import type { Chart } from "@/api/charts";
@@ -17,38 +18,54 @@ const chart = {
   params: { spec: { dimensions: ["region"], columns: ["city"], metrics: [] } },
 } as unknown as Chart;
 
-const render1 = (labels?: Record<string, string>) =>
+/** Renders the panel and opens the crossfilter picker; returns the options callback. */
+async function open1(labels?: Record<string, string>, mapped?: string) {
+  const onUpdateOptions = vi.fn();
+  const shown = mapped === undefined ? card
+    : { ...card, options: { clickBehavior: { type: "crossfilter", parameterMapping: { p1: mapped } } } };
   render(
     <CardSettingsPanel
-      card={card} chart={chart} tabs={[]} labels={labels}
+      card={shown} chart={chart} tabs={[]} labels={labels}
       parameters={[{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }]}
-      onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()}
+      onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()}
     />,
   );
+  await userEvent.setup().click(screen.getByRole("combobox", { name: "crossfilter Region" }));
+  return onUpdateOptions;
+}
+
+/** Picks the option named `name` and returns the column the panel stored for the filter. */
+async function storedFor(onUpdateOptions: ReturnType<typeof vi.fn>, name: string) {
+  await userEvent.setup().click(await screen.findByRole("option", { name }));
+  return onUpdateOptions.mock.lastCall?.[0].clickBehavior.parameterMapping.p1;
+}
 
 describe("the crossfilter column picker", () => {
-  it("shows the display name, not the machine name", () => {
-    render1({ region: "Khu vực" });
-    const opt = screen.getByRole("option", { name: "Khu vực" }) as HTMLOptionElement;
+  it("shows the display name, not the machine name", async () => {
+    const onUpdateOptions = await open1({ region: "Khu vực" });
     // IDENTITY stays the machine name — the stored value must not become the label.
-    expect(opt.value).toBe("region");
+    expect(await storedFor(onUpdateOptions, "Khu vực")).toBe("region");
   });
 
-  it("keeps the machine name reachable in the title, for whoever writes the SQL", () => {
-    render1({ region: "Khu vực" });
-    expect(screen.getByRole("option", { name: "Khu vực" })).toHaveAttribute("title", "Khu vực (region)");
+  it("keeps the machine name reachable in the title, for whoever writes the SQL", async () => {
+    await open1({ region: "Khu vực" });
+    expect(await screen.findByRole("option", { name: "Khu vực" })).toHaveAttribute("title", "Khu vực (region)");
   });
 
-  it("falls back to the machine name when a column has no verbose_name", () => {
-    render1({ region: "Khu vực" });
-    const opt = screen.getByRole("option", { name: "city" }) as HTMLOptionElement;
-    expect(opt.value).toBe("city");
+  it("falls back to the machine name when a column has no verbose_name", async () => {
+    const onUpdateOptions = await open1({ region: "Khu vực" });
     // and does not render the redundant `city (city)`
-    expect(opt).toHaveAttribute("title", "city");
+    expect(await screen.findByRole("option", { name: "city" })).toHaveAttribute("title", "city");
+    expect(await storedFor(onUpdateOptions, "city")).toBe("city");
   });
 
-  it("renders machine names when no labels are supplied at all", () => {
-    render1(undefined);
-    expect((screen.getByRole("option", { name: "region" }) as HTMLOptionElement).value).toBe("region");
+  it("renders machine names when no labels are supplied at all", async () => {
+    const onUpdateOptions = await open1(undefined);
+    expect(await storedFor(onUpdateOptions, "region")).toBe("region");
+  });
+
+  it("stores the empty string for none, not the item's sentinel", async () => {
+    const onUpdateOptions = await open1(undefined, "region");
+    expect(await storedFor(onUpdateOptions, "none")).toBe("");
   });
 });

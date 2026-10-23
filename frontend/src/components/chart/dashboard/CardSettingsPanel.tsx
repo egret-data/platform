@@ -1,5 +1,6 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { showsCardBackground } from "./card-chrome";
 import type { Chart } from "@/api/charts";
@@ -19,14 +20,19 @@ interface Props {
 }
 
 const inp = "h-8 w-full rounded border bg-background px-2 text-sm";
-const sel = "h-8 rounded border bg-background px-1 text-sm";
+/** The crossfilter picker's "none" item. A Radix item cannot carry "", which is what an unmapped
+ *  filter stores, so this sentinel stands in for it and is converted back to "" before it is saved. */
+const NONE = "__none__";
 
 export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptions, onMoveToTab, labels }: Props) {
   const moveToTab = tabs.length >= 2 ? (
-    <label className="flex items-center justify-between gap-2 text-sm"><span>Move to tab</span>
-      <select aria-label="move card to tab" className={sel} value={card.tabKey ?? ""} onChange={(e) => onMoveToTab(e.target.value)}>
-        {tabs.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
-      </select>
+    <label htmlFor={`cs-move-tab-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>Move to tab</span>
+      <Select value={card.tabKey ?? ""} onValueChange={onMoveToTab}>
+        <SelectTrigger size="sm" id={`cs-move-tab-${card.id}`} aria-label="move card to tab"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {tabs.map((t) => <SelectItem key={t.key} value={t.key}>{t.name}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </label>
   ) : null;
   const eligibleChart = card.card_type === "chart" && (chart?.viz_type === "table" || chart?.viz_type === "pivot_table");
@@ -132,14 +138,19 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       </label>
 
       <div className="flex flex-col gap-1">
-        <label className="flex items-center justify-between gap-2 text-sm"><span>On click</span>
-          <select aria-label="on click" className={sel} value={cb.type}
-            onChange={(e) => {
-              const t = e.target.value as ClickBehavior["type"];
+        <label htmlFor={`cs-on-click-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>On click</span>
+          <Select value={cb.type}
+            onValueChange={(v) => {
+              const t = v as ClickBehavior["type"];
               onUpdateOptions({ clickBehavior: t === "url" ? { type: "url", template: "" } : t === "crossfilter" ? { type: "crossfilter", parameterMapping: {} } : { type: "menu" } });
             }}>
-            <option value="menu">Menu</option><option value="crossfilter">Cross-filter</option><option value="url">Custom URL</option>
-          </select>
+            <SelectTrigger size="sm" id={`cs-on-click-${card.id}`} aria-label="on click"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="menu">Menu</SelectItem>
+              <SelectItem value="crossfilter">Cross-filter</SelectItem>
+              <SelectItem value="url">Custom URL</SelectItem>
+            </SelectContent>
+          </Select>
         </label>
         {cb.type === "url" && (
           <input aria-label="url template" placeholder="https://…/{{column}}?p={{slug}}" className={inp} value={cb.template}
@@ -148,12 +159,15 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         {cb.type === "crossfilter" && parameters.map((p) => {
           const m = cb.parameterMapping ?? {};
           return (
-            <label key={p.id} className="flex items-center justify-between gap-2 text-sm"><span>{p.name} ←</span>
-              <select aria-label={`crossfilter ${p.name}`} className={sel} value={m[p.id] ?? ""}
-                onChange={(e) => onUpdateOptions({ clickBehavior: { type: "crossfilter", parameterMapping: { ...m, [p.id]: e.target.value } } })}>
-                <option value="">none</option>
-                {cols.map((col) => <option key={col} value={col} title={fieldTitle(col, labels)}>{displayName(col, labels)}</option>)}
-              </select>
+            <label key={p.id} htmlFor={`cs-crossfilter-${card.id}-${p.id}`} className="flex items-center justify-between gap-2 text-sm"><span>{p.name} ←</span>
+              <Select value={m[p.id] || NONE}
+                onValueChange={(v) => onUpdateOptions({ clickBehavior: { type: "crossfilter", parameterMapping: { ...m, [p.id]: v === NONE ? "" : v } } })}>
+                <SelectTrigger size="sm" id={`cs-crossfilter-${card.id}-${p.id}`} aria-label={`crossfilter ${p.name}`}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>none</SelectItem>
+                  {cols.map((col) => <SelectItem key={col} value={col} title={fieldTitle(col, labels)}>{displayName(col, labels)}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </label>
           );
         })}

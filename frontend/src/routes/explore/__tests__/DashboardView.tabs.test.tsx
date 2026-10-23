@@ -66,8 +66,9 @@ describe("DashboardView tab edit affordances", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("button", { name: "tab menu A" }));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    const target = screen.getByLabelText("reassign target") as HTMLSelectElement;
-    fireEvent.change(target, { target: { value: target.options[0].value } });
+    // The dialog pre-selects the first other tab; picking it explicitly drives the shared select.
+    await user.click(screen.getByRole("combobox", { name: "reassign target" }));
+    await user.click((await screen.findAllByRole("option"))[0]);
     fireEvent.click(screen.getByRole("button", { name: "reassign and delete" }));
     expect(screen.queryByRole("tab", { name: "A" })).toBeNull();
   });
