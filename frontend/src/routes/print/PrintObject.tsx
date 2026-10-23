@@ -27,6 +27,9 @@ declare global {
   }
 }
 
+/** The viz types whose height is their rows rather than the box they are given. */
+const GROWS_WITH_ROWS = new Set(["table", "pivot_table", "object"]);
+
 /** One card's chart, wrapped in its own error boundary — one bad chart marks the whole page
  *  failed (via `onError`) rather than leaving `onFinished` uncalled and the page hung forever.
  *
@@ -47,7 +50,10 @@ function PrintCard({ card, data, onFinished, onError }: {
   return (
     <div className="mb-8 break-inside-avoid rounded border border-gray-200 bg-white p-4">
       <h2 className="mb-2 text-base font-medium text-black">{card.title}</h2>
-      <div className="h-96 w-full">
+      {/* A chart draws into a fixed 384px box and is clipped to it. A table's height is its rows,
+          so its box grows to them instead: on a page there is nothing to scroll, and a fixed box
+          let a 50-row table run past the card's border into the next card (KI-168). */}
+      <div data-print-chart className={GROWS_WITH_ROWS.has(card.viz_type) ? "w-full" : "h-96 w-full overflow-hidden"}>
         <ChartErrorBoundary onError={onError}>
           <ChartRenderer
             vizType={card.viz_type as VizType}
