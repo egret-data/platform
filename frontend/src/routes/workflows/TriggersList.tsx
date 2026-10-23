@@ -42,6 +42,7 @@ import { bannersFor, kindLabel, MANAGE_REASON } from "@/components/workflows/tri
 import { useBackfill } from "@/components/workflows/triggers/useBackfill";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
 
 /**
  * The drawer and the enable dialog, through `lazy()` only: they bring
@@ -485,6 +486,12 @@ export default function TriggersList() {
         <Pager page={page} current={filters.page} onPage={(n) => pickFilters({ page: n })} />
       </div>
     );
+  }
+
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(query.error)) {
+    return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
   }
 
   return (

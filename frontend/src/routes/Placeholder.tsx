@@ -1,15 +1,20 @@
-import { Construction } from "lucide-react";
+import { StatePage } from "@/components/layout/StatePage";
 
-export function Placeholder({ title }: { title: string }) {
+/**
+ * A page whose feature is not built yet. It says so plainly in the shared
+ * state frame (FE-STATE-5) rather than looking like a feature with nothing in
+ * it (KI-227).
+ */
+export function Placeholder({
+  title,
+  link = { to: "/", label: "Go to the home page" },
+}: {
+  title: string;
+  link?: { to: string; label: string };
+}) {
   return (
-    <div className="flex h-full flex-col items-center justify-center px-6 py-16 text-center">
-      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <Construction className="h-7 w-7" />
-      </div>
-      <h1 className="mt-5 text-lg font-semibold">{title}</h1>
-      <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-        This feature arrives in a later phase.
-      </p>
-    </div>
+    <StatePage eyebrow="Not available yet" title={title} link={link}>
+      <p>This feature is not available yet. Nothing on this page works today.</p>
+    </StatePage>
   );
 }

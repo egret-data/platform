@@ -13,19 +13,23 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/auth/useAuth";
 import { appForPath } from "@/auth/appAccess";
-import { useWorkspaceFeatures } from "@/hooks/useWorkspaceFeatures";
+import { useWorkspaceFeatures, useWorkspacePermission } from "@/hooks/useWorkspaceFeatures";
+import { useMyWorkspaces } from "@/api/hooks";
 import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
 /** `perm` is the fine-grained read permission that unlocks this item in the
  * Control Plane or Governance (a list: any one of them unlocks it); items with
  * no `perm` (e.g. Workspaces, Audit log) are platform_admin-only. `feature` is the workspace entitlement key (e.g.
  * `apps`) that unlocks an Explore item; items with no `feature` are
- * unaffected by entitlements. */
+ * unaffected by entitlements. `wsPerm` is the workspace permission the page's
+ * routes require (the server's `PAGE_PERMISSIONS`); an Explore item whose
+ * `wsPerm` the reader does not hold in this workspace is left out (KI-231). */
 type NavItem = {
   label: string;
   icon: LucideIcon;
   perm?: string | readonly string[];
   feature?: string;
+  wsPerm?: string;
   /** The path under the app's base; `""` is the base itself. */
   to?: string;
   /** Active only on its own path, not on the paths below it (an item at the app's base). */
@@ -50,9 +54,9 @@ const EXPLORE_GROUPS: NavGroup[] = [
     // hides when the workspace lacks the entitlement — see
     // docs/en/specs/2026-08-16-data-api-p5-design.md §2.1.
     items: [
-      { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
-      { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
-      { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+      { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api", wsPerm: "data_api_endpoint:read" },
+      { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api", wsPerm: "service_account:read" },
+      { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api", wsPerm: "data_api_endpoint:read" },
     ],
   },
   {
@@ -62,10 +66,10 @@ const EXPLORE_GROUPS: NavGroup[] = [
     // whole group hides without the entitlement (spec §3). Not in
     // `EXPLORE_MODULES`, which also decides the workspace's landing page.
     items: [
-      { label: "Flows", icon: Workflow, to: "workflows/flows", feature: "workflows" },
-      { label: "Executions", icon: History, to: "workflows/executions", feature: "workflows" },
-      { label: "Namespaces", icon: FolderTree, to: "workflows/namespaces", feature: "workflows" },
-      { label: "Triggers", icon: Zap, to: "workflows/triggers", feature: "workflows" },
+      { label: "Flows", icon: Workflow, to: "workflows/flows", feature: "workflows", wsPerm: "workflow:read" },
+      { label: "Executions", icon: History, to: "workflows/executions", feature: "workflows", wsPerm: "workflow:read" },
+      { label: "Namespaces", icon: FolderTree, to: "workflows/namespaces", feature: "workflows", wsPerm: "workflow:read" },
+      { label: "Triggers", icon: Zap, to: "workflows/triggers", feature: "workflows", wsPerm: "workflow:read" },
     ],
   },
   {
@@ -73,7 +77,9 @@ const EXPLORE_GROUPS: NavGroup[] = [
     items: [
       // Engine connections live inside Workspace settings → Connections now,
       // so they're reached from there rather than duplicated at top level.
-      { label: "Workspace settings", icon: Settings, to: "settings/members" },
+      // `settings`, not a section: its index opens the first section this
+      // reader may open (`SettingsIndex`); General is open to every member.
+      { label: "Workspace settings", icon: Settings, to: "settings" },
     ],
   },
 ];
@@ -88,43 +94,33 @@ function holdsAny(permissions: readonly string[], perm: NavItem["perm"]): boolea
 // Control Plane). Headings must stay distinct from every other app's headings —
 // collapsed-group state is one localStorage key across all three apps.
 const GOVERNANCE_GROUPS: NavGroup[] = [
-  // DG redesign #3 (spec O11): the Overview, the Governance index, first.
-  // "Governance overview", not "Overview": Control Plane has a group headed
-  // "Overview" and collapsed-group state is one key across the apps. `end`,
-  // because its path is the area's base and would match every page under it.
+  // One group (KI-225). It used to be a group per page, each holding one item
+  // of the same name with its own chevron, and the first heading wrapped in
+  // the 224px rail. "Governance" is distinct from every Explore and Control
+  // Plane heading, as the shared collapsed-group key needs.
   {
-    heading: "Governance overview",
-    items: [{ label: "Overview", icon: Gauge, perm: ["policy:read", "tag:read"], to: "", end: true }],
-  },
-  // The DG redesign (spec 2026-10-16 Part 1): Data, the catalog tree and its
-  // object pages. Either Governance read permission opens it, as its route
-  // does (`App.tsx`).
-  {
-    heading: "Data",
-    items: [{ label: "Data", icon: Database, perm: ["policy:read", "tag:read"], to: "data" }],
-  },
-  // DG redesign #2: people, groups and roles, directly after Data. Gated
-  // `policy:read` only, as its route is (spec P2).
-  {
-    heading: "People & groups",
-    items: [{ label: "People & groups", icon: UsersRound, perm: "policy:read", to: "people" }],
-  },
-  {
-    heading: "Classification",
-    items: [{ label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" }],
-  },
-  {
-    heading: "Lineage",
-    // Platform-wide (cross-workspace), so it lives here rather than inside a single
-    // workspace. Admin-only until the real feature + its permission land.
-    items: [{ label: "Data Lineage", icon: Share2, to: "data-lineage" }],
-  },
-  // DG redesign #4a (spec §2, EP3): Engine & policy, the last group, replaces
-  // "Policies"; its old URLs redirect (`App.tsx`). Gated `policy:read`, as its
-  // route is.
-  {
-    heading: "Engine & policy",
-    items: [{ label: "Engine & policy", icon: ShieldCheck, perm: "policy:read", to: "engines" }],
+    heading: "Governance",
+    items: [
+      // DG redesign #3 (spec O11): the Overview, the Governance index, first.
+      // `end`, because its path is the area's base and would match every page
+      // under it.
+      { label: "Overview", icon: Gauge, perm: ["policy:read", "tag:read"], to: "", end: true },
+      // The DG redesign (spec 2026-10-16 Part 1): Data, the catalog tree and
+      // its object pages. Either Governance read permission opens it, as its
+      // route does (`App.tsx`).
+      { label: "Data", icon: Database, perm: ["policy:read", "tag:read"], to: "data" },
+      // DG redesign #2: people, groups and roles, directly after Data. Gated
+      // `policy:read` only, as its route is (spec P2).
+      { label: "People & groups", icon: UsersRound, perm: "policy:read", to: "people" },
+      { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
+      // Platform-wide (cross-workspace), so it lives here rather than inside a
+      // single workspace. Admin-only until the real feature + its permission land.
+      { label: "Data Lineage", icon: Share2, to: "data-lineage" },
+      // DG redesign #4a (spec §2, EP3): Engine & policy, last; it replaces
+      // "Policies", whose old URLs redirect (`App.tsx`). Gated `policy:read`,
+      // as its route is.
+      { label: "Engine & policy", icon: ShieldCheck, perm: "policy:read", to: "engines" },
+    ],
   },
 ];
 
@@ -185,7 +181,8 @@ function loadCollapsedGroups(): Set<string> {
 
 interface SidebarProps {
   collapsed: boolean;
-  onToggle: () => void;
+  /** Absent when the rail is forced (a narrow window): there is nothing to toggle. */
+  onToggle?: () => void;
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
@@ -195,6 +192,13 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const isPlatformAdmin = me?.platform_roles.includes("platform_admin") ?? false;
   const permissions = me?.permissions ?? [];
   const enabledFeatures = useWorkspaceFeatures();
+  const holdsInWorkspace = useWorkspacePermission();
+  const { data: myWorkspaces } = useMyWorkspaces(true);
+  // A workspace the reader is not a member of (the refusal `RequireWorkspace`
+  // renders inside the shell) gets no Explore nav: every entry would point
+  // into that workspace and be refused again. Known only once the list loads.
+  const outsideWorkspace =
+    app === "explore" && myWorkspaces !== undefined && !myWorkspaces.some((w) => w.slug === workspace);
 
   // Governance and Control Plane items are permission-gated: platform_admin sees
   // everything, everyone else sees only items whose `perm` they hold. Items with
@@ -211,10 +215,15 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           (item) => isPlatformAdmin || holdsAny(permissions, item.perm),
         ),
       })).filter((group) => group.items.length > 0)
-    : EXPLORE_GROUPS.map((group) => ({
-        ...group,
-        items: group.items.filter((item) => !item.feature || enabledFeatures.includes(item.feature)),
-      })).filter((group) => group.items.length > 0);
+    : outsideWorkspace
+      ? []
+      : EXPLORE_GROUPS.map((group) => ({
+          ...group,
+          items: group.items.filter(
+            (item) =>
+              (!item.feature || enabledFeatures.includes(item.feature)) && holdsInWorkspace(item.wsPerm),
+          ),
+        })).filter((group) => group.items.length > 0);
   const base =
     app === "governance" ? "/governance" : app === "control-plane" ? "/control-plane" : `/explore/${workspace ?? ""}`;
 
@@ -234,6 +243,10 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       return next;
     });
   };
+
+  // Nothing this reader may open here (a refusal page): no rail at all, rather
+  // than an empty column with a Collapse button.
+  if (groups.length === 0) return null;
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
@@ -300,9 +313,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
               aria-expanded={!groupCollapsed}
               className="flex w-full items-center justify-between rounded-md px-3 py-1 text-xs font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
             >
-              {/* `text-left`: a heading that wraps ("Governance overview" in the
-                  w-56 rail) stays aligned with its items instead of centring. */}
-              <span className="text-left">{heading}</span>
+              {/* `truncate`: a heading is one line in the w-56 rail (KI-225). */}
+              <span className="truncate text-left">{heading}</span>
               {groupCollapsed ? (
                 <ChevronRight className="h-3.5 w-3.5 shrink-0" />
               ) : (
@@ -314,8 +326,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         );
       })}
 
-      {/* Toggle button pinned to bottom */}
-      {collapsed ? (
+      {/* Toggle button pinned to bottom; none when the rail is forced. */}
+      {!onToggle ? null : collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <button

@@ -108,7 +108,9 @@ describe("AccessRequests page", () => {
       error: { status: 403 },
     });
     renderPage();
-    expect(screen.getByText(/Only workspace admins can review requests/i)).toBeInTheDocument();
+    // The shared refusal (KI-231).
+    expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can review access requests.")).toBeInTheDocument();
   });
 
   it("approve flow: picking a role + date and confirming calls approve with { id, role, expires_at }", async () => {

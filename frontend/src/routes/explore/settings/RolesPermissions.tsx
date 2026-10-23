@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { errorStatus } from "@/lib/httpStatus";
+import { Forbidden } from "@/routes/Forbidden";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 
 /** Built-in role names, seeded on install — mirrors RolesPage's own copy. */
@@ -184,12 +185,7 @@ export default function RolesPermissions() {
       {q.isLoading ? (
         <ListSkeleton rows={4} cols={3} />
       ) : forbidden ? (
-        <p
-          className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground"
-          role="alert"
-        >
-          Only workspace admins can view roles.
-        </p>
+        <Forbidden level="section" reason="Only a workspace admin can view the workspace roles." />
       ) : q.isError ? (
         <p className="py-6 text-sm text-destructive" role="alert">
           Couldn&apos;t load roles. {String(q.error)}

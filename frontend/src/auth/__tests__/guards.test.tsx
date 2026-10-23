@@ -12,6 +12,7 @@ import {
   RequireGovernanceAccess,
   RequirePermission,
   RequirePlatform,
+  RequireWorkspace,
 } from "@/auth/guards";
 
 afterEach(() => vi.restoreAllMocks());
@@ -231,4 +232,72 @@ test.each([
   renderArea("/governance/policies", me, <RequireGovernanceAccess><span>governance</span></RequireGovernanceAccess>);
   expect(screen.queryByText("governance")).not.toBeInTheDocument();
   expect(screen.getByText(/Forbidden/i)).toBeInTheDocument();
+});
+
+// KI-230: an area refusal used to replace the whole page with a bare card: no
+// header, no sidebar, no way back but the browser's. It now renders inside the
+// app shell, says why, and offers Back and a workspace the reader can open.
+const serveMyWorkspaces = () =>
+  vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify([{ id: "1", slug: "eng", name: "Engineering", features: [], permissions: [] }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+  );
+
+test.each([
+  ["/control-plane/users", "Control Plane needs a platform administrator or a Control Plane permission such as user:read."],
+  ["/governance/data", "Governance needs a governance permission such as tag:read or policy:read."],
+])("an area refusal at %s renders inside the shell, with a reason and a way back", async (path, reason) => {
+  serveMyWorkspaces();
+  const guarded = path.startsWith("/governance") ? (
+    <RequireGovernanceAccess><span>area</span></RequireGovernanceAccess>
+  ) : (
+    <RequireControlPlaneAccess><span>area</span></RequireControlPlaneAccess>
+  );
+  render(
+    <QueryClientProvider client={qc()}>
+      <AuthContext.Provider value={{ me: withPerms([]), isLoading: false }}>
+        <MemoryRouter initialEntries={["/explore/eng/datasets", path]} initialIndex={1}>
+          <Routes>
+            <Route path="/control-plane/*" element={guarded} />
+            <Route path="/governance/*" element={guarded} />
+          </Routes>
+        </MemoryRouter>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
+  );
+  expect(screen.queryByText("area")).not.toBeInTheDocument();
+  expect(screen.getByTestId("app-header")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1, name: "You don't have access to this page." })).toBeInTheDocument();
+  expect(screen.getByText(reason)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Go back" })).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Open Engineering" })).toHaveAttribute("href", "/explore/eng");
+});
+
+test("RequireWorkspace refuses a workspace the reader is not in, inside the shell, with no sidebar", async () => {
+  serveMyWorkspaces();
+  render(
+    <QueryClientProvider client={qc()}>
+      <AuthContext.Provider value={{ me: withPerms([]), isLoading: false }}>
+        <MemoryRouter initialEntries={["/explore/other/datasets"]}>
+          <Routes>
+            <Route path="/explore/:workspace/*" element={<RequireWorkspace><span>workspace page</span></RequireWorkspace>} />
+          </Routes>
+        </MemoryRouter>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByRole("heading", { level: 1, name: "You don't have access to this page." }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("workspace page")).not.toBeInTheDocument();
+  expect(screen.getByTestId("app-header")).toBeInTheDocument();
+  expect(screen.queryByTestId("app-sidebar")).not.toBeInTheDocument();
+  expect(screen.getByText(/you are not a member of it/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open Engineering" })).toHaveAttribute("href", "/explore/eng");
+  // The first page of the tab: there is nothing to go back to.
+  expect(screen.queryByRole("button", { name: "Go back" })).not.toBeInTheDocument();
 });

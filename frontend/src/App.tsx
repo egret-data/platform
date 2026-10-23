@@ -2,7 +2,6 @@ import { lazy } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
-  Link,
   Navigate,
   Route,
   Routes,
@@ -169,7 +168,7 @@ import Apps from "@/routes/explore/Apps";
 import AppEditPage from "@/routes/explore/AppEditPage";
 import AppViewPage from "@/routes/explore/AppViewPage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
-import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
+import WorkspaceSettings, { SettingsIndex } from "@/routes/explore/settings/WorkspaceSettings";
 import Members from "@/routes/explore/settings/Members";
 import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
@@ -189,6 +188,7 @@ import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
 import { Placeholder } from "@/routes/Placeholder";
+import { StatePage } from "@/components/layout/StatePage";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
@@ -388,7 +388,7 @@ function ExploreRoutes() {
             }
           />
           <Route path="settings" element={<WorkspaceSettings />}>
-            <Route index element={<Navigate to="members" replace />} />
+            <Route index element={<SettingsIndex />} />
             <Route path="members" element={<Members />} />
             <Route path="roles" element={<RolesPermissions />} />
             <Route path="shares" element={<SharedObjects />} />
@@ -456,19 +456,15 @@ function WarehouseRedirect() {
   const [sp] = useSearchParams();
   if (!canReadRegistry)
     return (
-      <div className="space-y-3 p-10" data-testid="warehouse-redirect-blocked">
-        <h1 className="text-xl font-semibold">This page moved into Catalogs</h1>
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          A warehouse&apos;s roles and grants, Catalog Clients, namespace browser, connection
-          details and settings are now tabs on its catalog. Finding that catalog needs the{" "}
-          <code className="font-mono">catalog_registry:read</code> permission, which this account
-          does not have. A platform administrator can grant it.
-        </p>
-        <p className="text-sm">
-          <Link to="/control-plane/catalogs" className="text-primary hover:underline">
-            Back to Catalogs
-          </Link>
-        </p>
+      <div data-testid="warehouse-redirect-blocked">
+        <StatePage title="This page moved into Catalogs" link={{ to: "/control-plane/catalogs", label: "Back to Catalogs" }}>
+          <p>
+            A warehouse&apos;s roles and grants, Catalog Clients, namespace browser, connection
+            details and settings are now tabs on its catalog. Finding that catalog needs the{" "}
+            <code className="font-mono">catalog_registry:read</code> permission, which this account
+            does not have. A platform administrator can grant it.
+          </p>
+        </StatePage>
       </div>
     );
   if (q.isLoading) return <div className="p-10">Loading…</div>;
@@ -679,7 +675,7 @@ function GovernanceRoutes() {
             }
           />
           {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}
-          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
+          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" link={{ to: "/governance", label: "Open the Governance overview" }} /></RequireGlobalAdmin>} />
           <Route path="*" element={<Navigate to="/governance" replace />} />
         </Routes>
       </AppShell>
@@ -713,7 +709,8 @@ export default function App() {
               <Route path="/control-plane/policies/*" element={<LegacyGovernanceRedirect />} />
               <Route path="/control-plane/classifications/*" element={<LegacyGovernanceRedirect />} />
               <Route path="/control-plane/data-lineage" element={<LegacyGovernanceRedirect />} />
-              <Route path="*" element={<NotFound />} />
+              {/* Inside the shell, like every other state page (FE-STATE-5). */}
+              <Route path="*" element={<RequireAuth><AppShell><NotFound /></AppShell></RequireAuth>} />
             </Routes>
           </AuthProvider>
         </BrowserRouter>

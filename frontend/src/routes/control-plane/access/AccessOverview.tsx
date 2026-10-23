@@ -214,55 +214,71 @@ export default function AccessOverview() {
       {/* The working area: what needs attention (primary) beside the recent
           real changes (secondary). Two columns on desktop, stacked on mobile.
           Non-admins can't read the audit feed, so they get a full-width panel. */}
+      {/* `lg:items-start`: each card is as tall as its content. Stretched to the
+          feed's height, "Needs attention" was mostly empty and pushed "How
+          access works" below the fold (KI-227); that panel now fills the
+          column under it. */}
       {isPlatformAdmin ? (
-        <div className="grid gap-5 lg:grid-cols-3">
-          <div className="lg:col-span-2">
+        <div className="grid gap-5 lg:grid-cols-3 lg:items-start">
+          <div className="space-y-5 lg:col-span-2">
             <NeedsAttentionCard warnings={warnings} />
+            <HowAccessWorks />
           </div>
           <RecentChangesPanel />
         </div>
       ) : (
-        <NeedsAttentionCard warnings={warnings} />
+        <>
+          <NeedsAttentionCard warnings={warnings} />
+          <HowAccessWorks />
+        </>
       )}
 
-      {/* Orientation content: open by default so the access model is visible at
-          a glance, but collapsible for admins who don't need the reminder. It
-          sits last so the actionable panels still lead the page. */}
-      <details open className="group rounded-xl border bg-card text-card-foreground shadow-sm">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 text-lg font-semibold [&::-webkit-details-marker]:hidden">
-          How access works
-          <ChevronDown className="h-5 w-5 text-muted-foreground transition-transform group-open:rotate-180" />
-        </summary>
-        <div className="px-4 pb-4">
-          <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {ACCESS_LAYERS.map((layer, i) => (
-              <li key={layer.name} className="relative rounded-lg border p-3">
-                <div className="flex items-center gap-2">
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
-                    <layer.icon className="h-4 w-4" />
-                  </span>
-                  <span className="text-sm font-medium leading-tight">{layer.name}</span>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">{layer.desc}</p>
-                <Link
-                  to={layer.to}
-                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
-                >
-                  {layer.cta}
-                  <ArrowRight className="h-3 w-3" />
-                </Link>
-                {i < ACCESS_LAYERS.length - 1 && (
-                  <ArrowRight
-                    className="absolute -right-2.5 top-1/2 hidden h-4 w-4 -translate-y-1/2 text-border lg:block"
-                    aria-hidden
-                  />
-                )}
-              </li>
-            ))}
-          </ol>
-        </div>
-      </details>
     </PageContainer>
+  );
+}
+
+/**
+ * Orientation content: open by default so the access model is visible at a
+ * glance, but collapsible for admins who don't need the reminder. It sits
+ * after "Needs attention" so the actionable panel still leads the page. Two
+ * steps a row: it shares the width with the "Recent changes" feed.
+ */
+function HowAccessWorks() {
+  return (
+    <details open className="group rounded-xl border bg-card text-card-foreground shadow-sm">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 text-lg font-semibold [&::-webkit-details-marker]:hidden">
+        How access works
+        <ChevronDown className="h-5 w-5 text-muted-foreground transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="px-4 pb-4">
+        <ol className="grid gap-3 sm:grid-cols-2">
+          {ACCESS_LAYERS.map((layer, i) => (
+            <li key={layer.name} className="relative rounded-lg border p-3">
+              <div className="flex items-center gap-2">
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                  <layer.icon className="h-4 w-4" />
+                </span>
+                <span className="text-sm font-medium leading-tight">{layer.name}</span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">{layer.desc}</p>
+              <Link
+                to={layer.to}
+                className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
+              >
+                {layer.cta}
+                <ArrowRight className="h-3 w-3" />
+              </Link>
+              {i % 2 === 0 && i < ACCESS_LAYERS.length - 1 && (
+                <ArrowRight
+                  className="absolute -right-2.5 top-1/2 hidden h-4 w-4 -translate-y-1/2 text-border sm:block"
+                  aria-hidden
+                />
+              )}
+            </li>
+          ))}
+        </ol>
+      </div>
+    </details>
   );
 }
 
@@ -278,7 +294,7 @@ function NeedsAttentionCard({
   warnings: { key: string; title: string; detail: string; to: string }[];
 }) {
   return (
-    <Card className="h-full">
+    <Card>
       <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-lg">Needs attention</CardTitle>
         {warnings.length > 0 ? (

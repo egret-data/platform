@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { errorStatus } from "@/lib/httpStatus";
+import { Forbidden } from "@/routes/Forbidden";
 import { fullTimestamp } from "@/lib/relativeTime";
 import { StatusBadge } from "@/components/ui/status-badge";
 
@@ -190,12 +191,7 @@ export default function SharedObjects() {
       {q.isLoading ? (
         <ListSkeleton rows={6} cols={6} />
       ) : forbidden ? (
-        <p
-          className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground"
-          role="alert"
-        >
-          Only workspace admins can view shares.
-        </p>
+        <Forbidden level="section" reason="Only a workspace admin can view the shared objects." />
       ) : q.isError ? (
         <p className="py-6 text-sm text-destructive" role="alert">
           Couldn&apos;t load shares. {String(q.error)}

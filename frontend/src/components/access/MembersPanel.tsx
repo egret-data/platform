@@ -62,6 +62,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Forbidden } from "@/routes/Forbidden";
 import { errorStatus } from "@/lib/httpStatus";
 
 /** Small dot colour for a role, using semantic design tokens. */
@@ -370,9 +371,7 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
       {membersQ.isLoading ? (
         <ListSkeleton rows={5} cols={6} />
       ) : forbidden ? (
-        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground" role="alert">
-          Only workspace admins can manage members.
-        </p>
+        <Forbidden level="section" reason="Only a workspace admin can manage members." />
       ) : membersQ.isError ? (
         <p className="py-6 text-sm text-destructive" role="alert">
           Couldn&apos;t load members. {String(membersQ.error)}

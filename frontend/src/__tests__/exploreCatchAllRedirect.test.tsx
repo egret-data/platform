@@ -80,7 +80,7 @@ describe("explore catch-all redirect", () => {
   });
 
   it("handles a multi-segment default path", () => {
-    // `useDefaultExplorePath` falls back to "settings/members" when every module is off.
+    // A default path of two segments, e.g. one Workspace settings section.
     renderAt("/explore/default/nope", "settings/members");
     expect(screen.getByTestId("path")).toHaveTextContent("/explore/default/settings/members");
   });

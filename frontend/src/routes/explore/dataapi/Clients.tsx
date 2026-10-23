@@ -39,6 +39,8 @@ import {
 import { useDeleteServiceAccount } from "@/api/dataApi";
 import type { DataApiClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
+import { Forbidden, isForbidden, refusalReason } from "@/routes/Forbidden";
+import { ScrollX } from "@/components/ui/scroll-cue";
 
 /**
  * How many service-account groups render before the "Show more" button.
@@ -158,6 +160,12 @@ export default function Clients() {
   const shown = rows.slice(0, visible);
   const hidden = rows.length - shown.length;
 
+  // The server refused the page's own read: the shared refusal, not a red
+  // box with "forbidden" under a title bar that offers actions (KI-231).
+  if (isForbidden(error)) {
+    return <Forbidden reason={refusalReason(error, "Viewing clients needs the service_account:read permission in this workspace.")} />;
+  }
+
   return (
     // The canonical Explore list-page scaffold — `p-4` + a single `h1` — comes
     // from `ListPageShell`. Clients is its own top-level sidebar item, not a
@@ -224,7 +232,7 @@ export default function Clients() {
         </div>
 
         {rows.length > 0 ? (
-          <div className="overflow-x-auto">
+          <ScrollX>
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -245,7 +253,7 @@ export default function Clients() {
                 />
               ))}
             </table>
-          </div>
+          </ScrollX>
         ) : (
           <p className="text-muted-foreground">No service accounts match.</p>
         )}

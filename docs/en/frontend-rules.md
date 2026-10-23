@@ -58,6 +58,10 @@ A detail, form or editor page's header is `DetailHeader`: back link (`BackLink`,
 A tab strip made of router links uses `tabsListClass(variant)` and `tabsTriggerClass(variant)`, which style `aria-current="page"` like an active trigger. An icon in a trigger is spaced by the component; do not add margins. Allowed hand-written strips are document tabs a user opens, closes, renames or drags: `DashboardTabBar` (`frontend/src/components/chart/dashboard/DashboardTabBar.tsx`), `PanelTabStrip` (`frontend/src/components/workflows/panels/PanelTabStrip.tsx`) and the open-files strip in `NamespaceFiles` (`frontend/src/components/workflows/namespaces/files/NamespaceFiles.tsx`). The Data API statement switcher (`frontend/src/routes/explore/dataapi/detail/Query.tsx`) is a plain `role="tab"` element so that a disabled `fieldset` cannot disable it, and wears `tabsTriggerClass("underline")`.
 **Do this:** `frontend/src/components/ui/tabs.tsx`; router-link tabs: `frontend/src/routes/explore/dataapi/EndpointDetail.tsx`. **Checked by:** review and test (`frontend/src/components/layout/__tests__/pageFrame.test.tsx`). **Why:** KI-216: five tab styles for the same job.
 
+#### FE-PAGE-10 — Small screens: the rail, scrolling tables, wrapping tabs · MUST
+Below 1024px the app sidebar is the icon rail, whatever the stored preference, and its toggle is hidden. A table wider than its room scrolls inside its container, and `ui/table` shades the clipped edge (`ScrollCue`); a hand-written list `<table>` sits in `ScrollX`, which does the same. A pill tab strip wraps. An underline strip or a router-link section nav that can be clipped sits in `ScrollStrip`, which shades the clipped edge. Nothing on a page scrolls the document sideways.
+**Do this:** `frontend/src/components/ui/scroll-cue.tsx` (`ScrollCue`, `ScrollStrip`, `ScrollX`, `useHorizontalOverflow`), `frontend/src/components/ui/table.tsx`, `frontend/src/components/layout/AppShell.tsx`. **Checked by:** browser (`frontend/tests/e2e/small-screens.spec.ts`). **Why:** KI-233, KI-234: at 390px columns and tabs were cut off with no cue, and at 768px the 224px sidebar left a table 480px.
+
 ## 2. States (FE-STATE)
 
 #### FE-STATE-1 — Loading, empty and error, error first · MUST
@@ -75,6 +79,10 @@ Empty renders `EmptyState`. "Empty" means the unfiltered collection is empty. A 
 #### FE-STATE-4 — Status indicators compare content · MUST
 A status indicator ("edited", "differs from live", "out of date") compares the content it describes. A timestamp is used only when the content is unavailable, and then every writer of that timestamp is listed in a comment.
 **Do this:** example: `frontend/src/routes/explore/dataapi/endpointState.tsx` (compares the draft with the served definition). **Checked by:** review.
+
+#### FE-STATE-5 — State pages share one frame; a refusal is `Forbidden`, inside the shell · MUST
+A page with nothing of its own to show uses `StatePage`: a refusal, a missing page, a feature not built yet, a page that moved. It renders inside the app shell, at the list's left edge, with a `PageTitle`. It offers *Go back* when there is history, and one link onwards. A refusal is always `Forbidden`. A route guard uses it, and so does a page whose own read the server refused (`isForbidden(error)`): it renders instead of the page and its actions, never as a red box with the API's word. A section of a page that otherwise opens uses `level="section"`. The sidebar and the section navs leave out entries the reader cannot open, from `/me/workspaces` → `permissions` (`useWorkspacePermission`). They read optimistically, and the server stays the gate.
+**Do this:** `frontend/src/components/layout/StatePage.tsx`, `frontend/src/routes/Forbidden.tsx`, `frontend/src/hooks/useWorkspaceFeatures.ts`; example: `frontend/src/routes/explore/dataapi/Endpoints.tsx`. **Checked by:** test (`frontend/src/auth/__tests__/guards.test.tsx`, `frontend/src/components/layout/__tests__/Sidebar.test.tsx`). **Why:** KI-230, KI-231: a refusal replaced the whole app with a bare card, and the same refusal was worded four ways.
 
 ## 3. Actions and feedback (FE-ACTION)
 
@@ -277,10 +285,12 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-PAGE-7 — The `h1` is a visible `PageTitle`: 20px, or `compact` 16px in a tool's header bar.
 - [ ] FE-PAGE-8 — A detail, form or editor header is `DetailHeader` (or `PageTitle` + `BackLink`); no icon tile, no arrow icon button.
 - [ ] FE-PAGE-9 — Tabs are `pill` for page sections and `underline` for panels; router-link tabs use `tabsTriggerClass`.
+- [ ] FE-PAGE-10 — Below 1024px the sidebar is the rail; tables scroll with the edge shade; pill tabs wrap, clippable strips use `ScrollStrip`.
 - [ ] FE-STATE-1 — Loading, empty and error all render; `isError` is checked first; error never renders as empty.
 - [ ] FE-STATE-2 — Loading content is a skeleton; spinners only for buttons and in-place actions; no bare "Loading…".
 - [ ] FE-STATE-3 — Empty is `EmptyState` for the unfiltered collection; a filter miss says so and offers to clear.
 - [ ] FE-STATE-4 — Status indicators compare content; a timestamp fallback lists its writers in a comment.
+- [ ] FE-STATE-5 — State pages use `StatePage` inside the shell; every refusal is `Forbidden` (a refused main read included); entries the reader cannot open are left out.
 - [ ] FE-ACTION-2 — Success invalidates the changed queries; no toast when navigating, a toast when staying.
 - [ ] FE-ACTION-3 — Failure shows the server's message and clears nothing the user entered.
 - [ ] FE-ACTION-4 — A disabled control says why.

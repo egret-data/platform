@@ -14,6 +14,8 @@ import * as api from "@/api/generated/workflow/workflow";
 import * as members from "@/api/members";
 import type { FlowListItemDto } from "@/api/generated/model";
 import FlowsList, { nsCollapseKey } from "@/routes/workflows/FlowsList";
+import { ApiError } from "@/api/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const ALICE = "11111111-1111-1111-1111-111111111111";
 
@@ -65,7 +67,10 @@ function LocationProbe() {
 }
 
 function renderAt(search = "") {
+  // The refusal state names a workspace to open, from `/me/workspaces`.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, enabled: false } } });
   return render(
+    <QueryClientProvider client={qc}>
     <TooltipProvider>
       <MemoryRouter initialEntries={[`/explore/eng/workflows/flows${search}`]}>
         <Routes>
@@ -80,7 +85,8 @@ function renderAt(search = "") {
           />
         </Routes>
       </MemoryRouter>
-    </TooltipProvider>,
+    </TooltipProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -112,6 +118,15 @@ describe("FlowsList — the three states", () => {
     renderAt();
     expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // KI-231: workflow:read missing is the shared refusal, not an error alert.
+  it("renders the shared refusal when the server refuses the list", () => {
+    mockList({ isError: true, error: new ApiError(403, "forbidden") });
+    renderAt();
+    expect(screen.getByRole("heading", { level: 1, name: "You don't have access to this page." })).toBeInTheDocument();
+    expect(screen.getByText("Workflows need the workflow:read permission in this workspace.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("shows the error, never the empty state, when the list fails", () => {

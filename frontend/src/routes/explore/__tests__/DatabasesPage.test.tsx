@@ -195,9 +195,9 @@ describe("DatabasesPage", () => {
     });
     renderAt();
 
-    expect(
-      screen.getByText("Requires workspace-admin to manage engines."),
-    ).toBeInTheDocument();
+    // The shared refusal (KI-231).
+    expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can manage engine connections.")).toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
 
@@ -212,9 +212,9 @@ describe("DatabasesPage", () => {
     });
     renderAt();
 
-    expect(
-      screen.getByText("Requires workspace-admin to manage engines."),
-    ).toBeInTheDocument();
+    // The shared refusal (KI-231).
+    expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can manage engine connections.")).toBeInTheDocument();
     expect(screen.queryByText("prod-trino")).not.toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
