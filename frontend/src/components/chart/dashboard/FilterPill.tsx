@@ -182,16 +182,23 @@ export function FilterControl({ param, value, options, onChange }: Props) {
     // checkbox list or a radio list is the author's "People can pick" choice.
     const multi = isMultiValue(param);
     const selected = Array.isArray(value) ? (value as string[]) : isBlank(value) ? [] : [String(value)];
-    const shown = options.filter((o) => o.toLowerCase().includes(search.toLowerCase()));
+    // Dropdown lists every value and the box narrows it. Search box lists nothing until the
+    // viewer types, then only the matches: the widget for a column with too many values to read
+    // as a list (KI-066). The picked values stay on show so they can be unpicked.
+    const isSearchBox = widget === "search";
+    const query = search.trim().toLowerCase();
+    const shown = isSearchBox && query === ""
+      ? options.filter((o) => selected.includes(o))
+      : options.filter((o) => o.toLowerCase().includes(query));
     const toggle = (o: string) => {
       if (!multi) { onChange(o); return; }
       onChange(selected.includes(o) ? selected.filter((x) => x !== o) : [...selected, o]);
     };
     return (
       <div className="flex flex-col gap-1">
-        <Input aria-label={`search ${param.name}`} className={input} placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <Input aria-label={`search ${param.name}`} className={input} placeholder={isSearchBox ? "Search the values…" : "Search…"} value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className="max-h-52 overflow-auto">
-          {shown.length === 0 ? <p className="px-1 py-2 text-xs text-muted-foreground">No values</p>
+          {shown.length === 0 ? <p className="px-1 py-2 text-xs text-muted-foreground">{isSearchBox && query === "" ? "Type to search the values" : "No values"}</p>
             : shown.map((o) => (
               <label key={o} aria-label={`option ${o}`} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-accent/40"
                 onClick={() => { if (!multi) toggle(o); }}>
