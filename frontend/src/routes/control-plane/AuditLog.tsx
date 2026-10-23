@@ -6,6 +6,7 @@ import type { ControlPlaneAuditListAuditParams } from "@/api/generated/model/con
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -32,13 +33,6 @@ const COLUMNS = ["Time", "Actor", "Action", "Resource", "Decision", "Detail"];
 
 const PAGE_SIZE = 100;
 
-/** datetime-local value → ISO 8601, or undefined when empty/invalid. */
-function toIso(local: string): string | undefined {
-  if (!local) return undefined;
-  const d = new Date(local);
-  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
-}
-
 /**
  * Control Plane → System → Audit log.
  *
@@ -55,8 +49,8 @@ export default function AuditLog() {
   const [kind, setKind] = useState("changes");
   const [decision, setDecision] = useState("all");
   const [action, setAction] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState<Date | null>(null);
+  const [to, setTo] = useState<Date | null>(null);
 
   // Keyset pagination: accumulate pages, remember the next cursor.
   const [entries, setEntries] = useState<AuditEntryDto[]>([]);
@@ -64,8 +58,8 @@ export default function AuditLog() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
 
   const actionParam = action.trim() || undefined;
-  const fromIso = toIso(from);
-  const toIsoValue = toIso(to);
+  const fromIso = from?.toISOString();
+  const toIsoValue = to?.toISOString();
 
   const params: ControlPlaneAuditListAuditParams = useMemo(
     () => ({
@@ -176,24 +170,12 @@ export default function AuditLog() {
 
             <div className="space-y-1.5">
               <Label htmlFor="audit-from">From</Label>
-              <Input
-                id="audit-from"
-                type="datetime-local"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                className="w-52"
-              />
+              <DateTimePicker id="audit-from" value={from} onChange={setFrom} />
             </div>
 
             <div className="space-y-1.5">
               <Label htmlFor="audit-to">To</Label>
-              <Input
-                id="audit-to"
-                type="datetime-local"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                className="w-52"
-              />
+              <DateTimePicker id="audit-to" value={to} onChange={setTo} defaultTime="23:59" />
             </div>
           </div>
 

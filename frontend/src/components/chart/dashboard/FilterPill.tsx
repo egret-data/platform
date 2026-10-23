@@ -4,6 +4,9 @@ import type { DashboardParameter } from "@/api/dashboards";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 import { isBlank, summarize } from "./params";
 import { isMultiValue } from "./multiSelect";
@@ -13,6 +16,10 @@ const RELATIVE = [
   { v: "last7", label: "Last 7 days" }, { v: "last30", label: "Last 30 days" },
   { v: "last90", label: "Last 90 days" }, { v: "last365", label: "Last 365 days" },
 ];
+
+/** The boolean filter's "Any" item. A Radix item cannot carry "", which is what "Any" stores, so
+ *  this sentinel stands in for it and is converted back to "" before `onChange` sees it. */
+const ANY = "any";
 
 function iconFor(p: DashboardParameter) {
   if (p.type === "date") return Calendar;
@@ -95,32 +102,37 @@ export function FilterControl({ param, value, options, onChange }: Props) {
   // boolean: 3-state Any / True / False
   if (param.type === "boolean") {
     return (
-      <select aria-label={`${param.name} value`} className={input}
-        value={value === true || value === "true" ? "true" : value === false || value === "false" ? "false" : ""}
-        onChange={(e) => onChange(e.target.value)}>
-        <option value="">Any</option>
-        <option value="true">True</option>
-        <option value="false">False</option>
-      </select>
+      <Select value={value === true || value === "true" ? "true" : value === false || value === "false" ? "false" : ANY}
+        onValueChange={(v) => onChange(v === ANY ? "" : v)}>
+        <SelectTrigger size="sm" className="w-full" aria-label={`${param.name} value`}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ANY}>Any</SelectItem>
+          <SelectItem value="true">True</SelectItem>
+          <SelectItem value="false">False</SelectItem>
+        </SelectContent>
+      </Select>
     );
   }
 
   if (param.type === "temporal_unit") {
     return (
-      <select aria-label={`${param.name} value`} className={input}
-        value={String(value ?? param.default ?? "month")}
-        onChange={(e) => onChange(e.target.value)}>
-        <optgroup label="Group by">
-          {TEMPORAL_UNITS.filter((u) => u.group === "trunc").map((u) => (
-            <option key={u.token} value={u.token}>{u.label}</option>
-          ))}
-        </optgroup>
-        <optgroup label="Extract">
-          {TEMPORAL_UNITS.filter((u) => u.group === "extract").map((u) => (
-            <option key={u.token} value={u.token}>{u.label}</option>
-          ))}
-        </optgroup>
-      </select>
+      <Select value={String(value ?? param.default ?? "month")} onValueChange={(v) => onChange(v)}>
+        <SelectTrigger size="sm" className="w-full" aria-label={`${param.name} value`}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectLabel>Group by</SelectLabel>
+            {TEMPORAL_UNITS.filter((u) => u.group === "trunc").map((u) => (
+              <SelectItem key={u.token} value={u.token}>{u.label}</SelectItem>
+            ))}
+          </SelectGroup>
+          <SelectGroup>
+            <SelectLabel>Extract</SelectLabel>
+            {TEMPORAL_UNITS.filter((u) => u.group === "extract").map((u) => (
+              <SelectItem key={u.token} value={u.token}>{u.label}</SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
     );
   }
 
@@ -145,10 +157,15 @@ export function FilterControl({ param, value, options, onChange }: Props) {
       <div className="flex items-center gap-1">
         <input aria-label={`${param.name} year`} type="number" placeholder="Year" className={input}
           value={qy.y} onChange={(e) => emit(e.target.value, qy.q)} />
-        <select aria-label={`${param.name} quarter`} className={input} value={qy.q || "1"}
-          onChange={(e) => emit(qy.y || String(new Date().getUTCFullYear()), e.target.value)}>
-          <option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option>
-        </select>
+        <Select value={qy.q || "1"} onValueChange={(v) => emit(qy.y || String(new Date().getUTCFullYear()), v)}>
+          <SelectTrigger size="sm" className="w-full" aria-label={`${param.name} quarter`}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="1">Q1</SelectItem>
+            <SelectItem value="2">Q2</SelectItem>
+            <SelectItem value="3">Q3</SelectItem>
+            <SelectItem value="4">Q4</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
     );
   }

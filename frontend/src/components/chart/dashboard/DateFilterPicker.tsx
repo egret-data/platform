@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { DateAllOptionsValue, DateUnit } from "./params";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type RelVal = Extract<DateAllOptionsValue, { mode: "relative" }>;
 type SpecVal = Extract<DateAllOptionsValue, { mode: "specific" }>;
@@ -57,16 +58,14 @@ export function DateFilterPicker({ value, onChange }: Props) {
       </div>
       {tab === "relative" ? (
         <div className="flex items-center gap-1">
-          <select
-            aria-label="relative dir"
-            className={input}
-            value={rel.dir}
-            onChange={(e) => emit({ ...rel, dir: e.target.value as RelVal["dir"] })}
-          >
-            <option value="past">Past</option>
-            <option value="next">Next</option>
-            <option value="current">Current</option>
-          </select>
+          <Select value={rel.dir} onValueChange={(v) => emit({ ...rel, dir: v as RelVal["dir"] })}>
+            <SelectTrigger size="sm" aria-label="relative dir"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="past">Past</SelectItem>
+              <SelectItem value="next">Next</SelectItem>
+              <SelectItem value="current">Current</SelectItem>
+            </SelectContent>
+          </Select>
           {rel.dir !== "current" && (
             <input
               aria-label="relative n"
@@ -77,32 +76,28 @@ export function DateFilterPicker({ value, onChange }: Props) {
               onChange={(e) => emit({ ...rel, n: Math.max(1, Number(e.target.value) || 1) })}
             />
           )}
-          <select
-            aria-label="relative unit"
-            className={input}
-            value={rel.unit}
-            onChange={(e) => emit({ ...rel, unit: e.target.value as DateUnit })}
-          >
-            <option value="day">days</option>
-            <option value="week">weeks</option>
-            <option value="month">months</option>
-            <option value="quarter">quarters</option>
-            <option value="year">years</option>
-          </select>
+          <Select value={rel.unit} onValueChange={(v) => emit({ ...rel, unit: v as DateUnit })}>
+            <SelectTrigger size="sm" aria-label="relative unit"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="day">days</SelectItem>
+              <SelectItem value="week">weeks</SelectItem>
+              <SelectItem value="month">months</SelectItem>
+              <SelectItem value="quarter">quarters</SelectItem>
+              <SelectItem value="year">years</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       ) : (
         <div className="flex flex-col gap-1">
-          <select
-            aria-label="specific op"
-            className={input}
-            value={spec.op}
-            onChange={(e) => emit({ ...spec, op: e.target.value as SpecVal["op"] })}
-          >
-            <option value="on">On</option>
-            <option value="before">Before</option>
-            <option value="after">After</option>
-            <option value="between">Between</option>
-          </select>
+          <Select value={spec.op} onValueChange={(v) => emit({ ...spec, op: v as SpecVal["op"] })}>
+            <SelectTrigger size="sm" className="w-full" aria-label="specific op"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="on">On</SelectItem>
+              <SelectItem value="before">Before</SelectItem>
+              <SelectItem value="after">After</SelectItem>
+              <SelectItem value="between">Between</SelectItem>
+            </SelectContent>
+          </Select>
           <input
             aria-label="specific from"
             type="date"

@@ -44,14 +44,13 @@ const renderView = () => render(
 const toastCalls = () => (toast as unknown as { mock: { calls: unknown[][] } }).mock.calls;
 const lastToast = () => toastCalls().at(-1)!;
 
-/** Pick the option by its LABEL. The `move card to tab` select's option values are draft tab keys
+/** Pick the option by its LABEL. The `move card to tab` select's item values are draft tab keys
  *  (`tab-N`, minted fresh by `startTabsDraft` on every mount), not names — naming a display string
  *  where the code keys on a raw one is the failure this programme has hit six times. */
-function moveCardToTabNamed(name: string) {
-  const sel = screen.getByLabelText("move card to tab") as HTMLSelectElement;
-  const opt = Array.from(sel.options).find((o) => o.textContent === name);
-  if (!opt) throw new Error(`no "move card to tab" option labelled ${name}`);
-  fireEvent.change(sel, { target: { value: opt.value } });
+async function moveCardToTabNamed(name: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "move card to tab" }));
+  await user.click(await screen.findByRole("option", { name }));
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -64,7 +63,7 @@ describe("DashboardView tab delete undo", () => {
     // Tab B's card is moved away first so the delete takes the no-dialog fast path.
     fireEvent.click(screen.getByRole("tab", { name: "B" }));
     fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
-    moveCardToTabNamed("A");
+    await moveCardToTabNamed("A");
     await user.click(screen.getByRole("button", { name: "tab menu B" }));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByRole("tab", { name: "B" })).toBeNull();
@@ -80,8 +79,8 @@ describe("DashboardView tab delete undo", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("button", { name: "tab menu A" }));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    const target = screen.getByLabelText("reassign target") as HTMLSelectElement;
-    fireEvent.change(target, { target: { value: target.options[0].value } });
+    await user.click(screen.getByRole("combobox", { name: "reassign target" }));
+    await user.click((await screen.findAllByRole("option"))[0]);
     fireEvent.click(screen.getByRole("button", { name: "reassign and delete" }));
     expect(screen.queryByRole("tab", { name: "A" })).toBeNull();
     const [message, cfg] = lastToast();

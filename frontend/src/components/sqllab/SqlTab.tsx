@@ -293,12 +293,15 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
                 return (
                   <span key={n} className="inline-flex items-center gap-1 rounded-md border bg-background pl-2 text-xs">
                     <span className="font-mono">{n}</span>
-                    <select value={pv.type} onChange={(e) => set({ type: e.target.value })}
-                      aria-label={`Type of ${n}`} className="border-l bg-transparent px-1 py-1 outline-none">
-                      <option value="string">str</option>
-                      <option value="number">num</option>
-                      <option value="boolean">bool</option>
-                    </select>
+                    <Select value={pv.type} onValueChange={(v) => set({ type: v })}>
+                      <SelectTrigger size="sm" aria-label={`Type of ${n}`}
+                        className="h-7 gap-1 rounded-none border-0 border-l px-1.5 text-xs shadow-none"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="string">str</SelectItem>
+                        <SelectItem value="number">num</SelectItem>
+                        <SelectItem value="boolean">bool</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <input value={pv.value} onChange={(e) => set({ value: e.target.value })}
                       aria-label={`Value of ${n}`} placeholder="value"
                       className="w-24 rounded-r-md border-l bg-transparent px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring" />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   useSchedule,
   useScheduleMutations,
@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
@@ -54,6 +55,13 @@ import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
 import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
 
+/** The comparison operators a condition offers, in the order the picker lists them. */
+const OPERATORS = ["<", "<=", ">", ">=", "==", "!="];
+
+/** The Endpoint picker's item for "no endpoint": a select item cannot carry `""`,
+ *  which is what an unscoped watch saves, so this stands in for it on screen only. */
+const WHOLE_WORKSPACE = "whole-workspace";
+
 /**
  * What each Data API metric actually measures, including the empty-window
  * behaviour — copied from `dataapi_metric.rs`'s own doc comments, not
@@ -82,6 +90,63 @@ const DATAAPI_METRIC_HELP: Record<string, string> = {
   [DataapiMetric.error_code_count]:
     "Number of calls in the window whose error code matches the value entered below, exactly. An empty window is a real 0.",
 };
+
+/**
+ * The Timezone picker, memoised: it lists every IANA zone (about 400 items),
+ * and a `ui/select` renders its items on every render even while closed, so
+ * without `memo` each keystroke anywhere in the editor re-rendered all of them.
+ */
+const TimezoneSelect = memo(function TimezoneSelect({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (zone: string) => void;
+}) {
+  const zones = timezones();
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {/* A stored zone the browser does not list (an older egret, or a
+            newer IANA name) must stay selectable, or opening the editor
+            would silently move the schedule to another timezone. */}
+        {!zones.includes(value) && <SelectItem value={value}>{value}</SelectItem>}
+        {zones.map((z) => (
+          <SelectItem key={z} value={z}>{z}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+});
+
+/**
+ * The fixed item lists of the editor's pickers, built once. A `ui/select`
+ * renders its items on every render even while closed; elements that are the
+ * same object from one render to the next are skipped, so a keystroke in a
+ * text field does not re-render every hour and minute.
+ */
+const OPERATOR_ITEMS = OPERATORS.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>);
+const EVERY_MINUTES_ITEMS = [1, 2, 5, 10, 15, 20, 30].map((n) => (
+  <SelectItem key={n} value={String(n)}>{n} minutes</SelectItem>
+));
+const EVERY_HOURS_ITEMS = [1, 2, 3, 4, 6, 8, 12].map((n) => (
+  <SelectItem key={n} value={String(n)}>{n === 1 ? "hour" : `${n} hours`}</SelectItem>
+));
+const WEEKDAY_ITEMS = WEEKDAYS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>);
+const DAY_ITEMS = Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+  <SelectItem key={d} value={String(d)}>{d}</SelectItem>
+));
+const HOUR_ITEMS = Array.from({ length: 24 }, (_, h) => h).map((h) => (
+  <SelectItem key={h} value={String(h)}>{String(h).padStart(2, "0")}</SelectItem>
+));
+const MINUTE_ITEMS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+  <SelectItem key={m} value={String(m)}>{String(m).padStart(2, "0")}</SelectItem>
+));
 
 /**
  * The create/edit form for one schedule.
@@ -600,18 +665,18 @@ export function ScheduleEditor({
               htmlFor="sched-db"
               details="Which connection the query runs against."
             >
-              <select
-                id="sched-db"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={databaseId || databases?.[0]?.id || ""}
-                onChange={(e) => setDatabaseId(e.target.value)}
-              >
-                {(databases ?? []).map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <Select value={databaseId || databases?.[0]?.id || ""} onValueChange={setDatabaseId}>
+                <SelectTrigger id="sched-db">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(databases ?? []).map((d) => (
+                    <SelectItem key={d.id} value={d.id}>
+                      {d.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </ConfigTableRow>
 
             <ConfigTableRow
@@ -642,29 +707,28 @@ export function ScheduleEditor({
               details="What about the result makes this fire."
             >
               <div className="space-y-2">
-                <select
-                  id="sched-validator"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                <Select
                   value={validatorType}
-                  onChange={(e) => setValidatorType(e.target.value as "not_null" | "operator")}
+                  onValueChange={(v) => setValidatorType(v as "not_null" | "operator")}
                 >
-                  <option value="not_null">Value is not null and not zero</option>
-                  <option value="operator">Value meets a comparison</option>
-                </select>
+                  <SelectTrigger id="sched-validator">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="not_null">Value is not null and not zero</SelectItem>
+                    <SelectItem value="operator">Value meets a comparison</SelectItem>
+                  </SelectContent>
+                </Select>
                 {validatorType === "operator" && (
                   <div className="flex gap-2">
-                    <select
-                      aria-label="Operator"
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={op}
-                      onChange={(e) => setOp(e.target.value)}
-                    >
-                      {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                        <option key={o} value={o}>
-                          {o}
-                        </option>
-                      ))}
-                    </select>
+                    <Select value={op} onValueChange={setOp}>
+                      <SelectTrigger aria-label="Operator">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {OPERATOR_ITEMS}
+                      </SelectContent>
+                    </Select>
                     <Input
                       aria-label="Threshold"
                       value={threshold}
@@ -689,13 +753,15 @@ export function ScheduleEditor({
               details="Which endpoint's traffic this watches. Whole workspace combines every endpoint's traffic into one measurement — choose it deliberately, not by leaving this blank; every save sends this field either way."
             >
               <div className="space-y-2">
-                <select
-                  id="sched-dataapi-endpoint"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={dataapiEndpointId}
-                  onChange={(e) => setDataapiEndpointId(e.target.value)}
+                <Select
+                  value={dataapiEndpointId || WHOLE_WORKSPACE}
+                  onValueChange={(v) => setDataapiEndpointId(v === WHOLE_WORKSPACE ? "" : v)}
                 >
-                  <option value="">Whole workspace</option>
+                  <SelectTrigger id="sched-dataapi-endpoint">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                  <SelectItem value={WHOLE_WORKSPACE}>Whole workspace</SelectItem>
                   {/* The stored endpoint may no longer be in the (untrashed-only)
                       list — trashed, or a workspace the caller can no longer
                       read. Injected as its own option so the picker keeps
@@ -704,16 +770,17 @@ export function ScheduleEditor({
                       widen the watch to the entire workspace. Same precedent as
                       the Schedule section's timezone picker below. */}
                   {dataapiEndpointId && !endpoints.some((e) => e.id === dataapiEndpointId) && (
-                    <option value={dataapiEndpointId}>
+                    <SelectItem value={dataapiEndpointId}>
                       {dataapiEndpointId} (not visible — trashed or inaccessible)
-                    </option>
+                    </SelectItem>
                   )}
                   {endpoints.map((e) => (
-                    <option key={e.id} value={e.id}>
+                    <SelectItem key={e.id} value={e.id}>
                       {e.name}
-                    </option>
+                    </SelectItem>
                   ))}
-                </select>
+                  </SelectContent>
+                </Select>
                 {/* A FAILED fetch is not "this workspace has no endpoints" — the
                     picker still renders (it always has "Whole workspace"), so
                     without this a 403 or a network error is indistinguishable
@@ -740,19 +807,19 @@ export function ScheduleEditor({
               htmlFor="sched-dataapi-metric"
               details={DATAAPI_METRIC_HELP[dataapiMetric]}
             >
-              <select
-                id="sched-dataapi-metric"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={dataapiMetric}
-                onChange={(e) => setDataapiMetric(e.target.value)}
-              >
-                <option value={DataapiMetric.error_rate}>Error rate</option>
-                <option value={DataapiMetric.error_count}>Error count</option>
-                <option value={DataapiMetric.call_count}>Call count</option>
-                <option value={DataapiMetric.p50_duration_ms}>p50 latency</option>
-                <option value={DataapiMetric.p95_duration_ms}>p95 latency</option>
-                <option value={DataapiMetric.error_code_count}>Count of a specific error code</option>
-              </select>
+              <Select value={dataapiMetric} onValueChange={setDataapiMetric}>
+                <SelectTrigger id="sched-dataapi-metric">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DataapiMetric.error_rate}>Error rate</SelectItem>
+                  <SelectItem value={DataapiMetric.error_count}>Error count</SelectItem>
+                  <SelectItem value={DataapiMetric.call_count}>Call count</SelectItem>
+                  <SelectItem value={DataapiMetric.p50_duration_ms}>p50 latency</SelectItem>
+                  <SelectItem value={DataapiMetric.p95_duration_ms}>p95 latency</SelectItem>
+                  <SelectItem value={DataapiMetric.error_code_count}>Count of a specific error code</SelectItem>
+                </SelectContent>
+              </Select>
             </ConfigTableRow>
 
             {dataapiMetric === DataapiMetric.error_code_count && (
@@ -797,18 +864,14 @@ export function ScheduleEditor({
               details="What about the measured value makes this fire."
             >
               <div className="flex gap-2">
-                <select
-                  id="sched-dataapi-op"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={op}
-                  onChange={(e) => setOp(e.target.value)}
-                >
-                  {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  ))}
-                </select>
+                <Select value={op} onValueChange={setOp}>
+                  <SelectTrigger id="sched-dataapi-op">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {OPERATOR_ITEMS}
+                  </SelectContent>
+                </Select>
                 <Input
                   aria-label="Threshold"
                   value={threshold}
@@ -836,20 +899,23 @@ export function ScheduleEditor({
               htmlFor="sched-target-kind"
               details="Whether this delivers a dashboard or a single chart."
             >
-              <select
-                id="sched-target-kind"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              <Select
                 value={targetKind}
-                onChange={(e) => {
-                  setTargetKind(e.target.value as "dashboard" | "chart");
+                onValueChange={(v) => {
+                  setTargetKind(v as "dashboard" | "chart");
                   // Clear the id: a chart id in the dashboard slot is exactly the
                   // "both targets" shape the server rejects.
                   setTargetId("");
                 }}
               >
-                <option value="dashboard">A dashboard</option>
-                <option value="chart">A chart</option>
-              </select>
+                <SelectTrigger id="sched-target-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dashboard">A dashboard</SelectItem>
+                  <SelectItem value="chart">A chart</SelectItem>
+                </SelectContent>
+              </Select>
             </ConfigTableRow>
 
             <ConfigTableRow
@@ -857,18 +923,18 @@ export function ScheduleEditor({
               htmlFor="sched-target"
               details="The object this report delivers."
             >
-              <select
-                id="sched-target"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={defaultTarget}
-                onChange={(e) => setTargetId(e.target.value)}
-              >
-                {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
-              </select>
+              <Select value={defaultTarget} onValueChange={setTargetId}>
+                <SelectTrigger id="sched-target">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                    <SelectItem key={o.id} value={o.id}>
+                      {o.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </ConfigTableRow>
 
             {extraTargets.map((id, i) => (
@@ -879,18 +945,21 @@ export function ScheduleEditor({
                 details="Delivered as an additional page in the same document."
               >
                 <div className="flex items-end gap-2">
-                  <select
-                    id={`sched-extra-${i}`}
-                    className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                  <Select
                     value={id}
-                    onChange={(e) =>
-                      setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
+                    onValueChange={(v) =>
+                      setExtraTargets(extraTargets.map((x, j) => (j === i ? v : x)))
                     }
                   >
-                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                      <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
-                  </select>
+                    <SelectTrigger id={`sched-extra-${i}`} className="flex-1">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                        <SelectItem key={o.id} value={o.id}>{o.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <Button
                     type="button"
                     variant="ghost"
@@ -912,17 +981,17 @@ export function ScheduleEditor({
                   : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."
               }
             >
-              <select
-                id="sched-format"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={reportFormat}
-                onChange={(e) => setReportFormat(e.target.value)}
-              >
-                <option value="png">PNG image</option>
-                <option value="pdf">PDF</option>
-                <option value="csv">CSV data</option>
-                <option value="text">Text</option>
-              </select>
+              <Select value={reportFormat} onValueChange={setReportFormat}>
+                <SelectTrigger id="sched-format">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="png">PNG image</SelectItem>
+                  <SelectItem value="pdf">PDF</SelectItem>
+                  <SelectItem value="csv">CSV data</SelectItem>
+                  <SelectItem value="text">Text</SelectItem>
+                </SelectContent>
+              </Select>
             </ConfigTableRow>
           </ConfigTable>
 
@@ -1007,23 +1076,26 @@ export function ScheduleEditor({
             >
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1.5">
-                  <select
-                    id="sched-period"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  <Select
                     value={sched.period}
-                    onChange={(e) =>
+                    onValueChange={(v) =>
                       setSched({
                         ...sched,
-                        period: e.target.value as StructuredSchedule["period"],
+                        period: v as StructuredSchedule["period"],
                       })
                     }
                   >
-                    <option value="minutes">Every N minutes</option>
-                    <option value="hourly">Hourly</option>
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                  </select>
+                    <SelectTrigger id="sched-period">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="minutes">Every N minutes</SelectItem>
+                      <SelectItem value="hourly">Hourly</SelectItem>
+                      <SelectItem value="daily">Daily</SelectItem>
+                      <SelectItem value="weekly">Weekly</SelectItem>
+                      <SelectItem value="monthly">Monthly</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 {/* Two mutually exclusive fields share htmlFor="sched-every" —
@@ -1033,64 +1105,68 @@ export function ScheduleEditor({
                 {sched.period === "minutes" && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="sched-every">Every</Label>
-                    <select
-                      id="sched-every"
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={sched.every}
-                      onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                    <Select
+                      value={String(sched.every)}
+                      onValueChange={(v) => setSched({ ...sched, every: Number(v) })}
                     >
-                      {[1, 2, 5, 10, 15, 20, 30].map((n) => (
-                        <option key={n} value={n}>{n} minutes</option>
-                      ))}
-                    </select>
+                      <SelectTrigger id="sched-every">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+{EVERY_MINUTES_ITEMS}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
                 {sched.period === "hourly" && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="sched-every">Every</Label>
-                    <select
-                      id="sched-every"
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={sched.every}
-                      onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                    <Select
+                      value={String(sched.every)}
+                      onValueChange={(v) => setSched({ ...sched, every: Number(v) })}
                     >
-                      {[1, 2, 3, 4, 6, 8, 12].map((n) => (
-                        <option key={n} value={n}>{n === 1 ? "hour" : `${n} hours`}</option>
-                      ))}
-                    </select>
+                      <SelectTrigger id="sched-every">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+{EVERY_HOURS_ITEMS}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
                 {sched.period === "weekly" && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="sched-weekday">On</Label>
-                    <select
-                      id="sched-weekday"
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={sched.weekday}
-                      onChange={(e) => setSched({ ...sched, weekday: Number(e.target.value) })}
+                    <Select
+                      value={String(sched.weekday)}
+                      onValueChange={(v) => setSched({ ...sched, weekday: Number(v) })}
                     >
-                      {WEEKDAYS.map((d, i) => (
-                        <option key={d} value={i}>{d}</option>
-                      ))}
-                    </select>
+                      <SelectTrigger id="sched-weekday">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+{WEEKDAY_ITEMS}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
                 {sched.period === "monthly" && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="sched-day">On day</Label>
-                    <select
-                      id="sched-day"
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={sched.day}
-                      onChange={(e) => setSched({ ...sched, day: Number(e.target.value) })}
+                    <Select
+                      value={String(sched.day)}
+                      onValueChange={(v) => setSched({ ...sched, day: Number(v) })}
                     >
-                      {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                        <option key={d} value={d}>{d}</option>
-                      ))}
-                    </select>
+                      <SelectTrigger id="sched-day">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+{DAY_ITEMS}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
@@ -1100,30 +1176,31 @@ export function ScheduleEditor({
                     <div className="flex items-center gap-1">
                       {sched.period !== "hourly" && (
                         <>
-                          <select
-                            id="sched-time"
-                            aria-label="Hour"
-                            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                            value={sched.hour}
-                            onChange={(e) => setSched({ ...sched, hour: Number(e.target.value) })}
+                          <Select
+                            value={String(sched.hour)}
+                            onValueChange={(v) => setSched({ ...sched, hour: Number(v) })}
                           >
-                            {Array.from({ length: 24 }, (_, h) => h).map((h) => (
-                              <option key={h} value={h}>{String(h).padStart(2, "0")}</option>
-                            ))}
-                          </select>
+                            <SelectTrigger id="sched-time" aria-label="Hour">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+{HOUR_ITEMS}
+                            </SelectContent>
+                          </Select>
                           <span className="text-sm text-muted-foreground">:</span>
                         </>
                       )}
-                      <select
-                        aria-label="Minute"
-                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                        value={sched.minute}
-                        onChange={(e) => setSched({ ...sched, minute: Number(e.target.value) })}
+                      <Select
+                        value={String(sched.minute)}
+                        onValueChange={(v) => setSched({ ...sched, minute: Number(v) })}
                       >
-                        {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
-                          <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
-                        ))}
-                      </select>
+                        <SelectTrigger aria-label="Minute">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+{MINUTE_ITEMS}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
                 )}
@@ -1140,20 +1217,7 @@ export function ScheduleEditor({
               htmlFor="sched-tz"
               details="Runs are scheduled in this zone. It also renders the {{date}}/{{time}} placeholders in the subject — the message body itself has no dates in it."
             >
-              <select
-                id="sched-tz"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-              >
-                {/* A stored zone the browser does not list (an older egret, or a
-                    newer IANA name) must stay selectable, or opening the editor
-                    would silently move the schedule to another timezone. */}
-                {!timezones().includes(timezone) && <option value={timezone}>{timezone}</option>}
-                {timezones().map((z) => (
-                  <option key={z} value={z}>{z}</option>
-                ))}
-              </select>
+              <TimezoneSelect id="sched-tz" value={timezone} onChange={setTimezone} />
             </ConfigTableRow>
           )}
 
@@ -1341,39 +1405,42 @@ export function ScheduleEditor({
                   />
                   {attachTarget && (
                     <div className="flex flex-col gap-2">
-                      <select
-                        aria-label="Attachment object type"
-                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      <Select
                         value={targetKind}
-                        onChange={(e) => {
-                          setTargetKind(e.target.value as "dashboard" | "chart");
+                        onValueChange={(v) => {
+                          setTargetKind(v as "dashboard" | "chart");
                           setTargetId("");
                         }}
                       >
-                        <option value="dashboard">A dashboard</option>
-                        <option value="chart">A chart</option>
-                      </select>
-                      <select
-                        aria-label="Attachment object"
-                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                        value={defaultTarget}
-                        onChange={(e) => setTargetId(e.target.value)}
-                      >
-                        {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                          <option key={o.id} value={o.id}>
-                            {o.name}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        aria-label="Attachment format"
-                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                        value={reportFormat}
-                        onChange={(e) => setReportFormat(e.target.value)}
-                      >
-                        <option value="png">PNG image, shown here in the message</option>
-                        <option value="pdf">PDF, as a file</option>
-                      </select>
+                        <SelectTrigger aria-label="Attachment object type">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="dashboard">A dashboard</SelectItem>
+                          <SelectItem value="chart">A chart</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Select value={defaultTarget} onValueChange={setTargetId}>
+                        <SelectTrigger aria-label="Attachment object">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                            <SelectItem key={o.id} value={o.id}>
+                              {o.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select value={reportFormat} onValueChange={setReportFormat}>
+                        <SelectTrigger aria-label="Attachment format">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="png">PNG image, shown here in the message</SelectItem>
+                          <SelectItem value="pdf">PDF, as a file</SelectItem>
+                        </SelectContent>
+                      </Select>
                       <p className="text-xs text-muted-foreground">
                         If it cannot be rendered the alert still sends, with the rows alone.
                       </p>

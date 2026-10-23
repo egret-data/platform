@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MoveParameterField } from "../MoveParameterField";
 import type { MoveDestination } from "../inlineParameters";
 
@@ -14,38 +15,49 @@ const flat: MoveDestination[] = [
 ];
 
 describe("MoveParameterField", () => {
-  it("offers Top of page plus one group per tab, in tab order", () => {
+  // The picker's options render only while it is open.
+  const open = async () => {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: "filter location" }));
+    return { user, listbox: await screen.findByRole("listbox") };
+  };
+
+  it("offers Top of page plus one group per tab, in tab order", async () => {
     // MoveParameterMenu.tsx:104-129 — the root group holds only "Top of page" while any tab has a
     // hostable card.
     render(<MoveParameterField value={null} destinations={tabbed} onChange={vi.fn()} />);
-    const groups = [...document.querySelectorAll("optgroup")].map((g) => g.label);
+    const { listbox } = await open();
+    const groups = within(listbox).getAllByRole("group").map((g) => g.firstElementChild?.textContent);
     expect(groups).toEqual(["Overview", "Detail"]);
-    expect(screen.getByRole("option", { name: "Top of page" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: "Detail chart" })).toBeTruthy();
+    expect(within(listbox).getByRole("option", { name: "Top of page" })).toBeTruthy();
+    expect(within(within(listbox).getAllByRole("group")[1]).getByRole("option", { name: "Detail chart" })).toBeTruthy();
   });
 
-  it("drops the grouping on a dashboard with no tabs", () => {
+  it("drops the grouping on a dashboard with no tabs", async () => {
     render(<MoveParameterField value={null} destinations={flat} onChange={vi.fn()} />);
-    expect(document.querySelectorAll("optgroup")).toHaveLength(0);
-    expect(screen.getByRole("option", { name: "Revenue" })).toBeTruthy();
+    const { listbox } = await open();
+    expect(within(listbox).queryAllByRole("group")).toHaveLength(0);
+    expect(within(listbox).getByRole("option", { name: "Revenue" })).toBeTruthy();
   });
 
   it("shows Top of page for a filter no card hosts, and the host otherwise", () => {
     const { rerender } = render(<MoveParameterField value={null} destinations={tabbed} onChange={vi.fn()} />);
-    expect((screen.getByLabelText("filter location") as HTMLSelectElement).value).toBe("top-of-page");
+    expect(screen.getByRole("combobox", { name: "filter location" })).toHaveTextContent("Top of page");
     rerender(<MoveParameterField value="bar" destinations={tabbed} onChange={vi.fn()} />);
-    expect((screen.getByLabelText("filter location") as HTMLSelectElement).value).toBe("bar");
+    expect(screen.getByRole("combobox", { name: "filter location" })).toHaveTextContent("Revenue");
   });
 
-  it("emits the card id, and null for Top of page", () => {
+  it("emits the card id, and null for Top of page", async () => {
     // Assert the RAW value the handler receives: a test that read the visible label would pass
     // against an implementation emitting "top-of-page" as a card id, which would then be looked
     // up as a card and silently found missing.
     const onChange = vi.fn();
     render(<MoveParameterField value="bar" destinations={tabbed} onChange={onChange} />);
-    fireEvent.change(screen.getByLabelText("filter location"), { target: { value: "head" } });
+    let { user } = await open();
+    await user.click(screen.getByRole("option", { name: "Sales" }));
     expect(onChange).toHaveBeenCalledWith("head");
-    fireEvent.change(screen.getByLabelText("filter location"), { target: { value: "top-of-page" } });
+    ({ user } = await open());
+    await user.click(screen.getByRole("option", { name: "Top of page" }));
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
@@ -55,12 +67,10 @@ describe("MoveParameterField", () => {
   });
 
   it("keeps a host card whose tab has since been emptied selectable, rather than silently resetting", () => {
-    // The `<select>`'s value must be a real option or the browser shows the FIRST one — which is
-    // "Top of page", i.e. the control would claim the filter is on the top bar while the card
-    // still holds it. Every destination is rendered, so the host is always among them.
+    // The picker's value must be a real option or it shows nothing chosen — or, worse, the
+    // control would claim the filter is on the top bar while the card still holds it. Every
+    // destination is rendered, so the host is always among them.
     render(<MoveParameterField value="far" destinations={tabbed} onChange={vi.fn()} />);
-    const sel = screen.getByLabelText("filter location") as HTMLSelectElement;
-    expect(sel.value).toBe("far");
-    expect(sel.selectedOptions[0].textContent).toBe("Detail chart");
+    expect(screen.getByRole("combobox", { name: "filter location" })).toHaveTextContent("Detail chart");
   });
 });

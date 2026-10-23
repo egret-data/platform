@@ -23,6 +23,7 @@ import { useDashboardParams } from "@/api/useDashboardParams";
 import { useFilterDrafts } from "@/api/useFilterDrafts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
 import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
@@ -1001,14 +1002,16 @@ export default function DashboardView() {
           <DialogHeader><DialogTitle>Delete tab</DialogTitle></DialogHeader>
           <p className="text-sm text-muted-foreground">This tab has cards. Move them to another tab, or delete them with the tab.</p>
           <div className="flex flex-col gap-2 py-2">
-            <label className="flex items-center gap-2 text-sm">
+            <label htmlFor="reassign-target" className="flex items-center gap-2 text-sm">
               <span>Move cards to</span>
-              <select aria-label="reassign target" className="h-8 rounded border bg-background px-1 text-sm"
-                value={reassignTo ?? ""} onChange={(e) => setReassignTo(e.target.value)}>
-                {(draftTabs ?? []).filter((t) => t.key !== deletingTabKey).map((t) => (
-                  <option key={t.key} value={t.key}>{t.name}</option>
-                ))}
-              </select>
+              <Select value={reassignTo ?? ""} onValueChange={setReassignTo}>
+                <SelectTrigger size="sm" id="reassign-target" aria-label="reassign target"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(draftTabs ?? []).filter((t) => t.key !== deletingTabKey).map((t) => (
+                    <SelectItem key={t.key} value={t.key}>{t.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </label>
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="outline" aria-label="reassign and delete"
