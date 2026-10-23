@@ -16,7 +16,7 @@ import { loginLocalAdmin, firstWorkspace } from "./helpers";
  *   list                 Explore → Datasets            20px    full
  *   form / editor        Alerts → New alert            20px    960px column
  *   Control Plane        Control Plane → Workspaces    20px    full
- *   Workspace settings   Settings → General            20px    960px pane
+ *   Workspace settings   Settings → General            20px    pane ≤ 960px
  *   compact tool header  SQL Lab                       16px    full
  *
  * Measured before the change on the demo stack at 1440×900: the titles were
@@ -78,6 +78,8 @@ interface Measured {
   availableRight?: number;
   /** The width the 960px column applies to: the root, or the settings pane. */
   columnWidth?: number;
+  /** Room the column has: from its left edge to the root's content right. */
+  columnRoom?: number;
 }
 
 /** Measure one page. Runs in the browser. */
@@ -129,6 +131,7 @@ const measure = (page: Page, title: string, kind: Kind) =>
         rootRight: round(root.getBoundingClientRect().right),
         availableRight: round(mainBox.right),
         columnWidth: round(columnBox.right - columnBox.left),
+        columnRoom: round(rootBox.right - columnBox.left),
       };
     },
     { title, kind },
@@ -169,10 +172,14 @@ test.describe("Page frame — one title scale, one left edge", () => {
           `${c.kind}: full width (root ${m.rootRight} vs main ${m.availableRight})`,
         ).toBeLessThanOrEqual(1);
       } else {
-        expect(m.columnWidth, `${c.kind}: a ${COLUMN}px column`).toBeLessThanOrEqual(COLUMN);
-        expect(m.columnWidth, `${c.kind}: a ${COLUMN}px column, not a narrower one`).toBeGreaterThanOrEqual(
-          COLUMN - 1,
-        );
+        // Capped at 960, and otherwise taking the room it has: at 1440 the
+        // settings pane beside its 208px nav has 896px, less than the cap.
+        const want = Math.min(COLUMN, m.columnRoom!);
+        expect(m.columnWidth, `${c.kind}: capped at ${COLUMN}px`).toBeLessThanOrEqual(COLUMN);
+        expect(
+          Math.abs(m.columnWidth! - want),
+          `${c.kind}: min(${COLUMN}, room ${m.columnRoom}) wide, measured ${m.columnWidth}`,
+        ).toBeLessThanOrEqual(1);
       }
       lefts.push({ kind: c.kind, left: m.contentLeft! });
     }
