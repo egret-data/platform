@@ -51,3 +51,31 @@ describe("DrillMenu — bucketed dimensions", () => {
     expect(screen.getByText("See these records")).toBeInTheDocument();
   });
 });
+
+// KI-069: the menu opened at the pointer and ran off the right edge for a card on the right.
+describe("DrillMenu — stays inside the viewport", () => {
+  const menuBox = (width: number, height: number) =>
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width, height, x: 0, y: 0, top: 0, left: 0, right: width, bottom: height, toJSON: () => ({}),
+    } as DOMRect);
+
+  it("moves left and up when the pointer is near the bottom-right corner", () => {
+    Object.assign(window, { innerWidth: 1440, innerHeight: 900 });
+    const spy = menuBox(192, 103);
+    render(<DrillMenu ctx={ctx} x={1340} y={850} onFilterBy={() => {}} onSeeRecords={() => {}} onClose={() => {}} />);
+    const menu = screen.getByTestId("drill-menu");
+    expect(menu.style.left).toBe(`${1440 - 192 - 8}px`);
+    expect(menu.style.top).toBe(`${900 - 103 - 8}px`);
+    spy.mockRestore();
+  });
+
+  it("stays at the pointer when it fits", () => {
+    Object.assign(window, { innerWidth: 1440, innerHeight: 900 });
+    const spy = menuBox(192, 103);
+    render(<DrillMenu ctx={ctx} x={300} y={200} onFilterBy={() => {}} onSeeRecords={() => {}} onClose={() => {}} />);
+    const menu = screen.getByTestId("drill-menu");
+    expect(menu.style.left).toBe("300px");
+    expect(menu.style.top).toBe("200px");
+    spy.mockRestore();
+  });
+});
