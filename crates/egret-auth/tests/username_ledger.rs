@@ -465,3 +465,52 @@ fn deleter() -> egret_core::Principal {
         impersonator: None,
     }
 }
+
+#[tokio::test]
+async fn the_backfill_skips_an_event_object_with_no_ref() {
+    let Some(db) = connect().await else { return };
+    let name = format!("evobj{}", t());
+    sqlx::query(
+        "INSERT INTO audit.audit_log (ts, kind, action, resource_type, resource_id, detail) \
+         VALUES (now(), 'mutation', 'engine_grant:create', 'engine_grant', $1, $2)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(serde_json::json!({
+        "before": null,
+        "after": {"principals": [{"kind": "user"}, {"kind": "user", "ref": name}]},
+    }))
+    .execute(&db.pool)
+    .await
+    .expect("event");
+
+    // An older or foreign event shape does not abort the upgrade (an accessor
+    // reached through `.**` raises no missing-key error, strict or not).
+    backfill(&db).await;
+    assert_ne!(
+        mint(&db, &format!("{name}@x.test")).await,
+        name,
+        "the name the event remembers is retired"
+    );
+}
+
+#[tokio::test]
+async fn a_mint_starts_past_the_highest_retired_suffix() {
+    let Some(db) = connect().await else { return };
+    let base = format!("sfx{}", t());
+    // A base whose first thousand suffixes were all used and retired (a
+    // service account created and deleted over and over).
+    sqlx::query(
+        "INSERT INTO username_ledger (username, source, retired_at) \
+         SELECT CASE WHEN n = 1 THEN $1 ELSE $1 || '-' || n END, 'backfill_ref', now() \
+           FROM generate_series(1, 1000) n",
+    )
+    .bind(&base)
+    .execute(&db.pool)
+    .await
+    .expect("retired suffixes");
+
+    assert_eq!(
+        mint(&db, &format!("{base}@x.test")).await,
+        format!("{base}-1001")
+    );
+}

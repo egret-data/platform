@@ -494,9 +494,10 @@ fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// `username_ledger_pkey` for a name someone ever held, or that a stale ref,
 /// policy body or event named when 0208 ran, and the same `continue` tries the
 /// next suffix: the next person whose email slugs to a deleted user's name
-/// gets `base-2`, never the name refs still point at. The trigger runs inside
-/// this savepoint, so there is no check-then-insert race with a concurrent
-/// delete, and the loop itself needs no knowledge of the ledger.
+/// gets `base-2` (or the suffix past the highest the ledger holds for the
+/// base), never the name refs still point at. The trigger runs inside this
+/// savepoint, so there is no check-then-insert race with a concurrent delete:
+/// the ledger read only picks where probing starts, and the insert decides.
 pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId) -> Result<String> {
     use sqlx::Connection as _;
 
@@ -524,8 +525,23 @@ pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId)
         .map_err(db_err)?;
     let base = slugify_localpart(&email);
 
-    // 3. Try base, then base-2, base-3, … until the unique UPDATE sticks.
-    for n in 1..1000u32 {
+    // 3. Try base, then the suffixes past the highest the ledger ever saw for
+    //    it (`base-<max+1>`, …), until the unique UPDATE sticks. Names are
+    //    never freed, so probing from `base-2` would walk every retired one,
+    //    one failing savepoint each, and run out after 999.
+    let highest: Option<i64> = sqlx::query_scalar(
+        "SELECT max(substr(username::text, length($1) + 2)::bigint) FROM username_ledger \
+          WHERE starts_with(lower(username::text), $1 || '-') \
+            AND substr(username::text, length($1) + 2) ~ '^[0-9]{1,9}$'",
+    )
+    .bind(&base)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let first = u32::try_from(highest.unwrap_or(1) + 1)
+        .unwrap_or(u32::MAX - 1000)
+        .max(2);
+    for n in std::iter::once(1).chain(first..first + 998) {
         let cand = if n == 1 {
             base.clone()
         } else {
