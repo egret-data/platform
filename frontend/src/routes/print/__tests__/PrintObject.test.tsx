@@ -163,6 +163,8 @@ it("contains a chart in its fixed box, and lets a table card grow to its rows", 
   const { findAllByTestId } = renderPrint();
   const [bar, table] = (await findAllByTestId("chart")).map((c) => c.closest("[data-print-chart]")!);
   expect(bar.className).toContain("h-96");
-  expect(bar.className).toContain("overflow-hidden");
+  // Clipped to its height only: a horizontal clip cut the chart off on the PDF page.
+  expect(bar.className).toContain("overflow-y-clip");
+  expect(bar.className).not.toContain("overflow-hidden");
   expect(table.className).not.toContain("h-96");
 });
