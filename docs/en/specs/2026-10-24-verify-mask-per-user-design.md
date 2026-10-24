@@ -653,3 +653,8 @@ Deviations the code forces are recorded here, per task, as they happen.
   filters decide … differently"), and the refusal links the NEW rule to `/governance/rules/<preview uuid>`, an id that
   was never stored (`GET /perm/rules/{id}/effect` → 404). The refusal should name only stored rules, or describe the
   new one without a link. Probably older than this package (the ambiguous-arbitration refusal); left for a follow-up.
+- **UI 3b, live re-check.** On the rebuilt stack `break-words` alone changed nothing: the Member cell had shrunk to
+  71 px and "exempt-g" still broke at its hyphen (a normal break opportunity). The cell now has a `min-w-24` floor;
+  with it the name holds on one line at 390 px and the page still does not scroll sideways. The same re-check
+  confirmed the StarRocks refusal line (bulk1), the table-classification row-filter line and the closed suggestion
+  list against the live engines.
