@@ -37,7 +37,7 @@ use egret_perm_compile::explain_wire::{
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
     RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
-    UndecidableCause,
+    TiedOutcome, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -321,6 +321,7 @@ fn cause_eval_order_ambiguous_keeps_every_tied_id() {
     let cause = UndecidableCause::EvalOrderAmbiguous {
         policy_ids: vec![Some(1), None, Some(3)],
         policy_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        outcomes: Vec::new(),
     };
     let wire = WireUndecidableCause::from(&cause);
     assert_eq!(
@@ -328,7 +329,39 @@ fn cause_eval_order_ambiguous_keeps_every_tied_id() {
         WireUndecidableCause::EvalOrderAmbiguous {
             policy_ids: vec![Some(1), None, Some(3)],
             policy_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            outcomes: Vec::new(),
         }
+    );
+    // An access tie has no outcomes, and the wire omits the empty list.
+    assert!(serde_json::to_value(&wire)
+        .unwrap()
+        .get("outcomes")
+        .is_none());
+}
+
+#[test]
+fn cause_eval_order_ambiguous_carries_each_tied_outcome_in_order() {
+    let cause = UndecidableCause::EvalOrderAmbiguous {
+        policy_ids: vec![Some(1), Some(2)],
+        policy_names: vec!["a".to_string(), "b".to_string()],
+        outcomes: vec![
+            TiedOutcome::Mask {
+                mask_type: Some("MASK_HASH".to_string()),
+                masked_value: None,
+                mask_condition: None,
+            },
+            TiedOutcome::RowFilter {
+                filter_expr: "region = 'us'".to_string(),
+            },
+        ],
+    };
+    let wire = serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap();
+    assert_eq!(
+        wire["outcomes"],
+        serde_json::json!([
+            {"kind": "mask", "mask_type": "MASK_HASH", "masked_value": null, "mask_condition": null},
+            {"kind": "row_filter", "filter_expr": "region = 'us'"},
+        ])
     );
 }
 

@@ -785,6 +785,36 @@ pub enum DenyReason {
     NoPolicyMatched,
 }
 
+/// What one policy of an [`UndecidableCause::EvalOrderAmbiguous`] tie would
+/// yield on its own: the DATA half of a [`MaskResult`] or [`RowFilterResult`],
+/// without the identity the tie leaves unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TiedOutcome {
+    Mask {
+        mask_type: Option<String>,
+        masked_value: Option<String>,
+        mask_condition: Option<String>,
+    },
+    RowFilter {
+        filter_expr: String,
+    },
+}
+
+impl TiedOutcome {
+    fn of(result: &SubResult) -> Self {
+        match result {
+            SubResult::Mask(m) => TiedOutcome::Mask {
+                mask_type: m.mask_type.clone(),
+                masked_value: m.masked_value.clone(),
+                mask_condition: m.mask_condition.clone(),
+            },
+            SubResult::RowFilter(f) => TiedOutcome::RowFilter {
+                filter_expr: f.filter_expr.clone(),
+            },
+        }
+    }
+}
+
 /// Something that stands between this evaluator and a defensible answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndecidableCause {
@@ -905,9 +935,16 @@ pub enum UndecidableCause {
     /// 529 versus `if_icmple` at 505) — the FIRST matching evaluator is
     /// final and the others never run, so the reported mask type is a
     /// function of an order this crate cannot compute.
+    ///
+    /// `outcomes` is each tied policy's own yield, in `policy_names` order, so
+    /// a caller can tell an agreeing tie from a conflicting one without
+    /// re-deriving what this crate computed. It is filled on the MASK and
+    /// ROW-FILTER paths and empty on the ACCESS path, where the tie is about
+    /// the band's order and not about a yield.
     EvalOrderAmbiguous {
         policy_ids: Vec<Option<i64>>,
         policy_names: Vec<String>,
+        outcomes: Vec<TiedOutcome>,
     },
     /// [`EngineConfig::engine`] names one engine and the service-def's
     /// `name` is another's (or is absent). The two engines' resource and
@@ -2405,6 +2442,7 @@ fn evaluate_in(ctx: &Ctx<'_, '_>, request: &AccessRequest, engine: &EngineConfig
                         why: vec![UndecidableCause::EvalOrderAmbiguous {
                             policy_ids: vec![view.policy.id, rival.policy.id],
                             policy_names: vec![view.policy.name.clone(), rival.policy.name.clone()],
+                            outcomes: Vec::new(),
                         }],
                     };
                 }
@@ -4210,6 +4248,7 @@ fn evaluate_sub(
                     .iter()
                     .map(|(v, _)| v.policy.name.clone())
                     .collect(),
+                outcomes: deciding.iter().map(|(_, r)| TiedOutcome::of(r)).collect(),
             }])
         }
     }
@@ -4716,22 +4755,30 @@ fn evaluate_tag_sub(
     // policy reached through two tags of the same match type ties with itself
     // and is not an ambiguity.
     if let Some(won) = winner {
-        let tied: Vec<&TagCandidate<'_>> = candidates
+        // Each tied candidate keeps the yield its filter computed: the tie
+        // reports it (`TiedOutcome`).
+        let tied: Vec<(&TagCandidate<'_>, SubResult)> = candidates
             .iter()
             .filter(|c| !std::ptr::eq(c.view.policy, won.view.policy))
             .filter(|c| tag_order_without_the_id_standin(kind, c, won) == Ordering::Equal)
-            .filter(|c| c.view.decide_sub(kind, request, &implied).is_some())
+            .filter_map(|c| c.view.decide_sub(kind, request, &implied).map(|r| (c, r)))
             .collect();
         if !tied.is_empty() {
+            let won_result = found
+                .as_ref()
+                .expect("a recorded winner always yielded a sub-result");
             let mut policy_ids = vec![won.view.policy.id];
             let mut policy_names = vec![won.view.policy.name.clone()];
-            for c in tied {
+            let mut outcomes = vec![TiedOutcome::of(won_result)];
+            for (c, result) in tied {
                 policy_ids.push(c.view.policy.id);
                 policy_names.push(c.view.policy.name.clone());
+                outcomes.push(TiedOutcome::of(&result));
             }
             return Err(vec![UndecidableCause::EvalOrderAmbiguous {
                 policy_ids,
                 policy_names,
+                outcomes,
             }]);
         }
     }

@@ -1277,8 +1277,10 @@ fn a_tag_deny_makes_a_resource_band_s_eval_order_decide_and_that_refuses() {
         Decision::Undecidable { why } => assert!(
             why.iter().any(|c| matches!(
                 c,
-                UndecidableCause::EvalOrderAmbiguous { policy_ids, .. }
-                    if policy_ids == &vec![Some(1), Some(2)]
+                // An ACCESS tie carries no tied outcome: the verdict is the
+                // band's order, not a yield.
+                UndecidableCause::EvalOrderAmbiguous { policy_ids, outcomes, .. }
+                    if policy_ids == &vec![Some(1), Some(2)] && outcomes.is_empty()
             )),
             "{why:?}"
         ),

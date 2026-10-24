@@ -333,6 +333,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::explain_wire::WireMaskResult,
         crate::explain_wire::WireDenyReason,
         crate::explain_wire::WireUndecidableCause,
+        // Reachable from `WireUndecidableCause::EvalOrderAmbiguous::outcomes`.
+        crate::explain_wire::WireTiedOutcome,
         crate::explain_wire::WireUnmodelled,
         crate::explain_wire::WireItemBucket,
         crate::explain_wire::WireTagPolicyBlock,

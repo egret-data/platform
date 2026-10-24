@@ -410,3 +410,28 @@ None blocking. C1–C13 are defaults the user may revisit.
 ## 14. Implementation notes (append-only)
 
 Deviations the code forces are recorded here, per task, as they happen.
+
+### Step 0 (re-verification, 2026-10-24)
+
+- Base moved to `origin/main` `93a9f135` (frontend-only dashboard changes); the branch was rebased. No backend file
+  of §2 changed, so the line numbers hold. PR #741 is still open; highest migration is still `0207`.
+- **E5 is half-wrong.** `WireRowFilterDecision` and `WireRowFilterResult` already exist in `explain_wire.rs`
+  (since #606, with `From<&RowFilterDecision>` and wire tests in `tests/wire_dtos.rs`), unused by any response. What
+  is true is that explain emits no row-filter decision (`ExplainProfile` has no such field). Task 4 reuses the
+  existing types instead of adding them; no decision changes.
+- E3, E4, E9, E11, E12, E13, E14, E15 hold as written.
+- E19/C8: no write on the explain path (`check_explain_target`, `services_for_catalog_via`, `served_artifact_via`,
+  `envelope_via`, `lineage_catalogs_for_poll_via`/`eligible_bound_engines_via`, `resolved_tags_for_target`,
+  `profile_plugin_version`, `principal_members_via`). `routes/people.rs` already has a `snapshot!` macro
+  (`REPEATABLE READ, READ ONLY`, rolled back) used by the people reads; `READ ONLY` is kept.
+
+### Task 1 (tied outcomes)
+
+- `TiedOutcome` is built by a private `TiedOutcome::of(&SubResult)`, not a `From` impl, because `SubResult` is
+  private to the evaluator.
+- The tag-band case is asserted on the existing tied pair `two_mask_policies_tied_on_every_key_ranger_has_refuse`
+  (`src/tag_eval_tests.rs`, `MASK_HASH` vs `MASK_NULL`) instead of a new test in `tests/tag_arbitration.rs`; the
+  access-tie "outcomes empty" check is added to `a_tag_deny_makes_a_resource_band_s_eval_order_decide_and_that_refuses`
+  there.
+- `WireTiedOutcome` (`kind: mask | row_filter`) is registered in the OpenAPI components beside
+  `WireUndecidableCause`; the wire omits an empty `outcomes`.

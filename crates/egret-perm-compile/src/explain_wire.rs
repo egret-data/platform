@@ -92,7 +92,7 @@
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
     RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
-    UndecidableCause,
+    TiedOutcome, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -635,9 +635,14 @@ pub enum WireUndecidableCause {
     /// `policy_ids`/`policy_names` are the FULL tied set — see
     /// [`UndecidableCause::EvalOrderAmbiguous`]'s own doc for why collapsing
     /// this to one id would misreport a tie this crate cannot order.
+    ///
+    /// `outcomes` is each tied policy's own yield in the same order, present
+    /// for a mask or row-filter tie and absent for an access tie.
     EvalOrderAmbiguous {
         policy_ids: Vec<Option<i64>>,
         policy_names: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        outcomes: Vec<WireTiedOutcome>,
     },
     /// The `tagPolicies` block carries policies this decision's type would
     /// evaluate and the caller resolved no tag set. Not reachable through
@@ -842,9 +847,11 @@ impl From<&UndecidableCause> for WireUndecidableCause {
             UndecidableCause::EvalOrderAmbiguous {
                 policy_ids,
                 policy_names,
+                outcomes,
             } => WireUndecidableCause::EvalOrderAmbiguous {
                 policy_ids: policy_ids.clone(),
                 policy_names: policy_names.clone(),
+                outcomes: outcomes.iter().map(WireTiedOutcome::from).collect(),
             },
             UndecidableCause::TagsUnresolved => WireUndecidableCause::TagsUnresolved,
             UndecidableCause::TagSubPolicyIsDenyCapable {
@@ -1000,6 +1007,41 @@ impl From<&Decision> for WireDecision {
             },
             Decision::Undecidable { why } => WireDecision::Undecidable {
                 why: why.iter().map(WireUndecidableCause::from).collect(),
+            },
+        }
+    }
+}
+
+// ── tied outcome ─────────────────────────────────────────────────────────
+
+/// Wire mirror of [`TiedOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTiedOutcome {
+    Mask {
+        mask_type: Option<String>,
+        masked_value: Option<String>,
+        mask_condition: Option<String>,
+    },
+    RowFilter {
+        filter_expr: String,
+    },
+}
+
+impl From<&TiedOutcome> for WireTiedOutcome {
+    fn from(outcome: &TiedOutcome) -> Self {
+        match outcome {
+            TiedOutcome::Mask {
+                mask_type,
+                masked_value,
+                mask_condition,
+            } => WireTiedOutcome::Mask {
+                mask_type: mask_type.clone(),
+                masked_value: masked_value.clone(),
+                mask_condition: mask_condition.clone(),
+            },
+            TiedOutcome::RowFilter { filter_expr } => WireTiedOutcome::RowFilter {
+                filter_expr: filter_expr.clone(),
             },
         }
     }
