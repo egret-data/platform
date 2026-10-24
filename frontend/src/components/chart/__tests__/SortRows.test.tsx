@@ -106,3 +106,25 @@ describe("SortRows", () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 });
+
+// KI-050: the field menu names each field the way the field pickers do — its display name — while
+// the clause still stores the machine name.
+describe("SortRows — display names", () => {
+  it("lists display names and stores machine names", async () => {
+    function Labelled() {
+      const [value, setValue] = useState<ChartOrderBy[]>([]);
+      return (
+        <>
+          <SortRows fields={AGGREGATE_FIELDS} labels={{ revenue: "Revenue" }} value={value} onChange={setValue} />
+          <output data-testid="state">{JSON.stringify(value)}</output>
+        </>
+      );
+    }
+    render(<Labelled />);
+    await userEvent.click(screen.getByRole("combobox", { name: /add a sort/i }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["category", "Revenue"]);
+    await userEvent.click(screen.getByRole("option", { name: "Revenue" }));
+    expect(state()).toEqual([{ field: "revenue", desc: false }]);
+    expect(screen.getByRole("combobox", { name: "sort 1 field" })).toHaveTextContent("Revenue");
+  });
+});

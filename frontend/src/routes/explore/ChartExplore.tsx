@@ -13,7 +13,7 @@ import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
-import { columnLabels, metricLabels } from "@/components/chart/config/field-names";
+import { columnLabels, metricLabels, type FieldLabels } from "@/components/chart/config/field-names";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
@@ -336,6 +336,14 @@ export default function ChartExplore() {
     [detail.data],
   );
   const effCS = useMemo(() => withDatasetDefaults(datasetDefaults, columnSettings), [datasetDefaults, columnSettings]);
+  // What each field is CALLED on screen — the title the chart draws it under (dataset display name,
+  // or the chart's own rename) — for the menus that name fields outside the pickers: Sort and the
+  // drill menu (KI-050).
+  const fieldLabels = useMemo<FieldLabels>(() => {
+    const out: FieldLabels = {};
+    for (const [name, fmt] of Object.entries(effCS)) if (fmt.column_title) out[name] = fmt.column_title;
+    return out;
+  }, [effCS]);
 
   // "View SQL" disclosure: build-only, fetched lazily (only while the
   // disclosure is open) via the `charts`-gated ch_data endpoint — independent
@@ -756,7 +764,7 @@ export default function ChartExplore() {
                 its steps in — and the order that reads correctly, since the sort is what decides
                 WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
             {descriptor && honoursOrderby(descriptor, descConfig) && (
-              <SortRows fields={sortableFields(specForRun())} value={orderby} onChange={setOrderby} />
+              <SortRows fields={sortableFields(specForRun())} labels={fieldLabels} value={orderby} onChange={setOrderby} />
             )}
 
             {/* THE CEILING IS NOW ON SCREEN. `max={10000}` mirrors the backend's `MAX_CHART_ROWS`
@@ -1041,7 +1049,7 @@ export default function ChartExplore() {
 
       {drillMenu && (
         <DrillMenu
-          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y} labels={fieldLabels}
           onFilterBy={addFilter}
           onSeeRecords={(fs) => setRecordsFilters(fs)}
           onClose={() => setDrillMenu(null)}
