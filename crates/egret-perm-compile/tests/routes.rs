@@ -4223,6 +4223,10 @@ async fn explain_answers_an_uncleared_starrocks_read_of_a_masked_column_with_the
         "body: {body}"
     );
     assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert!(
+        mask.get("replayed").is_none(),
+        "MASK_NULL means not cleared: nothing to replay; body: {body}"
+    );
     assert_eq!(
         mask["attribution"]["tag_id"],
         tag_id.to_string(),
@@ -4570,6 +4574,167 @@ async fn a_mask_hash_column_keeps_its_starrocks_access_verdict() {
     lift_gate(&f, tag_id).await;
 }
 
+/// Spec §5.5 (D4): a cleared StarRocks reader's mask is the clearance's, which
+/// replays the rule masks' outcome for them. Explain replays it without the
+/// clearance so the answer credits both: the rule's `MASK_HASH`, or the rule's
+/// exemption with who exempts them.
+#[tokio::test]
+async fn a_cleared_starrocks_reader_s_mask_replays_the_rule() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let path = json!({ "type": "path", "catalog_id": f.catalog_id,
+                       "schema": "sales", "table": "orders", "column": "email" });
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule("vmask-replay", path.clone(), json!([])),
+    )
+    .await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let mask = &profile_for(&body, "starrocks")["mask"];
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    let replayed = &mask["replayed"];
+    assert_eq!(
+        replayed["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(replayed["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        replayed["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+
+    // Cleared AND exempt from the rule: the replay is the exempt item.
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "vmask-replay-ex",
+            path,
+            json!([{"kind": "user", "ref": cleared}]),
+        ),
+    )
+    .await;
+    let body = explain_column(&f, &token, &cleared).await;
+    let replayed = &profile_for(&body, "starrocks")["mask"]["replayed"];
+    assert_eq!(
+        replayed["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(
+        replayed["exemption"],
+        json!({"via": [{"principal_kind": "user", "ref": cleared}], "more": 0}),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
+async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
+    let (status, _) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/rules/{rule_id}"),
+                token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(status.is_success(), "delete the rule: {status}");
+}
+
+/// Spec §5.8 (D2, E13): StarRocks compiles a clearance only for a column the
+/// classification is attached to, so a gated classification on the whole TABLE
+/// is not enforced there. Explain lists it on the StarRocks profile; the same
+/// classification also on the column is enforced and not listed.
+#[tokio::test]
+async fn a_table_level_clearance_is_not_enforced_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let reader = known_user(&f, unique("vmask-d2")).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, &reader)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&tag.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(tag_id)
+    .bind(unique("vmask-d2-role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+
+    let body = explain_column(&f, &token, &reader).await;
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(
+        starrocks["clearance_not_enforced"],
+        json!([{"tag_id": tag_id, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(starrocks, "select")["decision"]["kind"],
+        "allowed",
+        "nothing compiled refuses the uncleared reader; body: {body}"
+    );
+    assert!(
+        starrocks
+            .get("mask")
+            .is_none_or(|m| m["decision"]["kind"] == "no_mask"),
+        "body: {body}"
+    );
+
+    // The same classification on the column too: enforced, so not listed.
+    let warehouse: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("warehouse");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'sales','orders','email')",
+    )
+    .bind(tag_id)
+    .bind(warehouse)
+    .execute(&f.db.pool)
+    .await
+    .expect("column assignment");
+    let body = explain_column(&f, &token, &reader).await;
+    assert!(
+        profile_for(&body, "starrocks")
+            .get("clearance_not_enforced")
+            .is_none(),
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
 /// Task 12 (C2), the other half: a classified column with a deny and NO mask
 /// (for example a download from before the clearance's first compile, which
 /// carried only the deny) is still checked, so explain still says denied.
@@ -4661,6 +4826,11 @@ async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
         "body: {body}"
     );
     assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    // Spec §5.5: the clearance's outcome replayed without it — no rule masks.
+    assert_eq!(
+        mask["replayed"]["decision"]["kind"], "no_mask",
+        "body: {body}"
+    );
 
     // A target that names no column has no mask to report.
     let (status, table_level) = into_json(

@@ -478,3 +478,15 @@ Deviations the code forces are recorded here, per task, as they happen.
   the ref. A workspace exemption, if ever allowed, adds it back.
 - Membership reads use the compiler's `group_members_via`, cached per group per request; reasons are cached per
   `(rule_id, username)`.
+
+### Task 6 (StarRocks clearance replay, D2 gap)
+
+- The tests live in `tests/routes.rs` (`a_cleared_starrocks_reader_s_mask_replays_the_rule`,
+  `a_table_level_clearance_is_not_enforced_on_starrocks`, plus `replayed` assertions on the existing cleared and
+  uncleared tests), not in `tests/clearance_starrocks.rs`, which drives the compiler without the router.
+- The replay removes every policy the attribution parser names a clearance (deny and mask alike), which is the
+  fold's own `source_kind != Clearance` set for a mask decision; the condition is "a clearance decided and the type
+  is not `CLEARANCE_MASK_TYPE`", without a separate `mask-` locator check (only the clearance mask is a mask).
+- The gap is computed once per request for a column read with a resolved tag set, from tags that never resolve at
+  the column, joined to `tags` by name (unique since 0207) and to `clearance_gates_for_tags_via` (roles only), and
+  attached to StarRocks profiles only.

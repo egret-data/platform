@@ -772,6 +772,12 @@ pub struct ExplainProfile {
     /// does not reach it (E14: on Trino it filters nothing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_filter: Option<ExplainRowFilter>,
+    /// StarRocks only, for a column read: the gated classifications that reach
+    /// the column only from its table and so compile no clearance here
+    /// ([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the
+    /// column as an `ANCESTOR`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clearance_not_enforced: Vec<ExplainClearanceGap>,
     /// `true` when StarRocks consults no access policy for the target column:
     /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
     /// policy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written
@@ -816,6 +822,10 @@ pub struct ExplainMask {
     /// Present when a rule's exempt item decided (`MASK_NONE`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exemption: Option<ExplainExemption>,
+    /// Present when a clearance mask decided and the subject is cleared (its
+    /// type is not `MASK_NULL`): what the rule masks give them ([`ExplainReplay`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<ExplainReplay>,
 }
 
 /// Who exempts the subject from the rule that decided a verdict (spec §5.4,
@@ -843,6 +853,29 @@ pub struct ExemptVia {
     /// `user` (the subject is named directly) or `group`.
     pub principal_kind: PrincipalKind,
     pub r#ref: String,
+}
+
+/// The mask a cleared StarRocks reader would get without the clearance (spec
+/// §5.5, D4). The clearance mask hands each cleared user the FOLDED outcome of
+/// the profile's other masks (`clearance_mask::fold_clearance_mask`), so its
+/// own attribution hides the rule that decided; this is that outcome,
+/// re-evaluated over the served artifact with every clearance policy removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainReplay {
+    pub decision: WireMaskDecision,
+    pub attribution: Option<ExplainAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
+}
+
+/// A gated classification that StarRocks does not enforce on the target column
+/// (spec §5.8, D2): it reaches the column only from its table, and StarRocks
+/// compiles a clearance only where the classification is on a column (E13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainClearanceGap {
+    pub tag_id: Uuid,
+    /// `tags.name`.
+    pub tag_name: String,
 }
 
 /// How many exempting principals [`ExplainExemption::via`] names (D1).
@@ -2503,6 +2536,13 @@ pub(crate) async fn explain_users(
         Some(scope) => explain_tag_inputs(resolved_tags_for_target(&mut *conn, scope).await?).0,
         None => None,
     };
+    // D2 (spec §5.8): per request, from the column resolution and the gates.
+    let clearance_gaps = match (&resolved_tags, &target.column) {
+        (Some(tags), Some(_)) if action == Action::Read => {
+            table_only_clearances(&mut *conn, tags).await?
+        }
+        _ => Vec::new(),
+    };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
@@ -2598,6 +2638,8 @@ pub(crate) async fn explain_users(
         // whose block is present but empty (`bind_trino_profile` creates exactly
         // that): in both cases no tag policy of any kind can decide here.
         let tag_policies_in_download = artifact.tag_policies.len();
+        // Built on the first cleared reader that needs it (spec §5.5).
+        let mut replay_artifact: Option<ServicePolicySet> = None;
         for (i, user) in users.iter().enumerate() {
             // The masked-read question, asked only where a mask can be the answer.
             // Asked BEFORE the accesses, because on StarRocks it decides whether
@@ -2621,25 +2663,38 @@ pub(crate) async fn explain_users(
                     &service_def,
                     &config,
                 );
-                let attribution = match &decision {
-                    MaskDecision::Masked(m) => {
-                        attribution_for_name(&mut *conn, &mut cache, &m.policy_name).await?
-                    }
-                    MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
-                };
-                let exempt_item = matches!(&decision, MaskDecision::Masked(m)
-                    if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE));
-                let exemption = match &attribution {
-                    Some(ExplainAttribution::Rule { rule_id, .. }) if exempt_item => {
-                        Some(cache.exemption(&mut *conn, *rule_id, user).await?)
-                    }
-                    _ => None,
+                let (attribution, exemption) =
+                    mask_reason(&mut *conn, &mut cache, &decision, user).await?;
+                let cleared_by_clearance = matches!(
+                    &attribution,
+                    Some(ExplainAttribution::Clearance { .. })
+                ) && !matches!(&decision, MaskDecision::Masked(m)
+                        if m.mask_type.as_deref() == Some(crate::clearance_mask::CLEARANCE_MASK_TYPE));
+                let replayed = if cleared_by_clearance {
+                    let without = replay_artifact
+                        .get_or_insert_with(|| without_clearance_policies(&artifact));
+                    let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                        without,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let (attribution, exemption) =
+                        mask_reason(&mut *conn, &mut cache, &decision, user).await?;
+                    Some(ExplainReplay {
+                        decision: WireMaskDecision::from(&decision),
+                        attribution,
+                        exemption,
+                    })
+                } else {
+                    None
                 };
                 Some(ExplainMask {
                     access_type: "select".to_string(),
                     decision: WireMaskDecision::from(&decision),
                     attribution,
                     exemption,
+                    replayed,
                 })
             } else {
                 None
@@ -2742,6 +2797,11 @@ pub(crate) async fn explain_users(
                 tag_policies_in_download,
                 mask,
                 row_filter,
+                clearance_not_enforced: if engine == EngineType::StarRocks {
+                    clearance_gaps.clone()
+                } else {
+                    Vec::new()
+                },
                 masked_read_skips_access,
             });
         }
@@ -3443,6 +3503,85 @@ async fn attribution_for_name<L: ClearanceLookups + RuleLookups + Send>(
             Some(attribution)
         }
     })
+}
+
+/// A mask verdict's model object and, when a rule's exempt item decided it,
+/// who exempts the subject.
+async fn mask_reason(
+    conn: &mut sqlx::PgConnection,
+    cache: &mut ExplainCache,
+    decision: &MaskDecision,
+    user: &str,
+) -> Result<(Option<ExplainAttribution>, Option<ExplainExemption>), PermHttpError> {
+    let MaskDecision::Masked(m) = decision else {
+        return Ok((None, None));
+    };
+    let attribution = attribution_for_name(&mut *conn, cache, &m.policy_name).await?;
+    let exemption = match &attribution {
+        Some(ExplainAttribution::Rule { rule_id, .. })
+            if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE) =>
+        {
+            Some(cache.exemption(conn, *rule_id, user).await?)
+        }
+        _ => None,
+    };
+    Ok((attribution, exemption))
+}
+
+/// `artifact` without its clearance policies: the set the clearance mask's
+/// fold evaluated the cleared users over (spec §5.5). Chosen by the
+/// attribution parser, the same one that names a clearance on the wire.
+fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
+    let mut out = artifact.clone();
+    out.policies.retain(|p| {
+        !matches!(
+            attribute_policy_name(&p.name),
+            Some(PolicyAttribution::Clearance { .. })
+        )
+    });
+    out
+}
+
+/// The resolved tags that reach the target column only from its table and
+/// carry a gate with a required role ([`ExplainClearanceGap`]). Sorted by name.
+async fn table_only_clearances(
+    conn: &mut sqlx::PgConnection,
+    tags: &UnenrichedTags,
+) -> Result<Vec<ExplainClearanceGap>, PermHttpError> {
+    let display = resolved_tags_for_display(tags);
+    let on_column: BTreeSet<&str> = display
+        .iter()
+        .filter(|t| t.attached_at_column)
+        .map(|t| t.name.as_str())
+        .collect();
+    let table_only: Vec<String> = display
+        .iter()
+        .filter(|t| !on_column.contains(t.name.as_str()))
+        .map(|t| t.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if table_only.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `tags.name` is unique (migration 0207), so a name names one tag.
+    let rows: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, key, name FROM tags WHERE name = ANY($1) ORDER BY name")
+            .bind(&table_only)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+    let keys: Vec<String> = rows.iter().map(|(_, key, _)| key.clone()).collect();
+    let gated: BTreeSet<String> = clearance_gates_for_tags_via(conn, &keys)
+        .await?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|(_, key, _)| gated.contains(key))
+        .map(|(tag_id, _, tag_name)| ExplainClearanceGap { tag_id, tag_name })
+        .collect())
 }
 
 /// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).
