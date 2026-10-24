@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import type { ExplainPrincipalResponse, ExplainResponse } from "@/api/generated/model";
+import { everyRowLine, ruleMaskLine } from "@/components/perm/__tests__/effectLineFixtures";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
@@ -65,6 +67,7 @@ const PER_PROFILE: ExplainResponse = {
       engine: "trino",
       tags: [],
       tag_policies_in_download: 0,
+      effect_lines: [],
       accesses: [{ access_type: "select", decision: { kind: "allowed", policy_id: 7, policy_name: "perm-grant-1" } }],
     },
   ],
@@ -76,14 +79,17 @@ function open() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <WhoCanReadDialog
-          open
-          onOpenChange={() => {}}
-          path={{ catalog: "demo_warehouse", schema: "analytics", object: "customers", column: "email" }}
-          catalogId="c-demo"
-        />
-      </TooltipProvider>
+      {/* The dialog opens inside the Data area's routes; its answer links to rules and people. */}
+      <MemoryRouter>
+        <TooltipProvider>
+          <WhoCanReadDialog
+            open
+            onOpenChange={() => {}}
+            path={{ catalog: "demo_warehouse", schema: "analytics", object: "customers", column: "email" }}
+            catalogId="c-demo"
+          />
+        </TooltipProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -141,6 +147,61 @@ describe("Who can read? — a typed user is checked against the known users (fin
   });
 });
 
+describe("Who can read? — the answer leads with the server's sentence (Package 2, spec §5.10)", () => {
+  it("shows a user's line per engine before the folded verdicts", async () => {
+    const answer: ExplainResponse = {
+      ...PER_PROFILE,
+      profiles: [
+        {
+          ...PER_PROFILE.profiles[0],
+          effect_lines: [ruleMaskLine("ana", "email", "hashed", "Hash personal data", "r-hash"), everyRowLine("ana")],
+        },
+      ],
+    };
+    serve({ explain: ok(answer) });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await user.type(within(dialog).getByLabelText("User"), "ana");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    const profile = await within(dialog).findByTestId("explain-profile");
+    const [first] = within(profile).getAllByTestId("effect-line");
+    expect(first).toHaveTextContent("ana reads email as hashed (rule Hash personal data)");
+    expect(first).toBeVisible();
+    expect(within(first).getByRole("link", { name: "Hash personal data" })).toHaveAttribute("href", "/governance/rules/r-hash");
+    expect(within(profile).getByTestId("explain-access")).not.toBeVisible();
+  });
+});
+
+describe("Who can read? — member names wrap only where they must (live check, 390 px)", () => {
+  it("does not break a member's username mid-word: only an unbreakable token too long for the cell breaks", async () => {
+    serve({
+      explainPrincipal: ok({
+        membersTotal: 1,
+        limit: 200,
+        truncated: false,
+        evaluated: [{ userId: "u-g", label: "Exempt G", username: "exempt-g", result: PER_PROFILE }],
+        notEvaluated: [],
+      } satisfies ExplainPrincipalResponse),
+    });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await pickKind(user, dialog, "Group");
+    await user.type(within(dialog).getByRole("combobox", { name: "Group" }), "data-team");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    const view = await within(dialog).findByTestId("members-explain");
+    // jsdom has no layout: this pins the wrapping class; the painted result is a browser check.
+    const name = within(view).getByText("exempt-g");
+    expect(name.className).not.toMatch(/\bbreak-all\b/);
+    expect(name.className).toMatch(/\bbreak-words\b/);
+    // At 390 px the cell shrank to 71 px and "exempt-g" broke at its hyphen: the cell keeps a floor.
+    expect(name.closest("td")?.className).toMatch(/\bmin-w-24\b/);
+  });
+});
+
 describe("Who can read? — a group nobody has (finding 3, §7)", () => {
   it("says so in a sentence, never the server's raw refusal", async () => {
     serve({ explainPrincipal: { status: 400, body: { error: "bad request: no group is named data" } } });
@@ -188,7 +249,7 @@ describe("Who can read? — a group on a catalog nothing enforces (finding 4)", 
 
     const view = await within(dialog).findByTestId("members-explain");
     const state = within(view).getByTestId("no-profile-state");
-    expect(state).toHaveTextContent("Nothing is enforcing");
+    expect(state).toHaveTextContent("Not enforced");
     expect(state).toHaveTextContent(
       "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
     );
@@ -314,6 +375,18 @@ describe("Who can read? — one click on Explain runs Explain while the suggesti
     // Once the click has landed, the list closes: focus has left the field.
     await waitFor(() => expect(within(dialog).queryByText("No matches.")).not.toBeInTheDocument());
     expect(lookups()).toHaveLength(1);
+  });
+
+  it("closes the list when Explain runs from the field (Enter), so it does not hang under the answer (live check)", async () => {
+    serve({ userLookup: () => ok({ items: [], total: 0 }) });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await user.type(within(dialog).getByLabelText("User"), "nobody");
+    expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(await within(dialog).findByText("No user named nobody. Pick a user from the suggestions.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("closes the list when focus leaves by keyboard", async () => {

@@ -528,3 +528,323 @@ async fn a_group_of_people_with_no_username_is_answered_by_not_evaluated_alone()
         .collect();
     assert_eq!(ids, vec![json!(u1), json!(u2)], "sorted by label");
 }
+
+/// `POST /perm/explain/principal` for a COLUMN read of `sales.orders.email`.
+async fn explain_principal_column(e: &Env, kind: &str, r: &str) -> Value {
+    let mut target = target(e);
+    target["column"] = json!("email");
+    let (status, body) = post(
+        e,
+        &e.admin,
+        "/perm/explain/principal",
+        &json!({ "principal": { "kind": kind, "ref": r }, "action": "read", "target": target }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+/// One member's single profile, by username.
+fn member_profile<'a>(body: &'a Value, username: &str) -> &'a Value {
+    let m = body["evaluated"]
+        .as_array()
+        .expect("evaluated")
+        .iter()
+        .find(|m| m["username"] == username)
+        .unwrap_or_else(|| panic!("{username} not evaluated: {body}"));
+    &m["result"]["profiles"][0]
+}
+
+fn via(kind: &str, r: &str) -> Value {
+    json!({ "principal_kind": kind, "ref": r })
+}
+
+/// Spec §5.4 (D1): an exempt verdict says WHO exempts the person. The compiled
+/// body names usernames only, so the server rebuilds the reason from the rule's
+/// exempt principals and the person's memberships: directly, then groups by
+/// name; three kept and the rest counted. (A rule exempts only users and groups:
+/// a role or a workspace is refused at write, `validate_rule_shape`.) When the compiled body
+/// is older than the model (a membership removed without a recompile) the
+/// reason is empty rather than invented.
+#[tokio::test]
+async fn an_exempt_member_is_told_who_exempts_them() {
+    let Some(e) = env().await else { return };
+    let t = tag();
+    let p = &e.db.pool;
+    let user = |n: &str| (format!("{n}_{t}@x.local"), format!("{n}_{t}"));
+    let mut ids = std::collections::HashMap::new();
+    for n in ["bob", "alice", "carol", "dave", "erin"] {
+        let (email, name) = user(n);
+        ids.insert(n, insert_user(p, &email, Some(&name)).await);
+    }
+    let team = format!("data-team-{t}");
+    group_with(p, &team, &[ids["bob"], ids["carol"]]).await;
+    let five: Vec<String> = (1..=5).map(|i| format!("g{i}-{t}")).collect();
+    for g in &five {
+        group_with(p, g, &[ids["erin"]]).await;
+    }
+    let everyone = format!("all-{t}");
+    group_with(
+        p,
+        &everyone,
+        &["bob", "alice", "carol", "dave", "erin"].map(|n| ids[n]),
+    )
+    .await;
+
+    let mut exempt = vec![
+        json!({"kind": "group", "ref": team}),
+        json!({"kind": "user", "ref": format!("alice_{t}")}),
+        json!({"kind": "user", "ref": format!("carol_{t}")}),
+    ];
+    // Stored in reverse, so the answer's order is the server's, not the rule's.
+    exempt.extend(
+        five.iter()
+            .rev()
+            .map(|g| json!({"kind": "group", "ref": g})),
+    );
+    for (kind, name) in [
+        (
+            json!({ "type": "mask", "mask_type": "MASK_HASH", "value_expr": null }),
+            format!("hash-{t}"),
+        ),
+        (
+            json!({ "type": "row_filter", "filter_expr": "region = 'us'" }),
+            format!("us-{t}"),
+        ),
+    ] {
+        let column = if kind["type"] == "mask" {
+            json!("email")
+        } else {
+            Value::Null
+        };
+        let (status, out) = post(
+            &e,
+            &e.admin,
+            "/perm/rules",
+            &json!({
+                "name": name, "kind": kind,
+                "selector": { "type": "path", "catalog_id": e.catalog_id,
+                              "schema": "sales", "table": "orders", "column": column },
+                "exempt": { "include": exempt, "exclude": [] }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+    }
+
+    let body = explain_principal_column(&e, "group", &everyone).await;
+    let reason = |n: &str, field: &str| member_profile(&body, &format!("{n}_{t}"))[field].clone();
+    let bob = reason("bob", "mask");
+    assert_eq!(
+        bob["decision"]["result"]["mask_type"], "MASK_NONE",
+        "{body}"
+    );
+    assert_eq!(bob["attribution"]["kind"], "rule", "{body}");
+    assert_eq!(
+        bob["exemption"],
+        json!({"via": [via("group", &team)], "more": 0}),
+        "{body}"
+    );
+    assert_eq!(
+        reason("alice", "mask")["exemption"],
+        json!({"via": [via("user", &format!("alice_{t}"))], "more": 0}),
+        "{body}"
+    );
+    assert_eq!(
+        reason("carol", "mask")["exemption"],
+        json!({"via": [via("user", &format!("carol_{t}")), via("group", &team)], "more": 0}),
+        "directly before groups; {body}"
+    );
+    let dave = reason("dave", "mask");
+    assert_eq!(
+        dave["decision"]["result"]["mask_type"], "MASK_HASH",
+        "{body}"
+    );
+    assert!(dave.get("exemption").is_none(), "{body}");
+    assert_eq!(
+        reason("erin", "mask")["exemption"],
+        json!({"via": five[..3].iter().map(|g| via("group", g)).collect::<Vec<_>>(), "more": 2}),
+        "{body}"
+    );
+    let bob_rows = reason("bob", "row_filter");
+    assert_eq!(bob_rows["decision"]["result"]["filter_expr"], "", "{body}");
+    assert_eq!(
+        bob_rows["exemption"],
+        json!({"via": [via("group", &team)], "more": 0}),
+        "{body}"
+    );
+    assert!(
+        reason("dave", "row_filter").get("exemption").is_none(),
+        "{body}"
+    );
+
+    // The model moves without a recompile: bob leaves the group by raw SQL.
+    // The served policy still exempts him, and nothing in the model says why.
+    sqlx::query(
+        "DELETE FROM user_groups WHERE user_id = $1 \
+           AND group_id = (SELECT id FROM groups WHERE name = $2)",
+    )
+    .bind(ids["bob"])
+    .bind(&team)
+    .execute(p)
+    .await
+    .unwrap();
+    let body = explain_principal_column(&e, "group", &everyone).await;
+    let bob = &member_profile(&body, &format!("bob_{t}"))["mask"];
+    assert_eq!(
+        bob["decision"]["result"]["mask_type"], "MASK_NONE",
+        "{body}"
+    );
+    assert_eq!(bob["exemption"], json!({"via": [], "more": 0}), "{body}");
+}
+
+/// Spec §5.9 (C7): the cost bound. 200 members of one group, a Trino and a
+/// StarRocks profile on the catalog, a mask rule exempting another group, a row
+/// filter and a clearance; `POST /perm/explain/principal` for a column read is
+/// timed five times. Release build only:
+///
+/// ```bash
+/// cargo test --release -p egret-perm-compile --test explain_principal explain_200 -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "timing: run in a release build with --ignored --nocapture"]
+async fn explain_200_members_on_two_engines_timing() {
+    let Some(e) = env().await else { return };
+    let t = tag();
+    let p = &e.db.pool;
+
+    // A Trino profile with a tag service, on the same catalog.
+    let policy = PolicyStore::new(e.db.clone());
+    egret_policy::seed_trino(&policy).await.expect("seed trino");
+    egret_policy::seed_tag(&policy).await.expect("seed tag");
+    let tag_service = policy
+        .create_service(&format!("xp_tag_{t}"), "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let trino = policy
+        .create_service(
+            &format!("xp_trino_{t}"),
+            "trino",
+            &json!({ "tagService": tag_service.name }),
+        )
+        .await
+        .expect("trino service");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{\"imageVersion\":\"483\"}'::jsonb, $2) RETURNING id",
+    )
+    .bind(format!("xp-trino-eng-{t}"))
+    .bind(trino.id)
+    .fetch_one(p)
+    .await
+    .expect("trino engine");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine)
+    .bind(e.catalog_id)
+    .execute(p)
+    .await
+    .expect("attach trino");
+
+    // 200 members, and a separate exempt group of 10.
+    let mut members = Vec::new();
+    for i in 0..200 {
+        let name = format!("m{i:03}_{t}");
+        members.push(insert_user(p, &format!("{name}@x.local"), Some(&name)).await);
+    }
+    let everyone = format!("big-{t}");
+    group_with(p, &everyone, &members).await;
+    let exempt = format!("exempt-{t}");
+    group_with(p, &exempt, &members[..10]).await;
+    grant_to(&e, "allow", "group", &everyone).await;
+
+    // A gated classification on the column.
+    let wh: Uuid = sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+        .bind(e.catalog_id)
+        .fetch_one(p)
+        .await
+        .unwrap();
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("xp_pii_{t}"))
+            .bind(format!("XP PII {t}"))
+            .fetch_one(p)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1, $2, 'sales', 'orders', 'email')",
+    )
+    .bind(tag_id)
+    .bind(wh)
+    .execute(p)
+    .await
+    .unwrap();
+    let role = format!("xp-cleared-{t}");
+    sqlx::query("INSERT INTO roles (scope, name) VALUES ('platform', $1)")
+        .bind(&role)
+        .execute(p)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(tag_id)
+    .bind(&role)
+    .execute(p)
+    .await
+    .unwrap();
+
+    for (kind, column) in [
+        (
+            json!({ "type": "mask", "mask_type": "MASK_HASH", "value_expr": null }),
+            json!("email"),
+        ),
+        (
+            json!({ "type": "row_filter", "filter_expr": "region = 'us'" }),
+            Value::Null,
+        ),
+    ] {
+        let (status, out) = post(
+            &e,
+            &e.admin,
+            "/perm/rules",
+            &json!({
+                "name": format!("xp-{}-{t}", kind["type"].as_str().unwrap()), "kind": kind,
+                "selector": { "type": "path", "catalog_id": e.catalog_id,
+                              "schema": "sales", "table": "orders", "column": column },
+                "exempt": { "include": [{"kind": "group", "ref": exempt}], "exclude": [] }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+    }
+
+    let mut times = Vec::new();
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        let body = explain_principal_column(&e, "group", &everyone).await;
+        times.push(started.elapsed());
+        assert_eq!(body["evaluated"].as_array().unwrap().len(), 200);
+        assert_eq!(
+            body["evaluated"][0]["result"]["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "{body}"
+        );
+    }
+    times.sort();
+    println!(
+        "explain/principal, 200 members x 2 profiles: min {:?}, median {:?}, max {:?}",
+        times[0], times[2], times[4]
+    );
+    assert!(
+        times[2] < std::time::Duration::from_secs(1),
+        "spec §5.9 bound: median {:?}",
+        times[2]
+    );
+}

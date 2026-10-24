@@ -14,6 +14,7 @@ import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-a
 import type {
   ExplainAccess as AccessVerdict,
   ExplainAttribution,
+  ExplainEffectLine,
   ExplainProfile,
   ExplainResponse,
   ExplainTagDecline,
@@ -31,6 +32,7 @@ import type {
   WireUndecidableCause,
   WireUnmodelled,
 } from "@/api/generated/model";
+import { EffectLine } from "@/components/perm/EffectLine";
 import { refFor } from "@/components/perm/PrincipalPicker";
 import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -659,7 +661,8 @@ function DecidedBy({
           to={`/governance/rules/${encodeURIComponent(attribution.rule_id)}`}
           className="text-primary hover:underline"
         >
-          View rule {attribution.rule_id}
+          {/* C11: the rule's name; its id when the rule row is gone. */}
+          View rule {attribution.name ?? attribution.rule_id}
         </Link>
         {/* A per-column StarRocks rule expands ONE `perm.rules` row into N
             policies, so the locator is the only thing that says which of the N
@@ -890,71 +893,95 @@ function ProfileBlock({
         <Badge variant="outline">{ENGINE_LABEL[profile.engine]}</Badge>
         <span className="text-xs text-muted-foreground">service id {profile.service_id}</span>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Evaluated over the policy set this profile’s plugin downloads.
-      </p>
-      <ul className="space-y-2">
-        {profile.accesses.map((verdict) => (
-          <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
-        ))}
-        {/* Final review V-1: StarRocks asks no access decision for a column
-            whose deciding mask is MASK_NULL, from whichever policy, so there is
-            no verdict to show, only the mask below. Explain does not know the
-            query's other columns, so the query-level consequence is stated. */}
-        {profile.masked_read_skips_access && (
-          <li
-            data-testid="explain-access-not-checked"
-            className="rounded-md border border-border p-3 text-sm text-muted-foreground"
-          >
-            This column is not access-checked on StarRocks: its mask is MASK_NULL, so the read
-            returns NULL for it, whoever denies it. The query as a whole is still refused unless the
-            reader may select another column it reads; when it selects only such columns, StarRocks
-            checks the table’s first unmasked column (measured: id, on a partly classified Iceberg table) or{" "}
-            <span className="font-mono text-xs">___count___</span> for{" "}
-            <span className="font-mono text-xs">count(*)</span>; when no column is unmasked, on an
-            Iceberg table it checks the hidden <span className="font-mono text-xs">_file</span> /{" "}
-            <span className="font-mono text-xs">_pos</span> columns. Measured on StarRocks 4.1.6, for
-            the clearance’s mask and for a manual MASK_NULL; Trino checks access on a masked
-            column.
-          </li>
-        )}
-        {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
-          <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
-        )}
-      </ul>
-      {profile.mask && <MaskLine mask={profile.mask} />}
-      {/* Fix round 1 (m-5), V-1: StarRocks checks no access on a MASK_NULL
-          column, so with the mask unknown the access verdict above may not apply. */}
-      {profile.mask?.decision.kind === "undecidable" && (
-        <p data-testid="explain-mask-provisional" className="text-xs text-muted-foreground">
-          The access verdict above is provisional: if StarRocks applies a MASK_NULL mask here, it
-          does not check this access.
-        </p>
+      {/* Spec §5.10: the answer in sentences first, built by the server (C1);
+          the verdicts they were built from fold below. */}
+      {profile.effect_lines.length > 0 && (
+        <div data-testid="effect-lines" className="space-y-1">
+          {profile.effect_lines.map((line, i) => (
+            <EffectLine key={`${line.about}-${i}`} line={line} />
+          ))}
+        </div>
       )}
-      {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
-          states the rule instead of a verdict for one database. */}
-      {profile.engine === "starrocks" && (
-        <p data-testid="explain-mv-rule" className="text-xs text-muted-foreground">
-          Materialized views: when this profile holds a classified column, StarRocks refuses{" "}
-          <span className="font-mono">create materialized view</span> in every database to anyone
-          not cleared for every classification on the profile. Explain does not answer it per
-          database.
-        </p>
-      )}
-      <ProfileTags profile={profile} declined={declined} />
+      <details data-testid="profile-details">
+        <summary className="cursor-pointer text-xs font-medium">Which policies decided this</summary>
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Evaluated over the policy set this profile’s plugin downloads.
+          </p>
+          <ul className="space-y-2">
+            {profile.accesses.map((verdict) => (
+              <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
+            ))}
+            {/* Final review V-1: StarRocks asks no access decision for a column
+                whose deciding mask is MASK_NULL, from whichever policy, so there is
+                no verdict to show, only the mask below. Explain does not know the
+                query's other columns, so the query-level consequence is stated. */}
+            {profile.masked_read_skips_access && (
+              <li
+                data-testid="explain-access-not-checked"
+                className="rounded-md border border-border p-3 text-sm text-muted-foreground"
+              >
+                This column is not access-checked on StarRocks: its mask is MASK_NULL, so the read
+                returns NULL for it, whoever denies it. The query as a whole is still refused unless the
+                reader may select another column it reads; when it selects only such columns, StarRocks
+                checks the table’s first unmasked column (measured: id, on a partly classified Iceberg table) or{" "}
+                <span className="font-mono text-xs">___count___</span> for{" "}
+                <span className="font-mono text-xs">count(*)</span>; when no column is unmasked, on an
+                Iceberg table it checks the hidden <span className="font-mono text-xs">_file</span> /{" "}
+                <span className="font-mono text-xs">_pos</span> columns. Measured on StarRocks 4.1.6, for
+                the clearance’s mask and for a manual MASK_NULL; Trino checks access on a masked
+                column.
+              </li>
+            )}
+            {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
+              <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
+            )}
+          </ul>
+          {profile.mask && <MaskLine mask={profile.mask} declined={declined} />}
+          {/* Fix round 1 (m-5), V-1: StarRocks checks no access on a MASK_NULL
+              column, so with the mask unknown the access verdict above may not apply. */}
+          {profile.engine === "starrocks" && profile.mask?.decision.kind === "undecidable" && (
+            <p data-testid="explain-mask-provisional" className="text-xs text-muted-foreground">
+              The access verdict above is provisional: if StarRocks applies a MASK_NULL mask here, it
+              does not check this access.
+            </p>
+          )}
+          {profile.row_filter && <RowFilterLine rowFilter={profile.row_filter} declined={declined} />}
+          {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
+              states the rule instead of a verdict for one database. */}
+          {profile.engine === "starrocks" && (
+            <p data-testid="explain-mv-rule" className="text-xs text-muted-foreground">
+              Materialized views: when this profile holds a classified column, StarRocks refuses{" "}
+              <span className="font-mono">create materialized view</span> in every database to anyone
+              not cleared for every classification on the profile. Explain does not answer it per
+              database.
+            </p>
+          )}
+          <ProfileTags profile={profile} declined={declined} />
+        </div>
+      </details>
     </section>
   );
 }
 
 /**
- * The masked-read verdict for the target column (StarRocks, view governance
- * A2). Plain on purpose: the DG frontend is redesigned later as its own spec.
+ * The mask verdict for the target column, on either engine (spec §5.2), with
+ * the policy that decided it. The effect line above says it in words; this is
+ * the evidence it was built from.
  */
-function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+function MaskLine({
+  mask,
+  declined,
+}: {
+  mask: NonNullable<ExplainProfile["mask"]>;
+  declined?: ExplainTagDecline;
+}) {
   const d = mask.decision;
   return (
     <div className="space-y-1">
-      <MaskSentence mask={mask} />
+      <p data-testid="explain-mask" className="text-xs text-muted-foreground">
+        Mask on {mask.access_type}: {maskDecisionText(d)}
+      </p>
       {/* Final review V-1 / Task 10 M4: any policy's MASK_NULL can decide the
           skip, so the steward sees which perm object (or raw policy) it was. */}
       {d.kind === "masked" && (
@@ -966,30 +993,74 @@ function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
           />
         </div>
       )}
+      {d.kind === "undecidable" && <CauseList causes={d.why} declined={declined} />}
     </div>
   );
 }
 
-/**
- * A mask verdict in words, the one wording every surface uses: the full
- * answer's mask line (`MaskSentence`) and the member table's summary
- * (`MembersExplainView`, live check D3).
- */
-export function maskDecisionText(d: NonNullable<ExplainProfile["mask"]>["decision"]): string {
+/** A mask verdict in words, as the folded evidence reads it: the raw mask type and the Ranger policy. */
+function maskDecisionText(d: NonNullable<ExplainProfile["mask"]>["decision"]): string {
   if (d.kind === "masked") {
     if (d.result.mask_type === "MASK_NONE") return `not transformed (MASK_NONE, Ranger policy ${d.result.policy_name})`;
     if (d.result.mask_type === "MASK_NULL") return `returns NULL (MASK_NULL, Ranger policy ${d.result.policy_name})`;
     return `masked to ${d.result.mask_type} by Ranger policy ${d.result.policy_name}`;
   }
   if (d.kind === "no_mask") return "no mask applies";
-  return `undecidable (${d.why.map((c) => c.kind).join(", ")})`;
+  return "undecidable";
 }
 
-function MaskSentence({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+/**
+ * The table's row-filter verdict (spec §5.3): asked against the table, so a
+ * column read shows its table's filter. The effect line above says it in words.
+ */
+function RowFilterLine({
+  rowFilter,
+  declined,
+}: {
+  rowFilter: NonNullable<ExplainProfile["row_filter"]>;
+  declined?: ExplainTagDecline;
+}) {
+  const d = rowFilter.decision;
   return (
-    <p data-testid="explain-mask" className="text-xs text-muted-foreground">
-      Mask on {mask.access_type}: {maskDecisionText(mask.decision)}
-    </p>
+    <div className="space-y-1">
+      <p data-testid="explain-row-filter" className="text-xs text-muted-foreground">
+        Row filter on {rowFilter.access_type}:{" "}
+        {d.kind === "no_filter" ? (
+          "no row filter applies"
+        ) : d.kind === "filtered" ? (
+          <>
+            rows where <span className="font-mono">{d.result.filter_expr}</span>, by Ranger policy{" "}
+            {d.result.policy_name}
+          </>
+        ) : (
+          "undecidable"
+        )}
+      </p>
+      {d.kind === "filtered" && (
+        <div data-testid="explain-row-filter-decided-by">
+          <DecidedBy
+            policyName={d.result.policy_name}
+            policyId={d.result.policy_id}
+            attribution={rowFilter.attribution}
+          />
+        </div>
+      )}
+      {d.kind === "undecidable" && <CauseList causes={d.why} declined={declined} />}
+    </div>
+  );
+}
+
+/** The causes of an undecidable mask or row filter, one sentence each. */
+function CauseList({ causes, declined }: { causes: WireUndecidableCause[]; declined?: ExplainTagDecline }) {
+  if (causes.length === 0) return null;
+  return (
+    <ul className="space-y-1">
+      {causes.map((cause, i) => (
+        <li key={`${cause.kind}-${i}`} className="text-xs text-muted-foreground">
+          {causeSentence(cause, declined)}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1212,25 +1283,28 @@ export function SubjectUserField({
   );
 }
 
-/** The "nothing is enforcing" state's badge and sentence: one wording for a user's answer and a group's or role's. */
-export const NOTHING_ENFORCING_TITLE = "Nothing is enforcing";
+/** The "not enforced" state's badge (the glossary's term, spec §5.7): one wording for a user's answer and a group's or role's. */
+export const NOT_ENFORCED_TITLE = "Not enforced";
+/** The state's sentence when the answer carries no effect line to say it with. */
 export const NOTHING_ENFORCING_TEXT =
   "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.";
 
 /**
  * The `no_profile_serves_the_catalog` state (see `ExplainResultView`): a
  * user's answer, and a group's or role's when every member asked got it
- * (`MembersExplainView`; the outcome depends on the catalog alone).
+ * (`MembersExplainView`; the outcome depends on the catalog alone). It leads
+ * with the server's line, which names the catalog and why (C5); without one it
+ * falls back to the general sentence.
  */
-export function NothingEnforcing() {
+export function NothingEnforcing({ line }: { line?: ExplainEffectLine | null }) {
   return (
     <Alert data-testid="no-profile-state">
       <AlertDescription className="space-y-1">
         <Badge variant="outline" className="gap-1">
           <Server className="h-3 w-3" />
-          {NOTHING_ENFORCING_TITLE}
+          {NOT_ENFORCED_TITLE}
         </Badge>
-        <p className="text-sm">{NOTHING_ENFORCING_TEXT}</p>
+        {line ? <EffectLine line={line} /> : <p className="text-sm">{NOTHING_ENFORCING_TEXT}</p>}
       </AlertDescription>
     </Alert>
   );
@@ -1262,9 +1336,11 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
            What is true of all three is that no profile egret compiles for
            covers this catalog, so that is what the copy claims.
 
-           Classification UX C12: the visible sentence is the short one; the
-           long one, unchanged, is under "How this answer was worked out". */
-        <NothingEnforcing />
+           Package 2 (spec §5.7): the visible sentence is the server's line,
+           which names the catalog and why ("has no engine" or "'s engines
+           have no policy profile"); the general one is under "How this
+           answer was worked out". */
+        <NothingEnforcing line={result.effect_line} />
       ) : (
         <div className="space-y-3">
           {result.profiles.map((profile) => (
@@ -1311,29 +1387,24 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
               nothing on the engine either.
 
               ⚠ Under `no_profile_serves_the_catalog` there are no verdicts, so
-              the line names no "Allowed" and no verdict-level caveat: prose
-              about an absent thing teaches a reader to discount the rest. */}
-          {result.profiles.length > 0 ? (
+              there is no visible line at all: prose about an absent thing
+              teaches a reader to discount the rest. Package 2 dropped the
+              "Masks on Trino and row filters are not shown here" clause: both
+              are asked now (spec §5.10). */}
+          {result.profiles.length > 0 && (
             <p>
-              Masks on Trino and row filters are not shown here, so{" "}
-              <span className="italic">Allowed</span> can still return masked values or
-              filtered rows, and a manual policy that names a role or a group other than{" "}
-              <span className="font-mono">public</span> matches nobody, here or on the
-              engines.
+              A manual policy that names a role or a group other than{" "}
+              <span className="font-mono">public</span> matches nobody, here or on the engines.
             </p>
-          ) : (
-            <p>Masks on Trino and row filters are not shown here.</p>
           )}
           <details>
             <summary className="cursor-pointer text-xs font-medium">How this answer was worked out</summary>
             <div className="mt-1 space-y-1">
-              {result.outcome === "no_profile_serves_the_catalog" && (
-                <p>
-                  No policy profile serves this catalog, so no policy set egret compiles
-                  covers it. This is not a denial — nothing is enforcing here, which is a
-                  different fact from a policy refusing the access. Attach the catalog to a
-                  profile if it is meant to be governed.
-                </p>
+              {/* Spec §5.7: the state leads with the server's line, and the
+                  general sentence stays here. Without a line the state shows the
+                  sentence itself, so it is not said twice. */}
+              {result.outcome === "no_profile_serves_the_catalog" && result.effect_line && (
+                <p>{NOTHING_ENFORCING_TEXT}</p>
               )}
               {/* ⚠ **Rewritten by Task 8's browser gate (F4).** This said the tag
                   list "decides nothing here" and is "not the set the engine would
@@ -1416,15 +1487,15 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
                   So this states the limit and dates nothing. Replacing it with a
                   new promise would reintroduce exactly the same defect the first
                   time a package slipped. */}
-              {/* Task 12, M-5: this used to say "ACCESS only" under a StarRocks
-                  mask line, which contradicted it. It now names what is shown. */}
+              {/* Task 12, M-5, then Package 2 (spec §5.10): this said masks on
+                  Trino and row filters were not reported. Both are now asked, so
+                  it says what is asked and the one thing explain cannot predict. */}
               <p>
-                On a StarRocks profile, a read of a column also shows the mask the engine
-                applies to it. Apart from that this answers about access only: row filters,
-                and masks on Trino, are not reported, so a target this page calls{" "}
-                <span className="font-medium">Allowed</span> can still return masked values,
-                filtered rows, or an error from a mask the engine cannot apply. Asking which
-                takes the engine.
+                A read of a column also shows the mask each engine applies to it, on Trino and
+                on StarRocks, and a read of a table or a column shows the table’s row filter:
+                both engines filter whole tables, so a column reader sees its table’s rows.
+                What explain cannot predict is an error from a mask the engine cannot apply,
+                such as a custom expression or a mask on a column type it does not fit.
               </p>
               <p>
                 Each plugin polls for its policy set on an interval, so an engine can still

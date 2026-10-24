@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
 import type {
+  ExplainEffectLine,
   ExplainPrincipalResponse,
   ExplainResponse,
   GroupPrincipal,
@@ -13,6 +14,7 @@ import type {
   WireDecision,
 } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
+import { code, effectLine, everyRowLine, ruleMaskLine, strong, subject, text } from "@/components/perm/__tests__/effectLineFixtures";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import PeopleRoutes from "@/routes/governance/people/PeopleRoutes";
 
@@ -115,6 +117,7 @@ const explainOf = (...decisions: WireDecision[]): ExplainResponse => ({
       engine: "trino",
       tags: [],
       tag_policies_in_download: 0,
+      effect_lines: [],
       accesses: decisions.map((decision, i) => ({ access_type: i === 0 ? "select" : `access${i}`, decision })),
     },
   ],
@@ -148,15 +151,47 @@ const ANALYSTS: GroupPrincipal = {
 
 const READER_ROLE: RolePrincipal = { name: "reader", scopes: ["platform"], holders: [], serviceAccounts: 0, holderGroups: [], standsFor: [], clearances: [] };
 
+/** `r` with the server's effect lines on every profile. */
+const answeredAs = (r: ExplainResponse, ...lines: ExplainEffectLine[]): ExplainResponse => ({
+  ...r,
+  profiles: r.profiles.map((p) => ({ ...p, effect_lines: lines })),
+});
+
 // One member allowed, one refused, one undecidable: any single word for the group would be wrong.
 const MEMBERS: ExplainPrincipalResponse = {
   membersTotal: 4,
   limit: 200,
   truncated: false,
   evaluated: [
-    { userId: "u-ana", label: "Ana Silva", username: "ana", result: explainOf(ALLOWED) },
-    { userId: "u-bob", label: "Bob Ray", username: "bob", result: explainOf(DENIED) },
-    { userId: "u-cy", label: "Cy Lee", username: "cy", result: explainOf(ALLOWED, UNDECIDABLE) },
+    {
+      userId: "u-ana",
+      label: "Ana Silva",
+      username: "ana",
+      result: answeredAs(
+        explainOf(ALLOWED),
+        effectLine("access", "allowed", [subject("ana"), text(" "), strong("can read"), text(" "), code("sales")]),
+        everyRowLine("ana"),
+      ),
+    },
+    {
+      userId: "u-bob",
+      label: "Bob Ray",
+      username: "bob",
+      result: answeredAs(
+        explainOf(DENIED),
+        effectLine("access", "refused", [subject("bob"), text(" is "), strong("refused"), text(" "), code("sales"), text(" (a grant denies it)")]),
+      ),
+    },
+    {
+      userId: "u-cy",
+      label: "Cy Lee",
+      username: "cy",
+      result: answeredAs(
+        explainOf(ALLOWED, UNDECIDABLE),
+        effectLine("access", "undecided", [subject("cy"), text(": "), strong("undecided"), text(" (egret does not model this policy set)")]),
+        everyRowLine("cy"),
+      ),
+    },
   ],
   notEvaluated: [{ userId: "u-dee", label: "Dee Noname", reason: "no_username" }],
 };
@@ -238,10 +273,12 @@ describe("Check access for a group or a role", () => {
     expect(within(view).queryByText(/MASK_NULL column is not access-checked/)).not.toBeInTheDocument();
 
     const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
+    // Spec §5.10: each member's first line per profile, as the server built it;
+    // the rows line is in the full answer.
     expect(rows.map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
-      "egret-trino-prod: select Allowed",
-      "egret-trino-prod: select Refused by a deny item",
-      "egret-trino-prod: select Allowed, access1 Undecidable",
+      "egret-trino-prodana can read sales",
+      "egret-trino-prodbob is refused sales (a grant denies it)",
+      "egret-trino-prodcy: undecided (egret does not model this policy set)",
     ]);
     // No verdict for the group as a whole, and no per-profile answer until a member is expanded.
     expect(within(view).queryByTestId("explain-result")).not.toBeInTheDocument();
@@ -266,6 +303,10 @@ describe("Check access for a group or a role", () => {
           engine: "trino",
           tags: [],
           tag_policies_in_download: 0,
+          effect_lines: [
+            effectLine("column", "real_value", [subject("ana"), text(" reads "), code("email"), text(" as "), strong("the real value")]),
+            everyRowLine("ana"),
+          ],
           accesses: [{ access_type: "select", decision: ALLOWED }],
           mask: { access_type: "select", decision: { kind: "no_mask" } },
         },
@@ -275,6 +316,7 @@ describe("Check access for a group or a role", () => {
           engine: "starrocks",
           tags: [],
           tag_policies_in_download: 0,
+          effect_lines: [ruleMaskLine("ana", "email", "NULL", "Null personal data", "rule-1"), everyRowLine("ana")],
           accesses: [],
           masked_read_skips_access: true,
           mask: {
@@ -293,6 +335,15 @@ describe("Check access for a group or a role", () => {
           engine: "starrocks",
           tags: [],
           tag_policies_in_download: 0,
+          effect_lines: [
+            effectLine("column", "undecided", [
+              subject("cy"),
+              text(": "),
+              strong("undecided"),
+              text(" (egret does not model this policy set)"),
+            ]),
+            everyRowLine("cy"),
+          ],
           accesses: [{ access_type: "select", decision: ALLOWED }],
           mask: { access_type: "select", decision: { kind: "undecidable", why: [] } },
         },
@@ -319,12 +370,14 @@ describe("Check access for a group or a role", () => {
     const view = await within(panel).findByTestId("members-explain");
     const rows = within(within(view).getByRole("table", { name: "Members" })).getAllByRole("row").slice(1);
     const ana = within(rows[0]).getAllByRole("cell")[1];
+    // Spec §5.10: the member's first line per profile, the server's sentence.
     expect(ana).not.toHaveTextContent("no access asked");
-    expect(ana).toHaveTextContent(
-      "vgsr: not access-checked: the mask is MASK_NULL, mask on select: returns NULL (MASK_NULL, Ranger policy perm-rule-1)",
-    );
-    expect(ana).toHaveTextContent("vgtr: select Allowed, mask on select: no mask applies");
-    expect(within(rows[1]).getAllByRole("cell")[1]).toHaveTextContent("vgsr: select Allowed, mask on select: undecidable ()");
+    expect(within(ana).getAllByTestId("effect-line").map((l) => l.textContent)).toEqual([
+      "ana reads email as the real value",
+      "ana reads email as NULL (rule Null personal data)",
+    ]);
+    expect(ana).not.toHaveTextContent("every row");
+    expect(within(rows[1]).getAllByRole("cell")[1]).toHaveTextContent("vgsrcy: undecided (egret does not model this policy set)");
 
     const counts = Object.fromEntries(
       within(view)

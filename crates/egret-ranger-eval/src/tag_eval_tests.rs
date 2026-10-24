@@ -90,7 +90,7 @@ use crate::eval::{
     evaluate_tag_policies as evaluate_tag_policies_phase,
     evaluate_tag_row_filter as evaluate_tag_row_filter_phase, AccessRequest, DenyReason,
     EnrichedTags, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
-    TagServiceResource, UndecidableCause, UnenrichedTags,
+    TagServiceResource, TiedOutcome, UndecidableCause, UnenrichedTags,
 };
 use crate::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
 use crate::resource::{MatchType, RequestResource};
@@ -1391,6 +1391,14 @@ fn two_mask_policies_tied_on_every_key_ranger_has_refuse() {
             why: vec![UndecidableCause::EvalOrderAmbiguous {
                 policy_ids: vec![Some(1), Some(2)],
                 policy_names: vec!["same-name".to_string(), "same-name".to_string()],
+                // Each tied policy's own yield, in `policy_names` order.
+                outcomes: ["MASK_HASH", "MASK_NULL"]
+                    .map(|t| TiedOutcome::Mask {
+                        mask_type: Some(t.to_string()),
+                        masked_value: None,
+                        mask_condition: None,
+                    })
+                    .to_vec(),
             }]
         },
         "{d:?}"

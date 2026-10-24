@@ -43,7 +43,7 @@
 //! family rather than adding a key: SP4c may fold the hand-written policy
 //! editor away entirely, and a key added now would have to be retired twice.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
@@ -72,7 +72,8 @@ use egret_policy::{
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
-    AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
+    AccessRequest, Decision, EngineConfig, MaskDecision, RowFilterDecision, TagServiceResource,
+    UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::requests_all_values;
@@ -80,7 +81,9 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
-use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
+use crate::explain_wire::{
+    WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
+};
 use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
@@ -314,6 +317,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::ExistingMask,
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
+        crate::effect::TrinoColumnOnly,
+        crate::effect::StarRocksTableOnly,
         crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
@@ -335,15 +340,17 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         // `WireUnmodelled`/`WireServiceDefIssue`, which carry the four leaf
         // enums. The mask mirrors (`WireMaskDecision`, `WireMaskResult`) are
         // registered because `ExplainProfile::mask` returns one (view governance
-        // Task 3). The row-filter mirrors are deliberately NOT: no response
-        // shape carries one yet, and a registered-but-unreachable schema is a
-        // contract claim nothing honours. Register them in the same breath as
-        // the field that returns one.
+        // Task 3), and the row-filter mirrors because `ExplainProfile::row_filter`
+        // does (spec §5.3).
         crate::explain_wire::WireDecision,
         crate::explain_wire::WireMaskDecision,
         crate::explain_wire::WireMaskResult,
+        crate::explain_wire::WireRowFilterDecision,
+        crate::explain_wire::WireRowFilterResult,
         crate::explain_wire::WireDenyReason,
         crate::explain_wire::WireUndecidableCause,
+        // Reachable from `WireUndecidableCause::EvalOrderAmbiguous::outcomes`.
+        crate::explain_wire::WireTiedOutcome,
         crate::explain_wire::WireUnmodelled,
         crate::explain_wire::WireItemBucket,
         crate::explain_wire::WireTagPolicyBlock,
@@ -587,9 +594,13 @@ pub enum ExplainAttribution {
     /// `perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'
     /// per-column expansion, where ONE `perm.rules` row becomes N policies and
     /// the locator is the only thing that says which expansion decided.
+    ///
+    /// `name` is the rule's `perm.rules.name` (spec C11), `None` when the row
+    /// is gone: a compiled policy outlives its rule until the next recompile.
     Rule {
         rule_id: Uuid,
         locator: Option<String>,
+        name: Option<String>,
     },
     /// `perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger
     /// analogue on the wire, so `tag` and `required_roles` are reconstructed
@@ -752,12 +763,36 @@ pub struct ExplainProfile {
     /// view. For an uncleared reader the mask is `MASK_NULL`, and then the deny
     /// is not consulted: see [`ExplainProfile::masked_read_skips_access`].
     ///
-    /// Present only for a `read` explain of a COLUMN on a StarRocks profile. A
-    /// table-level target has no column to mask, a `write` has no masked request,
-    /// and Trino's masks come from the tag service, which the evaluator refuses
-    /// (tier c), so none is asked there.
+    /// Present for a `read` explain of a COLUMN, on every engine (spec C2). On
+    /// Trino the masks come from the resource policies and from the tag
+    /// service, asked with the same resolved tags as the access verdicts. A
+    /// table-level target has no column to mask and a `write` has no masked
+    /// request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
+    /// The rows the subject sees: present for a `read` explain whose target
+    /// names a table (or a column of one), on every engine. Asked against the
+    /// table with a TABLE-level tag resolution, so a classification on a column
+    /// does not reach it (E14: on Trino it filters nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_filter: Option<ExplainRowFilter>,
+    /// StarRocks only, for a column read: the gated classifications that reach
+    /// the column only from its table and so compile no clearance here
+    /// ([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the
+    /// column as an `ANCESTOR`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clearance_not_enforced: Vec<ExplainClearanceGap>,
+    /// For a read naming a table: the classification row filters that filter
+    /// nothing here ([`ExplainRowFilterGap`]). On Trino (when the download has
+    /// tag policies), those whose classification is on columns of the table
+    /// only; on StarRocks, those whose classification is on the table only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_filter_not_applied: Vec<ExplainRowFilterGap>,
+    /// The answer in words (spec §5.1, C1): for a `read`, the column (or
+    /// table) line and then the rows line, which a refused read does not get;
+    /// for a `write`, one access line. Built by `explain_effect` from the
+    /// fields above and nothing else.
+    pub effect_lines: Vec<crate::explain_effect::ExplainEffectLine>,
     /// `true` when StarRocks consults no access policy for the target column:
     /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
     /// policy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written
@@ -787,6 +822,14 @@ pub struct ExplainProfile {
     /// the rule, and the database it asked about held nothing.)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub masked_read_skips_access: bool,
+    /// Present exactly when [`ExplainProfile::masked_read_skips_access`]: the
+    /// `select` verdict for the target's TABLE, standing in for the SELECT the
+    /// query still needs on the other columns it reads. StarRocks returns NULL
+    /// for the masked column, but without that SELECT it refuses the whole
+    /// query (live check: a reader with no grant got `ERROR 5204 need SELECT
+    /// on COLUMN region`). A denied verdict here makes the answer a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_columns_access: Option<ExplainAccess>,
 }
 
 /// The data-mask verdict for the target column: Ranger's `select` request
@@ -799,6 +842,100 @@ pub struct ExplainMask {
     /// The deciding mask policy's `perm` model object, as for an access verdict;
     /// `None` for no mask or an undecidable answer.
     pub attribution: Option<ExplainAttribution>,
+    /// Present when a rule's exempt item decided (`MASK_NONE`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
+    /// Present when a clearance mask decided and the subject is cleared (its
+    /// type is not `MASK_NULL`): what the rule masks give them ([`ExplainReplay`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<ExplainReplay>,
+}
+
+/// Who exempts the subject from the rule that decided a verdict (spec §5.4,
+/// D1). The compiled exempt item names usernames only (groups are expanded at
+/// compile time), so this is rebuilt from the model: the rule's exempt
+/// principals and the subject's group memberships, read with the compiler's own
+/// `group_members_via` on the request's snapshot. A rule exempts only users and
+/// groups (`validate_rule_shape` refuses a role or a workspace at write).
+///
+/// An empty `via` is an answer: the served policy exempts the subject and the
+/// current model does not, so the compiled policy is older than the rule or
+/// than a membership change (spec §5.4 step 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainExemption {
+    /// At most [`EXEMPTION_VIA_SHOWN`] principals: a user named directly
+    /// first, then groups by name.
+    pub via: Vec<ExemptVia>,
+    /// How many more exempting principals there are beyond `via`.
+    pub more: u32,
+}
+
+/// One exempt principal of a rule that reaches the subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExemptVia {
+    /// `user` (the subject is named directly) or `group`.
+    pub principal_kind: PrincipalKind,
+    pub r#ref: String,
+}
+
+/// The mask a cleared StarRocks reader would get without the clearance (spec
+/// §5.5, D4). The clearance mask hands each cleared user the FOLDED outcome of
+/// the profile's other masks (`clearance_mask::fold_clearance_mask`), so its
+/// own attribution hides the rule that decided; this is that outcome,
+/// re-evaluated over the served artifact with every clearance policy removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainReplay {
+    pub decision: WireMaskDecision,
+    pub attribution: Option<ExplainAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
+}
+
+/// A gated classification that StarRocks does not enforce on the target column
+/// (spec §5.8, D2): it reaches the column only from its table, and StarRocks
+/// compiles a clearance only where the classification is on a column (E13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainClearanceGap {
+    pub tag_id: Uuid,
+    /// `tags.name`.
+    pub tag_name: String,
+}
+
+/// A classification row-filter rule that filters nothing on a profile for the
+/// target's table. Trino (spec §5.8, D3, E14): the classification is on a
+/// column of the table and not on the table, and a Trino tag row filter fires
+/// only for a table-level attachment. StarRocks (live check finding 2): the
+/// classification is on the table and on none of its columns, and StarRocks
+/// expands the rule over tagged columns, so nothing compiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainRowFilterGap {
+    pub rule_id: Uuid,
+    pub rule_name: String,
+    /// `tags.name`.
+    pub tag_name: String,
+}
+
+/// How many exempting principals [`ExplainExemption::via`] names (D1).
+pub const EXEMPTION_VIA_SHOWN: usize = 3;
+
+/// The mask type a rule's exempt item carries (`rules::mask_items`); an empty
+/// `filterExpr` is the row-filter equivalent.
+const EXEMPT_MASK_TYPE: &str = "MASK_NONE";
+
+/// The row-filter verdict for the target's TABLE (spec §5.3): Ranger's
+/// `select` request against the table, which is the granularity both engines
+/// filter at, so a column target shows its table's filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainRowFilter {
+    /// Always `select`: a row filter is applied to a read.
+    pub access_type: String,
+    pub decision: WireRowFilterDecision,
+    /// The deciding row-filter policy's `perm` model object; `None` for no
+    /// filter or an undecidable answer.
+    pub attribution: Option<ExplainAttribution>,
+    /// Present when a rule's exempt item decided (an empty filter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
 }
 
 /// One tag egret resolved for the target, and **where the attachment that
@@ -879,6 +1016,10 @@ pub struct ExplainResponse {
     /// only production state in which the evaluator raises `TagsUnresolved`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_resolution_declined: Option<ExplainTagDecline>,
+    /// C5: "Not enforced: <catalog> has no engine." (or "…'s engines have no
+    /// policy profile."), present exactly for `no_profile_serves_the_catalog`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_line: Option<crate::explain_effect::ExplainEffectLine>,
 }
 
 /// Split one tag resolution into the two things `explain` does with it: the
@@ -2313,15 +2454,23 @@ async fn explain(
     Json(body): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    check_explain_target(&mut conn, &p, &body.target).await?;
+    // One read-only snapshot (spec C8): the model rows that explain a verdict
+    // (a rule's name, later its exemptions) and the artifact the verdict is
+    // evaluated over see one state.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    check_explain_target(&mut tx, &p, &body.target).await?;
     let mut out = explain_users(
-        &mut conn,
+        &mut tx,
         std::slice::from_ref(&body.subject.user),
         body.action,
         &body.target,
     )
     .await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
     Ok(Json(out.remove(0)))
 }
 
@@ -2415,6 +2564,35 @@ pub(crate) async fn explain_users(
         .map(resolved_tags_for_display)
         .unwrap_or_default();
 
+    // The row-filter question is about the TABLE (spec §5.3), so it gets its
+    // own resolution of the table scope: reusing the column's would hand a
+    // column-level tag to the table request, which no engine does (E14). Its
+    // decline needs no report of its own: the table scope carries a subset of
+    // the column target's values, so it declines only where that one did.
+    let table_scope = (action == Action::Read && target.table.is_some()).then(|| Scope {
+        column: None,
+        ..target.clone()
+    });
+    let table_tags = match &table_scope {
+        Some(scope) => explain_tag_inputs(resolved_tags_for_target(&mut *conn, scope).await?).0,
+        None => None,
+    };
+    // D2 (spec §5.8) and the classifications a column's clearance mask clears
+    // for: per request, from the column resolution and the gates.
+    let (column_clearances, clearance_gaps) = match (&resolved_tags, &target.column) {
+        (Some(tags), Some(_)) if action == Action::Read => {
+            gated_clearances(&mut *conn, tags).await?
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    let (trino_row_filter_gaps, starrocks_row_filter_gaps) = match &table_scope {
+        Some(scope) => (
+            row_filters_not_applied(&mut *conn, scope, ROW_FILTER_GAPS_COLUMN_ONLY).await?,
+            row_filters_not_applied(&mut *conn, scope, ROW_FILTER_GAPS_TABLE_ONLY).await?,
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
         let svc = get_service_by_id_via(&mut *conn, service_id).await?;
@@ -2451,6 +2629,9 @@ pub(crate) async fn explain_users(
         // consults) travels inside the same envelope.
         let service_def = ServiceDef::parse(&artifact.service_def);
         let resource = crate::handwritten::object_request(engine, &catalog_name, target);
+        let table_resource = table_scope
+            .as_ref()
+            .map(|scope| crate::handwritten::object_request(engine, &catalog_name, scope));
         // `EngineConfig::without_super_users()` records a fact about egret's
         // own provisioning, and an unknown super-user list would make every
         // decision unknowable (`isSuperUser` is checked before any policy and
@@ -2506,14 +2687,13 @@ pub(crate) async fn explain_users(
         // whose block is present but empty (`bind_trino_profile` creates exactly
         // that): in both cases no tag policy of any kind can decide here.
         let tag_policies_in_download = artifact.tag_policies.len();
+        // Built on the first cleared reader that needs it (spec §5.5).
+        let mut replay_artifact: Option<ServicePolicySet> = None;
         for (i, user) in users.iter().enumerate() {
             // The masked-read question, asked only where a mask can be the answer.
             // Asked BEFORE the accesses, because on StarRocks it decides whether
             // the column's access is consulted at all (Task 12, C2).
-            let mask = if action == Action::Read
-                && engine == EngineType::StarRocks
-                && target.column.is_some()
-            {
+            let mask = if action == Action::Read && target.column.is_some() {
                 let request = AccessRequest {
                     user: user.clone(),
                     groups: BTreeSet::new(),
@@ -2521,8 +2701,10 @@ pub(crate) async fn explain_users(
                     access_type: "select".to_string(),
                     resource: resource.clone(),
                     owner: None,
-                    // StarRocks has no tag service: no tag can reach a mask.
-                    resolved_tags: None,
+                    // The same resolution as the access verdicts (spec C2): a
+                    // Trino tag mask needs it, and StarRocks' enricher drops
+                    // every tag, so passing it there changes nothing.
+                    resolved_tags: resolved_tags.clone(),
                 };
                 let decision = egret_ranger_eval::eval::evaluate_data_mask(
                     &artifact,
@@ -2530,23 +2712,48 @@ pub(crate) async fn explain_users(
                     &service_def,
                     &config,
                 );
-                let attribution = match &decision {
-                    MaskDecision::Masked(m) => {
-                        attribution_for_name(&mut *conn, &m.policy_name).await?
-                    }
-                    MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
+                let (attribution, exemption) =
+                    mask_reason(&mut *conn, &mut cache, &decision, user).await?;
+                // Cleared = named in one of the served clearance mask's own items
+                // (the `{public}` item names a group), which is what the engine
+                // matches. Not the mask TYPE: a cleared reader under a rule that
+                // nulls the column gets `MASK_NULL` too (review finding 2).
+                let cleared_by_clearance =
+                    matches!(&attribution, Some(ExplainAttribution::Clearance { .. }))
+                        && matches!(&decision, MaskDecision::Masked(m)
+                        if named_in_mask_items(&artifact, &m.policy_name, user));
+                let replayed = if cleared_by_clearance {
+                    let without = replay_artifact
+                        .get_or_insert_with(|| without_clearance_policies(&artifact));
+                    let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                        without,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let (attribution, exemption) =
+                        mask_reason(&mut *conn, &mut cache, &decision, user).await?;
+                    Some(ExplainReplay {
+                        decision: WireMaskDecision::from(&decision),
+                        attribution,
+                        exemption,
+                    })
+                } else {
+                    None
                 };
                 Some(ExplainMask {
                     access_type: "select".to_string(),
                     decision: WireMaskDecision::from(&decision),
                     attribution,
+                    exemption,
+                    replayed,
                 })
             } else {
                 None
             };
             // StarRocks asks no access decision for a column whose deciding mask
             // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
-            // `mask` is only ever `Some` for a StarRocks column read.
+            // Trino checks access on a masked column, so never there.
             let masked_read_skips_access = engine == EngineType::StarRocks
                 && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
 
@@ -2584,7 +2791,7 @@ pub(crate) async fn explain_users(
                 // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
                 // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
                 // and a `PoolConnection` does not — inference needs the deref.
-                let attribution = attribution_for(&mut *conn, &decision).await?;
+                let attribution = attribution_for(&mut *conn, &mut cache, &decision).await?;
                 accesses.push(ExplainAccess {
                     access_type: access_type.to_string(),
                     decision: WireDecision::from(&decision),
@@ -2592,7 +2799,80 @@ pub(crate) async fn explain_users(
                 });
             }
 
-            per_user[i].push(ExplainProfile {
+            // The SELECT the masked read still needs (live check defect 1): asked
+            // against the TABLE, standing in for the query's other columns.
+            let other_columns_access = match (&table_resource, masked_read_skips_access) {
+                (Some(table_resource), true) => {
+                    let request = AccessRequest {
+                        user: user.clone(),
+                        groups: BTreeSet::new(),
+                        roles: BTreeSet::new(),
+                        access_type: "select".to_string(),
+                        resource: table_resource.clone(),
+                        owner: None,
+                        resolved_tags: table_tags.clone(),
+                    };
+                    let decision = egret_ranger_eval::eval::evaluate(
+                        &artifact,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let attribution = attribution_for(&mut *conn, &mut cache, &decision).await?;
+                    Some(ExplainAccess {
+                        access_type: "select".to_string(),
+                        decision: WireDecision::from(&decision),
+                        attribution,
+                    })
+                }
+                _ => None,
+            };
+
+            let row_filter = match &table_resource {
+                Some(table_resource) => {
+                    let request = AccessRequest {
+                        user: user.clone(),
+                        groups: BTreeSet::new(),
+                        roles: BTreeSet::new(),
+                        access_type: "select".to_string(),
+                        resource: table_resource.clone(),
+                        owner: None,
+                        resolved_tags: table_tags.clone(),
+                    };
+                    let decision = egret_ranger_eval::eval::evaluate_row_filter(
+                        &artifact,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let attribution = match &decision {
+                        RowFilterDecision::Filtered(r) => {
+                            attribution_for_name(&mut *conn, &mut cache, &r.policy_name).await?
+                        }
+                        RowFilterDecision::NoFilter | RowFilterDecision::Undecidable { .. } => None,
+                    };
+                    let exempt_item = matches!(&decision, RowFilterDecision::Filtered(r)
+                        if r.filter_expr.is_empty());
+                    let exemption = match &attribution {
+                        Some(ExplainAttribution::Rule { rule_id, .. })
+                            if exempt_item
+                                && cache.rule_has_exempt_item(&mut *conn, *rule_id).await? =>
+                        {
+                            Some(cache.exemption(&mut *conn, *rule_id, user).await?)
+                        }
+                        _ => None,
+                    };
+                    Some(ExplainRowFilter {
+                        access_type: "select".to_string(),
+                        decision: WireRowFilterDecision::from(&decision),
+                        attribution,
+                        exemption,
+                    })
+                }
+                None => None,
+            };
+
+            let mut profile = ExplainProfile {
                 service_id,
                 service_name: svc.name.clone(),
                 engine: WireEngineType::from(ranger_engine(engine)),
@@ -2600,11 +2880,57 @@ pub(crate) async fn explain_users(
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,
                 mask,
+                row_filter,
+                clearance_not_enforced: if engine == EngineType::StarRocks {
+                    clearance_gaps.clone()
+                } else {
+                    Vec::new()
+                },
+                row_filter_not_applied: match engine {
+                    EngineType::Trino if tag_policies_in_download > 0 => {
+                        trino_row_filter_gaps.clone()
+                    }
+                    EngineType::StarRocks => starrocks_row_filter_gaps.clone(),
+                    _ => Vec::new(),
+                },
                 masked_read_skips_access,
-            });
+                other_columns_access,
+                effect_lines: Vec::new(),
+            };
+            let (tied, tag_names) = line_names(&mut *conn, &mut cache, &profile).await?;
+            profile.effect_lines =
+                crate::explain_effect::effect_lines(&crate::explain_effect::EffectInput {
+                    subject: user,
+                    action,
+                    target,
+                    profile: &profile,
+                    tag_resolution_declined: tag_resolution_declined.as_ref(),
+                    tied: &tied,
+                    tag_names: &tag_names,
+                    cleared_for: &column_clearances,
+                });
+            per_user[i].push(profile);
         }
     }
 
+    // C5: one line for the whole request when nothing serves the catalog
+    // (every user then has no profile alike).
+    let not_enforced = if per_user.iter().any(Vec::is_empty) {
+        let name = catalog_names_for_ids_via(&mut *conn, &[target.catalog_id])
+            .await?
+            .into_iter()
+            .map(|c| c.name)
+            .next()
+            .unwrap_or_default();
+        let why = crate::effect::catalog_not_enforced(&mut *conn, target.catalog_id).await?;
+        Some(crate::explain_effect::not_enforced_line(
+            target.catalog_id,
+            &name,
+            why,
+        ))
+    } else {
+        None
+    };
     Ok(per_user
         .into_iter()
         .map(|profiles| ExplainResponse {
@@ -2613,6 +2939,7 @@ pub(crate) async fn explain_users(
             } else {
                 ExplainOutcome::PerProfile
             },
+            effect_line: profiles.is_empty().then(|| not_enforced.clone()).flatten(),
             profiles,
             tag_resolution_declined: tag_resolution_declined.clone(),
         })
@@ -3241,21 +3568,23 @@ async fn envelope_via(
 /// reached this function was DB-gated. `ClearanceLookups` is the seam that
 /// closes it; `sqlx::PgConnection` is the production implementation and the
 /// tests at the bottom of this file hand it a fake that records what was asked.
-async fn attribution_for<L: ClearanceLookups + Send>(
+async fn attribution_for<L: ClearanceLookups + RuleLookups + Send>(
     conn: &mut L,
+    cache: &mut ExplainCache,
     decision: &Decision,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     let name = match decision {
         Decision::Allowed { policy_name, .. } | Decision::Denied { policy_name, .. } => policy_name,
         Decision::Undecidable { .. } => return Ok(None),
     };
-    attribution_for_name(conn, name).await
+    attribution_for_name(conn, cache, name).await
 }
 
 /// [`attribution_for`] for a deciding policy's NAME, which is all a mask
 /// verdict carries.
-async fn attribution_for_name<L: ClearanceLookups + Send>(
+async fn attribution_for_name<L: ClearanceLookups + RuleLookups + Send>(
     conn: &mut L,
+    cache: &mut ExplainCache,
     name: &str,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     Ok(match attribute_policy_name(name) {
@@ -3264,6 +3593,7 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
         Some(PolicyAttribution::Rule { id, locator }) => Some(ExplainAttribution::Rule {
             rule_id: id,
             locator,
+            name: cache.rule(conn, id).await?.map(|r| r.name.clone()),
         }),
         // A clearance names a `tags.id` and nothing else. `tag` and
         // `required_roles` are the two facts a steward needs and neither is on
@@ -3276,6 +3606,9 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
             Some(ExplainAttribution::EngineGrant { engine_grant_id })
         }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
+            if let Some(hit) = cache.clearances.get(name) {
+                return Ok(Some(hit.clone()));
+            }
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
             // lookup to run. What the result MEANS is `clearing_roles`' job.
@@ -3283,14 +3616,396 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
                 Some(key) => conn.gates_for(key).await?,
                 None => Vec::new(),
             };
-            Some(ExplainAttribution::Clearance {
+            let attribution = ExplainAttribution::Clearance {
                 tag_id,
                 required_roles: clearing_roles(tag.as_deref(), &gates),
                 tag,
                 locator,
-            })
+            };
+            cache
+                .clearances
+                .insert(name.to_string(), attribution.clone());
+            Some(attribution)
         }
     })
+}
+
+/// A mask verdict's model object and, when a rule's exempt item decided it,
+/// who exempts the subject.
+async fn mask_reason(
+    conn: &mut sqlx::PgConnection,
+    cache: &mut ExplainCache,
+    decision: &MaskDecision,
+    user: &str,
+) -> Result<(Option<ExplainAttribution>, Option<ExplainExemption>), PermHttpError> {
+    let MaskDecision::Masked(m) = decision else {
+        return Ok((None, None));
+    };
+    let attribution = attribution_for_name(&mut *conn, cache, &m.policy_name).await?;
+    let exemption = match &attribution {
+        Some(ExplainAttribution::Rule { rule_id, .. })
+            if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE)
+                && cache.rule_has_exempt_item(conn, *rule_id).await? =>
+        {
+            Some(cache.exemption(conn, *rule_id, user).await?)
+        }
+        _ => None,
+    };
+    Ok((attribution, exemption))
+}
+
+/// Whether `user` is named in a `dataMaskPolicyItems` entry of the served
+/// policy `policy_name`.
+fn named_in_mask_items(artifact: &ServicePolicySet, policy_name: &str, user: &str) -> bool {
+    artifact
+        .policies
+        .iter()
+        .filter(|p| p.name == policy_name)
+        .flat_map(|p| &p.data_mask_policy_items)
+        .any(|item| item.users.iter().any(|u| u == user))
+}
+
+/// `artifact` without its clearance policies: the set the clearance mask's
+/// fold evaluated the cleared users over (spec §5.5). Chosen by the
+/// attribution parser, the same one that names a clearance on the wire.
+fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
+    let mut out = artifact.clone();
+    out.policies.retain(|p| {
+        !matches!(
+            attribute_policy_name(&p.name),
+            Some(PolicyAttribution::Clearance { .. })
+        )
+    });
+    out
+}
+
+/// The resolved tags that carry a gate with a required role, split by where
+/// they reach the target column: `(on_column, table_only)`, each sorted by
+/// name. `table_only` is the D2 gap ([`ExplainClearanceGap`]); `on_column` is
+/// every classification a StarRocks clearance mask on the column clears for
+/// (one merged mask, the intersection of their cleared sets).
+async fn gated_clearances(
+    conn: &mut sqlx::PgConnection,
+    tags: &UnenrichedTags,
+) -> Result<(Vec<ExplainClearanceGap>, Vec<ExplainClearanceGap>), PermHttpError> {
+    let display = resolved_tags_for_display(tags);
+    let on_column: BTreeSet<&str> = display
+        .iter()
+        .filter(|t| t.attached_at_column)
+        .map(|t| t.name.as_str())
+        .collect();
+    let names: Vec<String> = display
+        .iter()
+        .map(|t| t.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if names.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // `tags.name` is unique (migration 0207), so a name names one tag.
+    let rows: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, key, name FROM tags WHERE name = ANY($1) ORDER BY name")
+            .bind(&names)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+    let keys: Vec<String> = rows.iter().map(|(_, key, _)| key.clone()).collect();
+    let gated: BTreeSet<String> = clearance_gates_for_tags_via(conn, &keys)
+        .await?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|(_, key, _)| gated.contains(key))
+        .map(|(tag_id, _, tag_name)| ExplainClearanceGap { tag_id, tag_name })
+        .partition(|g| on_column.contains(g.tag_name.as_str())))
+}
+
+/// The names the line builder needs that the profile does not carry: the
+/// model object of every policy a tie names, and `tags.name` for every
+/// clearance the profile attributes to.
+async fn line_names(
+    conn: &mut sqlx::PgConnection,
+    cache: &mut ExplainCache,
+    profile: &ExplainProfile,
+) -> Result<
+    (
+        HashMap<String, Option<ExplainAttribution>>,
+        HashMap<Uuid, String>,
+    ),
+    PermHttpError,
+> {
+    let mut causes: Vec<&WireUndecidableCause> = Vec::new();
+    let mut attributions: Vec<&ExplainAttribution> = Vec::new();
+    for a in &profile.accesses {
+        attributions.extend(&a.attribution);
+    }
+    if let Some(m) = &profile.mask {
+        attributions.extend(&m.attribution);
+        if let WireMaskDecision::Undecidable { why } = &m.decision {
+            causes.extend(why);
+        }
+        if let Some(r) = &m.replayed {
+            attributions.extend(&r.attribution);
+        }
+    }
+    if let Some(WireRowFilterDecision::Undecidable { why }) =
+        profile.row_filter.as_ref().map(|r| &r.decision)
+    {
+        causes.extend(why);
+    }
+    let mut tied = HashMap::new();
+    for cause in causes {
+        if let WireUndecidableCause::EvalOrderAmbiguous { policy_names, .. } = cause {
+            for name in policy_names {
+                if !tied.contains_key(name) {
+                    let attribution = attribution_for_name(&mut *conn, cache, name).await?;
+                    tied.insert(name.clone(), attribution);
+                }
+            }
+        }
+    }
+    let tag_ids: BTreeSet<Uuid> = attributions
+        .into_iter()
+        .chain(tied.values().flatten())
+        .filter_map(|a| match a {
+            ExplainAttribution::Clearance { tag_id, .. } => Some(*tag_id),
+            _ => None,
+        })
+        .collect();
+    let mut tag_names = HashMap::new();
+    for id in tag_ids {
+        if let Some(name) = cache.tag_name(conn, id).await? {
+            tag_names.insert(id, name.to_string());
+        }
+    }
+    Ok((tied, tag_names))
+}
+
+/// The classification row-filter rules on a classification that is on a column
+/// of the target table and NOT on the table: they filter nothing on Trino,
+/// whose tag row filter fires only for a table-level attachment (D3, E14).
+const ROW_FILTER_GAPS_COLUMN_ONLY: &str = "SELECT r.id, r.name, t.name \
+       FROM perm.rules r \
+       JOIN tags t ON t.key = r.tag_key \
+      WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
+        AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                     WHERE c.id = $1 AND a.tag_id = t.id \
+                       AND lower(a.schema_name) = lower($2) \
+                       AND lower(a.table_name) = lower($3) \
+                       AND a.column_name <> '') \
+        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                         WHERE c.id = $1 AND a.tag_id = t.id \
+                           AND lower(a.schema_name) = lower($2) \
+                           AND lower(a.table_name) = lower($3) \
+                           AND a.column_name = '') \
+      ORDER BY r.name, r.id";
+
+/// The classification row-filter rules on a classification that is on the
+/// target table and on NONE of its columns: they compile nothing on StarRocks,
+/// which expands a classification row filter over the tagged columns (live
+/// check finding 2; the compiler fix is the D2 StarRocks package).
+const ROW_FILTER_GAPS_TABLE_ONLY: &str = "SELECT r.id, r.name, t.name \
+       FROM perm.rules r \
+       JOIN tags t ON t.key = r.tag_key \
+      WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
+        AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                     WHERE c.id = $1 AND a.tag_id = t.id \
+                       AND lower(a.schema_name) = lower($2) \
+                       AND lower(a.table_name) = lower($3) \
+                       AND a.column_name = '') \
+        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                         WHERE c.id = $1 AND a.tag_id = t.id \
+                           AND lower(a.schema_name) = lower($2) \
+                           AND lower(a.table_name) = lower($3) \
+                           AND a.column_name <> '') \
+      ORDER BY r.name, r.id";
+
+/// The classification row-filter rules that filter nothing for `table`'s rows
+/// ([`ExplainRowFilterGap`]); `query` is one of [`ROW_FILTER_GAPS_COLUMN_ONLY`]
+/// (Trino) and [`ROW_FILTER_GAPS_TABLE_ONLY`] (StarRocks). Levels compare
+/// case-folded, as the tag resolution does.
+async fn row_filters_not_applied(
+    conn: &mut sqlx::PgConnection,
+    table: &Scope,
+    query: &'static str,
+) -> Result<Vec<ExplainRowFilterGap>, PermHttpError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(query)
+        .bind(table.catalog_id)
+        .bind(table.schema.as_deref())
+        .bind(table.table.as_deref())
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|(rule_id, rule_name, tag_name)| ExplainRowFilterGap {
+            rule_id,
+            rule_name,
+            tag_name,
+        })
+        .collect())
+}
+
+/// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).
+/// A group answer evaluates up to `EXPLAIN_MEMBER_LIMIT` members against one
+/// artifact per profile, so without it every member's clearance or rule verdict
+/// re-reads the same rows. Per request and never shared: it lives inside the
+/// request's snapshot, so it cannot serve a row another state wrote.
+#[derive(Default)]
+pub(crate) struct ExplainCache {
+    /// Clearance attributions by the deciding policy's NAME (the locator is
+    /// part of the attribution), each costing two reads uncached (E18).
+    clearances: HashMap<String, ExplainAttribution>,
+    /// `perm.rules` rows by id, `None` when the rule is gone.
+    rules: HashMap<Uuid, Option<Rule>>,
+    /// Exemption reasons by `(rule id, username)`.
+    exemptions: HashMap<(Uuid, String), ExplainExemption>,
+    /// Each group's members' usernames, by group name.
+    group_members: HashMap<String, BTreeSet<String>>,
+    /// `tags.name` by tag id, `None` when the row is gone.
+    tag_names: HashMap<Uuid, Option<String>>,
+}
+
+impl ExplainCache {
+    async fn rule<L: RuleLookups + Send>(
+        &mut self,
+        conn: &mut L,
+        id: Uuid,
+    ) -> Result<Option<&Rule>, PermHttpError> {
+        let rule = match self.rules.entry(id) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
+        };
+        Ok(rule.as_ref())
+    }
+
+    /// Whether a no-transform answer from `rule_id` can only be its exempt
+    /// item: the rule exists and its OWN outcome transforms (a mask type other
+    /// than `MASK_NONE`, a non-empty filter). A rule whose own outcome is "no
+    /// transform" decides through its `{public}` item for everyone, which is
+    /// not an exemption (review finding 1).
+    async fn rule_has_exempt_item(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        rule_id: Uuid,
+    ) -> Result<bool, PermHttpError> {
+        Ok(self
+            .rule(conn, rule_id)
+            .await?
+            .is_some_and(|r| match &r.kind {
+                RuleKind::Mask { mask_type, .. } => mask_type != EXEMPT_MASK_TYPE,
+                RuleKind::RowFilter { filter_expr } => !filter_expr.is_empty(),
+            }))
+    }
+
+    /// `tags.name` for `id`, or `None` when the tag is gone.
+    async fn tag_name(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<&str>, PermHttpError> {
+        let name = match self.tag_names.entry(id) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(
+                sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?,
+            ),
+        };
+        Ok(name.as_deref())
+    }
+
+    /// Why `username` is exempt from `rule_id` ([`ExplainExemption`]).
+    async fn exemption(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        rule_id: Uuid,
+        username: &str,
+    ) -> Result<ExplainExemption, PermHttpError> {
+        let key = (rule_id, username.to_string());
+        if let Some(hit) = self.exemptions.get(&key) {
+            return Ok(hit.clone());
+        }
+        let include = self
+            .rule(conn, rule_id)
+            .await?
+            .map(|r| r.exempt.include.clone())
+            .unwrap_or_default();
+        let mut direct = Vec::new();
+        let mut groups = Vec::new();
+        for p in include {
+            let exempts = match p.kind {
+                PrincipalKind::User => p.r#ref == username,
+                PrincipalKind::Group if p.r#ref != egret_perm::PUBLIC_GROUP => {
+                    self.group_members(conn, &p.r#ref).await?.contains(username)
+                }
+                // A role or a workspace cannot be stored on a rule's exempt set.
+                _ => false,
+            };
+            if exempts {
+                match p.kind {
+                    PrincipalKind::User => direct.push(p),
+                    _ => groups.push(p),
+                }
+            }
+        }
+        groups.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+        let all: Vec<ExemptVia> = direct
+            .into_iter()
+            .chain(groups)
+            .map(|p| ExemptVia {
+                principal_kind: p.kind,
+                r#ref: p.r#ref,
+            })
+            .collect();
+        let exemption = ExplainExemption {
+            more: all.len().saturating_sub(EXEMPTION_VIA_SHOWN) as u32,
+            via: all.into_iter().take(EXEMPTION_VIA_SHOWN).collect(),
+        };
+        self.exemptions.insert(key, exemption.clone());
+        Ok(exemption)
+    }
+
+    /// The usernames of `group`'s members, as the compiler expands it.
+    async fn group_members(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        group: &str,
+    ) -> Result<&BTreeSet<String>, PermHttpError> {
+        let members = match self.group_members.entry(group.to_string()) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let rows = crate::members::group_members_via(conn, &[group.to_string()]).await?;
+                slot.insert(rows.into_iter().filter_map(|r| r.username).collect())
+            }
+        };
+        Ok(members)
+    }
+}
+
+/// The rule read a rule attribution needs, behind a trait for the same reason
+/// as [`ClearanceLookups`]: the attribution wiring is tested with no database.
+trait RuleLookups {
+    /// The rule with its exemptions, or `None` when the row is gone.
+    fn rule(
+        &mut self,
+        id: Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<Rule>, PermHttpError>> + Send;
+}
+
+impl RuleLookups for sqlx::PgConnection {
+    async fn rule(&mut self, id: Uuid) -> Result<Option<Rule>, PermHttpError> {
+        Ok(get_rule_via(self, id).await?)
+    }
 }
 
 /// The two reads a clearance attribution needs, behind a trait so that
@@ -4524,7 +5239,10 @@ mod explain_target_tests {
 
 #[cfg(test)]
 mod wiring_tests {
-    use super::{attribution_for, ClearanceLookups, ExplainAttribution, PermHttpError};
+    use super::{
+        attribution_for, ClearanceLookups, ExplainAttribution, ExplainCache, PermHttpError, Rule,
+        RuleLookups,
+    };
     use egret_ranger_eval::eval::{Decision, DenyReason};
     use uuid::Uuid;
 
@@ -4534,6 +5252,7 @@ mod wiring_tests {
         gates: Vec<(String, Vec<String>)>,
         tags_asked: Vec<Uuid>,
         gates_asked: Vec<String>,
+        rules_asked: Vec<Uuid>,
     }
 
     impl FakeLookups {
@@ -4551,6 +5270,7 @@ mod wiring_tests {
                     .collect(),
                 tags_asked: Vec::new(),
                 gates_asked: Vec::new(),
+                rules_asked: Vec::new(),
             }
         }
     }
@@ -4575,6 +5295,15 @@ mod wiring_tests {
                 .filter(|(k, _)| k == tag_key)
                 .cloned()
                 .collect())
+        }
+    }
+
+    /// No rule row: the attribution then carries `name: None`, which is what a
+    /// deleted rule whose compiled policy is still served reads as.
+    impl RuleLookups for FakeLookups {
+        async fn rule(&mut self, id: Uuid) -> Result<Option<Rule>, PermHttpError> {
+            self.rules_asked.push(id);
+            Ok(None)
         }
     }
 
@@ -4603,9 +5332,13 @@ mod wiring_tests {
     async fn a_resolved_clearance_carries_the_gates_roles_onto_the_wire() {
         let mut lookups =
             FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(None)),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4628,9 +5361,13 @@ mod wiring_tests {
     #[tokio::test]
     async fn an_unresolved_clearance_sends_null_roles_and_asks_no_gate() {
         let mut lookups = FakeLookups::new(None, &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(Some("wh.s.t.ssn"))))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(Some("wh.s.t.ssn"))),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4652,9 +5389,13 @@ mod wiring_tests {
     #[tokio::test]
     async fn a_resolved_clearance_with_no_gate_sends_an_empty_list() {
         let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(None)),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4684,6 +5425,7 @@ mod wiring_tests {
                 Some(ExplainAttribution::Rule {
                     rule_id: rule,
                     locator: Some("wh.s.t.c".to_string()),
+                    name: None,
                 }),
             ),
             // Ranger's own super-user short-circuit: a real decider with no
@@ -4692,11 +5434,39 @@ mod wiring_tests {
             (Decision::Undecidable { why: Vec::new() }, None),
         ] {
             let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
-            let got = attribution_for(&mut lookups, &decision).await.expect("ok");
+            let got = attribution_for(&mut lookups, &mut ExplainCache::default(), &decision)
+                .await
+                .expect("ok");
             assert_eq!(got, want, "for {decision:?}");
             assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
             assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
         }
+    }
+
+    /// Spec C7: one request attributes many verdicts to the same clearance
+    /// (every member of a group, every profile), and the two reads behind it
+    /// run once. The same holds for a rule's row.
+    #[tokio::test]
+    async fn a_clearance_is_looked_up_once_per_request() {
+        let mut lookups =
+            FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let mut cache = ExplainCache::default();
+        let rule = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            for name in [clearance_name(None), format!("perm-rule-{rule}")] {
+                answers.push(
+                    attribution_for(&mut lookups, &mut cache, &denied(&name))
+                        .await
+                        .expect("ok"),
+                );
+            }
+        }
+        assert_eq!(lookups.tags_asked.len(), 1, "{:?}", lookups.tags_asked);
+        assert_eq!(lookups.gates_asked.len(), 1, "{:?}", lookups.gates_asked);
+        assert_eq!(lookups.rules_asked, vec![rule]);
+        assert_eq!(answers[0], answers[2], "a cached answer is the same answer");
+        assert_eq!(answers[0], answers[4]);
     }
 
     /// F11 (spec §4.3 item 5): a deciding `perm-engine-{uuid}` attributes to
@@ -4706,9 +5476,13 @@ mod wiring_tests {
     async fn an_engine_grant_attributes_by_its_id_and_asks_no_clearance_lookup() {
         let id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
         let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
-        let got = attribution_for(&mut lookups, &denied(&format!("perm-engine-{id}")))
-            .await
-            .expect("ok");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&format!("perm-engine-{id}")),
+        )
+        .await
+        .expect("ok");
         assert_eq!(
             got,
             Some(ExplainAttribution::EngineGrant {

@@ -449,9 +449,15 @@ pub(super) async fn explain_principal(
         }
         PrincipalKind::Group | PrincipalKind::Role => {}
     }
-    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    super::check_explain_target(&mut conn, &p, &body.target).await?;
-    let Some(members) = principal_members_via(&mut conn, body.principal.kind, name).await? else {
+    // One read-only snapshot, as `explain` (spec C8): the members, the model
+    // rows that explain their verdicts and the artifacts see one state.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    super::check_explain_target(&mut tx, &p, &body.target).await?;
+    let Some(members) = principal_members_via(&mut tx, body.principal.kind, name).await? else {
         return Err(PermHttpError::BadRequest(format!(
             "no {} is named {name}",
             body.principal.kind.as_str()
@@ -472,8 +478,9 @@ pub(super) async fn explain_principal(
     let results = if usernames.is_empty() {
         Vec::new()
     } else {
-        super::explain_users(&mut conn, &usernames, body.action, &body.target).await?
+        super::explain_users(&mut tx, &usernames, body.action, &body.target).await?
     };
+    tx.rollback().await.map_err(PermHttpError::db)?;
     let evaluated = named
         .into_iter()
         .zip(results)

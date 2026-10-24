@@ -26,6 +26,8 @@ export type ExplainAttribution = {
   rule_id: string;
   /** @nullable */
   locator?: string | null;
+  /** @nullable */
+  name?: string | null;
   kind: 'rule';
 } | {
   tag_id: string;

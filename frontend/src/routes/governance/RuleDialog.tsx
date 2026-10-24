@@ -53,6 +53,10 @@ import {
   RefusalBody,
   showsNotEnforced,
   tickReason,
+  StarRocksTableOnlyNotice,
+  TrinoColumnOnlyNotice,
+  starrocksTickReason,
+  trinoTickReason,
   type ConflictActions,
 } from "@/routes/governance/RulePreview";
 import {
@@ -75,6 +79,9 @@ const EMPTY_SCOPE: Scope = { catalog_id: "" };
 
 /** Create's reason when only the preview is missing or out of date (spec C8.2). */
 export const PREVIEW_TO_ENABLE_CREATE = "Preview the rule to enable Create.";
+/** Spec §5.8 (D3) and live check finding 2: shown under Kind for a row filter on a classification. */
+export const TRINO_ROW_FILTER_HINT =
+  "On Trino, a row filter by classification applies only where the classification is on the whole table; on StarRocks, only where it is on a column.";
 /** The path-mask help (spec C8.1): an absent column is legal and means every column. */
 export const EMPTY_COLUMN_MASKS_EVERY_COLUMN = "Leave Column empty to mask every column of the table.";
 
@@ -471,8 +478,16 @@ function RuleForm({
    * where the constraint starts applying — not silently at submit, which
    * would send something other than what the form last showed.
    */
+  // A new rule's seeded name ("Mask PII") follows Kind ("Filter rows PII") until the user edits it (live check).
+  const autoName = (kind: KindType): string | null =>
+    !existing && seed.name.startsWith("Mask ") ? (kind === "mask" ? seed.name : `Filter rows ${seed.name.slice("Mask ".length)}`) : null;
   function changeKind(next: KindType) {
-    update(next === "row_filter" && scope.column ? { kindType: next, scope: { ...scope, column: undefined } } : { kindType: next });
+    const renamed = autoName(kindType) !== null && name === autoName(kindType) ? { name: autoName(next) ?? name } : {};
+    update(
+      next === "row_filter" && scope.column
+        ? { kindType: next, scope: { ...scope, column: undefined }, ...renamed }
+        : { kindType: next, ...renamed },
+    );
   }
 
   const previewStale = previewedFor !== bodySnapshot;
@@ -582,7 +597,12 @@ function RuleForm({
    */
   const effect = preview && !previewStale ? (preview.effect ?? null) : null;
   // Only a mask can be a second mask on a column; the server lists masks only, and the kind is checked anyway.
-  const needsTick = !!effect && effect.kind === "mask" && effect.alreadyMasked.length > 0 && !ticked;
+  const secondMask = !!effect && effect.kind === "mask" && effect.alreadyMasked.length > 0;
+  // Spec §5.8 (D3, C9): a classification row filter Trino would not apply on some tables asks for the same tick.
+  const trinoColumnOnly = effect?.kind === "row_filter" ? (effect.trinoColumnOnly ?? null) : null;
+  // Its StarRocks mirror (live check finding 2): a classification on the whole table filters nothing there.
+  const starrocksTableOnly = effect?.kind === "row_filter" ? (effect.starrocksTableOnly ?? null) : null;
+  const needsTick = (secondMask || trinoColumnOnly !== null || starrocksTableOnly !== null) && !ticked;
   const createReason =
     blockedReason ??
     (previewStale || (!preview && !previewError)
@@ -590,14 +610,31 @@ function RuleForm({
       : previewError
         ? "The preview was refused. Change the rule, then preview it again."
         : needsTick
-          ? tickReason(!!existing)
+          ? secondMask
+            ? tickReason(!!existing)
+            : trinoColumnOnly
+              ? trinoTickReason(!!existing)
+              : starrocksTickReason(!!existing)
           : null);
   const canSave = createReason === null;
   const reasonId = useId();
   const warnId = useId();
-  // The reason when Create waits, and the "Not enforced yet" warning even when it does not (spec C7 A11y).
+  const trinoWarnId = useId();
+  const starrocksWarnId = useId();
+  const kindHintId = useId();
+  // The reason when Create waits, and the warnings even when it does not (spec C7 A11y).
   const createDescribedBy =
-    [canSave ? null : reasonId, showsNotEnforced(effect) ? warnId : null].filter(Boolean).join(" ") || undefined;
+    [
+      canSave ? null : reasonId,
+      showsNotEnforced(effect) ? warnId : null,
+      trinoColumnOnly ? trinoWarnId : null,
+      starrocksTableOnly ? starrocksWarnId : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
+  // The classification's name for the D3 warning: from the list, else as the entry point knows it, else its key.
+  const tagsQ = useTags();
+  const tagName = tagsQ.data?.find((t) => t.key === tagKey)?.name ?? knownTagName(entry, tagKey) ?? tagKey;
   const saveLabel = existing ? "Save changes" : "Create";
 
   /** The footer's error: the latest failure, in the server's words (FE-ACTION-3). */
@@ -688,7 +725,10 @@ function RuleForm({
         <div className="space-y-1.5">
           <Label htmlFor="rule-kind">{TERM.kind}</Label>
           <Select value={kindType} onValueChange={(v) => changeKind(v as KindType)}>
-            <SelectTrigger id="rule-kind">
+            <SelectTrigger
+              id="rule-kind"
+              aria-describedby={kindType === "row_filter" && selectorType === "tag" ? kindHintId : undefined}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -696,6 +736,11 @@ function RuleForm({
               <SelectItem value="row_filter">Filter rows</SelectItem>
             </SelectContent>
           </Select>
+          {kindType === "row_filter" && selectorType === "tag" && (
+            <p id={kindHintId} className="text-xs text-muted-foreground">
+              {TRINO_ROW_FILTER_HINT}
+            </p>
+          )}
         </div>
 
         {kindType === "mask" ? (
@@ -833,6 +878,26 @@ function RuleForm({
                       ticked={ticked}
                       onTick={setTicked}
                       editing={!!existing}
+                    />
+                  )}
+                  {trinoColumnOnly && (
+                    <TrinoColumnOnlyNotice
+                      only={trinoColumnOnly}
+                      classification={tagName}
+                      ticked={ticked}
+                      onTick={setTicked}
+                      editing={!!existing}
+                      id={trinoWarnId}
+                    />
+                  )}
+                  {starrocksTableOnly && (
+                    <StarRocksTableOnlyNotice
+                      only={starrocksTableOnly}
+                      classification={tagName}
+                      ticked={ticked}
+                      onTick={setTicked}
+                      editing={!!existing}
+                      id={starrocksWarnId}
                     />
                   )}
                 </>

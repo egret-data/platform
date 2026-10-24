@@ -4223,6 +4223,10 @@ async fn explain_answers_an_uncleared_starrocks_read_of_a_masked_column_with_the
         "body: {body}"
     );
     assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert!(
+        mask.get("replayed").is_none(),
+        "MASK_NULL means not cleared: nothing to replay; body: {body}"
+    );
     assert_eq!(
         mask["attribution"]["tag_id"],
         tag_id.to_string(),
@@ -4469,6 +4473,43 @@ async fn a_hand_written_column_deny_under_the_clearance_mask_null_is_skipped_on_
     lift_gate(&f, tag_id).await;
 }
 
+/// Spec C11: a verdict a rule decides names the rule, so the answer can say
+/// "rule *Hash personal data*" without a second lookup by the client.
+#[tokio::test]
+async fn explain_names_the_rule_it_attributes() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name = unique("vmask-names-the-rule");
+    let rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, written) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {written}");
+
+    let body = explain_column(&f, &token, "analyst").await;
+    let mask = &profile_for(&body, "starrocks")["mask"];
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["rule_id"], written["id"],
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["name"], json!(name), "body: {body}");
+}
+
 /// Final review V-1, live 2c: a rule `MASK_HASH` folded into the clearance mask
 /// for a cleared reader, plus a hand-written column `select` deny. StarRocks
 /// refused that read (`5204`): a `MASK_HASH` column IS access-checked. So the
@@ -4530,6 +4571,320 @@ async fn a_mask_hash_column_keeps_its_starrocks_access_verdict() {
     )
     .await;
     assert!(status.is_success(), "delete the rule: {status}");
+    lift_gate(&f, tag_id).await;
+}
+
+/// Spec §5.5 (D4): a cleared StarRocks reader's mask is the clearance's, which
+/// replays the rule masks' outcome for them. Explain replays it without the
+/// clearance so the answer credits both: the rule's `MASK_HASH`, or the rule's
+/// exemption with who exempts them.
+#[tokio::test]
+async fn a_cleared_starrocks_reader_s_mask_replays_the_rule() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let path = json!({ "type": "path", "catalog_id": f.catalog_id,
+                       "schema": "sales", "table": "orders", "column": "email" });
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule("vmask-replay", path.clone(), json!([])),
+    )
+    .await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let mask = &profile_for(&body, "starrocks")["mask"];
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    let replayed = &mask["replayed"];
+    assert_eq!(
+        replayed["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(replayed["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        replayed["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+
+    // Cleared AND exempt from the rule: the replay is the exempt item.
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "vmask-replay-ex",
+            path,
+            json!([{"kind": "user", "ref": cleared}]),
+        ),
+    )
+    .await;
+    let body = explain_column(&f, &token, &cleared).await;
+    let replayed = &profile_for(&body, "starrocks")["mask"]["replayed"];
+    assert_eq!(
+        replayed["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(
+        replayed["exemption"],
+        json!({"via": [{"principal_kind": "user", "ref": cleared}], "more": 0}),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
+/// Review finding 2: a cleared reader under a rule that NULLs the column gets
+/// `MASK_NULL` from the clearance mask too (the fold replays the rule). That
+/// is the rule's outcome, not "not cleared": the replay names the rule, and the
+/// uncleared reader still gets no replay.
+#[tokio::test]
+async fn a_cleared_reader_under_a_nulling_rule_is_told_the_rule_nulls_them() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, uncleared) = clearance_readers(&f, &token).await;
+    let mut rule = mask_rule(
+        "vmask-null-rule",
+        json!({ "type": "path", "catalog_id": f.catalog_id,
+                "schema": "sales", "table": "orders", "column": "email" }),
+        json!([]),
+    );
+    rule["kind"]["mask_type"] = json!("MASK_NULL");
+    let name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let profile = profile_for(&body, "starrocks");
+    let mask = &profile["mask"];
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["replayed"]["attribution"]["kind"], "rule",
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["replayed"]["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    let line = profile["effect_lines"][0]["text"].as_str().unwrap();
+    assert!(
+        line.starts_with(&format!(
+            "{cleared} reads email as NULL by rule {name} (cleared for "
+        )),
+        "body: {body}"
+    );
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    assert!(
+        profile_for(&body, "starrocks")["mask"]
+            .get("replayed")
+            .is_none(),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
+/// Review finding 4: a column carrying two gated classifications gets ONE
+/// clearance mask (named after the lower tag id) whose cleared set is the
+/// intersection, so a reader it clears is cleared for both, and the line names
+/// both.
+#[tokio::test]
+async fn a_reader_cleared_for_two_classifications_is_told_both() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let first: String = sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("first tag name");
+    let second = assign_tag(&f, f.catalog_id, "sales", "orders", "email").await;
+    let second_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&second.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("second tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(second_id)
+    .bind(&role)
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the second tag");
+    // A rule write recompiles the profile, folding both gates into one mask.
+    let rule = mask_rule(
+        "vmask-two-tags",
+        json!({ "type": "path", "catalog_id": f.catalog_id,
+                "schema": "sales", "table": "orders", "column": "email" }),
+        json!([]),
+    );
+    let name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let mut tags = [first, second.name.clone()];
+    tags.sort();
+    assert_eq!(
+        profile_for(&body, "starrocks")["effect_lines"][0]["text"],
+        json!(format!(
+            "{cleared} reads email as hashed by rule {name} (cleared for {} and {})",
+            tags[0], tags[1]
+        )),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, second_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
+/// Live check defect 1: StarRocks asks no `select` for a column its clearance
+/// nulls, but the query still needs `SELECT` on the other columns it reads.
+/// A reader with no grant at all is refused by the engine (5204), so the line
+/// must say so instead of "reads email as NULL". A granted, uncleared reader
+/// does read NULL.
+#[tokio::test]
+async fn an_ungranted_starrocks_reader_of_a_nulled_column_is_refused_not_masked() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let stranger = ungranted_reader(&f).await;
+
+    let body = explain_column(&f, &token, &stranger).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    let lines = profile["effect_lines"].as_array().expect("lines");
+    assert_eq!(
+        lines.len(),
+        1,
+        "a refused read has no rows line; body: {body}"
+    );
+    assert_eq!(lines[0]["outcome"], "refused", "body: {body}");
+    assert_eq!(
+        lines[0]["text"],
+        json!(format!(
+            "{stranger} is refused email (no policy allows it): StarRocks masks it to NULL, \
+             and the query still needs SELECT on the other columns it reads"
+        )),
+        "body: {body}"
+    );
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    assert_eq!(
+        profile_for(&body, "starrocks")["effect_lines"][0]["outcome"],
+        "nullified",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
+    let (status, _) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/rules/{rule_id}"),
+                token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(status.is_success(), "delete the rule: {status}");
+}
+
+/// Spec §5.8 (D2, E13): StarRocks compiles a clearance only for a column the
+/// classification is attached to, so a gated classification on the whole TABLE
+/// is not enforced there. Explain lists it on the StarRocks profile; the same
+/// classification also on the column is enforced and not listed.
+#[tokio::test]
+async fn a_table_level_clearance_is_not_enforced_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let reader = known_user(&f, unique("vmask-d2")).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, &reader)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&tag.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(tag_id)
+    .bind(unique("vmask-d2-role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+
+    let body = explain_column(&f, &token, &reader).await;
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(
+        starrocks["clearance_not_enforced"],
+        json!([{"tag_id": tag_id, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(starrocks, "select")["decision"]["kind"],
+        "allowed",
+        "nothing compiled refuses the uncleared reader; body: {body}"
+    );
+    assert!(
+        starrocks
+            .get("mask")
+            .is_none_or(|m| m["decision"]["kind"] == "no_mask"),
+        "body: {body}"
+    );
+
+    // The same classification on the column too: enforced, so not listed.
+    let warehouse: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("warehouse");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'sales','orders','email')",
+    )
+    .bind(tag_id)
+    .bind(warehouse)
+    .execute(&f.db.pool)
+    .await
+    .expect("column assignment");
+    let body = explain_column(&f, &token, &reader).await;
+    assert!(
+        profile_for(&body, "starrocks")
+            .get("clearance_not_enforced")
+            .is_none(),
+        "body: {body}"
+    );
     lift_gate(&f, tag_id).await;
 }
 
@@ -4624,6 +4979,11 @@ async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
         "body: {body}"
     );
     assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    // Spec §5.5: the clearance's outcome replayed without it — no rule masks.
+    assert_eq!(
+        mask["replayed"]["decision"]["kind"], "no_mask",
+        "body: {body}"
+    );
 
     // A target that names no column has no mask to report.
     let (status, table_level) = into_json(
@@ -8930,6 +9290,602 @@ async fn trino_catalog_with_config(f: &Fixture, tag: &str, config: Value) -> Uui
     .await
     .expect("attach catalog");
     catalog_id
+}
+
+/// A Trino profile whose `tagService` names a real, empty tag service, bound to
+/// an engine on a new catalog (spec Task 3). Returns the catalog and the TAG
+/// service's id, which a test writes hand policies into.
+async fn trino_tag_profile(f: &Fixture, label: &str) -> (Uuid, i64) {
+    egret_policy::seed_tag(&f.policy)
+        .await
+        .expect("seed tag def");
+    let tag_service = f
+        .policy
+        .create_service(&unique(&format!("{label}_tag")), "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let catalog_id =
+        trino_catalog_with_config(f, label, json!({ "tagService": tag_service.name })).await;
+    (catalog_id, tag_service.id)
+}
+
+/// A hand-written tag MASK policy for `{public}` on `tag_name`, in the tag
+/// service `tag_service_id`.
+async fn hand_tag_mask(f: &Fixture, tag_service_id: i64, tag_name: &str, mask_type: &str) {
+    let tag_service = f
+        .policy
+        .get_service_by_id(tag_service_id)
+        .await
+        .expect("tag service row");
+    let name = unique("hand-tag-mask");
+    f.policy
+        .create_policy(
+            tag_service_id,
+            &name,
+            &json!({
+                "name": name, "service": tag_service.name, "serviceType": "tag",
+                "policyType": 1, "isEnabled": true, "policyPriority": 0,
+                "resources": { "tag": { "values": [tag_name], "isExcludes": false, "isRecursive": false } },
+                "dataMaskPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                    "dataMaskInfo": {"dataMaskType": mask_type}}],
+                "policyItems": [], "denyPolicyItems": [],
+                "allowExceptions": [], "denyExceptions": []
+            }),
+        )
+        .await
+        .expect("hand tag mask");
+}
+
+/// `POST /perm/explain` for `user` reading `sales.orders.email` in `catalog_id`.
+async fn explain_email(f: &Fixture, token: &str, catalog_id: Uuid, user: &str) -> Value {
+    let mut ask = explain_body(catalog_id, user);
+    ask["target"]["column"] = json!("email");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body
+}
+
+/// Spec §5.2 (C2): a classification mask on Trino is asked and answered, with
+/// the resolved tags, and attributed to the rule.
+#[tokio::test]
+async fn explain_reports_a_trino_classification_mask() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-mask").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    let reader = known_user(&f, unique("vmask-reader")).await;
+    // After the fixtures: `trino_catalog_with_config` takes the lock itself.
+    let _lock = exclusive(&f).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(catalog_id, &reader)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "vmask-trino-hash",
+            json!({"type": "tag", "key": tag.key}),
+            json!([]),
+        ),
+    )
+    .await;
+
+    let body = explain_email(&f, &token, catalog_id, &reader).await;
+    let trino = profile_for(&body, "trino");
+    assert_eq!(
+        access_for(trino, "select")["decision"]["kind"],
+        "allowed",
+        "body: {body}"
+    );
+    let mask = &trino["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    assert!(
+        trino.get("masked_read_skips_access").is_none(),
+        "Trino checks access on a masked column; body: {body}"
+    );
+    // Spec §5.1: the answer in one sentence, naming the rule.
+    let rule_name: String = sqlx::query_scalar("SELECT name FROM perm.rules WHERE id = $1::uuid")
+        .bind(&rule_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("rule name");
+    assert_eq!(
+        trino["effect_lines"][0]["text"],
+        json!(format!("{reader} reads email as hashed (rule {rule_name})")),
+        "body: {body}"
+    );
+    assert_eq!(
+        trino["effect_lines"][0]["outcome"], "masked",
+        "body: {body}"
+    );
+}
+
+/// The same question when the classification is on the TABLE only: the tag
+/// reaches the column request as `ANCESTOR`, and a tag mask applies there.
+#[tokio::test]
+async fn explain_reports_a_trino_mask_from_a_table_classification() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, tag_service) = trino_tag_profile(&f, "vmask-trino-anc").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    hand_tag_mask(&f, tag_service, &tag.name, "MASK_HASH").await;
+
+    let body = explain_email(&f, &token, catalog_id, "analyst").await;
+    let mask = &profile_for(&body, "trino")["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+}
+
+/// A resolution explain declines (a fold-divergent stored column) leaves the
+/// mask undecidable with `tags_unresolved`, never answered from a narrower set.
+#[tokio::test]
+async fn a_declined_resolution_leaves_the_trino_mask_undecidable() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, tag_service) = trino_tag_profile(&f, "vmask-trino-decl").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    assign_tag(&f, catalog_id, "sales", "orders", "emaıl").await;
+    hand_tag_mask(&f, tag_service, &tag.name, "MASK_HASH").await;
+
+    let body = explain_email(&f, &token, catalog_id, "analyst").await;
+    let mask = &profile_for(&body, "trino")["mask"];
+    assert_eq!(mask["decision"]["kind"], "undecidable", "body: {body}");
+    assert!(
+        mask["decision"]["why"]
+            .as_array()
+            .expect("why")
+            .iter()
+            .any(|c| c["kind"] == "tags_unresolved"),
+        "body: {body}"
+    );
+}
+
+/// `POST /perm/explain` with `ask` as the body.
+async fn explain_with(f: &Fixture, token: &str, ask: Value) -> Value {
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body
+}
+
+fn row_filter_rule(name: &str, selector: Value, filter_expr: &str) -> Value {
+    json!({
+        "name": unique(name),
+        "kind": { "type": "row_filter", "filter_expr": filter_expr },
+        "selector": selector,
+        "exempt": { "include": [], "exclude": [] }
+    })
+}
+
+/// Spec §5.3 (C3): the row-filter decision joins the answer, asked against the
+/// TABLE; a column target shows its table's filter.
+#[tokio::test]
+async fn explain_reports_a_path_row_filter_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let rule_id = store_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-path-rf",
+            json!({"type": "path", "catalog_id": f.catalog_id,
+                   "schema": "sales", "table": "orders", "column": null}),
+            "region = 'us'",
+        ),
+    )
+    .await;
+
+    let table = explain_with(&f, &token, explain_body(f.catalog_id, "analyst")).await;
+    let column = explain_column(&f, &token, "analyst").await;
+    for body in [&table, &column] {
+        let rf = &profile_for(body, "starrocks")["row_filter"];
+        assert_eq!(rf["access_type"], "select", "body: {body}");
+        assert_eq!(rf["decision"]["kind"], "filtered", "body: {body}");
+        assert_eq!(
+            rf["decision"]["result"]["filter_expr"], "region = 'us'",
+            "body: {body}"
+        );
+        assert_eq!(rf["attribution"]["kind"], "rule", "body: {body}");
+        assert_eq!(rf["attribution"]["rule_id"], json!(rule_id), "body: {body}");
+    }
+}
+
+/// A Trino classification row filter on a TABLE-level classification filters.
+#[tokio::test]
+async fn explain_reports_a_trino_classification_row_filter_on_a_tagged_table() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rft").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    let _lock = exclusive(&f).await;
+    store_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-trino-rft",
+            json!({"type": "tag", "key": tag.key}),
+            "region = 'us'",
+        ),
+    )
+    .await;
+
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let body = explain_with(&f, &token, ask).await;
+    let rf = &profile_for(&body, "trino")["row_filter"];
+    assert_eq!(rf["decision"]["kind"], "filtered", "body: {body}");
+    assert_eq!(
+        rf["decision"]["result"]["filter_expr"], "region = 'us'",
+        "body: {body}"
+    );
+}
+
+/// E14: on Trino a classification on a COLUMN reaches the table request as a
+/// descendant, so its row filter filters nothing. The table request is asked
+/// with the table-level resolution, so explain says so.
+#[tokio::test]
+async fn a_trino_row_filter_on_a_column_classification_filters_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rfc").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    let _lock = exclusive(&f).await;
+    // A grant, so the read is allowed and the answer has a rows line.
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule = row_filter_rule(
+        "vmask-trino-rfc",
+        json!({"type": "tag", "key": tag.key}),
+        "region = 'us'",
+    );
+    let rule_name = rule["name"].as_str().expect("name").to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let body = explain_with(&f, &token, ask).await;
+    let trino = profile_for(&body, "trino");
+    assert_eq!(
+        trino["row_filter"]["decision"]["kind"], "no_filter",
+        "body: {body}"
+    );
+    // D3 (spec §5.8): the gap is listed and the rows line says it.
+    assert_eq!(
+        trino["row_filter_not_applied"],
+        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        trino["effect_lines"][1]["text"],
+        json!(format!(
+            "analyst sees every row: rule {rule_name} does not filter on Trino here, because {} \
+             is on a column, not on the table",
+            tag.name
+        )),
+        "body: {body}"
+    );
+}
+
+/// A table with no row filter answers `no_filter`; a `write` has no row filter.
+#[tokio::test]
+async fn a_read_without_a_filter_is_no_filter_and_a_write_has_none() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (_trino, _starrocks, catalog_id) = two_profile_catalog(&f, "vmask-rf-none").await;
+
+    let read = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    for engine in ["trino", "starrocks"] {
+        assert_eq!(
+            profile_for(&read, engine)["row_filter"]["decision"]["kind"],
+            "no_filter",
+            "body: {read}"
+        );
+    }
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["action"] = json!("write");
+    let write = explain_with(&f, &token, ask).await;
+    for engine in ["trino", "starrocks"] {
+        assert!(
+            profile_for(&write, engine).get("row_filter").is_none(),
+            "body: {write}"
+        );
+    }
+}
+
+/// C5 (spec §5.7): a catalog nothing serves says so in one line, naming the
+/// catalog and which of the two remedies applies.
+#[tokio::test]
+async fn no_profile_explain_says_not_enforced_with_the_catalog() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let catalog_id = orphan_catalog(&f, "vmask-orphan").await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+
+    let body = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    assert_eq!(
+        body["outcome"], "no_profile_serves_the_catalog",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["effect_line"]["text"],
+        json!(format!("Not enforced: {name} has no engine.")),
+        "body: {body}"
+    );
+    assert_eq!(
+        body["effect_line"]["outcome"], "not_enforced",
+        "body: {body}"
+    );
+
+    // An engine attached, bound to no policy profile.
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1,'trino','egret','{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("vmask-unbound"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach");
+    let body = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    assert_eq!(
+        body["effect_line"]["text"],
+        json!(format!(
+            "Not enforced: {name}'s engines have no policy profile."
+        )),
+        "body: {body}"
+    );
+
+    // A served catalog has no such line.
+    let body = explain_column(&f, &token, "analyst").await;
+    assert!(body.get("effect_line").is_none(), "body: {body}");
+}
+
+/// Spec §5.8 (D3, C9): a classification row filter's preview counts the
+/// tables where the classification is on columns only, in catalogs a Trino
+/// engine enforces it: there it filters nothing. A table carrying it as a
+/// whole is not counted; a mask, and a catalog only StarRocks enforces, get
+/// `null`. The stored rule's effect says the same.
+#[tokio::test]
+async fn a_classification_row_filter_preview_counts_trino_column_only_tables() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-d3-count").await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let _lock = exclusive(&f).await;
+    let (key, tag_id) = classification_named(&f, &unique("VmaskD3")).await;
+    let wh = warehouse_of(&f, catalog_id).await;
+    assign(&f, tag_id, wh, "orders", "email").await;
+    assign(&f, tag_id, wh, "orders", "phone").await;
+    // On the whole table AND a column: the table attachment filters, so it
+    // is not counted.
+    assign(&f, tag_id, wh, "customers", "").await;
+    assign(&f, tag_id, wh, "customers", "id").await;
+    let selector = json!({"type": "tag", "key": key});
+
+    let rule = row_filter_rule("vmask-d3", selector.clone(), "region = 'us'");
+    let (status, body) = preview_rule(&f, &token, rule.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["effect"]["trinoColumnOnly"],
+        json!({"catalogs": [name], "tables": 1}),
+        "{body}"
+    );
+    let id = store_rule(&f, &token, rule).await;
+    let (status, stored) = get_json(&f, &token, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(
+        stored["trinoColumnOnly"], body["effect"]["trinoColumnOnly"],
+        "{stored}"
+    );
+
+    let (_, body) = preview_rule(&f, &token, mask_rule("vmask-d3-mask", selector, json!([]))).await;
+    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
+
+    // The fixture's StarRocks-only catalog, its classification on a column.
+    let (_, body) = preview_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-d3-sr",
+            json!({"type": "tag", "key": f.tag_key}),
+            "1=1",
+        ),
+    )
+    .await;
+    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
+}
+
+/// Review finding 1: a rule whose OWN mask is `MASK_NONE` ("Unmasked"), or a
+/// row filter whose own filter is empty, decides through its `{public}` item.
+/// That is the rule's outcome for everyone, not an exemption, so explain must
+/// not report one (nor call the compiled policy stale).
+#[tokio::test]
+async fn a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let path = |column: Value| {
+        json!({"type": "path", "catalog_id": f.catalog_id,
+               "schema": "sales", "table": "orders", "column": column})
+    };
+    let mut unmasked = mask_rule("vmask-unmasked", path(json!("email")), json!([]));
+    unmasked["kind"]["mask_type"] = json!("MASK_NONE");
+    let name = unmasked["name"].as_str().unwrap().to_string();
+    store_rule(&f, &token, unmasked).await;
+    store_rule(
+        &f,
+        &token,
+        row_filter_rule("vmask-nofilter", path(Value::Null), ""),
+    )
+    .await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+
+    let body = explain_column(&f, &token, "analyst").await;
+    let starrocks = profile_for(&body, "starrocks");
+    let mask = &starrocks["mask"];
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert!(
+        mask.get("exemption").is_none(),
+        "not an exemption; body: {body}"
+    );
+    let rows = &starrocks["row_filter"];
+    assert_eq!(
+        rows["decision"]["result"]["filter_expr"], "",
+        "body: {body}"
+    );
+    assert!(
+        rows.get("exemption").is_none(),
+        "not an exemption; body: {body}"
+    );
+    assert_eq!(
+        starrocks["effect_lines"][0]["text"],
+        json!(format!(
+            "analyst reads email as the real value (rule {name})"
+        )),
+        "body: {body}"
+    );
+}
+
+/// Live check finding 2, the mirror of D3: StarRocks expands a classification
+/// row filter over the tagged COLUMNS of a table, so a classification on the
+/// table only compiles nothing there. Explain lists the rule on the StarRocks
+/// profile and the rows line says why; the rule preview counts the tables
+/// (`starrocksTableOnly`). The compiler fix is the D2 StarRocks package.
+#[tokio::test]
+async fn a_starrocks_row_filter_on_a_table_classification_filters_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let _lock = exclusive(&f).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule = row_filter_rule(
+        "vmask-sr-table",
+        json!({"type": "tag", "key": tag.key}),
+        "region = 'us'",
+    );
+    let (status, preview) = preview_rule(&f, &token, rule.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(
+        preview["effect"]["starrocksTableOnly"],
+        json!({"catalogs": [name], "tables": 1}),
+        "{preview}"
+    );
+    let rule_name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_with(&f, &token, explain_body(f.catalog_id, "analyst")).await;
+    let sr = profile_for(&body, "starrocks");
+    assert_eq!(
+        sr["row_filter"]["decision"]["kind"], "no_filter",
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["row_filter_not_applied"],
+        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["effect_lines"][1]["text"],
+        json!(format!(
+            "analyst sees every row: rule {rule_name} does not filter on StarRocks here, because \
+             {} is on the table, not on a column",
+            tag.name
+        )),
+        "body: {body}"
+    );
 }
 
 /// A classification rule is compiled for a Trino profile only through the
