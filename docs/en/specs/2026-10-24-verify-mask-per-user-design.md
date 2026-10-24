@@ -464,3 +464,17 @@ Deviations the code forces are recorded here, per task, as they happen.
   so).
 - Mutation: handing the column-level tag set to the table request turns
   `a_trino_row_filter_on_a_column_classification_filters_nothing` red (it filters), which is E14's mechanism.
+
+### Task 5 (exemption reasons)
+
+- **A rule exempts only users and groups.** `validate_rule_shape` → `exempt_principals` refuses a `role` (no roles
+  bucket on a mask/row-filter item) and an unexpanded `workspace_members` at write, pinned by
+  `a_rule_that_can_never_compile_is_refused_at_write_time` and `compile_rules::a_role_principal_in_exempt_is_refused`.
+  So §5.4 step 2's `role_usernames`/`workspace_members_via` branches have nothing to read, and §5.1's "role analyst"
+  example cannot occur. D1 is unchanged (the rule and who exempts, up to three, "directly" for a named user); the order
+  is "directly, then groups by name". The plan's role holder (carol) became a user named directly who is also in
+  the group.
+- `ExemptVia` is `{principal_kind, ref}` without §8's `label`: with users and groups only, the label always equals
+  the ref. A workspace exemption, if ever allowed, adds it back.
+- Membership reads use the compiler's `group_members_via`, cached per group per request; reasons are cached per
+  `(rule_id, username)`.

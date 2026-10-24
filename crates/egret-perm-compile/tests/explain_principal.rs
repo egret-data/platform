@@ -528,3 +528,172 @@ async fn a_group_of_people_with_no_username_is_answered_by_not_evaluated_alone()
         .collect();
     assert_eq!(ids, vec![json!(u1), json!(u2)], "sorted by label");
 }
+
+/// `POST /perm/explain/principal` for a COLUMN read of `sales.orders.email`.
+async fn explain_principal_column(e: &Env, kind: &str, r: &str) -> Value {
+    let mut target = target(e);
+    target["column"] = json!("email");
+    let (status, body) = post(
+        e,
+        &e.admin,
+        "/perm/explain/principal",
+        &json!({ "principal": { "kind": kind, "ref": r }, "action": "read", "target": target }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+/// One member's single profile, by username.
+fn member_profile<'a>(body: &'a Value, username: &str) -> &'a Value {
+    let m = body["evaluated"]
+        .as_array()
+        .expect("evaluated")
+        .iter()
+        .find(|m| m["username"] == username)
+        .unwrap_or_else(|| panic!("{username} not evaluated: {body}"));
+    &m["result"]["profiles"][0]
+}
+
+fn via(kind: &str, r: &str) -> Value {
+    json!({ "principal_kind": kind, "ref": r })
+}
+
+/// Spec §5.4 (D1): an exempt verdict says WHO exempts the person. The compiled
+/// body names usernames only, so the server rebuilds the reason from the rule's
+/// exempt principals and the person's memberships: directly, then groups by
+/// name; three kept and the rest counted. (A rule exempts only users and groups:
+/// a role or a workspace is refused at write, `validate_rule_shape`.) When the compiled body
+/// is older than the model (a membership removed without a recompile) the
+/// reason is empty rather than invented.
+#[tokio::test]
+async fn an_exempt_member_is_told_who_exempts_them() {
+    let Some(e) = env().await else { return };
+    let t = tag();
+    let p = &e.db.pool;
+    let user = |n: &str| (format!("{n}_{t}@x.local"), format!("{n}_{t}"));
+    let mut ids = std::collections::HashMap::new();
+    for n in ["bob", "alice", "carol", "dave", "erin"] {
+        let (email, name) = user(n);
+        ids.insert(n, insert_user(p, &email, Some(&name)).await);
+    }
+    let team = format!("data-team-{t}");
+    group_with(p, &team, &[ids["bob"], ids["carol"]]).await;
+    let five: Vec<String> = (1..=5).map(|i| format!("g{i}-{t}")).collect();
+    for g in &five {
+        group_with(p, g, &[ids["erin"]]).await;
+    }
+    let everyone = format!("all-{t}");
+    group_with(
+        p,
+        &everyone,
+        &["bob", "alice", "carol", "dave", "erin"].map(|n| ids[n]),
+    )
+    .await;
+
+    let mut exempt = vec![
+        json!({"kind": "group", "ref": team}),
+        json!({"kind": "user", "ref": format!("alice_{t}")}),
+        json!({"kind": "user", "ref": format!("carol_{t}")}),
+    ];
+    // Stored in reverse, so the answer's order is the server's, not the rule's.
+    exempt.extend(
+        five.iter()
+            .rev()
+            .map(|g| json!({"kind": "group", "ref": g})),
+    );
+    for (kind, name) in [
+        (
+            json!({ "type": "mask", "mask_type": "MASK_HASH", "value_expr": null }),
+            format!("hash-{t}"),
+        ),
+        (
+            json!({ "type": "row_filter", "filter_expr": "region = 'us'" }),
+            format!("us-{t}"),
+        ),
+    ] {
+        let column = if kind["type"] == "mask" {
+            json!("email")
+        } else {
+            Value::Null
+        };
+        let (status, out) = post(
+            &e,
+            &e.admin,
+            "/perm/rules",
+            &json!({
+                "name": name, "kind": kind,
+                "selector": { "type": "path", "catalog_id": e.catalog_id,
+                              "schema": "sales", "table": "orders", "column": column },
+                "exempt": { "include": exempt, "exclude": [] }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{out}");
+    }
+
+    let body = explain_principal_column(&e, "group", &everyone).await;
+    let reason = |n: &str, field: &str| member_profile(&body, &format!("{n}_{t}"))[field].clone();
+    let bob = reason("bob", "mask");
+    assert_eq!(
+        bob["decision"]["result"]["mask_type"], "MASK_NONE",
+        "{body}"
+    );
+    assert_eq!(bob["attribution"]["kind"], "rule", "{body}");
+    assert_eq!(
+        bob["exemption"],
+        json!({"via": [via("group", &team)], "more": 0}),
+        "{body}"
+    );
+    assert_eq!(
+        reason("alice", "mask")["exemption"],
+        json!({"via": [via("user", &format!("alice_{t}"))], "more": 0}),
+        "{body}"
+    );
+    assert_eq!(
+        reason("carol", "mask")["exemption"],
+        json!({"via": [via("user", &format!("carol_{t}")), via("group", &team)], "more": 0}),
+        "directly before groups; {body}"
+    );
+    let dave = reason("dave", "mask");
+    assert_eq!(
+        dave["decision"]["result"]["mask_type"], "MASK_HASH",
+        "{body}"
+    );
+    assert!(dave.get("exemption").is_none(), "{body}");
+    assert_eq!(
+        reason("erin", "mask")["exemption"],
+        json!({"via": five[..3].iter().map(|g| via("group", g)).collect::<Vec<_>>(), "more": 2}),
+        "{body}"
+    );
+    let bob_rows = reason("bob", "row_filter");
+    assert_eq!(bob_rows["decision"]["result"]["filter_expr"], "", "{body}");
+    assert_eq!(
+        bob_rows["exemption"],
+        json!({"via": [via("group", &team)], "more": 0}),
+        "{body}"
+    );
+    assert!(
+        reason("dave", "row_filter").get("exemption").is_none(),
+        "{body}"
+    );
+
+    // The model moves without a recompile: bob leaves the group by raw SQL.
+    // The served policy still exempts him, and nothing in the model says why.
+    sqlx::query(
+        "DELETE FROM user_groups WHERE user_id = $1 \
+           AND group_id = (SELECT id FROM groups WHERE name = $2)",
+    )
+    .bind(ids["bob"])
+    .bind(&team)
+    .execute(p)
+    .await
+    .unwrap();
+    let body = explain_principal_column(&e, "group", &everyone).await;
+    let bob = &member_profile(&body, &format!("bob_{t}"))["mask"];
+    assert_eq!(
+        bob["decision"]["result"]["mask_type"], "MASK_NONE",
+        "{body}"
+    );
+    assert_eq!(bob["exemption"], json!({"via": [], "more": 0}), "{body}");
+}

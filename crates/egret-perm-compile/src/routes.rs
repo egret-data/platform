@@ -813,7 +813,44 @@ pub struct ExplainMask {
     /// The deciding mask policy's `perm` model object, as for an access verdict;
     /// `None` for no mask or an undecidable answer.
     pub attribution: Option<ExplainAttribution>,
+    /// Present when a rule's exempt item decided (`MASK_NONE`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
 }
+
+/// Who exempts the subject from the rule that decided a verdict (spec §5.4,
+/// D1). The compiled exempt item names usernames only (groups are expanded at
+/// compile time), so this is rebuilt from the model: the rule's exempt
+/// principals and the subject's group memberships, read with the compiler's own
+/// `group_members_via` on the request's snapshot. A rule exempts only users and
+/// groups (`validate_rule_shape` refuses a role or a workspace at write).
+///
+/// An empty `via` is an answer: the served policy exempts the subject and the
+/// current model does not, so the compiled policy is older than the rule or
+/// than a membership change (spec §5.4 step 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainExemption {
+    /// At most [`EXEMPTION_VIA_SHOWN`] principals: a user named directly
+    /// first, then groups by name.
+    pub via: Vec<ExemptVia>,
+    /// How many more exempting principals there are beyond `via`.
+    pub more: u32,
+}
+
+/// One exempt principal of a rule that reaches the subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExemptVia {
+    /// `user` (the subject is named directly) or `group`.
+    pub principal_kind: PrincipalKind,
+    pub r#ref: String,
+}
+
+/// How many exempting principals [`ExplainExemption::via`] names (D1).
+pub const EXEMPTION_VIA_SHOWN: usize = 3;
+
+/// The mask type a rule's exempt item carries (`rules::mask_items`); an empty
+/// `filterExpr` is the row-filter equivalent.
+const EXEMPT_MASK_TYPE: &str = "MASK_NONE";
 
 /// The row-filter verdict for the target's TABLE (spec §5.3): Ranger's
 /// `select` request against the table, which is the granularity both engines
@@ -826,6 +863,9 @@ pub struct ExplainRowFilter {
     /// The deciding row-filter policy's `perm` model object; `None` for no
     /// filter or an undecidable answer.
     pub attribution: Option<ExplainAttribution>,
+    /// Present when a rule's exempt item decided (an empty filter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exemption: Option<ExplainExemption>,
 }
 
 /// One tag egret resolved for the target, and **where the attachment that
@@ -2587,10 +2627,19 @@ pub(crate) async fn explain_users(
                     }
                     MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
                 };
+                let exempt_item = matches!(&decision, MaskDecision::Masked(m)
+                    if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE));
+                let exemption = match &attribution {
+                    Some(ExplainAttribution::Rule { rule_id, .. }) if exempt_item => {
+                        Some(cache.exemption(&mut *conn, *rule_id, user).await?)
+                    }
+                    _ => None,
+                };
                 Some(ExplainMask {
                     access_type: "select".to_string(),
                     decision: WireMaskDecision::from(&decision),
                     attribution,
+                    exemption,
                 })
             } else {
                 None
@@ -2666,10 +2715,19 @@ pub(crate) async fn explain_users(
                         }
                         RowFilterDecision::NoFilter | RowFilterDecision::Undecidable { .. } => None,
                     };
+                    let exempt_item = matches!(&decision, RowFilterDecision::Filtered(r)
+                        if r.filter_expr.is_empty());
+                    let exemption = match &attribution {
+                        Some(ExplainAttribution::Rule { rule_id, .. }) if exempt_item => {
+                            Some(cache.exemption(&mut *conn, *rule_id, user).await?)
+                        }
+                        _ => None,
+                    };
                     Some(ExplainRowFilter {
                         access_type: "select".to_string(),
                         decision: WireRowFilterDecision::from(&decision),
                         attribution,
+                        exemption,
                     })
                 }
                 None => None,
@@ -3399,6 +3457,10 @@ pub(crate) struct ExplainCache {
     clearances: HashMap<String, ExplainAttribution>,
     /// `perm.rules` rows by id, `None` when the rule is gone.
     rules: HashMap<Uuid, Option<Rule>>,
+    /// Exemption reasons by `(rule id, username)`.
+    exemptions: HashMap<(Uuid, String), ExplainExemption>,
+    /// Each group's members' usernames, by group name.
+    group_members: HashMap<String, BTreeSet<String>>,
 }
 
 impl ExplainCache {
@@ -3412,6 +3474,73 @@ impl ExplainCache {
             std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
         };
         Ok(rule.as_ref())
+    }
+
+    /// Why `username` is exempt from `rule_id` ([`ExplainExemption`]).
+    async fn exemption(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        rule_id: Uuid,
+        username: &str,
+    ) -> Result<ExplainExemption, PermHttpError> {
+        let key = (rule_id, username.to_string());
+        if let Some(hit) = self.exemptions.get(&key) {
+            return Ok(hit.clone());
+        }
+        let include = self
+            .rule(conn, rule_id)
+            .await?
+            .map(|r| r.exempt.include.clone())
+            .unwrap_or_default();
+        let mut direct = Vec::new();
+        let mut groups = Vec::new();
+        for p in include {
+            let exempts = match p.kind {
+                PrincipalKind::User => p.r#ref == username,
+                PrincipalKind::Group if p.r#ref != egret_perm::PUBLIC_GROUP => {
+                    self.group_members(conn, &p.r#ref).await?.contains(username)
+                }
+                // A role or a workspace cannot be stored on a rule's exempt set.
+                _ => false,
+            };
+            if exempts {
+                match p.kind {
+                    PrincipalKind::User => direct.push(p),
+                    _ => groups.push(p),
+                }
+            }
+        }
+        groups.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+        let all: Vec<ExemptVia> = direct
+            .into_iter()
+            .chain(groups)
+            .map(|p| ExemptVia {
+                principal_kind: p.kind,
+                r#ref: p.r#ref,
+            })
+            .collect();
+        let exemption = ExplainExemption {
+            more: all.len().saturating_sub(EXEMPTION_VIA_SHOWN) as u32,
+            via: all.into_iter().take(EXEMPTION_VIA_SHOWN).collect(),
+        };
+        self.exemptions.insert(key, exemption.clone());
+        Ok(exemption)
+    }
+
+    /// The usernames of `group`'s members, as the compiler expands it.
+    async fn group_members(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        group: &str,
+    ) -> Result<&BTreeSet<String>, PermHttpError> {
+        let members = match self.group_members.entry(group.to_string()) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let rows = crate::members::group_members_via(conn, &[group.to_string()]).await?;
+                slot.insert(rows.into_iter().filter_map(|r| r.username).collect())
+            }
+        };
+        Ok(members)
     }
 }
 
@@ -3427,7 +3556,7 @@ trait RuleLookups {
 
 impl RuleLookups for sqlx::PgConnection {
     async fn rule(&mut self, id: Uuid) -> Result<Option<Rule>, PermHttpError> {
-        Ok(egret_perm::get_rule_via(self, id).await?)
+        Ok(get_rule_via(self, id).await?)
     }
 }
 
