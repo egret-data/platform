@@ -910,9 +910,12 @@ export default function ChartExplore() {
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <StudioToolbar
           name={saveName} onName={setSaveName}
+          description={saveDesc} onDescription={setSaveDesc}
           autoRun={autoRun} onAutoRun={setAutoRun}
-          onRun={run} onSave={() => setSaveOpen(true)}
-          running={data.isLoading} saveLabel={id ? "Update" : "Save"}
+          // An existing chart saves in one step: its name and description are edited right here,
+          // so a dialog would only ask again (KI-008). A new chart still opens the Save dialog.
+          onRun={run} onSave={() => (id ? void save() : setSaveOpen(true))}
+          running={data.isLoading} saving={mutations.update.isPending} saveLabel={id ? "Update" : "Save"}
           exportMenu={
             <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
               columnSettings={effCS}
@@ -1018,7 +1021,7 @@ export default function ChartExplore() {
       {/* Save dialog */}
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{id ? "Update chart" : "Save chart"}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Save chart</DialogTitle></DialogHeader>
           <div className="space-y-3 py-2">
             <div className="space-y-1">
               <Label htmlFor="chart-name">Name</Label>
@@ -1031,7 +1034,7 @@ export default function ChartExplore() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSaveOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={mutations.create.isPending || mutations.update.isPending}>{id ? "Update" : "Save"}</Button>
+            <Button onClick={save} disabled={mutations.create.isPending}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
