@@ -47,20 +47,46 @@ describe("humanizeCrontab", () => {
 
   // ── the fallback: a wrong humanisation is worse than the raw expression ──
 
-  it("falls back to the raw expression for a weekday range, which it does not attempt to understand", () => {
-    // "1-5" (Mon-Fri) is a shape this helper deliberately does not claim to
-    // read. This is the load-bearing case: humanizeCrontab must return the
-    // RAW string unchanged, not a guess.
-    const raw = "0 9 * * 1-5";
+  // KI-038: every shape the editor's picker can produce is described, plus
+  // the weekday range the seeded "Late orders to Slack" uses.
+  it("reads an hourly schedule (KI-038)", () => {
+    expect(humanizeCrontab("0 * * * *")).toBe("Every hour at minute 0");
+    expect(humanizeCrontab("15 * * * *")).toBe("Every hour at minute 15");
+  });
+
+  it("reads a weekday range (KI-038)", () => {
+    expect(humanizeCrontab("30 8 * * 1-5")).toBe("Every Monday to Friday at 08:30");
+    expect(humanizeCrontab("0 9 * * 0-6")).toBe("Every Sunday to Saturday at 09:00");
+  });
+
+  it("reads a weekday list that mixes a range and single days (KI-038)", () => {
+    expect(humanizeCrontab("0 9 * * 1-3,5")).toBe(
+      "Every Monday, Tuesday, Wednesday, and Friday at 09:00",
+    );
+  });
+
+  it("reads a monthly schedule (KI-038)", () => {
+    expect(humanizeCrontab("0 9 1 * *")).toBe("Every month on day 1 at 09:00");
+    expect(humanizeCrontab("30 6 28 * *")).toBe("Every month on day 28 at 06:30");
+  });
+
+  it("reads a yearly schedule (KI-038)", () => {
+    expect(humanizeCrontab("0 8 1 1 *")).toBe("Every year on 1 January at 08:00");
+  });
+
+  it("keeps the raw expression for a day-of-month crossed with a weekday, which cron ORs", () => {
+    const raw = "0 9 1 * 1";
     expect(humanizeCrontab(raw)).toBe(raw);
   });
 
-  it("falls back to the raw expression for a day-of-month restriction", () => {
-    const raw = "0 9 1 * *";
-    expect(humanizeCrontab(raw)).toBe(raw);
+  it("keeps the raw expression for a range it will not read", () => {
+    // Backwards, out of bounds, or 7 (Sunday) as a range end — each stays raw.
+    for (const raw of ["0 9 * * 5-1", "0 9 * * 1-8", "0 9 * * 5-7", "0 9 1-5 * *"]) {
+      expect(humanizeCrontab(raw)).toBe(raw);
+    }
   });
 
-  it("falls back to the raw expression for a month restriction", () => {
+  it("falls back to the raw expression for a month restriction without a day", () => {
     const raw = "0 9 * 6 *";
     expect(humanizeCrontab(raw)).toBe(raw);
   });
