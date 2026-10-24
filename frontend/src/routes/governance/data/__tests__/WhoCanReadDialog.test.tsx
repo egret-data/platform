@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import type { ExplainPrincipalResponse, ExplainResponse } from "@/api/generated/model";
+import { everyRowLine, ruleMaskLine } from "@/components/perm/__tests__/effectLineFixtures";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
@@ -65,6 +67,7 @@ const PER_PROFILE: ExplainResponse = {
       engine: "trino",
       tags: [],
       tag_policies_in_download: 0,
+      effect_lines: [],
       accesses: [{ access_type: "select", decision: { kind: "allowed", policy_id: 7, policy_name: "perm-grant-1" } }],
     },
   ],
@@ -76,14 +79,17 @@ function open() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <WhoCanReadDialog
-          open
-          onOpenChange={() => {}}
-          path={{ catalog: "demo_warehouse", schema: "analytics", object: "customers", column: "email" }}
-          catalogId="c-demo"
-        />
-      </TooltipProvider>
+      {/* The dialog opens inside the Data area's routes; its answer links to rules and people. */}
+      <MemoryRouter>
+        <TooltipProvider>
+          <WhoCanReadDialog
+            open
+            onOpenChange={() => {}}
+            path={{ catalog: "demo_warehouse", schema: "analytics", object: "customers", column: "email" }}
+            catalogId="c-demo"
+          />
+        </TooltipProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -141,6 +147,33 @@ describe("Who can read? — a typed user is checked against the known users (fin
   });
 });
 
+describe("Who can read? — the answer leads with the server's sentence (Package 2, spec §5.10)", () => {
+  it("shows a user's line per engine before the folded verdicts", async () => {
+    const answer: ExplainResponse = {
+      ...PER_PROFILE,
+      profiles: [
+        {
+          ...PER_PROFILE.profiles[0],
+          effect_lines: [ruleMaskLine("ana", "email", "hashed", "Hash personal data", "r-hash"), everyRowLine("ana")],
+        },
+      ],
+    };
+    serve({ explain: ok(answer) });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await user.type(within(dialog).getByLabelText("User"), "ana");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    const profile = await within(dialog).findByTestId("explain-profile");
+    const [first] = within(profile).getAllByTestId("effect-line");
+    expect(first).toHaveTextContent("ana reads email as hashed (rule Hash personal data)");
+    expect(first).toBeVisible();
+    expect(within(first).getByRole("link", { name: "Hash personal data" })).toHaveAttribute("href", "/governance/rules/r-hash");
+    expect(within(profile).getByTestId("explain-access")).not.toBeVisible();
+  });
+});
+
 describe("Who can read? — a group nobody has (finding 3, §7)", () => {
   it("says so in a sentence, never the server's raw refusal", async () => {
     serve({ explainPrincipal: { status: 400, body: { error: "bad request: no group is named data" } } });
@@ -188,7 +221,7 @@ describe("Who can read? — a group on a catalog nothing enforces (finding 4)", 
 
     const view = await within(dialog).findByTestId("members-explain");
     const state = within(view).getByTestId("no-profile-state");
-    expect(state).toHaveTextContent("Nothing is enforcing");
+    expect(state).toHaveTextContent("Not enforced");
     expect(state).toHaveTextContent(
       "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
     );

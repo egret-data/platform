@@ -120,6 +120,7 @@ const EXPLAIN: ExplainResponse = {
       engine: "trino",
       tags: [],
       tag_policies_in_download: 0,
+      effect_lines: [],
       accesses: [
         {
           access_type: "select",

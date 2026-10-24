@@ -541,3 +541,27 @@ Deviations the code forces are recorded here, per task, as they happen.
 - `npx tsc -b` reports 51 errors, all in test fixtures that build an `ExplainProfile` without the new required
   `effect_lines` (`ExplainResult.test.tsx` 45, `CheckAccess.test.tsx` 4, `ColumnPanel.test.tsx` 1,
   `WhoCanReadDialog.test.tsx` 1). They are Task 11's.
+
+### Task 11 (frontend, the answer)
+
+- `EffectLine` (`frontend/src/components/perm/EffectLine.tsx`) renders the parts the §5.10 list names, plus the three
+  it leaves open: `Subject` is plain `font-medium` text (no link), `Policy` is italic and unlinked (a manual policy
+  has no page), `Catalog` is an italic link to the catalog's Data page by name (`pathToUrl`; the Data area is keyed by
+  name, the part's `catalog_id` is not used). Links are underlined, so a link never reads by colour alone. A
+  `workspace_members` principal (not reachable today, §14 Task 5) renders as text.
+- The no-profile badge is `NOT_ENFORCED_TITLE` = "Not enforced" (was `NOTHING_ENFORCING_TITLE`). The state shows the
+  server's line; `NOTHING_ENFORCING_TEXT` is shown in the state only when the answer has no `effect_line`, and under
+  "How this answer was worked out" when it has one. It replaces the longer folded paragraph there, which said the same
+  thing, so the sentence is never shown twice.
+- The visible limits line keeps only the manual-policy role/group clause; with no profile there is no visible line.
+  The folded StarRocks-only paragraph is rewritten to: masks on both engines, row filters per table, and the one
+  thing explain cannot predict (an error from a mask the engine cannot apply). The polling paragraph is unchanged.
+- The folded evidence gains the row-filter verdict (`explain-row-filter`, with `DecidedBy`), and an undecidable mask
+  or row filter lists its causes with `causeSentence` (the mask used to print only the cause kinds).
+  `maskDecisionText` stays, unexported, for the folded mask line; `profileVerdictText` is deleted.
+- "The access verdict above is provisional" is shown only on a StarRocks profile: the note is about StarRocks
+  skipping the access check on `MASK_NULL`, and masks are now asked on Trino too.
+- `MembersExplainView`: each row shows the profile name above that profile's first line; a no-profile member shows
+  its `effect_line`. Counts unchanged.
+- The `WhoCanReadDialog` test now renders inside a `MemoryRouter` (the dialog lives in the Data area's routes; the
+  lines carry links). The 390 px wrap (`break-words` on the line) is not checked in jsdom; the live check covers it.
