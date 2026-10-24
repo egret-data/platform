@@ -100,7 +100,8 @@ fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
     params(ChangesQuery),
     description = "Governance events, newest first: grant, rule, hand-written policy, \
                    migration and compile changes and role assignments for a `policy:read` \
-                   reader; clearance changes and catalog-column tags for a `tag:read` reader. \
+                   reader; clearance changes and catalog-column tags for a `tag:read` reader; \
+                   user deletes for a reader who also holds `user:read`. \
                    Recorded from the version that introduced this feed on; role assignments and \
                    catalog tags are best-effort (recorded after commit).",
     responses(
@@ -118,7 +119,14 @@ async fn changes(
 ) -> Result<Json<ChangesPage>, CpError> {
     crate::governance_browse::require_governance_read(&st, &p).await?;
     let mut families = Vec::new();
-    for (perm, family) in [("policy:read", Family::Policy), ("tag:read", Family::Tag)] {
+    // `User` (a deleted user's email) only with `user:read`, inside the same
+    // Governance gate: a reader needs `policy:read` or `tag:read` to reach the
+    // feed at all (username-takeover spec, D4).
+    for (perm, family) in [
+        ("policy:read", Family::Policy),
+        ("tag:read", Family::Tag),
+        ("user:read", Family::User),
+    ] {
         match egret_core::authz::require(&*st.pdp, &p, perm).await {
             Ok(()) => families.push(family),
             Err(egret_core::Error::Forbidden) => {}
@@ -270,6 +278,7 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::ENGINE_GRANT_CREATE => "created an engine grant",
         action::ENGINE_GRANT_UPDATE => "changed an engine grant",
         action::ENGINE_GRANT_DELETE => "deleted an engine grant",
+        action::USER_DELETE => "deleted a user",
         _ => "made a change",
     }
 }
@@ -536,6 +545,14 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
             };
             let live = live && target.is_some();
             (sentence, target, live)
+        }
+        action::USER_DELETE => {
+            let before = d.get("before").unwrap_or(&Value::Null);
+            let who = [s(before, "username"), s(before, "email")]
+                .into_iter()
+                .find(|v| !v.is_empty())
+                .map_or_else(|| id.clone(), str::to_string);
+            (format!("{a} deleted user {who}"), None, false)
         }
         other => (format!("{a} made a change: {other}"), None, false),
     };

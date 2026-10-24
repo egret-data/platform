@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight, ShieldQuestion, Users } from "lucide-react";
 import type { PersonRow } from "@/api/generated/model";
 import { usePermListPeople } from "@/api/generated/perm/perm";
+import { useAuth } from "@/auth/useAuth";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
@@ -17,19 +18,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TabError } from "@/routes/governance/tabParts";
 import { principalUrl } from "@/routes/governance/people/peopleUrl";
 import { UnmatchedNames } from "@/routes/governance/people/UnmatchedNames";
+import { ReusedNames } from "@/routes/governance/people/ReusedNames";
 import { CheckAccessDialog } from "@/routes/governance/people/CheckAccessDialog";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
 
 type PersonKind = "user" | "group" | "role";
-type TabId = PersonKind | "unmatched";
+type TabId = PersonKind | "unmatched" | "reused";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "user", label: "Users" },
   { id: "group", label: "Groups" },
   { id: "role", label: "Roles" },
   { id: "unmatched", label: "Unmatched names" },
+  { id: "reused", label: "Reused names" },
 ];
+
+/** Tabs only a platform admin is offered: the report behind them answers 403 to anyone else. */
+const ADMIN_TABS: ReadonlySet<TabId> = new Set(["reused"]);
 
 /** Each kind's nouns, written out (FE-COPY-4). */
 const NOUN: Record<PersonKind, { one: string; many: string }> = {
@@ -43,13 +49,15 @@ const PLACEHOLDER: Record<TabId, string> = {
   group: "Group name",
   role: "Role name",
   unmatched: "Stored name",
+  reused: "Username",
 };
 
 export const PAGE_SIZE = 50;
 
 /**
  * `/governance/people` (spec §2, P1, P11): Users · Groups · Roles · Unmatched
- * names. Everything a reader would share is in the URL (FE-PAGE-2): the tab
+ * names, and Reused names for a platform admin (username-takeover spec
+ * 2026-10-23 §4.4). Everything a reader would share is in the URL (FE-PAGE-2): the tab
  * (`?kind=`, Users when absent), the search (`?q=`), the page (`?page=`) and
  * whether service accounts are listed (`?serviceAccounts=1`). A new tab or a
  * new search starts again at the first page. Typing replaces the history
@@ -57,8 +65,11 @@ export const PAGE_SIZE = 50;
  */
 export default function PeopleIndex() {
   const [search, setSearch] = useSearchParams();
+  const { me } = useAuth();
+  const isAdmin = me?.platform_roles.includes("platform_admin") ?? false;
+  const tabs = TABS.filter((t) => isAdmin || !ADMIN_TABS.has(t.id));
   const asked = search.get("kind");
-  const kind: TabId = TABS.find((t) => t.id === asked)?.id ?? "user";
+  const kind: TabId = tabs.find((t) => t.id === asked)?.id ?? "user";
   const q = search.get("q") ?? "";
   const pageNo = Math.max(1, Number.parseInt(search.get("page") ?? "1", 10) || 1);
   const showServiceAccounts = search.get("serviceAccounts") === "1";
@@ -92,7 +103,7 @@ export default function PeopleIndex() {
       <Tabs value={kind} onValueChange={(t) => change({ kind: t === "user" ? null : t, page: null })}>
         {/* Wraps, so every tab is in view at 390 px. */}
         <TabsList className="h-auto max-w-full flex-wrap justify-start">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <TabsTrigger key={t.id} value={t.id}>
               {t.label}
             </TabsTrigger>
@@ -122,11 +133,13 @@ export default function PeopleIndex() {
             </div>
           ) : null}
         </div>
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <TabsContent key={t.id} value={t.id} className="mt-4">
             {t.id === kind ? (
               kind === "unmatched" ? (
                 <UnmatchedNames q={q} onClearSearch={clearSearch} />
+              ) : kind === "reused" ? (
+                <ReusedNames q={q} onClearSearch={clearSearch} />
               ) : (
                 <PeopleList
                   kind={kind}

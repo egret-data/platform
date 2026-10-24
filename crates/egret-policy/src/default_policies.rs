@@ -14,7 +14,8 @@
 //! table/column chain plus the 9 standalone/attached admin resources).
 
 use crate::infra_names::{
-    ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_SERVICE_TYPE,
+    is_admin_all_access_policy_name, ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX,
+    DEFAULT_ALL_ACCESS_SERVICE_TYPE,
 };
 use crate::service_def::{starrocks_service_def, trino_service_def};
 use crate::{PolicyStore, PolicyStoreError};
@@ -160,10 +161,15 @@ impl PolicyStore {
     }
 
     /// Seed an "admin has all access" policy per resource hierarchy for the
-    /// given `users` on any Ranger service (Trino or StarRocks). Unlike
-    /// [`seed_default_trino_policies`], this has NO empty-service guard and
-    /// upserts each policy, so it is safe to call repeatedly (e.g. as the set
-    /// of platform admins changes). Returns `Ok(0)` when `users` is empty.
+    /// given `users` on any Ranger service (Trino or StarRocks): engine apply's
+    /// call, [`sync_admin_all_access_in_tx`] in its own transaction. Unlike
+    /// [`seed_default_trino_policies`], this has NO empty-service guard, so it
+    /// is safe to call repeatedly. An empty `users` rewrites the existing
+    /// bodies to name nobody and creates none (before the username-takeover
+    /// fix it wrote nothing, so a set that shrank to nothing never cleared a
+    /// stale body). The bodies carry `service_name` and are built from
+    /// `service_type`'s def, as apply passes them. Returns how many
+    /// `egret-admin` policies the service has afterwards.
     pub async fn seed_admin_all_access(
         &self,
         service_id: i64,
@@ -171,30 +177,200 @@ impl PolicyStore {
         service_type: &str,
         users: &[String],
     ) -> Result<usize, PolicyStoreError> {
-        if users.is_empty() {
-            return Ok(0);
-        }
-        let def = if service_type == "starrocks" {
-            starrocks_service_def()?
-        } else {
-            trino_service_def()?
-        };
-        let policies = build_default_policies(
-            &def,
-            service_name,
-            service_type,
-            ADMIN_ALL_ACCESS_NAME_PREFIX,
-            users,
-            &[],
-        );
-
-        let mut count = 0usize;
-        for (name, body) in &policies {
-            self.upsert_infra_policy(service_id, name, body).await?;
-            count += 1;
-        }
-        Ok(count)
+        let mut tx = self.pool().begin().await?;
+        let sync =
+            write_admin_all_access_in_tx(&mut tx, service_id, service_name, service_type, users)
+                .await?;
+        tx.commit().await?;
+        Ok(sync.present)
     }
+}
+
+/// What [`sync_admin_all_access_in_tx`] did to one service's `egret-admin`
+/// policies.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdminPolicySync {
+    /// Whether any body changed (and so `policy_version` moved, once).
+    pub changed: bool,
+    /// How many `egret-admin` policies the service has afterwards.
+    pub present: usize,
+    /// Names the bodies named before and no longer name, sorted.
+    pub removed: Vec<String>,
+    /// Names they name now and did not before, sorted.
+    pub added: Vec<String>,
+}
+
+/// Every service holding at least one `egret-admin - …` infra policy: the
+/// engines egret seeded, whose admin set [`sync_admin_all_access_in_tx`]
+/// keeps current. Ascending.
+pub async fn admin_policy_services_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, PolicyStoreError> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT service_id, name FROM policy.authz_policies \
+          WHERE managed_by = 'infra' AND starts_with(name, $1) ORDER BY service_id",
+    )
+    .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut ids: Vec<i64> = rows
+        .into_iter()
+        .filter(|(_, name)| is_admin_all_access_policy_name(name))
+        .map(|(id, _)| id)
+        .collect();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Make `service_id`'s `egret-admin - …` policies name exactly `users`, on
+/// the caller's transaction (username-takeover spec 2026-10-23 §4.2, D2).
+///
+/// `users` is the engine-admin set's usernames, sorted (the caller mints
+/// them). One body per resource hierarchy of the service's def, upserted only
+/// where it differs (`IS DISTINCT FROM`), and `policy_version` bumped once
+/// when any did, so an unchanged set writes nothing and a plugin re-downloads
+/// nothing. An empty `users` rewrites the existing bodies to `users: []`, an
+/// item that matches nobody, and creates none. The caller holds the service's
+/// profile lock (every recompile does).
+pub async fn sync_admin_all_access_in_tx(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    users: &[String],
+) -> Result<AdminPolicySync, PolicyStoreError> {
+    let (service_name, service_type) = service_name_and_type(conn, service_id).await?;
+    write_admin_all_access_in_tx(conn, service_id, &service_name, &service_type, users).await
+}
+
+async fn service_name_and_type(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(String, String), PolicyStoreError> {
+    sqlx::query_as("SELECT name, type FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {service_id}")))
+}
+
+/// [`sync_admin_all_access_in_tx`] with the bodies' service name and def type
+/// given (engine apply passes its own). The name guard reads the row's type.
+async fn write_admin_all_access_in_tx(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    service_name: &str,
+    service_type: &str,
+    users: &[String],
+) -> Result<AdminPolicySync, PolicyStoreError> {
+    let (_, row_type) = service_name_and_type(conn, service_id).await?;
+    let def = if service_type == "starrocks" {
+        starrocks_service_def()?
+    } else {
+        trino_service_def()?
+    };
+    let policies = build_default_policies(
+        &def,
+        service_name,
+        service_type,
+        ADMIN_ALL_ACCESS_NAME_PREFIX,
+        users,
+        &[],
+    );
+
+    let before: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies \
+          WHERE service_id = $1 AND managed_by = 'infra' AND starts_with(name, $2)",
+    )
+    .bind(service_id)
+    .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
+    .fetch_all(&mut *conn)
+    .await?;
+    let named_before: std::collections::BTreeSet<String> = before
+        .iter()
+        .filter(|(name, _)| is_admin_all_access_policy_name(name))
+        .flat_map(|(_, body)| {
+            body["policyItems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|item| item["users"].as_array().into_iter().flatten())
+                .filter_map(|u| u.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut changed = false;
+    let mut present = 0usize;
+    for (name, body) in &policies {
+        crate::store::refuse_reserved_name(name)?;
+        crate::store::refuse_non_infrastructure_name(&row_type, name)?;
+        let exists = before.iter().any(|(n, _)| n == name);
+        if users.is_empty() && !exists {
+            continue;
+        }
+        present += 1;
+        let wrote: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+             VALUES ($1, $2, $3, 'infra') \
+             ON CONFLICT (service_id, name) DO UPDATE \
+               SET policy_jsonb = EXCLUDED.policy_jsonb, \
+                   managed_by = 'infra', \
+                   version = policy.authz_policies.version + 1, \
+                   updated_at = now() \
+             WHERE policy.authz_policies.policy_jsonb IS DISTINCT FROM EXCLUDED.policy_jsonb \
+                OR policy.authz_policies.managed_by <> 'infra' \
+             RETURNING id",
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(body)
+        .fetch_optional(&mut *conn)
+        .await?;
+        changed |= wrote.is_some();
+    }
+    // An `egret-admin - …` row the def no longer builds (an older def's
+    // hierarchy, or one seeded from another engine type's def) would keep its
+    // old names, ALL access included, forever: it is rewritten to name
+    // `users` as well, its resources untouched.
+    for (name, body) in &before {
+        if !is_admin_all_access_policy_name(name) || policies.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        present += 1;
+        let mut rewritten = body.clone();
+        if let Some(items) = rewritten["policyItems"].as_array_mut() {
+            for item in items {
+                item["users"] = Value::from(users.to_vec());
+            }
+        }
+        let wrote: Option<i64> = sqlx::query_scalar(
+            "UPDATE policy.authz_policies \
+                SET policy_jsonb = $3, version = version + 1, updated_at = now() \
+              WHERE service_id = $1 AND name = $2 AND policy_jsonb IS DISTINCT FROM $3 \
+             RETURNING id",
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(&rewritten)
+        .fetch_optional(&mut *conn)
+        .await?;
+        changed |= wrote.is_some();
+    }
+    if changed {
+        sqlx::query(
+            "UPDATE policy.authz_services SET policy_version = policy_version + 1, \
+             updated_at = now() WHERE id = $1",
+        )
+        .bind(service_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    let now: std::collections::BTreeSet<String> = users.iter().cloned().collect();
+    Ok(AdminPolicySync {
+        changed,
+        present,
+        removed: named_before.difference(&now).cloned().collect(),
+        added: now.difference(&named_before).cloned().collect(),
+    })
 }
 
 #[cfg(test)]

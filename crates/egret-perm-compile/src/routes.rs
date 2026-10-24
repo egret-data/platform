@@ -92,6 +92,7 @@ use crate::trigger::{
 mod engine_grants;
 mod error;
 mod people;
+mod username_reuse;
 pub use error::PermHttpError;
 pub use people::{
     ExplainPrincipalRequest, ExplainPrincipalResponse, PeoplePage, PeopleQuery, PersonKind,
@@ -156,6 +157,7 @@ pub fn perm_router() -> Router<PermState> {
             get(list_unresolved_principals),
         )
         .route("/perm/people", get(people::list_people))
+        .route("/perm/username-reuse", get(username_reuse::username_reuse))
         .route("/perm/people/users/{user_id}", get(people::read_user))
         .route(
             "/perm/people/users/{user_id}/username",
@@ -230,6 +232,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         people::read_role,
         people::cleared_people,
         people::explain_principal,
+        username_reuse::username_reuse,
         preview,
         explain,
         compile,
@@ -263,6 +266,14 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::principal_refs::UnresolvedPrincipal,
         crate::principal_refs::StoredUserRef,
         people::AllocatedUsername,
+        crate::username_reuse::UsernameReuseReport,
+        crate::username_reuse::ReuseFinding,
+        crate::username_reuse::ReuseKind,
+        crate::username_reuse::Verdict,
+        crate::username_reuse::PlaceType,
+        crate::username_reuse::Place,
+        crate::username_reuse::Holder,
+        crate::username_reuse::Retired,
         people::StaleUserRefsConflict,
         PeoplePage,
         PersonRow,

@@ -50,6 +50,11 @@ const TAG_READ: &str = "tag:read";
 const ENGINE_READ: &str = "engine:read";
 const CATALOG_READ: &str = "catalog_registry:read";
 const KNOWN_PERMISSIONS: [&str; 4] = [POLICY_READ, TAG_READ, ENGINE_READ, CATALOG_READ];
+/// Not a permission: the `platform_admin` role at platform scope, held as one
+/// in `held` (username-takeover spec §4.5). The username-reuse source shows
+/// emails and holders across workspaces, so only an admin runs it; everyone
+/// else gets it in `notChecked`.
+const PLATFORM_ADMIN: &str = "platform_admin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -103,6 +108,8 @@ pub enum Ref {
     DataCatalog {
         name: String,
     },
+    /// Governance > People > Reused names (the username-reuse report).
+    ReusedNames,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -294,6 +301,12 @@ pub const SOURCES: &[Source] = &[
         run: |c| Box::pin(tags_without_clearance(c)),
     },
     Source {
+        kind: "username_reuse",
+        what: "username reuse",
+        requires: Requires::All(&[PLATFORM_ADMIN]),
+        run: |c| Box::pin(username_reuse(c)),
+    },
+    Source {
         kind: "catalogs_without_engine",
         what: "catalog attachments",
         requires: GOVERNANCE,
@@ -342,6 +355,9 @@ async fn attention(
             Err(egret_core::Error::Forbidden) => {}
             Err(e) => return Err(e.into()),
         }
+    }
+    if p.platform_roles.iter().any(|r| r == PLATFORM_ADMIN) {
+        held.insert(PLATFORM_ADMIN);
     }
     let mut tx = begin_snapshot(&st).await?;
     let response = attention_via(&mut tx, &held, SOURCES).await;
@@ -551,6 +567,102 @@ fn coordinate_path(coordinate: &str) -> String {
 }
 
 // ── sources ─────────────────────────────────────────────────────────────
+
+/// Past username takeovers (username-takeover spec §4.5): `critical` when
+/// any finding is `definite`, else `warning` for `possible` and `stale` ones.
+/// Refs nobody holds (`dead`) are no finding here:
+/// `unresolved_principals_fail_open` already reports the ones that fail open.
+/// The sentence says, per verdict, only what the evidence shows. Samples name
+/// the username and the place, never an email.
+async fn username_reuse(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
+    use egret_perm_compile::username_reuse::{findings_via, PlaceType, Verdict};
+    let rows: Vec<_> = findings_via(c)
+        .await?
+        .findings
+        .into_iter()
+        .filter(|f| f.verdict != Verdict::Dead)
+        .collect();
+    let severity = if rows.iter().any(|f| f.verdict == Verdict::Definite) {
+        Severity::Critical
+    } else {
+        Severity::Warning
+    };
+    let sample = rows
+        .iter()
+        .map(|f| {
+            let (detail, r#ref) = match f.place.place_type {
+                PlaceType::Grant => (
+                    "a grant".to_string(),
+                    f.place.id.map(|id| Ref::Grant { id }),
+                ),
+                PlaceType::Rule => ("a rule".to_string(), f.place.id.map(|id| Ref::Rule { id })),
+                PlaceType::EngineGrant => ("an engine grant".to_string(), None),
+                PlaceType::Policy => {
+                    let service = f.place.service.clone().unwrap_or_default();
+                    (
+                        format!(
+                            "policy {} on profile {service}",
+                            f.place.name.as_deref().unwrap_or("")
+                        ),
+                        Some(Ref::Profile { name: service }),
+                    )
+                }
+            };
+            Sample {
+                label: f.username.clone(),
+                detail: Some(detail),
+                r#ref,
+            }
+        })
+        .collect();
+    let count = |v: Verdict| rows.iter().filter(|f| f.verdict == v).count();
+    Ok(finding(
+        "username_reuse",
+        severity,
+        rows.len(),
+        reuse_sentence(
+            count(Verdict::Definite),
+            count(Verdict::Possible),
+            count(Verdict::Stale),
+        ),
+        sample,
+        Some(Ref::ReusedNames),
+    ))
+}
+
+/// What the `username_reuse` finding says: `definite` findings were written
+/// before the current holder of the name existed, `possible` ones may have
+/// been, and `stale` ones are `egret-admin` bodies the sync has not caught up
+/// with (no reuse).
+fn reuse_sentence(definite: usize, possible: usize, stale: usize) -> String {
+    const PLACES: (&str, &str) = ("reference or policy", "references or policies");
+    const WRITTEN: &str = "written for a username before the person who holds it now existed";
+    let mut parts = Vec::new();
+    if definite > 0 {
+        let verb = if definite == 1 { "was" } else { "were" };
+        parts.push(format!(
+            "{} {verb} {WRITTEN}.",
+            plural(definite, PLACES.0, PLACES.1)
+        ));
+    }
+    if possible > 0 && definite > 0 {
+        parts.push(format!("{possible} more may have been."));
+    } else if possible > 0 {
+        parts.push(format!(
+            "{} may have been {WRITTEN}.",
+            plural(possible, PLACES.0, PLACES.1)
+        ));
+    }
+    if stale > 0 {
+        let verb = if stale == 1 { "gives" } else { "give" };
+        parts.push(format!(
+            "{} still {verb} engine ALL access to someone who is no longer an active platform \
+             admin.",
+            plural(stale, "egret-admin policy", "egret-admin policies")
+        ));
+    }
+    parts.join(" ")
+}
 
 async fn unresolved_principals(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     let rows: Vec<_> = egret_perm_compile::principal_refs::unresolved_principals_via(c)
@@ -1167,4 +1279,28 @@ async fn catalogs_without_engine(c: &mut PgConnection) -> Result<Option<Finding>
         sample,
         Some(Ref::Data),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reuse_sentence;
+
+    #[test]
+    fn the_reuse_sentence_claims_only_what_each_verdict_shows() {
+        assert_eq!(
+            reuse_sentence(2, 1, 0),
+            "2 references or policies were written for a username before the person who holds \
+             it now existed. 1 more may have been."
+        );
+        assert_eq!(
+            reuse_sentence(0, 1, 0),
+            "1 reference or policy may have been written for a username before the person who \
+             holds it now existed."
+        );
+        assert_eq!(
+            reuse_sentence(0, 0, 1),
+            "1 egret-admin policy still gives engine ALL access to someone who is no longer an \
+             active platform admin."
+        );
+    }
 }

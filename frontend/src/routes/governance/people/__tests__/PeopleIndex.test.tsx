@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
-import type { PersonRow, UnresolvedPrincipal } from "@/api/generated/model";
+import type { PersonRow, ReuseFinding, UnresolvedPrincipal, UsernameReuseReport } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { expectStackedLabels } from "@/routes/governance/people/__tests__/stackedTable";
@@ -21,7 +21,11 @@ const json = (status: number, body: unknown) =>
  * params) and `GET …/perm/unresolved-principals`. Returns the params of each
  * people call.
  */
-function serve(people: (q: URLSearchParams) => Answer, unresolved: Answer = { status: 200, body: [] }) {
+function serve(
+  people: (q: URLSearchParams) => Answer,
+  unresolved: Answer = { status: 200, body: [] },
+  reuse: Answer = { status: 403, body: { error: "forbidden" } },
+) {
   const peopleCalls: URLSearchParams[] = [];
   let unresolvedCalls = 0;
   vi.stubGlobal(
@@ -37,6 +41,7 @@ function serve(people: (q: URLSearchParams) => Answer, unresolved: Answer = { st
         unresolvedCalls += 1;
         return reply(unresolved);
       }
+      if (url.pathname === "/api/control-plane/perm/username-reuse") return reply(reuse);
       return Promise.resolve(json(404, { error: "not found" }));
     }),
   );
@@ -44,6 +49,7 @@ function serve(people: (q: URLSearchParams) => Answer, unresolved: Answer = { st
 }
 
 const STEWARD: Me = { user_id: "s1", email: "s@example.com", platform_roles: [], permissions: ["policy:read"] };
+const ADMIN: Me = { user_id: "a1", email: "a@example.com", platform_roles: ["platform_admin"], permissions: [] };
 
 function Where() {
   const loc = useLocation();
@@ -56,11 +62,11 @@ function Where() {
 }
 const where = () => screen.getByTestId("where").textContent;
 
-function open(url: string) {
+function open(url: string, me: Me = STEWARD) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <AuthContext.Provider value={{ me: STEWARD, isLoading: false }}>
+      <AuthContext.Provider value={{ me, isLoading: false }}>
         <TooltipProvider>
           <MemoryRouter initialEntries={["/start", url]} initialIndex={1}>
             <Routes>
@@ -341,6 +347,146 @@ describe("People index: Unmatched names", () => {
       await screen.findByText("The unmatched names could not be loaded. Retry, or reload the page."),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});
+
+describe("People index: Reused names", () => {
+  const finding = (over: Partial<ReuseFinding> & Pick<ReuseFinding, "kind" | "verdict" | "username" | "place">): ReuseFinding => ({
+    holder: null,
+    retired: null,
+    evidenceAt: null,
+    evidence: "",
+    ...over,
+  });
+  const ANA = { id: "u-ana2", email: "ana@new.example", createdAt: "2026-09-01T00:00:00Z", mintedAt: null };
+  // Dead first and definite last on purpose: the tab puts definite findings first.
+  const FINDINGS: ReuseFinding[] = [
+    finding({
+      kind: "holderless_ref",
+      verdict: "dead",
+      username: "gone",
+      place: { type: "grant", id: "g-gone", position: "include", effect: "deny" },
+      retired: { retiredAt: "2026-08-01T00:00:00Z", mintedFor: null, failsOpen: true },
+      evidence: "nobody holds gone",
+    }),
+    finding({
+      kind: "ref_predates_holder",
+      verdict: "possible",
+      username: "ana",
+      place: { type: "engine_grant", id: "eg-1", engineId: "e-1" },
+      holder: ANA,
+      evidenceAt: "2026-07-02T00:00:00Z",
+      evidence: "engine grant created before ana@new.example",
+    }),
+    finding({
+      kind: "policy_predates_holder",
+      verdict: "possible",
+      username: "ana",
+      place: { type: "policy", policyId: 7, name: "hand written", service: "trino prod", managedBy: "operator" },
+      holder: ANA,
+      evidenceAt: "2026-07-03T00:00:00Z",
+      evidence: "policy last changed before ana@new.example",
+    }),
+    finding({
+      kind: "admin_policy_named_non_admin",
+      verdict: "stale",
+      username: "cy",
+      place: { type: "policy", policyId: 9, name: "egret-admin - catalog", service: "trino prod", managedBy: "infra" },
+      holder: { id: "u-cy", email: "cy@corp.example", createdAt: "2026-01-01T00:00:00Z", mintedAt: null },
+      evidenceAt: "2026-10-01T00:00:00Z",
+      evidence: "the egret-admin body still gives engine ALL access to someone who is no longer an active platform admin",
+    }),
+    finding({
+      kind: "ref_predates_holder",
+      verdict: "definite",
+      username: "bob",
+      place: { type: "rule", id: "r-bob", position: "exclude" },
+      holder: { id: "u-bob2", email: "bob@new.example", createdAt: "2026-09-02T00:00:00Z", mintedAt: "2026-09-02T00:00:00Z" },
+      evidenceAt: "2026-07-01T09:00:00Z",
+      evidence: "governance event perm_rule:create named user:bob",
+    }),
+  ];
+  const REPORT: UsernameReuseReport = { generatedAt: "2026-10-23T10:00:00Z", findings: FINDINGS, baselineTakenAt: null };
+
+  it("lists each finding, definite first, with its verdict, place, holder and evidence time", async () => {
+    serve(() => page([]), undefined, { status: 200, body: REPORT });
+    open("/governance/people?kind=reused", ADMIN);
+    expect(await screen.findByRole("tab", { name: "Reused names", selected: true })).toBeInTheDocument();
+    const table = await screen.findByRole("table");
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["bob", "ana", "ana", "cy", "gone"]);
+    expectStackedLabels(table);
+
+    const [bob, engineGrant, policy, stale, gone] = rows;
+    expect(within(bob).getByText("Definite")).toBeInTheDocument();
+    expect(within(bob).getByRole("link", { name: "Rule" })).toHaveAttribute("href", "/governance/rules/r-bob");
+    expect(within(bob).getByRole("link", { name: "bob@new.example" })).toHaveAttribute(
+      "href",
+      "/governance/people/users/u-bob2",
+    );
+    expect(bob.querySelector("time")).toHaveAttribute("datetime", "2026-07-01T09:00:00Z");
+    expect(within(bob).getByText("governance event perm_rule:create named user:bob")).toBeInTheDocument();
+
+    expect(within(engineGrant).getByText("Possible")).toBeInTheDocument();
+    expect(within(engineGrant).getByRole("link", { name: "Engine grant" })).toHaveAttribute(
+      "href",
+      "/governance/engines/e-1?tab=engine-permissions&grant=eg-1",
+    );
+    expect(within(policy).getByRole("link", { name: "Policy hand written on trino prod" })).toHaveAttribute(
+      "href",
+      "/governance/engines/profiles/trino%20prod?tab=policies",
+    );
+
+    expect(within(stale).getByText("Stale")).toBeInTheDocument();
+
+    expect(within(gone).getByText("Dead")).toBeInTheDocument();
+    expect(within(gone).getByText("Widens access")).toBeInTheDocument();
+    expect(within(gone).getByText("Nobody")).toBeInTheDocument();
+    expect(within(gone).getByRole("link", { name: "Grant" })).toHaveAttribute("href", "/governance/grants/g-gone");
+  });
+
+  it("lets the prose columns wrap, so the table fits at 1440 px without scrolling sideways", async () => {
+    // Live check: `ui/table` cells are `whitespace-nowrap`, so a long evidence
+    // sentence widened the table past 1440 px and the Evidence column needed
+    // the table's sideways scroll. jsdom does no layout: this pins the classes.
+    serve(() => page([]), undefined, { status: 200, body: REPORT });
+    open("/governance/people?kind=reused", ADMIN);
+    const table = await screen.findByRole("table");
+    const bob = within(table).getAllByRole("row")[1];
+    const cell = (label: string) => bob.querySelector(`td[data-label="${label}"]`);
+    for (const label of ["Finding", "In", "Holder", "Evidence"]) {
+      expect(cell(label), label).toHaveClass("whitespace-normal");
+    }
+    // Wrapping needs somewhere to break: the evidence is server prose.
+    expect(cell("Evidence")).toHaveClass("break-words");
+  });
+
+  it("filters by ?q= on the username", async () => {
+    serve(() => page([]), undefined, { status: 200, body: REPORT });
+    open("/governance/people?kind=reused&q=bo", ADMIN);
+    expect(await screen.findByText("bob")).toBeInTheDocument();
+    expect(screen.queryByText("gone")).not.toBeInTheDocument();
+  });
+
+  it("says when no name is reused, and what it could not check", async () => {
+    serve(() => page([]), undefined, { status: 200, body: { ...REPORT, findings: [] } });
+    open("/governance/people?kind=reused", ADMIN);
+    expect(await screen.findByText("No reused engine usernames found.")).toBeInTheDocument();
+    expect(screen.getByText(/History past audit retention cannot be checked\./)).toBeInTheDocument();
+  });
+
+  it("shows a refused read as an error with a retry", async () => {
+    serve(() => page([]), undefined, { status: 403, body: { error: "forbidden" } });
+    open("/governance/people?kind=reused", ADMIN);
+    expect(await screen.findByText("The reused names could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("is not offered to a reader who is not a platform admin", async () => {
+    serve(() => page(USERS), undefined, { status: 200, body: REPORT });
+    open("/governance/people?kind=reused");
+    expect(await screen.findByRole("tab", { name: "Users", selected: true })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Reused names" })).not.toBeInTheDocument();
   });
 });
 

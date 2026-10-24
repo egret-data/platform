@@ -1060,7 +1060,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     assert_eq!(v.published_by, Some(publisher));
 
     let deleted = egret_auth::users::UserRepo::new(fx.db.clone())
-        .hard_delete(UserId(publisher), &NoGroupPolicies)
+        .hard_delete(UserId(publisher), &deleter(), &NoGroupPolicies)
         .await
         .expect("a publisher can be deleted");
     assert!(deleted.is_some(), "the user row was deleted");
@@ -1304,5 +1304,18 @@ impl egret_auth::groups::GroupMembershipRecompiler for NoGroupPolicies {
         _names: &[String],
     ) -> egret_core::Result<Vec<egret_auth::groups::GroupReference>> {
         Ok(Vec::new())
+    }
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
     }
 }

@@ -239,6 +239,38 @@ describe("Needs attention", () => {
     ).toBeInTheDocument();
   });
 
+  // Username takeover (spec 2026-10-23 §4.5): platform admins only.
+  it("opens the Reused names tab from a username_reuse finding", async () => {
+    serve(
+      ok(
+        response({
+          findings: [
+            finding({
+              kind: "username_reuse",
+              severity: "critical",
+              count: 1,
+              sentence: "1 engine username is written for someone other than its holder.",
+              ref: { type: "reused_names" },
+              sample: [{ label: "bob", detail: "grant, include", ref: { type: "grant", id: "g-bob" } }],
+            }),
+          ],
+        }),
+      ),
+    );
+    openOverview();
+    const row = (await screen.findByText("1 engine username is written for someone other than its holder.")).closest("li")!;
+    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute("href", "/governance/people?kind=reused");
+    expect(within(row).getByRole("link", { name: "bob" })).toHaveAttribute("href", "/governance/grants/g-bob");
+  });
+
+  it("names the reused-username check for a reader who is not a platform admin", async () => {
+    serve(ok(response({ notChecked: [{ kind: "username_reuse", requires: ["platform_admin"], any: false }] })));
+    openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });
+    expect(
+      await screen.findByText("Not checked for you: engine usernames reused after a delete (needs `platform_admin`)."),
+    ).toBeInTheDocument();
+  });
+
   it("links the fixed Not checked here line to Classifications only for a tag:read reader", async () => {
     serve(ok(response()));
     openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });
