@@ -490,3 +490,27 @@ Deviations the code forces are recorded here, per task, as they happen.
 - The gap is computed once per request for a column read with a resolved tag set, from tags that never resolve at
   the column, joined to `tags` by name (unique since 0207) and to `clearance_gates_for_tags_via` (roles only), and
   attached to StarRocks profiles only.
+
+### Task 7 (effect lines, Not enforced, D3 in explain)
+
+- `explain_effect::effect_lines` reads the finished `ExplainProfile` plus two maps the profile does not carry: the
+  model object of every policy a tie names (`tied`, by Ranger name) and `tags.name` by tag id for clearances (a
+  `Clearance` attribution carries `tags.key`, and the line names the classification). Both come from the
+  per-request cache (`ExplainCache::tag_name` is new).
+- Wording decisions the §5.1 table left open:
+  - A grant has no name, so a grant deny reads "(a grant denies it)"; an engine grant "(an engine grant denies it)".
+  - A person named directly AND in an exempting group reads "(exempt from rule *X* directly and via group G)".
+  - A refused read has no rows line; an undecided access keeps it.
+  - A replay that is a manual policy reads "as **redacted** by manual policy *P* (cleared for *PII*)"; an
+    undecidable replay keeps the clearance's folded word "(cleared for *PII*)".
+  - The D3 sentence names the classification as plain text (there is no classification part kind), and several
+    gap rules read "rules *X* and *Y* do not filter on Trino here, because their classifications are on a column,
+    not on the table".
+  - An agreeing tie of non-rule policies reads "N policies agree"; a conflicting row-filter tie shows each filter as
+    code.
+  - `write`: refused names the first refused access type ("is **refused** delete on `t` (…)"); otherwise undecided
+    or "**can write** `t`".
+- `row_filter_not_applied` is attached to a Trino profile whose download has tag policies (a rule compiles into the
+  tag service only when it resolves). The gap query folds case on schema and table like the tag resolution.
+- `ExplainResponse.effect_line` uses `effect::catalog_not_enforced` (new), the same attachment read as
+  `attached_engines`: no attached engine → `NoEngine`, else `NoProfile`.

@@ -9257,6 +9257,21 @@ async fn explain_reports_a_trino_classification_mask() {
         trino.get("masked_read_skips_access").is_none(),
         "Trino checks access on a masked column; body: {body}"
     );
+    // Spec §5.1: the answer in one sentence, naming the rule.
+    let rule_name: String = sqlx::query_scalar("SELECT name FROM perm.rules WHERE id = $1::uuid")
+        .bind(&rule_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("rule name");
+    assert_eq!(
+        trino["effect_lines"][0]["text"],
+        json!(format!("{reader} reads email as hashed (rule {rule_name})")),
+        "body: {body}"
+    );
+    assert_eq!(
+        trino["effect_lines"][0]["outcome"], "masked",
+        "body: {body}"
+    );
 }
 
 /// The same question when the classification is on the TABLE only: the tag
@@ -9397,22 +9412,51 @@ async fn a_trino_row_filter_on_a_column_classification_filters_nothing() {
     let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rfc").await;
     let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
     let _lock = exclusive(&f).await;
-    store_rule(
-        &f,
-        &token,
-        row_filter_rule(
-            "vmask-trino-rfc",
-            json!({"type": "tag", "key": tag.key}),
-            "region = 'us'",
-        ),
+    // A grant, so the read is allowed and the answer has a rows line.
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
     )
     .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule = row_filter_rule(
+        "vmask-trino-rfc",
+        json!({"type": "tag", "key": tag.key}),
+        "region = 'us'",
+    );
+    let rule_name = rule["name"].as_str().expect("name").to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
 
     let mut ask = explain_body(catalog_id, "analyst");
     ask["target"]["column"] = json!("email");
     let body = explain_with(&f, &token, ask).await;
-    let rf = &profile_for(&body, "trino")["row_filter"];
-    assert_eq!(rf["decision"]["kind"], "no_filter", "body: {body}");
+    let trino = profile_for(&body, "trino");
+    assert_eq!(
+        trino["row_filter"]["decision"]["kind"], "no_filter",
+        "body: {body}"
+    );
+    // D3 (spec §5.8): the gap is listed and the rows line says it.
+    assert_eq!(
+        trino["row_filter_not_applied"],
+        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        trino["effect_lines"][1]["text"],
+        json!(format!(
+            "analyst sees every row: rule {rule_name} does not filter on Trino here, because {} \
+             is on a column, not on the table",
+            tag.name
+        )),
+        "body: {body}"
+    );
 }
 
 /// A table with no row filter answers `no_filter`; a `write` has no row filter.
@@ -9439,6 +9483,65 @@ async fn a_read_without_a_filter_is_no_filter_and_a_write_has_none() {
             "body: {write}"
         );
     }
+}
+
+/// C5 (spec §5.7): a catalog nothing serves says so in one line, naming the
+/// catalog and which of the two remedies applies.
+#[tokio::test]
+async fn no_profile_explain_says_not_enforced_with_the_catalog() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let catalog_id = orphan_catalog(&f, "vmask-orphan").await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+
+    let body = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    assert_eq!(
+        body["outcome"], "no_profile_serves_the_catalog",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["effect_line"]["text"],
+        json!(format!("Not enforced: {name} has no engine.")),
+        "body: {body}"
+    );
+    assert_eq!(
+        body["effect_line"]["outcome"], "not_enforced",
+        "body: {body}"
+    );
+
+    // An engine attached, bound to no policy profile.
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1,'trino','egret','{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("vmask-unbound"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach");
+    let body = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    assert_eq!(
+        body["effect_line"]["text"],
+        json!(format!(
+            "Not enforced: {name}'s engines have no policy profile."
+        )),
+        "body: {body}"
+    );
+
+    // A served catalog has no such line.
+    let body = explain_column(&f, &token, "analyst").await;
+    assert!(body.get("effect_line").is_none(), "body: {body}");
 }
 
 /// A classification rule is compiled for a Trino profile only through the

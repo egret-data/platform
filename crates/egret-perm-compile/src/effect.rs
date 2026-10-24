@@ -414,6 +414,20 @@ async fn attached_engines(
     .map_err(PermHttpError::db)
 }
 
+/// Why nothing enforces a catalog no policy profile serves (explain's C5 line):
+/// no engine attached to it, or engines with no policy profile. The same
+/// attachment read as [`attached_engines`].
+pub(crate) async fn catalog_not_enforced(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<NotEnforced, PermHttpError> {
+    Ok(if attached_engines(conn, &[catalog_id]).await?.is_empty() {
+        NotEnforced::NoEngine
+    } else {
+        NotEnforced::NoProfile
+    })
+}
+
 /// Who enforces a rule that reaches `reached`, given the `attached` engines:
 /// per catalog, the distinct enforcing engines, and why none does. A
 /// `tag_rule` (classification selector) is enforced only by engines whose

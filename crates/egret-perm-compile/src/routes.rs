@@ -81,7 +81,9 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
-use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision};
+use crate::explain_wire::{
+    WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
+};
 use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
@@ -778,6 +780,16 @@ pub struct ExplainProfile {
     /// column as an `ANCESTOR`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clearance_not_enforced: Vec<ExplainClearanceGap>,
+    /// Trino only, for a read naming a table, when the profile's download has
+    /// tag policies: the classification row filters that filter nothing here
+    /// ([`ExplainRowFilterGap`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_filter_not_applied: Vec<ExplainRowFilterGap>,
+    /// The answer in words (spec §5.1, C1): for a `read`, the column (or
+    /// table) line and then the rows line, which a refused read does not get;
+    /// for a `write`, one access line. Built by `explain_effect` from the
+    /// fields above and nothing else.
+    pub effect_lines: Vec<crate::explain_effect::ExplainEffectLine>,
     /// `true` when StarRocks consults no access policy for the target column:
     /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
     /// policy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written
@@ -874,6 +886,18 @@ pub struct ExplainReplay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExplainClearanceGap {
     pub tag_id: Uuid,
+    /// `tags.name`.
+    pub tag_name: String,
+}
+
+/// A classification row-filter rule that filters nothing on a Trino profile
+/// for the target's table (spec §5.8, D3, E14): its classification is on a
+/// column of the table and not on the table, and a Trino tag row filter fires
+/// only for a table-level attachment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainRowFilterGap {
+    pub rule_id: Uuid,
+    pub rule_name: String,
     /// `tags.name`.
     pub tag_name: String,
 }
@@ -979,6 +1003,10 @@ pub struct ExplainResponse {
     /// only production state in which the evaluator raises `TagsUnresolved`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_resolution_declined: Option<ExplainTagDecline>,
+    /// C5: "Not enforced: <catalog> has no engine." (or "…'s engines have no
+    /// policy profile."), present exactly for `no_profile_serves_the_catalog`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_line: Option<crate::explain_effect::ExplainEffectLine>,
 }
 
 /// Split one tag resolution into the two things `explain` does with it: the
@@ -2543,6 +2571,10 @@ pub(crate) async fn explain_users(
         }
         _ => Vec::new(),
     };
+    let row_filter_gaps = match &table_scope {
+        Some(scope) => row_filters_not_applied(&mut *conn, scope).await?,
+        None => Vec::new(),
+    };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
@@ -2788,7 +2820,7 @@ pub(crate) async fn explain_users(
                 None => None,
             };
 
-            per_user[i].push(ExplainProfile {
+            let mut profile = ExplainProfile {
                 service_id,
                 service_name: svc.name.clone(),
                 engine: WireEngineType::from(ranger_engine(engine)),
@@ -2802,11 +2834,49 @@ pub(crate) async fn explain_users(
                 } else {
                     Vec::new()
                 },
+                row_filter_not_applied: if engine == EngineType::Trino
+                    && tag_policies_in_download > 0
+                {
+                    row_filter_gaps.clone()
+                } else {
+                    Vec::new()
+                },
                 masked_read_skips_access,
-            });
+                effect_lines: Vec::new(),
+            };
+            let (tied, tag_names) = line_names(&mut *conn, &mut cache, &profile).await?;
+            profile.effect_lines =
+                crate::explain_effect::effect_lines(&crate::explain_effect::EffectInput {
+                    subject: user,
+                    action,
+                    target,
+                    profile: &profile,
+                    tag_resolution_declined: tag_resolution_declined.as_ref(),
+                    tied: &tied,
+                    tag_names: &tag_names,
+                });
+            per_user[i].push(profile);
         }
     }
 
+    // C5: one line for the whole request when nothing serves the catalog
+    // (every user then has no profile alike).
+    let not_enforced = if per_user.iter().any(Vec::is_empty) {
+        let name = catalog_names_for_ids_via(&mut *conn, &[target.catalog_id])
+            .await?
+            .into_iter()
+            .map(|c| c.name)
+            .next()
+            .unwrap_or_default();
+        let why = crate::effect::catalog_not_enforced(&mut *conn, target.catalog_id).await?;
+        Some(crate::explain_effect::not_enforced_line(
+            target.catalog_id,
+            &name,
+            why,
+        ))
+    } else {
+        None
+    };
     Ok(per_user
         .into_iter()
         .map(|profiles| ExplainResponse {
@@ -2815,6 +2885,7 @@ pub(crate) async fn explain_users(
             } else {
                 ExplainOutcome::PerProfile
             },
+            effect_line: profiles.is_empty().then(|| not_enforced.clone()).flatten(),
             profiles,
             tag_resolution_declined: tag_resolution_declined.clone(),
         })
@@ -3584,6 +3655,110 @@ async fn table_only_clearances(
         .collect())
 }
 
+/// The names the line builder needs that the profile does not carry: the
+/// model object of every policy a tie names, and `tags.name` for every
+/// clearance the profile attributes to.
+async fn line_names(
+    conn: &mut sqlx::PgConnection,
+    cache: &mut ExplainCache,
+    profile: &ExplainProfile,
+) -> Result<
+    (
+        HashMap<String, Option<ExplainAttribution>>,
+        HashMap<Uuid, String>,
+    ),
+    PermHttpError,
+> {
+    let mut causes: Vec<&WireUndecidableCause> = Vec::new();
+    let mut attributions: Vec<&ExplainAttribution> = Vec::new();
+    for a in &profile.accesses {
+        attributions.extend(&a.attribution);
+    }
+    if let Some(m) = &profile.mask {
+        attributions.extend(&m.attribution);
+        if let WireMaskDecision::Undecidable { why } = &m.decision {
+            causes.extend(why);
+        }
+        if let Some(r) = &m.replayed {
+            attributions.extend(&r.attribution);
+        }
+    }
+    if let Some(WireRowFilterDecision::Undecidable { why }) =
+        profile.row_filter.as_ref().map(|r| &r.decision)
+    {
+        causes.extend(why);
+    }
+    let mut tied = HashMap::new();
+    for cause in causes {
+        if let WireUndecidableCause::EvalOrderAmbiguous { policy_names, .. } = cause {
+            for name in policy_names {
+                if !tied.contains_key(name) {
+                    let attribution = attribution_for_name(&mut *conn, cache, name).await?;
+                    tied.insert(name.clone(), attribution);
+                }
+            }
+        }
+    }
+    let tag_ids: BTreeSet<Uuid> = attributions
+        .into_iter()
+        .chain(tied.values().flatten())
+        .filter_map(|a| match a {
+            ExplainAttribution::Clearance { tag_id, .. } => Some(*tag_id),
+            _ => None,
+        })
+        .collect();
+    let mut tag_names = HashMap::new();
+    for id in tag_ids {
+        if let Some(name) = cache.tag_name(conn, id).await? {
+            tag_names.insert(id, name.to_string());
+        }
+    }
+    Ok((tied, tag_names))
+}
+
+/// The classification row-filter rules that filter nothing on Trino for
+/// `table`'s rows ([`ExplainRowFilterGap`]): the classification is on a column
+/// of the table and not on the table itself. Levels compare case-folded, as
+/// the tag resolution does.
+async fn row_filters_not_applied(
+    conn: &mut sqlx::PgConnection,
+    table: &Scope,
+) -> Result<Vec<ExplainRowFilterGap>, PermHttpError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT r.id, r.name, t.name \
+           FROM perm.rules r \
+           JOIN tags t ON t.key = r.tag_key \
+          WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
+            AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                         WHERE c.id = $1 AND a.tag_id = t.id \
+                           AND lower(a.schema_name) = lower($2) \
+                           AND lower(a.table_name) = lower($3) \
+                           AND a.column_name <> '') \
+            AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
+                              JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+                             WHERE c.id = $1 AND a.tag_id = t.id \
+                               AND lower(a.schema_name) = lower($2) \
+                               AND lower(a.table_name) = lower($3) \
+                               AND a.column_name = '') \
+          ORDER BY r.name, r.id",
+    )
+    .bind(table.catalog_id)
+    .bind(table.schema.as_deref())
+    .bind(table.table.as_deref())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|(rule_id, rule_name, tag_name)| ExplainRowFilterGap {
+            rule_id,
+            rule_name,
+            tag_name,
+        })
+        .collect())
+}
+
 /// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).
 /// A group answer evaluates up to `EXPLAIN_MEMBER_LIMIT` members against one
 /// artifact per profile, so without it every member's clearance or rule verdict
@@ -3600,6 +3775,8 @@ pub(crate) struct ExplainCache {
     exemptions: HashMap<(Uuid, String), ExplainExemption>,
     /// Each group's members' usernames, by group name.
     group_members: HashMap<String, BTreeSet<String>>,
+    /// `tags.name` by tag id, `None` when the row is gone.
+    tag_names: HashMap<Uuid, Option<String>>,
 }
 
 impl ExplainCache {
@@ -3613,6 +3790,25 @@ impl ExplainCache {
             std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
         };
         Ok(rule.as_ref())
+    }
+
+    /// `tags.name` for `id`, or `None` when the tag is gone.
+    async fn tag_name(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<&str>, PermHttpError> {
+        let name = match self.tag_names.entry(id) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(
+                sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?,
+            ),
+        };
+        Ok(name.as_deref())
     }
 
     /// Why `username` is exempt from `rule_id` ([`ExplainExemption`]).
