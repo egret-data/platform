@@ -643,3 +643,6 @@ Deviations the code forces are recorded here, per task, as they happen.
 - **UI 3a.** The subject suggestion list stayed open after Explain ran from the field (Enter). The shared
   `useSuggestionCombobox` now closes the list when the enclosing form submits (Enter or the submit button). Vitest
   "closes the list when Explain runs from the field (Enter), …" (`WhoCanReadDialog.test.tsx`).
+- **UI 3b.** At 390 px a member's username broke mid-word (`break-all`). The members table now wraps names
+  normally and breaks only a token too long for the cell (`break-words`). Vitest "does not break a member's username
+  mid-word …"; the painted result is a browser check.

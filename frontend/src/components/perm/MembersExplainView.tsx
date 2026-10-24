@@ -220,8 +220,8 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
     <Fragment>
       <TableRow>
         <TableCell className="whitespace-normal">
-          <p className="text-sm">{member.label}</p>
-          <p className="font-mono text-xs text-muted-foreground break-all">{member.username}</p>
+          <p className="text-sm break-words">{member.label}</p>
+          <p className="font-mono text-xs text-muted-foreground break-words">{member.username}</p>
         </TableCell>
         <TableCell className="whitespace-normal">
           {r.outcome === "no_profile_serves_the_catalog" ? (

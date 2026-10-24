@@ -174,6 +174,32 @@ describe("Who can read? — the answer leads with the server's sentence (Package
   });
 });
 
+describe("Who can read? — member names wrap only where they must (live check, 390 px)", () => {
+  it("does not break a member's username mid-word: only an unbreakable token too long for the cell breaks", async () => {
+    serve({
+      explainPrincipal: ok({
+        membersTotal: 1,
+        limit: 200,
+        truncated: false,
+        evaluated: [{ userId: "u-g", label: "Exempt G", username: "exempt-g", result: PER_PROFILE }],
+        notEvaluated: [],
+      } satisfies ExplainPrincipalResponse),
+    });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await pickKind(user, dialog, "Group");
+    await user.type(within(dialog).getByRole("combobox", { name: "Group" }), "data-team");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+
+    const view = await within(dialog).findByTestId("members-explain");
+    // jsdom has no layout: this pins the wrapping class; the painted result is a browser check.
+    const name = within(view).getByText("exempt-g");
+    expect(name.className).not.toMatch(/\bbreak-all\b/);
+    expect(name.className).toMatch(/\bbreak-words\b/);
+  });
+});
+
 describe("Who can read? — a group nobody has (finding 3, §7)", () => {
   it("says so in a sentence, never the server's raw refusal", async () => {
     serve({ explainPrincipal: { status: 400, body: { error: "bad request: no group is named data" } } });
