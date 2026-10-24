@@ -97,7 +97,7 @@ function TrendDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
   );
   return (
     <div className="space-y-2.5">
-      {row("ss-switch", "Switch positive / negative colours",
+      {row("ss-switch", "Switch positive / negative colors",
         "For a metric where less is better — cost, churn, time to resolve.", "switchPositiveNegative")}
       {row("ss-compact", "Compact number", "36,513 becomes 36.5k.", "compact")}
     </div>
@@ -155,8 +155,8 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
-        <Label className="text-sm font-normal">Colour</Label>
-        <ColorPicker label="Colour" value={color}
+        <Label className="text-sm font-normal">Color</Label>
+        <ColorPicker label="Color" value={color}
           onChange={(next) => onChange({ color: next } as Partial<Cfg>)} />
       </div>
       <div className="space-y-1">

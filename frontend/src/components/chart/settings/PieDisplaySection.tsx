@@ -139,7 +139,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
         label="Legend"
         value={config.showLegend}
         onChange={(v) => onChange({ showLegend: v })}
-        autoHint="Auto shows the legend — a pie's colours are meaningless without it"
+        autoHint="Auto shows the legend — a pie's colors are meaningless without it"
       />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
       {/* Offered whenever the chart HAS a hole to write in — a multi-ring pie always does,

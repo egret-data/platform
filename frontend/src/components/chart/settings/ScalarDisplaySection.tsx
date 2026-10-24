@@ -57,10 +57,10 @@ export function ScalarDisplaySection({ config, onChange }: {
       </div>
 
       <div>
-        <div className="text-xs font-medium">Conditional colours</div>
+        <div className="text-xs font-medium">Conditional colors</div>
         <p className="pt-0.5 text-xs text-muted-foreground">
-          The number takes the colour of the first range it falls in. Leave a bound empty for an
-          open-ended range. A named range also prints its name under the number, so the colour is
+          The number takes the color of the first range it falls in. Leave a bound empty for an
+          open-ended range. A named range also prints its name under the number, so the color is
           never the only thing carrying the meaning.
         </p>
         <SegmentRangesSection
@@ -69,7 +69,7 @@ export function ScalarDisplaySection({ config, onChange }: {
           minRows={0}
           palette={SCALAR_BAND_PALETTE}
           warnContrast={contrastWarning}
-          emptyHint="No ranges — the number uses the default text colour."
+          emptyHint="No ranges — the number uses the default text color."
           onChange={(next) => onChange({ segments: next.map(toScalarSegment) })}
         />
       </div>
