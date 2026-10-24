@@ -1,13 +1,13 @@
 //! Username takeover, spec `2026-10-23-username-takeover-design.md` §4.5
 //! (decision D3): the evidence of PAST takeovers, reported and never acted on.
 //!
-//! Before migration 0208 a deleted user's username could be minted for the
+//! Before migration 0209 a deleted user's username could be minted for the
 //! next person whose email slugged to it, who then inherited every ref and
-//! policy still naming it. The ledger stops that from 0208 on; this reads what
+//! policy still naming it. The ledger stops that from 0209 on; this reads what
 //! is left of the time before:
 //!
-//! A holder whose name was minted after 0208 (`minted_at` set) is never a
-//! finding: 0208 seeded every name a ref, body or event knew, so a minted name
+//! A holder whose name was minted after 0209 (`minted_at` set) is never a
+//! finding: 0209 seeded every name a ref, body or event knew, so a minted name
 //! is one nobody held before and nothing was written for someone else.
 //!
 //! - `ref_predates_holder`: a `user` ref older than the person who now holds
@@ -16,14 +16,14 @@
 //!   otherwise `possible`, because grants and rules have no `updated_at` and a
 //!   later PATCH may have added the ref for the holder;
 //! - `policy_predates_holder`: a policy body naming a held username, last
-//!   written before its holder existed, live or in the 0208 baseline.
+//!   written before its holder existed, live or in the 0209 baseline.
 //!   `definite` for `compiler`/`infra` bodies, `possible` for a hand-written
 //!   one (it may be a deliberate pre-provisioning);
 //! - `admin_policy_named_non_admin`: an `egret-admin` body naming someone who
-//!   is not an active platform admin, in the 0208 baseline or live. `definite`
+//!   is not an active platform admin, in the 0209 baseline or live. `definite`
 //!   when the body was last written before they existed; `stale` (live only)
 //!   when they hold a `platform_admin` grant (a disabled admin) or were minted
-//!   after 0208: no reuse, the sync has not caught up; otherwise `possible` (a
+//!   after 0209: no reuse, the sync has not caught up; otherwise `possible` (a
 //!   demoted admin, or someone given a deleted admin's name after their
 //!   `created_at`). A baseline row for a disabled admin, or naming nobody, is
 //!   no finding;
@@ -33,7 +33,7 @@
 //!
 //! What it cannot see is listed in the spec (§4.5, "What the report cannot
 //! see"): events past retention, refs already removed, mint times before
-//! 0208, free text, engine-side ownership and actual use.
+//! 0209, free text, engine-side ownership and actual use.
 //!
 //! The caller runs [`findings_via`] in one `REPEATABLE READ, READ ONLY`
 //! transaction, so every rule reads one state.
@@ -116,7 +116,7 @@ pub struct Holder {
     pub email: String,
     pub created_at: DateTime<Utc>,
     /// When the name was minted for them; `null` when they held it before
-    /// migration 0208 (then `createdAt` is a lower bound).
+    /// migration 0209 (then `createdAt` is a lower bound).
     pub minted_at: Option<DateTime<Utc>>,
 }
 
@@ -155,7 +155,7 @@ pub struct ReuseFinding {
 pub struct UsernameReuseReport {
     pub generated_at: DateTime<Utc>,
     pub findings: Vec<ReuseFinding>,
-    /// When migration 0208 took the baseline; `null` when it kept no row.
+    /// When migration 0209 took the baseline; `null` when it kept no row.
     pub baseline_taken_at: Option<DateTime<Utc>>,
 }
 
@@ -206,7 +206,7 @@ struct PolicyRow {
 /// grant. The events are read once, every name each one carries extracted
 /// (`events`), and joined: a per-ref scan of `audit.audit_log` would be a
 /// nested loop with no index on `(resource_type, resource_id)`. The two
-/// shapes are 0208 step 4b's: `"user:<name>"` strings and `{kind: "user",
+/// shapes are 0209 step 4b's: `"user:<name>"` strings and `{kind: "user",
 /// ref}` objects.
 const REFS: &str = "\
 WITH refs AS ( \
@@ -254,7 +254,7 @@ SELECT r.place_type, r.place_id, r.engine_id, r.ref AS username, r.position, r.e
         AND ev.resource_id = r.place_id::text AND ev.ref = r.ref \
  ORDER BY r.ref, r.place_type, r.place_id";
 
-/// Every name in every policy body now, and every row of the 0208 baseline,
+/// Every name in every policy body now, and every row of the 0209 baseline,
 /// with the holder now, whether they hold `platform_admin` (at all, and as an
 /// active user), and the ledger. A baseline holder deleted since is no holder.
 const POLICIES: &str = "\
@@ -370,7 +370,7 @@ fn classify_ref(r: RefRow) -> Option<ReuseFinding> {
                 holder: None,
             })
         }
-        // Minted after 0208: nobody held the name before.
+        // Minted after 0209: nobody held the name before.
         Some(h) if h.minted_at.is_some() => None,
         Some(h) => {
             let (verdict, at, evidence) =
@@ -444,7 +444,7 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
         managed_by: Some(p.managed_by.clone()),
     };
     let when = if p.from_baseline {
-        " (at migration 0208)"
+        " (at migration 0209)"
     } else {
         ""
     };
@@ -498,7 +498,7 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
         });
     }
     match h {
-        // Minted after 0208: nobody held the name before.
+        // Minted after 0209: nobody held the name before.
         Some(h) if h.minted_at.is_some() => None,
         Some(h) if p.updated_at < h.created_at => Some(ReuseFinding {
             kind: ReuseKind::PolicyPredatesHolder,
@@ -539,7 +539,7 @@ fn classify_policy(p: PolicyRow) -> Option<ReuseFinding> {
     }
 }
 
-/// The evidence of a hand-written body naming a retired name. A name 0208
+/// The evidence of a hand-written body naming a retired name. A name 0209
 /// retired with no record of a holder (it found the name in a body, ref or
 /// event) may have been written for someone who had not signed in yet: they
 /// were given another name, and the body never applies to them.

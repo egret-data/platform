@@ -19,7 +19,7 @@ const PLATFORM_ADMIN: &str = "platform_admin";
     get,
     path = "/api/control-plane/perm/username-reuse",
     tag = "perm",
-    description = "Evidence of past username takeovers (before migration 0208 a deleted user's \
+    description = "Evidence of past username takeovers (before migration 0209 a deleted user's \
                    username could be minted for the next person): user refs and policy bodies \
                    older than the person who now holds the name, `egret-admin` bodies naming \
                    someone who is not an active platform admin, and refs nobody holds. Reported \

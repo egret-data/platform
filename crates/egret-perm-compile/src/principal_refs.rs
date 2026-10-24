@@ -87,7 +87,7 @@
 //! rather than refused: refusing every later edit of the row (even an
 //! actions-only one) until the author removed it would block unrelated work.
 //! For a USER that is safe because nobody can carry the name again: migration
-//! 0208's `username_ledger` retires a username for good when its holder is
+//! 0209's `username_ledger` retires a username for good when its holder is
 //! deleted or renamed, and seeds every name a stale ref, policy body or event
 //! still named, so `ensure_username` never mints it for the next person (spec
 //! `2026-10-23-username-takeover-design.md` §4.1). Such a ref matches nobody,

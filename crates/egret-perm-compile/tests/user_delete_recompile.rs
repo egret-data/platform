@@ -5,7 +5,7 @@
 //!
 //! Before the fix the delete recompiled the group and engine-grant arms only,
 //! so a compiled body kept naming the deleted user's username until something
-//! else recompiled it. The ledger (0208) makes such a stale name match nobody
+//! else recompiled it. The ledger (0209) makes such a stale name match nobody
 //! from then on; this keeps the bodies correct as well. Every assertion asks
 //! the engine (`egret-ranger-eval` over the profile's download) as the deleted
 //! user's username, read right after `hard_delete` returns, with no recompile

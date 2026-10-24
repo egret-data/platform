@@ -20,7 +20,7 @@ CREATE TABLE username_ledger (
     -- The user it was minted for. No FK: it survives the delete, so the ledger
     -- names who held the name after audit retention has pruned every event.
     minted_for uuid NULL,
-    -- NULL = held before 0208, when the mint time was not recorded.
+    -- NULL = held before 0209, when the mint time was not recorded.
     minted_at  timestamptz NULL,
     retired_at timestamptz NULL,
     source     text NOT NULL CHECK (source IN
@@ -153,10 +153,10 @@ LANGUAGE sql IMMUTABLE AS $$
      WHERE u.name <> '' AND u.name !~ '^\{.*\}$'
 $$;
 
--- The seed: every name that is knowable, so no mint after 0208 hands out a name
+-- The seed: every name that is knowable, so no mint after 0209 hands out a name
 -- a stale ref, body or event still names. Each step is ON CONFLICT DO NOTHING,
 -- so the order decides the source of a name found twice (a held name stays
--- `backfill_user`). Kept callable, so a test can insert pre-0208 shapes and run
+-- `backfill_user`). Kept callable, so a test can insert pre-0209 shapes and run
 -- it again.
 CREATE FUNCTION username_ledger_backfill() RETURNS void
 LANGUAGE plpgsql AS $$
@@ -235,7 +235,7 @@ SELECT username_ledger_backfill();
 -- the bodies that show a past takeover. Snapshotted once, here, before any of
 -- that runs. Only rows that are evidence are kept: a name with no holder, a body
 -- last written before its holder existed, or an `egret-admin` body naming
--- someone who is not an active platform admin. After 0208 every rewrite is
+-- someone who is not an active platform admin. After 0209 every rewrite is
 -- correct by construction, so no later snapshot is taken. No FKs: the evidence
 -- outlives the service, policy and user.
 CREATE TABLE username_reuse_baseline (

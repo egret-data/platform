@@ -15,7 +15,7 @@ export interface Holder {
   createdAt: string;
   /**
      * When the name was minted for them; `null` when they held it before
-     * migration 0208 (then `createdAt` is a lower bound).
+     * migration 0209 (then `createdAt` is a lower bound).
      * @nullable
      */
   mintedAt?: string | null;

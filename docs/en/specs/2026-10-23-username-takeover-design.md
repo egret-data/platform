@@ -58,7 +58,7 @@ them.
 | E18 **new** | `egret_delegator` (the impersonate-mode service user) is **not** a reserved username, so a human can be minted it. This was recorded as a separate fix (engine-grants spec E21) | `crates/egret-core/src/engine_principals.rs:18-29` |
 | E19 | The Governance attention model: `SOURCES` with `Requires` over a `held` set of permission strings, one savepoint each, typed `Ref`s the client turns into URLs | `crates/egret-controlplane/src/governance_overview.rs:174-300`, `:331-410`; `frontend/src/routes/governance/overview/refUrl.ts` |
 | E20 | The delete dialogs: `UsersPage.tsx:504-516` and `UserDetail.tsx:340-350`. The description says "This user, their sessions, group memberships, and role grants will be permanently removed." `ConfirmDeleteDialog` accepts `children`. The disable dialog is `UserDetail.tsx:318-338`. `ControlPlaneUserDto` has no `username` | `frontend/src/routes/control-plane/access/*`; `frontend/src/components/ui/confirm-delete-dialog.tsx:61` |
-| E21 | Migration numbers: the highest on `origin/main` is `0206_workspace_invites.sql`. Another open branch takes 0207. **This package reserves `0208`** | `migrations/` |
+| E21 | Migration numbers: the highest on `origin/main` is `0206_workspace_invites.sql`. Another open branch takes 0207. **This package reserves `0209`** (it reserved `0208` until open PR #740 took that number; see §13, "Renumbered to 0209") | `migrations/` |
 
 ## 3. User decisions (settled 2026-10-23, not reopened)
 
@@ -81,14 +81,14 @@ them.
 
 ### 4.1 The ledger (D1)
 
-**Table** (`migrations/0208_username_ledger.sql`, public schema next to `users`):
+**Table** (`migrations/0209_username_ledger.sql`, public schema next to `users`):
 
 ```sql
 CREATE TABLE username_ledger (
     username   citext PRIMARY KEY,
     user_id    uuid NULL REFERENCES users(id) ON DELETE SET NULL, -- current holder
     minted_for uuid NULL,        -- the user it was minted for; no FK, survives the delete
-    minted_at  timestamptz NULL, -- NULL = held before 0208 (unknown)
+    minted_at  timestamptz NULL, -- NULL = held before 0209 (unknown)
     retired_at timestamptz NULL,
     source     text NOT NULL CHECK (source IN
         ('mint', 'backfill_user', 'backfill_ref', 'backfill_policy', 'backfill_audit', 'reserved'))
@@ -127,8 +127,8 @@ name. This record outlives audit retention (E15).
 to `username`, `minted_for`, `minted_at` or `source`. Only `user_id` (the FK action) and `retired_at` may change.
 No API frees a name. An operator who must free one has to drop the trigger in a manual migration, on purpose.
 
-**Seed** (inside 0208, as a SQL function `username_ledger_backfill()` that the migration calls once). Each step is
-`ON CONFLICT DO NOTHING`. It stays callable, so a test can insert pre-0208 shapes and run it again:
+**Seed** (inside 0209, as a SQL function `username_ledger_backfill()` that the migration calls once). Each step is
+`ON CONFLICT DO NOTHING`. It stays callable, so a test can insert pre-0209 shapes and run it again:
 
 | step | source | rows | `retired_at` |
 |---|---|---|---|
@@ -159,7 +159,7 @@ The SQL slug in step 4a must agree with `slugify_localpart` (lowercase the local
 - The ledger only grows (one row per name ever minted). `ensure_username_via`'s 999-suffix bound is unchanged.
 
 **The Governance allocate guard stays** (`people.rs:577-593`). After the seed, a holderless ref names a ledger row
-and is skipped by every mint. A ref inserted by raw SQL after 0208 still bypasses the ledger, though, and the 409
+and is skipped by every mint. A ref inserted by raw SQL after 0209 still bypasses the ledger, though, and the 409
 still catches it. Its tests (`tests/allocate_username.rs`) insert exactly that shape and keep passing.
 
 ### 4.2 `egret-admin` follows platform_admin (D2)
@@ -300,15 +300,15 @@ effect; or policy id, name, service and `managed_by`), the current holder (id, e
 | kind | rule | verdict |
 |---|---|---|
 | `ref_predates_holder` | a `user` ref whose earliest governance event naming it (`"user:<ref>"` in that row's events), or else the parent row's `created_at` (and, for an engine grant, `updated_at`), is **older than the holder's `created_at`** | `definite` when an event or an engine grant's `updated_at` proves it; otherwise `possible` (a PATCH may have added the ref for the holder later: grants and rules have no `updated_at`) |
-| `policy_predates_holder` | a policy body naming a held username whose `updated_at` is older than the holder's `created_at`, read live and from the 0208 baseline (below) | `definite` for `compiler`/`infra`; `possible` for `operator` (it may be a deliberate pre-provisioning) |
-| `admin_policy_named_non_admin` | an `egret-admin` body naming someone who is not an active platform admin (or nobody), read from the 0208 baseline and live | `definite` (live rows should be empty once D2 is in; a live row means the sync failed) |
+| `policy_predates_holder` | a policy body naming a held username whose `updated_at` is older than the holder's `created_at`, read live and from the 0209 baseline (below) | `definite` for `compiler`/`infra`; `possible` for `operator` (it may be a deliberate pre-provisioning) |
+| `admin_policy_named_non_admin` | an `egret-admin` body naming someone who is not an active platform admin (or nobody), read from the 0209 baseline and live | `definite` (live rows should be empty once D2 is in; a live row means the sync failed) |
 | `holderless_ref` | a `user` ref or hand-written `users[]` name with no holder, with its ledger row (`retired_at`, `minted_for`) and whether its position fails open (deny include, allow exclude, rule exempt exclude) | `dead` (retired, matches nobody, forever) |
 
-**The 0208 baseline.** The boot sync (§4.2) and the recompiles rewrite exactly the bodies the report needs. So
-0208 snapshots them once, before any of that runs, into `username_reuse_baseline(service_id, policy_id,
+**The 0209 baseline.** The boot sync (§4.2) and the recompiles rewrite exactly the bodies the report needs. So
+0209 snapshots them once, before any of that runs, into `username_reuse_baseline(service_id, policy_id,
 policy_name, managed_by, policy_updated_at, username, holder_id, holder_created_at, holder_is_active_admin,
 taken_at)`. It keeps only the rows that are evidence: no holder, `updated_at < holder.created_at`, or an
-`egret-admin` row naming a non-admin. After 0208 every rewrite is correct by construction, so no later snapshot is
+`egret-admin` row naming a non-admin. After 0209 every rewrite is correct by construction, so no later snapshot is
 needed.
 
 **Attention signal.** The model fits (E19): one more `Source`, kind `username_reuse`, with a new pseudo-permission
@@ -327,16 +327,16 @@ needed.
   no event at all. Evidence older than that is only the timestamps that remain.
 - **Removed refs:** a stale ref that was later edited away, or a grant that was deleted, leaves no row, only events
   within retention.
-- **The mint time of names held before 0208:** `minted_at` is NULL, so `users.created_at` is a lower bound. A ref
+- **The mint time of names held before 0209:** `minted_at` is NULL, so `users.created_at` is a lower bound. A ref
   added between creation and mint reads as `possible`.
 - **Transient exposure** from stale role, workspace or clearance expansions (E6) between a delete and the next
-  recompile. The recompile overwrote the body and left no trace, unless the 0208 baseline caught it still stale.
+  recompile. The recompile overwrote the body and left no trace, unless the 0209 baseline caught it still stale.
 - **Free text:** a literal username in a row-filter or mask expression or in a condition (`current_user = 'bob'`).
 - **Engine-side ownership:** table, view and schema owners in Iceberg, Trino or StarRocks, Trino `DEFINER` views
   that run as their owner, and Ranger `{OWNER}` items. Those live in the engine or catalog, not in egret.
 - **Actual use:** whether an inherited access was ever exercised. That needs the engines' query logs (the Trino
   event listener, the StarRocks audit log), and egret may not retain them. The report links no log.
-- **`egret-admin` bodies re-seeded before 0208** by an engine re-apply that already rewrote them.
+- **`egret-admin` bodies re-seeded before 0209** by an engine re-apply that already rewrote them.
 
 ### 4.6 Old engine JWTs of a deleted user
 
@@ -364,7 +364,7 @@ statement. That is not worth it for a token that only egret holds.
 
 ## 6. Backend changes (enumerated)
 
-1. `migrations/0208_username_ledger.sql`:
+1. `migrations/0209_username_ledger.sql`:
    - `username_ledger`, its five triggers, and `username_ledger_backfill()`;
    - `username_reuse_baseline`, filled once.
 2. `egret-auth`:
@@ -420,9 +420,9 @@ managedBy}`. The new attention kind is `username_reuse`, and the new `Ref` varia
 
 ## 8. Migration and compatibility
 
-- **0208** is reserved (0207 belongs to another open branch). Re-check both on `origin/main` and on the open PRs
+- **0209** is reserved (`origin/main` stops at 0207; open PR #740 takes 0208). Re-check both on `origin/main` and on the open PRs
   before merging; renumber above both if needed.
-- 0208 is additive. Its triggers take effect for every later write. On a fresh install, step 1 seeds from an empty
+- 0209 is additive. Its triggers take effect for every later write. On a fresh install, step 1 seeds from an empty
   `users`.
 - Tests that write `users.username` directly keep working unless one binary deletes a user and re-inserts the
   **same** username. Those now fail with `23505`, which is the intended behaviour. The plan sweeps for them.
@@ -704,3 +704,12 @@ Deviations from the text above that the code forced or that implementation found
   - If a data-only restore cannot be avoided: run it as a superuser with `--disable-triggers`. Before it, remove the
     reserved rows in a session with `SET session_replication_role = replica` (the append-only guard refuses the
     delete otherwise), so that the dump's copy of them restores.
+
+### Renumbered to 0209 (live check, 2026-10-24)
+
+- **The migration is now `0209_username_ledger.sql`.** `origin/main` stops at `0207`, and open PR #740
+  (`fix/u4-sqllab-ux`) adds `0208_query_history_clear.sql`. The rule is to number above main and every open PR, so
+  the file moved to `0209`. The contents are unchanged. Code comments, the report's evidence suffix (now
+  " (at migration 0209)"), the OpenAPI descriptions, the test helper (`pre_0209_holder`) and §2 to §8 above now say
+  0209. The notes earlier in this section keep "0208": they record what was true when they were written, and every
+  "0208" in them means this migration.

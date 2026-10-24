@@ -1303,8 +1303,8 @@ async fn username_reuse_is_a_finding_for_platform_admins_only() {
     .execute(&f.db.pool)
     .await
     .unwrap();
-    // The next person, given the freed name later, before migration 0208: the
-    // ledger row is 0208's backfill, not a mint (a name minted since is one
+    // The next person, given the freed name later, before migration 0209: the
+    // ledger row is 0209's backfill, not a mint (a name minted since is one
     // nobody held before, and no finding).
     let holder: Uuid = sqlx::query_scalar(
         "INSERT INTO users (provider, email, name) VALUES ('local', $1, 'B') RETURNING id",

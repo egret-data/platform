@@ -3,7 +3,7 @@
 //!
 //! Every test is written from the side of the NEXT person whose email slugs to
 //! a name someone else held, or that a stale ref still names: they must be
-//! given another name. Migration 0208's ledger enforces it.
+//! given another name. Migration 0209's ledger enforces it.
 //!
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 

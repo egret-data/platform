@@ -62,7 +62,7 @@ sửa lại kết quả đó.
 | E18 **new** | `egret_delegator` (service user của impersonate-mode) **không** phải username reserved, nên một người thật có thể được mint tên này. Việc này đã được ghi nhận là một fix riêng (engine-grants spec E21) | `crates/egret-core/src/engine_principals.rs:18-29` |
 | E19 | Mô hình attention của Governance: `SOURCES` với `Requires` trên một tập `held` gồm các chuỗi permission, mỗi cái một savepoint, các `Ref` có kiểu mà client chuyển thành URL | `crates/egret-controlplane/src/governance_overview.rs:174-300`, `:331-410`; `frontend/src/routes/governance/overview/refUrl.ts` |
 | E20 | Các dialog xoá: `UsersPage.tsx:504-516` và `UserDetail.tsx:340-350`. Mô tả ghi "This user, their sessions, group memberships, and role grants will be permanently removed." `ConfirmDeleteDialog` nhận `children`. Dialog disable là `UserDetail.tsx:318-338`. `ControlPlaneUserDto` không có `username` | `frontend/src/routes/control-plane/access/*`; `frontend/src/components/ui/confirm-delete-dialog.tsx:61` |
-| E21 | Số migration: số cao nhất trên `origin/main` là `0206_workspace_invites.sql`. Một branch đang mở khác lấy 0207. **Gói này giữ chỗ `0208`** | `migrations/` |
+| E21 | Số migration: số cao nhất trên `origin/main` là `0206_workspace_invites.sql`. Một branch đang mở khác lấy 0207. **Gói này giữ chỗ `0209`** (trước đó giữ `0208`, đến khi PR đang mở #740 lấy số đó; xem §13, "Đánh số lại thành 0209") | `migrations/` |
 
 ## 3. Quyết định của user (chốt 2026-10-23, không mở lại)
 
@@ -85,14 +85,14 @@ sửa lại kết quả đó.
 
 ### 4.1 Ledger (D1)
 
-**Bảng** (`migrations/0208_username_ledger.sql`, schema public, cạnh `users`):
+**Bảng** (`migrations/0209_username_ledger.sql`, schema public, cạnh `users`):
 
 ```sql
 CREATE TABLE username_ledger (
     username   citext PRIMARY KEY,
     user_id    uuid NULL REFERENCES users(id) ON DELETE SET NULL, -- current holder
     minted_for uuid NULL,        -- the user it was minted for; no FK, survives the delete
-    minted_at  timestamptz NULL, -- NULL = held before 0208 (unknown)
+    minted_at  timestamptz NULL, -- NULL = held before 0209 (unknown)
     retired_at timestamptz NULL,
     source     text NOT NULL CHECK (source IN
         ('mint', 'backfill_user', 'backfill_ref', 'backfill_policy', 'backfill_audit', 'reserved'))
@@ -130,8 +130,8 @@ này tồn tại lâu hơn audit retention (E15).
 đổi. Không API nào giải phóng một tên. Operator buộc phải giải phóng tên thì phải drop trigger trong một migration
 thủ công, một cách có chủ đích.
 
-**Seed** (bên trong 0208, dưới dạng hàm SQL `username_ledger_backfill()` mà migration gọi một lần). Mỗi bước là
-`ON CONFLICT DO NOTHING`. Hàm vẫn gọi được, nên test có thể insert các dạng trước 0208 rồi chạy lại:
+**Seed** (bên trong 0209, dưới dạng hàm SQL `username_ledger_backfill()` mà migration gọi một lần). Mỗi bước là
+`ON CONFLICT DO NOTHING`. Hàm vẫn gọi được, nên test có thể insert các dạng trước 0209 rồi chạy lại:
 
 | bước | source | dòng | `retired_at` |
 |---|---|---|---|
@@ -161,7 +161,7 @@ SQL slug ở bước 4a phải khớp với `slugify_localpart` (lowercase phầ
 - Ledger chỉ có tăng (mỗi tên từng được mint một dòng). Giới hạn 999 suffix của `ensure_username_via` không đổi.
 
 **Guard allocate của Governance được giữ lại** (`people.rs:577-593`). Sau khi seed, ref holderless ghi một dòng
-ledger và bị mọi lần mint bỏ qua. Tuy vậy, một ref insert bằng SQL thô sau 0208 vẫn bỏ qua ledger, và 409 vẫn bắt
+ledger và bị mọi lần mint bỏ qua. Tuy vậy, một ref insert bằng SQL thô sau 0209 vẫn bỏ qua ledger, và 409 vẫn bắt
 được nó. Các test của nó (`tests/allocate_username.rs`) insert đúng dạng đó và vẫn pass.
 
 ### 4.2 `egret-admin` đi theo platform_admin (D2)
@@ -300,15 +300,15 @@ thời gian bằng chứng, và một verdict):
 | kind | quy tắc | verdict |
 |---|---|---|
 | `ref_predates_holder` | một ref `user` mà governance event sớm nhất ghi nó (`"user:<ref>"` trong các event của dòng đó), hoặc nếu không có thì `created_at` của dòng cha (và, với engine grant, `updated_at`), **cũ hơn `created_at` của holder** | `definite` khi một event hoặc `updated_at` của engine grant chứng minh điều đó; ngược lại `possible` (một PATCH có thể đã thêm ref cho holder về sau: grant và rule không có `updated_at`) |
-| `policy_predates_holder` | một body policy ghi một username đang có holder mà `updated_at` cũ hơn `created_at` của holder, đọc live và từ baseline 0208 (bên dưới) | `definite` với `compiler`/`infra`; `possible` với `operator` (có thể là pre-provisioning có chủ đích) |
-| `admin_policy_named_non_admin` | một body `egret-admin` ghi một người không phải platform admin đang active (hoặc không ai), đọc từ baseline 0208 và live | `definite` (dòng live phải rỗng khi D2 đã vào; có dòng live tức là sync đã fail) |
+| `policy_predates_holder` | một body policy ghi một username đang có holder mà `updated_at` cũ hơn `created_at` của holder, đọc live và từ baseline 0209 (bên dưới) | `definite` với `compiler`/`infra`; `possible` với `operator` (có thể là pre-provisioning có chủ đích) |
+| `admin_policy_named_non_admin` | một body `egret-admin` ghi một người không phải platform admin đang active (hoặc không ai), đọc từ baseline 0209 và live | `definite` (dòng live phải rỗng khi D2 đã vào; có dòng live tức là sync đã fail) |
 | `holderless_ref` | một ref `user` hoặc tên `users[]` viết tay không có holder, kèm dòng ledger của nó (`retired_at`, `minted_for`) và việc position của nó có fail open không (deny include, allow exclude, rule exempt exclude) | `dead` (đã retire, không khớp ai, vĩnh viễn) |
 
-**Baseline 0208.** Boot sync (§4.2) và các recompile ghi lại đúng những body mà báo cáo cần. Vì vậy 0208 chụp
+**Baseline 0209.** Boot sync (§4.2) và các recompile ghi lại đúng những body mà báo cáo cần. Vì vậy 0209 chụp
 snapshot chúng một lần, trước khi bất cứ thứ gì kia chạy, vào `username_reuse_baseline(service_id, policy_id,
 policy_name, managed_by, policy_updated_at, username, holder_id, holder_created_at, holder_is_active_admin,
 taken_at)`. Nó chỉ giữ các dòng là bằng chứng: không có holder, `updated_at < holder.created_at`, hoặc một dòng
-`egret-admin` ghi người không phải admin. Sau 0208 mọi lần ghi lại đều đúng theo cách dựng, nên không cần snapshot
+`egret-admin` ghi người không phải admin. Sau 0209 mọi lần ghi lại đều đúng theo cách dựng, nên không cần snapshot
 nào sau đó.
 
 **Attention signal.** Mô hình vừa vặn (E19): thêm một `Source`, kind `username_reuse`, với một pseudo-permission
@@ -328,10 +328,10 @@ khác).
   event nào cả. Bằng chứng cũ hơn mốc đó chỉ còn các timestamp sót lại.
 - **Ref đã bị gỡ:** một ref cũ về sau bị sửa mất, hoặc một grant đã bị xoá, không để lại dòng nào, chỉ có event
   trong thời hạn retention.
-- **Thời điểm mint của các tên đã được giữ trước 0208:** `minted_at` là NULL, nên `users.created_at` là cận dưới.
+- **Thời điểm mint của các tên đã được giữ trước 0209:** `minted_at` là NULL, nên `users.created_at` là cận dưới.
   Một ref thêm vào giữa lúc tạo và lúc mint được đọc là `possible`.
 - **Phơi nhiễm tạm thời** từ các expansion role, workspace hay clearance cũ (E6) giữa một lần xoá và lần recompile
-  tiếp theo. Recompile đã ghi đè body và không để lại dấu vết, trừ khi baseline 0208 bắt được nó lúc còn cũ.
+  tiếp theo. Recompile đã ghi đè body và không để lại dấu vết, trừ khi baseline 0209 bắt được nó lúc còn cũ.
 - **Văn bản tự do:** một username literal trong biểu thức row-filter hay mask hoặc trong một condition
   (`current_user = 'bob'`).
 - **Quyền sở hữu phía engine:** owner của table, view và schema trong Iceberg, Trino hay StarRocks, các view
@@ -339,7 +339,7 @@ khác).
   catalog, không nằm trong egret.
 - **Việc sử dụng thực tế:** liệu một quyền thừa hưởng đã từng được dùng hay chưa. Điều đó cần query log của engine
   (Trino event listener, StarRocks audit log), và egret có thể không lưu chúng. Báo cáo không liên kết log nào.
-- **Body `egret-admin` đã được seed lại trước 0208** bởi một lần engine re-apply đã ghi lại chúng.
+- **Body `egret-admin` đã được seed lại trước 0209** bởi một lần engine re-apply đã ghi lại chúng.
 
 ### 4.6 Engine JWT cũ của user đã bị xoá
 
@@ -367,7 +367,7 @@ lệnh engine. Không đáng cho một token mà chỉ egret giữ.
 
 ## 6. Thay đổi backend (liệt kê)
 
-1. `migrations/0208_username_ledger.sql`:
+1. `migrations/0209_username_ledger.sql`:
    - `username_ledger`, năm trigger của nó, và `username_ledger_backfill()`;
    - `username_reuse_baseline`, điền một lần.
 2. `egret-auth`:
@@ -423,9 +423,9 @@ managedBy}`. Attention kind mới là `username_reuse`, và biến thể `Ref` m
 
 ## 8. Migration và tương thích
 
-- **0208** đã được giữ chỗ (0207 thuộc về một branch đang mở khác). Kiểm tra lại cả hai trên `origin/main` và trên
+- **0209** đã được giữ chỗ (`origin/main` dừng ở 0207; PR đang mở #740 lấy 0208). Kiểm tra lại cả hai trên `origin/main` và trên
   các PR đang mở trước khi merge; đánh số lại cao hơn cả hai nếu cần.
-- 0208 là additive. Trigger của nó có hiệu lực với mọi lần ghi về sau. Trên bản cài mới, bước 1 seed từ một
+- 0209 là additive. Trigger của nó có hiệu lực với mọi lần ghi về sau. Trên bản cài mới, bước 1 seed từ một
   `users` rỗng.
 - Các test ghi `users.username` trực tiếp vẫn chạy, trừ khi một binary xoá một user rồi insert lại **cùng**
   username. Những test đó giờ fail với `23505`, đó là hành vi mong muốn. Plan sẽ rà soát chúng.
@@ -665,3 +665,12 @@ Các sai khác so với phần trên mà code buộc phải có hoặc quá trì
   - Nếu không tránh được restore chỉ dữ liệu: chạy bằng superuser với `--disable-triggers`. Trước đó, xoá các dòng
     reserved trong một session có `SET session_replication_role = replica` (nếu không, guard append-only sẽ từ chối
     lệnh xoá), để bản sao của chúng trong dump được restore.
+
+### Đánh số lại thành 0209 (live check, 2026-10-24)
+
+- **Migration giờ là `0209_username_ledger.sql`.** `origin/main` dừng ở `0207`, và PR đang mở #740
+  (`fix/u4-sqllab-ux`) thêm `0208_query_history_clear.sql`. Quy tắc là đánh số cao hơn main và mọi PR đang mở, nên
+  file chuyển sang `0209`. Nội dung không đổi. Comment trong code, hậu tố evidence của báo cáo (giờ là
+  " (at migration 0209)"), mô tả OpenAPI, helper test (`pre_0209_holder`) và §2 đến §8 ở trên giờ ghi 0209. Các ghi
+  chú trước đó trong mục này giữ "0208": chúng ghi lại điều đúng lúc được viết, và mọi "0208" trong đó là migration
+  này.

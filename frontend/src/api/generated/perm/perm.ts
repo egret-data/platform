@@ -4125,7 +4125,7 @@ export const getPermUsernameReuseUrl = () => {
 }
 
 /**
- * Evidence of past username takeovers (before migration 0208 a deleted user's username could be minted for the next person): user refs and policy bodies older than the person who now holds the name, `egret-admin` bodies naming someone who is not an active platform admin, and refs nobody holds. Reported only; nothing is changed.
+ * Evidence of past username takeovers (before migration 0209 a deleted user's username could be minted for the next person): user refs and policy bodies older than the person who now holds the name, `egret-admin` bodies naming someone who is not an active platform admin, and refs nobody holds. Reported only; nothing is changed.
  */
 export const permUsernameReuse = async ( options?: Parameters<typeof customInstance>[1]): Promise<permUsernameReuseResponse> => {
 

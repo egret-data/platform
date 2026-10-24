@@ -11,7 +11,7 @@ export interface UsernameReuseReport {
   generatedAt: string;
   findings: ReuseFinding[];
   /**
-     * When migration 0208 took the baseline; `null` when it kept no row.
+     * When migration 0209 took the baseline; `null` when it kept no row.
      * @nullable
      */
   baselineTakenAt?: string | null;

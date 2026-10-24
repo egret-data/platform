@@ -9,7 +9,7 @@ admin can see past takeovers.
 
 **Architecture:**
 
-- An append-only `username_ledger`. Triggers on `users` maintain it, and migration `0208` seeds it.
+- An append-only `username_ledger`. Triggers on `users` maintain it, and migration `0209` seeds it.
 - `egret-admin` sync inside the single recompile chokepoint, plus admin-policy arms in the role and group affected
   sets, a status path and a boot pass.
 - `hard_delete` gains the role and workspace arms and a `user:delete` governance event.
@@ -35,8 +35,9 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
   - Never run `git stash`, `git checkout --` or `git clean`.
   - Use `pgrep -x`, never `pgrep -f`.
 - **SQL:** sqlx 0.9 `query()` takes `&'static str`. No `format!` SQL.
-- **Migration number:** `0208` is reserved for this package (`0207` belongs to another open branch). Before
-  merging, check `origin/main` and the open PRs. If either holds 0208, renumber above both.
+- **Migration number:** `0209` is reserved for this package (`origin/main` stops at `0207`; open PR #740 takes
+  `0208`, so this package moved from `0208` to `0209` on 2026-10-24). Before merging, check `origin/main` and the
+  open PRs. If either holds 0209, renumber above both.
 - **DB-gated tests must run, not skip:**
   - Use `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test`, run under `env -u EGRET_ALLOW_DB_SKIP`.
   - After each run, `grep -c "skip: DATABASE_URL"` must print `0`.
@@ -71,7 +72,7 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
 
 | file | change | task |
 |---|---|---|
-| `migrations/0208_username_ledger.sql` | new: ledger, triggers, `username_ledger_backfill()`, `username_reuse_baseline` | 1 |
+| `migrations/0209_username_ledger.sql` | new: ledger, triggers, `username_ledger_backfill()`, `username_reuse_baseline` | 1 |
 | `crates/egret-auth/tests/username_ledger.rs` | new | 1 |
 | `crates/egret-auth/src/users.rs` | docs of `ensure_username_via`; `hard_delete` (actor, event, `DeletedUser`); `set_status_in_tx` | 1, 2, 5 |
 | `crates/egret-audit/src/governance.rs` | `USER_DELETE`, `USER`, `Family::User`, `FAMILIES`, `GOVERNANCE_ACTIONS` | 2 |
@@ -99,7 +100,7 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
 
 **Files:**
 
-- create `migrations/0208_username_ledger.sql` and `crates/egret-auth/tests/username_ledger.rs`;
+- create `migrations/0209_username_ledger.sql` and `crates/egret-auth/tests/username_ledger.rs`;
 - modify the docs of `crates/egret-auth/src/users.rs` `ensure_username_via`, `crates/egret-perm-compile/src/principal_refs.rs:86-99` and `crates/egret-core/src/engine_principals.rs:18-29`.
 
 - [ ] **Step 1: Red tests, as the next holder.** In `username_ledger.rs`, using the `egret_test_db` per-process
@@ -136,7 +137,7 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
 
   Run: `env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=… cargo test -p egret-auth --test username_ledger`. Expected: no
   compile errors; every test fails (no table, or the reuse succeeds).
-- [ ] **Step 2: Migration.** Write `0208` per spec §4.1:
+- [ ] **Step 2: Migration.** Write `0209` per spec §4.1:
   - the table;
   - `username_ledger_record()` with the `AFTER INSERT` and `AFTER UPDATE OF username` triggers. Use `WHEN
     (NEW.username IS NOT NULL)` on insert and `WHEN (NEW.username IS DISTINCT FROM OLD.username)` on update. The
@@ -163,7 +164,7 @@ checked on `aec59807`. Re-check each one with `grep -n` before editing, because 
   - Fix only the tests that delete a user and re-insert the same username in one binary: give them unique names,
     and say why in the commit.
   - Expected: all green, and the skip grep prints `0`.
-- [ ] **Step 5: Commit** `feat(perm): retire usernames forever through an append-only ledger (0208)`.
+- [ ] **Step 5: Commit** `feat(perm): retire usernames forever through an append-only ledger (0209)`.
 
 ## Task 2: `hard_delete` recompiles everything that named the user, and leaves a record (spec §4.3, §4.4)
 
@@ -280,7 +281,7 @@ signature does not change.
 ## Task 6: The report and the attention signal (spec §4.5)
 
 - [ ] **Step 1: Red tests** (`username_reuse_report.rs`, controlplane `governance_attention.rs`). Arrange
-  pre-0208 history with raw SQL on the test DB. Backdate `perm.grants.created_at`, governance events, policy
+  pre-0209 history with raw SQL on the test DB. Backdate `perm.grants.created_at`, governance events, policy
   `updated_at` and `users.created_at`, and insert `username_reuse_baseline` rows:
   1. `a_ref_older_than_its_holder_is_definite_with_an_event` / `possible_without`.
   2. `an_engine_grant_unchanged_since_before_the_holder_is_definite` (`updated_at`).
@@ -382,7 +383,7 @@ Expected: every command exits 0, and `gen:api` leaves no diff.
 
 Bring the stack up with a compose override in the scratchpad, as in the classification plan's Task 12
 (`-p egret-takeover`, `DEMO_PORT=18380`). Run the migration on an install that already has data (seed first,
-then upgrade the image), so that 0208's backfill and baseline see real history. Record the results in the
+then upgrade the image), so that 0209's backfill and baseline see real history. Record the results in the
 scratchpad, not git.
 
 1. Before the upgrade:

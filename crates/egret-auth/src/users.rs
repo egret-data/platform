@@ -397,7 +397,7 @@ impl UserRepo {
         }
         // Who was deleted, on this transaction: the event exists exactly when
         // the delete committed. The username is retired for good (migration
-        // 0208), so this is where a later audit learns whose it was.
+        // 0209), so this is where a later audit learns whose it was.
         if let Some(d) = &deleted {
             egret_audit::governance::record_change(
                 &mut tx,
@@ -487,12 +487,12 @@ fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// `continue` that tries `base-2` after `base` was taken would poison a
 /// caller's whole recompile instead of retrying inside it.
 ///
-/// **A name is never minted twice (migration 0208, username-takeover spec
+/// **A name is never minted twice (migration 0209, username-takeover spec
 /// §4.1).** Triggers on `users` insert every name a row takes into the
 /// append-only `username_ledger`, and a name stays there after its holder is
 /// deleted or renamed. So the `UPDATE` below also fails with 23505 on
 /// `username_ledger_pkey` for a name someone ever held, or that a stale ref,
-/// policy body or event named when 0208 ran, and the same `continue` tries the
+/// policy body or event named when 0209 ran, and the same `continue` tries the
 /// next suffix: the next person whose email slugs to a deleted user's name
 /// gets `base-2` (or the suffix past the highest the ledger holds for the
 /// base), never the name refs still point at. The trigger runs inside this
@@ -620,7 +620,7 @@ fn slugify_localpart(email: &str) -> String {
     }
 }
 
-/// [`slugify_localpart`], for the test that compares it with migration 0208's
+/// [`slugify_localpart`], for the test that compares it with migration 0209's
 /// SQL `username_slug`. Not an API.
 #[doc(hidden)]
 pub fn slugify_localpart_for_tests(email: &str) -> String {
