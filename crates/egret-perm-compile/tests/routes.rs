@@ -8479,9 +8479,8 @@ fn hit_ids(body: &Value) -> Vec<String> {
 }
 
 /// Spec C6's own scenario, on a catalog no engine serves: a path mask on a
-/// column that a TAG mask already reaches names the tag rule. Controls: a
-/// classification whose name differs only in case is not the same
-/// classification (engines match tag names case-sensitively), and a
+/// column that a TAG mask already reaches names the tag rule. Controls: another
+/// classification's mask on another column of the table is not named, and a
 /// classification on the whole TABLE reaches every column of it.
 #[tokio::test]
 async fn a_path_mask_on_a_column_a_tag_mask_reaches_names_the_tag_rule() {
@@ -8491,9 +8490,8 @@ async fn a_path_mask_on_a_column_a_tag_mask_reaches_names_the_tag_rule() {
     let orphan = orphan_catalog(&f, "eff-c6").await;
     let wh = warehouse_of(&f, orphan).await;
 
-    let name = unique("EffCls");
-    let (key_a, tag_a) = classification_named(&f, &name).await;
-    let (key_b, tag_b) = classification_named(&f, &name.to_lowercase()).await;
+    let (key_a, tag_a) = classification_named(&f, &unique("EffCls")).await;
+    let (key_b, tag_b) = classification_named(&f, &unique("EffOther")).await;
     let (key_c, tag_c) = classification_named(&f, &unique("EffWhole")).await;
     let none = json!([]);
     let tag_sel = |k: &str| json!({"type": "tag", "key": k});
@@ -8531,7 +8529,7 @@ async fn a_path_mask_on_a_column_a_tag_mask_reaches_names_the_tag_rule() {
     assert_eq!(
         hit_ids(&body),
         vec![mask_a.clone()],
-        "only the tag rule on `email`, not its lower-case twin: {body}"
+        "only the tag rule on `email`, not the one on `phone`: {body}"
     );
     assert_ne!(mask_a, mask_b);
     let hit = &body["effect"]["alreadyMasked"][0];

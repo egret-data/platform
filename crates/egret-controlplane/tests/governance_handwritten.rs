@@ -504,7 +504,7 @@ async fn route_d_needs_policy_read_and_answers_with_it() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "listed");
     assert_eq!(body["tag"]["name"], json!(name));
-    assert_eq!(body["sameName"], json!([]));
+    assert!(body.get("sameName").is_none(), "{body}");
     let row = body["policies"]
         .as_array()
         .unwrap()

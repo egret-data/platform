@@ -757,3 +757,36 @@ Khi câu trả lời còn đang tải, bị lỗi hoặc không có quyền đ�
   - N1 (Package 2) và N25 (U3).
   - Cột hành động bị cắt của danh sách classification ở 390 px thuộc phần scroll-cue của U3.
   - Recent changes của Overview hiện được viết lại phía client từ câu của server; chuyển việc đó vào `governance_changes.rs` là việc làm sau.
+
+## 17. Các việc tiếp theo (2026-10-23)
+
+Phần này thay thế hai câu ở §9 ("Không có database migration" và "các tên trùng hiện có vẫn hoạt động") và trả lời câu hỏi ở §12.2. Phần văn bản phía trên được giữ nguyên.
+
+### 17.1 Tên classification là duy nhất, không phân biệt hoa thường
+
+**Quyết định của người dùng:** thêm unique index, và đổi tên các classification đang trùng tên. Rule, clearance và cơ chế chặn bảng không đọc được đều chọn cột theo `tags.key`, còn engine khớp tag policy theo `tags.name`. Hai bên chỉ khớp nhau khi mỗi key ứng với đúng một name.
+
+- **Index.** `tags_name_lower_key` trên `lower(tags.name)` (migration `0207_tags_name_unique.sql`). Handler vẫn giữ bước kiểm tra `tag_name_taken` để trả về lỗi có mã. Nếu một thao tác tạo hoặc đổi tên chạy song song và lọt qua bước kiểm tra, index sẽ chặn lại, và `TagRepo::create`/`update` trả về đúng mã `tag_name_taken`.
+- **Các tên trùng hiện có.** Trong mỗi nhóm trùng tên, classification cũ nhất (theo `created_at`, rồi `id`) giữ tên. Mỗi classification còn lại được đổi thành `<name> (<key>)`. Nếu tên đó cũng đã có người dùng thì thêm ` 2`, ` 3`, … vào cuối. Mỗi lần đổi tên ghi một dòng `audit.audit_log` (`tag:rename` trên `tag`, không có người thực hiện). Dòng này không xuất hiện trong governance feed. Việc đổi tên làm thay đổi phạm vi dữ liệu mà rule áp dụng: một rule hoặc manual tag policy gọi tên chung giờ chỉ áp dụng cho classification giữ tên đó.
+- **Recompile lúc khởi động.** Tag policy đã compile mang tên tại thời điểm compile, và SQL không recompile được. Vì vậy migration xếp mỗi lần đổi tên vào bảng `tag_rename_recompiles`. Khi server khởi động, `TagRepo::recompile_queued_renames` chạy đúng phần recompile mà thao tác đổi tên qua API dùng, rồi xoá các dòng trong hàng đợi, tất cả trong một transaction: tăng `tag_version` của mọi service phục vụ warehouse có gắn tag, rồi recompile mọi profile mà tên đó áp dụng tới. Nếu lỗi, các dòng vẫn còn trong hàng đợi và lần khởi động sau sẽ chạy lại.
+- **Vì sao tăng `tag_version` lúc khởi động mà không làm trong migration.** Khi recompile chưa commit, plugin vẫn nhận 304 và dùng bản tag map cũ. Bản đó mang đúng các tên cũ như policy đang lưu, nên hai bên vẫn khớp. Nếu tăng version ngay trong migration, plugin sẽ tải tên mới trong khi policy vẫn mang tên cũ, và mask sẽ ngừng áp dụng cho tới khi bước chạy lúc khởi động hoàn tất.
+
+### 17.2 `PUT`/`DELETE …/resource-tags` từ chối id không tồn tại (§6, §11.1)
+
+- Warehouse id không ứng với dòng nào trong `catalog.warehouses`: **404** `warehouse_not_found`, kèm `warehouseId`.
+- `tag_id` không ứng với classification nào: **404** `tag_not_found`, kèm `tagId`. Trước đây trường hợp này trả về 500 do lỗi khoá ngoại.
+- Cả hai áp dụng cho PUT và DELETE. Không có dòng nào được lưu.
+
+Test route tạo một warehouse thật bằng `egret_test_db::seed_warehouse`.
+
+### 17.3 Bỏ `sameName`
+
+`TagHandWritten.sameName` của route D liệt kê các classification khác có cùng tên. Điều đó không còn xảy ra được nữa, nên trường này đã bị bỏ khỏi API, và dòng hiển thị nó trong tab Manual policies cũng đã bị bỏ.
+
+### 17.4 Các việc tiếp theo ở frontend
+
+- **C1.** Ô Exempt trong rule dialog xoá nội dung tìm kiếm sau khi chọn. Các ô grant vẫn giữ nội dung (D9a).
+- **C2.** Xoá một classification từ chính trang của nó sẽ hiện toast, giống như khi xoá từ trang danh sách.
+- **C3.** Tên rule trong column panel là link tới trang của rule, kèm đường quay lại trang Data.
+- **C4.** Ở 390 px, danh sách Classifications ghim cột hành động, còn Where used xếp các bảng thành thẻ và cho tiêu đề xuống dòng.
+- **D.** Test hành trình xoá rule có tổng thời gian chờ 15 s, đã được đo thực tế. Mỗi lần chờ vẫn giữ giới hạn 3 s.

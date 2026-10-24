@@ -27,7 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
-import { RequiredMark, TabError } from "@/routes/governance/tabParts";
+import { ACTIONS_CELL, RequiredMark, TabError } from "@/routes/governance/tabParts";
 import { tagKeyInvalid, tagKeyTaken, tagNameTaken } from "@/routes/governance/apiErrors";
 import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDialog";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
@@ -186,7 +186,8 @@ export default function ClassificationsIndex() {
           {
             key: "actions",
             label: "",
-            className: "text-right",
+            // Pinned to the scroller's right edge: at 390 px it sat past it (U3).
+            className: `${ACTIONS_CELL} w-auto text-right`,
             cell: (t: Tag) => (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>

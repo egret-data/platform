@@ -3382,6 +3382,11 @@ export type controlPlaneCatalogAssignResourceTagResponse403 = {
   status: 403
 }
 
+export type controlPlaneCatalogAssignResourceTagResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
 export type controlPlaneCatalogAssignResourceTagResponse409 = {
   data: ErrorBody
   status: 409
@@ -3395,7 +3400,7 @@ export type controlPlaneCatalogAssignResourceTagResponse500 = {
 export type controlPlaneCatalogAssignResourceTagResponseSuccess = (controlPlaneCatalogAssignResourceTagResponse200) & {
   headers: Headers;
 };
-export type controlPlaneCatalogAssignResourceTagResponseError = (controlPlaneCatalogAssignResourceTagResponse400 | controlPlaneCatalogAssignResourceTagResponse401 | controlPlaneCatalogAssignResourceTagResponse403 | controlPlaneCatalogAssignResourceTagResponse409 | controlPlaneCatalogAssignResourceTagResponse500) & {
+export type controlPlaneCatalogAssignResourceTagResponseError = (controlPlaneCatalogAssignResourceTagResponse400 | controlPlaneCatalogAssignResourceTagResponse401 | controlPlaneCatalogAssignResourceTagResponse403 | controlPlaneCatalogAssignResourceTagResponse404 | controlPlaneCatalogAssignResourceTagResponse409 | controlPlaneCatalogAssignResourceTagResponse500) & {
   headers: Headers;
 };
 
@@ -3481,6 +3486,11 @@ export type controlPlaneCatalogUnassignResourceTagResponse403 = {
   status: 403
 }
 
+export type controlPlaneCatalogUnassignResourceTagResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
 export type controlPlaneCatalogUnassignResourceTagResponse409 = {
   data: ErrorBody
   status: 409
@@ -3494,7 +3504,7 @@ export type controlPlaneCatalogUnassignResourceTagResponse500 = {
 export type controlPlaneCatalogUnassignResourceTagResponseSuccess = (controlPlaneCatalogUnassignResourceTagResponse200) & {
   headers: Headers;
 };
-export type controlPlaneCatalogUnassignResourceTagResponseError = (controlPlaneCatalogUnassignResourceTagResponse401 | controlPlaneCatalogUnassignResourceTagResponse403 | controlPlaneCatalogUnassignResourceTagResponse409 | controlPlaneCatalogUnassignResourceTagResponse500) & {
+export type controlPlaneCatalogUnassignResourceTagResponseError = (controlPlaneCatalogUnassignResourceTagResponse401 | controlPlaneCatalogUnassignResourceTagResponse403 | controlPlaneCatalogUnassignResourceTagResponse404 | controlPlaneCatalogUnassignResourceTagResponse409 | controlPlaneCatalogUnassignResourceTagResponse500) & {
   headers: Headers;
 };
 

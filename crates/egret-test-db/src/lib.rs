@@ -795,6 +795,24 @@ pub async fn url() -> Option<String> {
     }
 }
 
+/// A real `catalog.warehouses` row, with the workspace and storage connection it
+/// needs, and its id. `PUT …/resource-tags` refuses a warehouse id that names no
+/// warehouse, so a fixture that attaches a classification needs one.
+pub async fn seed_warehouse(pool: &sqlx::PgPool) -> uuid::Uuid {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    sqlx::query_scalar(
+        "WITH ws AS (INSERT INTO workspaces (slug, name) VALUES ($1, $1) RETURNING id), \
+              sc AS (INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+                     VALUES ($1, 'us-east-1', 'egret-test', 'AKIATEST') RETURNING id) \
+         INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         SELECT $1, ws.id, sc.id FROM ws, sc RETURNING id",
+    )
+    .bind(format!("test-wh-{suffix}"))
+    .fetch_one(pool)
+    .await
+    .expect("seed a warehouse")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -5,7 +5,6 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { SameNameTag } from './sameNameTag';
 import type { TagPolicyRow } from './tagPolicyRow';
 import type { TagPolicyState } from './tagPolicyState';
 import type { TagRef } from './tagRef';
@@ -18,11 +17,6 @@ export interface TagHandWritten {
   tag: TagRef;
   state: TagPolicyState;
   policies: TagPolicyRow[];
-  /**
-     * Other tags with this name: engine tag policies on the name apply to
-     * them too (CL10).
-     */
-  sameName: SameNameTag[];
   /**
      * Hand-written tag policies whose body could not be read: they may name
      * this tag, so the list above may be incomplete.
