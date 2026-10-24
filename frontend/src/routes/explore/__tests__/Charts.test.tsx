@@ -327,3 +327,17 @@ describe("Charts — no folders, no folderless header", () => {
     expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
   });
 });
+
+// KI-055: the Trash is a flat list with no folders on show, so its summary counts none — the same
+// rule the Dashboards list follows (KI-074).
+describe("Charts Trash summary", () => {
+  it("counts folders on the list and none in the Trash", async () => {
+    folders = [{ id: "f1", name: "Finance" }];
+    renderAt();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByRole("heading", { name: "Trash" });
+    expect(screen.queryByText("folder")).toBeNull();
+    expect(screen.queryByText("folders")).toBeNull();
+  });
+});

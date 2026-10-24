@@ -295,7 +295,8 @@ export default function Charts() {
             <SummaryStrip
               items={[
                 { label: "charts", singular: "chart", value: rows.length },
-                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
+                // The Trash is a flat list with no folders on show, so it counts none (KI-055).
+                ...(folders.length && !showTrash ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>
