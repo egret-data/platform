@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/select";
 
 import { FIELD_LABEL as LABEL_CLASS, ICON_BUTTON } from "@/components/chart/settings/FieldLabel";
+import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 
 /**
  * The order a chart's rows come back in — the studio's first AUTHORED query clause (filters still
@@ -35,8 +36,10 @@ import { FIELD_LABEL as LABEL_CLASS, ICON_BUTTON } from "@/components/chart/sett
  * `fields` must come from `sortableFields(spec)` — see there for why the dataset's column list is
  * the wrong source.
  */
-export function SortRows({ fields, value, onChange }: {
+export function SortRows({ fields, labels, value, onChange }: {
   fields: string[];
+  /** Display names, as the field pickers show them (KI-050). A clause still stores the machine name. */
+  labels?: FieldLabels;
   value: ChartOrderBy[];
   onChange: (next: ChartOrderBy[]) => void;
 }) {
@@ -77,7 +80,7 @@ export function SortRows({ fields, value, onChange }: {
               </SelectTrigger>
               <SelectContent>
                 {fields.filter((f) => f === clause.field || !used.has(f))
-                  .map((f) => <SelectItem key={f} value={f}>{f}</SelectItem>)}
+                  .map((f) => <SelectItem key={f} value={f} title={fieldTitle(f, labels)}>{displayName(f, labels)}</SelectItem>)}
               </SelectContent>
             </Select>
             <div className="flex shrink-0 items-center text-muted-foreground">
@@ -111,7 +114,7 @@ export function SortRows({ fields, value, onChange }: {
               <SelectValue placeholder="Add a sort…" />
             </SelectTrigger>
             <SelectContent>
-              {unused.map((f) => <SelectItem key={f} value={f}>{f}</SelectItem>)}
+              {unused.map((f) => <SelectItem key={f} value={f} title={fieldTitle(f, labels)}>{displayName(f, labels)}</SelectItem>)}
             </SelectContent>
           </Select>
         )}

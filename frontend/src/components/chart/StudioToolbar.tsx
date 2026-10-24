@@ -4,11 +4,14 @@ import { Label } from "@/components/ui/label";
 import type { ReactNode } from "react";
 
 export function StudioToolbar({
-  name, onName, autoRun, onAutoRun, onRun, onSave, running, saveLabel, exportMenu, sqlDisclosure,
+  name, onName, description, onDescription, autoRun, onAutoRun, onRun, onSave, running, saving, saveLabel,
+  exportMenu, sqlDisclosure,
 }: {
   name: string; onName: (v: string) => void;
+  /** Edited here, beside the name, so saving an existing chart needs no dialog (KI-008). */
+  description: string; onDescription: (v: string) => void;
   autoRun: boolean; onAutoRun: (v: boolean) => void;
-  onRun: () => void; onSave: () => void; running: boolean; saveLabel: string;
+  onRun: () => void; onSave: () => void; running: boolean; saving?: boolean; saveLabel: string;
   exportMenu: ReactNode; sqlDisclosure: ReactNode;
 }) {
   return (
@@ -22,10 +25,13 @@ export function StudioToolbar({
             <Switch id="auto-run" checked={autoRun} onCheckedChange={onAutoRun} aria-label="Auto-run" /> Auto
           </Label>
           <Button size="sm" onClick={onRun} disabled={running}>{running ? "Running…" : "Run"}</Button>
-          <Button size="sm" variant="outline" onClick={onSave}>{saveLabel}</Button>
+          <Button size="sm" variant="outline" onClick={onSave} disabled={saving}>{saving ? "Saving…" : saveLabel}</Button>
           {exportMenu}
         </div>
       </div>
+      <input aria-label="Chart description" value={description} onChange={(e) => onDescription(e.target.value)}
+        placeholder="Add a description"
+        className="-mt-2 h-7 w-full min-w-0 rounded-md border border-transparent bg-transparent px-1.5 text-xs text-muted-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-input focus:bg-background focus:text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
       {sqlDisclosure}
     </>
   );

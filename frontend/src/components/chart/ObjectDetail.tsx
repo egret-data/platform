@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { formatValue } from "@/components/chart/format";
+import { formatValue, withIdentifierDefault } from "@/components/chart/format";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import type { ResultColumn } from "@/components/chart/ChartTable";
 
@@ -56,7 +56,7 @@ function Value({ value, column, format }: {
     return <img src={value} alt={value} className="mx-auto my-1 max-h-72 max-w-full rounded" />;
   }
 
-  const text = formatValue(value, column.type, format);
+  const text = formatValue(value, column.type, withIdentifierDefault(column.name, column.type, format));
   if (text.length <= EXPAND_AT) return <>{text}</>;
   return (
     <>

@@ -2022,7 +2022,10 @@ function decorateSeries(
     // dimension's own column format, then the raw value. The FORMAT step is what made a breakout
     // by month read "2026-01-01" in the legend while the panel offered a date style for that very
     // column — offered, stored, and ignored.
-    name: cfg.seriesLabels?.[s.name] ?? seriesDisplayName(cfg, s.name),
+    // With no breakout the series IS a metric, and it reads by that metric's display name — the
+    // name the axis title already uses (`displayTitle`), not its machine name (KI-050).
+    name: cfg.seriesLabels?.[s.name]
+      ?? (cfg.series == null ? (cfg.columnSettings?.[s.name]?.column_title || s.name) : seriesDisplayName(cfg, s.name)),
     // The RAW series value, kept because `name` above is what the reader sees and the drill needs
     // what the column holds. Filtering by the display label found nothing the moment a series was
     // renamed — the rename silently broke the click.

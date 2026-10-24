@@ -312,7 +312,8 @@ function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
   return (
     <div className="space-y-1">
       <div className="space-y-1.5">
-        <Label htmlFor={id} className="text-sm font-normal">Show label</Label>
+        {/* "X label" / "Y label", the name cartesian's Axes tab gives the same row (KI-054). */}
+        <Label htmlFor={id} className="text-sm font-normal">{axis} label</Label>
         <Switch id={`${id}-shown`} aria-label={`Show ${axis} label`} checked={shown} onCheckedChange={onShown} />
       </div>
       {shown && (
@@ -399,7 +400,7 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
             value axis has no power scale, Metabase implements its own, and a third option that
             silently drew a linear axis would be worse than its absence. */}
         <div className="space-y-1">
-          <Label htmlFor={`${idPrefix}-scale`} className="text-sm font-normal">Scale</Label>
+          <Label htmlFor={`${idPrefix}-scale`} className="text-sm font-normal">Y scale</Label>
           <Select value={config.logScale ? "log" : "linear"}
             onValueChange={(v) => onChange({ logScale: v === "log" || undefined } as Partial<C>)}>
             <SelectTrigger id={`${idPrefix}-scale`} aria-label="Y scale" className="w-full"><SelectValue /></SelectTrigger>

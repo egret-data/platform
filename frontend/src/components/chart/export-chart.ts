@@ -1,6 +1,6 @@
 import type { ResultColumn } from "@/components/chart/ChartTable";
 import type { ColumnFormat } from "@/components/chart/format-types";
-import { formatValue } from "@/components/chart/format";
+import { formatValue, withIdentifierDefault } from "@/components/chart/format";
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -62,7 +62,9 @@ export function exportCell(
   columnSettings: Record<string, ColumnFormat> | undefined,
   formatted: boolean,
 ): unknown {
-  return formatted ? formatValue(value, column.type, columnSettings?.[column.name] ?? {}) : value;
+  return formatted
+    ? formatValue(value, column.type, withIdentifierDefault(column.name, column.type, columnSettings?.[column.name] ?? {}))
+    : value;
 }
 
 /** RFC-4180 CSV: a header row, then one row per data row, CRLF-separated. */

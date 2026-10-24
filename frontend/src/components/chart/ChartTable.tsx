@@ -16,7 +16,7 @@ import {
   SortableContext, horizontalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { formatValue } from "./format";
+import { formatValue, withIdentifierDefault } from "./format";
 import { buildConditional } from "./conditional";
 import { isNumericType, type ColumnFormat, type Rule } from "./format-types";
 import type { TableState } from "@/api/charts";
@@ -241,7 +241,7 @@ export function ChartTable({
           cell: (ctx) => {
             const v = ctx.getValue();
             const fmt = columnSettings[c.name];
-            return renderTableCell(v, isNum, fmt, formatValue(v, c.type, fmt), miniBarCaps[c.name] ?? 0);
+            return renderTableCell(v, isNum, fmt, formatValue(v, c.type, withIdentifierDefault(c.name, c.type, fmt)), miniBarCaps[c.name] ?? 0);
           },
           enableSorting: true,
           minSize: MIN_COL_WIDTH,

@@ -158,3 +158,16 @@ describe("Datasets — bulk select only reaches rows on screen", () => {
     expect(trashMock).toHaveBeenCalledTimes(1);
   });
 });
+
+// KI-055: the Datasets Trash read "1 dataset · 2 folders" although the Trash shows no folders.
+describe("Datasets Trash summary", () => {
+  it("counts folders on the list and none in the Trash", async () => {
+    folders = [{ id: "f1", name: "Finance" }, { id: "f2", name: "Ops" }];
+    renderAt();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByRole("heading", { name: "Trash" });
+    expect(screen.queryByText("folders")).toBeNull();
+    expect(screen.queryByText("folder")).toBeNull();
+  });
+});
