@@ -33,7 +33,7 @@ Danh sách dạng bảng dùng `FilterableTable` hoặc `ui/table`. `<table>` t�
 **Làm thế này:** `frontend/src/components/explore/FilterableTable.tsx`, `frontend/src/components/ui/table.tsx`. **Kiểm bằng:** review.
 
 #### FE-PAGE-5 — Cấu hình là bảng `Setting | Details | Value` · PHẢI
-Phần cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection`, theo dạng `Setting | Details | Value`. Một tập thuộc tính phẳng là một danh sách key/value tìm kiếm được, không làm form riêng cho từng field.
+Phần cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection`, theo dạng `Setting | Details | Value`. Một tập thuộc tính phẳng là một danh sách key/value tìm kiếm được, không làm form riêng cho từng field. *Details* chỉ một dòng ngắn; phần giải thích còn lại đặt vào `more` của `ConfigTableRow`, mở bằng nút info.
 **Làm thế này:** `frontend/src/components/config/ConfigTable.tsx` (`ConfigTable`, `ConfigTableRow`), `frontend/src/components/form/ConfigSection.tsx`. **Kiểm bằng:** review. **Vì sao:** [ui-conventions §4](../en/ui-conventions.md#4-setting--details--value-tables-and-when-a-card-is-still-right).
 
 #### FE-PAGE-6 — Mọi trang nằm trong `PageContainer`, chung một mép trái · PHẢI

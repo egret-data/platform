@@ -1,7 +1,8 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Info } from "lucide-react";
 import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
 
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Table,
   TableBody,
@@ -111,10 +112,35 @@ export function ConfigTableGroup({ label }: { label: string }) {
 }
 
 /**
+ * The rest of a row's explanation, one click away: Details holds one short
+ * line (KI-219), and what does not fit in it opens here. A popover rather
+ * than a hover tooltip, so it opens by keyboard and on touch as well.
+ */
+function MoreDetails({ label, text }: { label: ReactNode; text: string }) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        type="button"
+        aria-label={typeof label === "string" ? `More about ${label}` : "More details"}
+        className="ml-1 inline-flex size-5 translate-y-0.5 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Info className="size-3.5" aria-hidden />
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 text-xs leading-relaxed">
+        {text}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
  * One row of a {@link ConfigTable}: the label, a muted Details cell (help text
  * from `fieldHelp[fieldKey]` unless overridden, plus a docs link), and the edit
  * control passed as `children`. `details === null` forces an empty Details cell
  * even when the field has `fieldHelp`.
+ *
+ * `more` is the long form of `details`: keep `details` to one line and put
+ * the rest here, behind an info button.
  *
  * `mono` renders a string label in monospace — used when the label is the exact
  * config key (e.g. `query.max-memory`) so it's easy to look up in the docs.
@@ -125,6 +151,7 @@ export function ConfigTableRow({
   htmlFor,
   details,
   docsUrl,
+  more,
   mono,
   children,
 }: {
@@ -134,6 +161,8 @@ export function ConfigTableRow({
   /** Override the Details text; `null` = force empty; omitted = fall back to fieldHelp. */
   details?: string | null;
   docsUrl?: string;
+  /** The rest of the explanation, behind an info button after Details. */
+  more?: string;
   mono?: boolean;
   children: ReactNode;
 }) {
@@ -154,9 +183,10 @@ export function ConfigTableRow({
   // (below lg, where the Details column is hidden) inline under the Setting
   // label — so the help and the docs link are never lost on narrow screens.
   const helpNode =
-    detailText || unit || link ? (
+    detailText || unit || link || more ? (
       <>
         {detailText}
+        {more ? <MoreDetails label={label} text={more} /> : null}
         {unit ? <span className="text-muted-foreground/70"> ({unit})</span> : null}
         {link ? (
           <a
