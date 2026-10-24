@@ -120,7 +120,7 @@ impl QueryStore {
     ) -> Result<Vec<Query>, EngineError> {
         let rows = sqlx::query_as::<_, QueryRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM query.queries WHERE workspace_id=$1 AND user_id=$2 \
-             ORDER BY submitted_at DESC LIMIT $3"
+             AND NOT hidden_from_history ORDER BY submitted_at DESC LIMIT $3"
         )))
         .bind(ws)
         .bind(user)
@@ -128,6 +128,22 @@ impl QueryStore {
         .fetch_all(&self.db.pool)
         .await?;
         Ok(rows.into_iter().map(QueryRow::into_query).collect())
+    }
+
+    /// Clear `user`'s query history in `ws` (KI-092): their queries leave the
+    /// History list. Only rows whose `user_id` is `user` are touched, so a
+    /// caller can clear nobody's history but their own. The rows are kept:
+    /// status and results by id still answer.
+    pub async fn clear_history_for_user(&self, ws: Uuid, user: Uuid) -> Result<u64, EngineError> {
+        let r = sqlx::query(
+            "UPDATE query.queries SET hidden_from_history = true \
+             WHERE workspace_id=$1 AND user_id=$2 AND NOT hidden_from_history",
+        )
+        .bind(ws)
+        .bind(user)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(r.rows_affected())
     }
 
     pub async fn set_running(&self, id: Uuid) -> Result<(), EngineError> {

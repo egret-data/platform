@@ -266,6 +266,16 @@ async fn member_session(
     ws: Uuid,
     role: &str,
 ) -> String {
+    member_session_with_id(db, sessions, ws, role).await.1
+}
+
+/// [`member_session`], also returning the new user's id.
+async fn member_session_with_id(
+    db: &egret_metastore::Db,
+    sessions: &egret_auth::session::SessionService,
+    ws: Uuid,
+    role: &str,
+) -> (Uuid, String) {
     let uid: Uuid =
         sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
             .bind(format!("m_{}@egret.local", Uuid::new_v4().simple()))
@@ -283,11 +293,12 @@ async fn member_session(
     .execute(&db.pool)
     .await
     .expect("add workspace member");
-    sessions
+    let token = sessions
         .create(egret_core::ids::UserId(uid), "test", "127.0.0.1")
         .await
         .expect("create session")
-        .token
+        .token;
+    (uid, token)
 }
 
 /// PDP-backed workspace authz (this seam migrated onto
@@ -711,4 +722,148 @@ async fn submit_impersonate_runs_as_caller_no_mint() {
         bearer, None,
         "impersonate: NO JWT is minted — the connector uses basic-auth + X-Trino-User"
     );
+}
+
+/// KI-092: `DELETE /ws/{ws}/queries` clears the CALLER's SQL Lab history and
+/// nobody else's. A second member clearing their own history leaves the first
+/// member's entries listed; a member without `query:run` is refused; the owner
+/// clearing empties their list, and queries run afterwards are listed again.
+#[tokio::test]
+async fn clear_history_clears_only_the_callers_history() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = egret_metastore::Db::connect(&url, 5)
+        .await
+        .expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let creator: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert creator");
+    let slug = format!("query-history-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Query History Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(creator)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    let db_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8080,$2,false) RETURNING id",
+    )
+    .bind(format!("h-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert db");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(
+        db.clone(),
+        pdp,
+        Arc::new(NoMinter),
+        Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+    );
+    let sessions = st.sessions.clone();
+    let (owner, owner_tok) = member_session_with_id(&db, &sessions, ws, "ws_editor").await;
+    let (other, other_tok) = member_session_with_id(&db, &sessions, ws, "ws_editor").await;
+    let viewer_tok = member_session(&db, &sessions, ws, "ws_viewer").await;
+
+    let store = QueryStore::new(db.clone());
+    for sql in ["SELECT 'owner 1'", "SELECT 'owner 2'"] {
+        store
+            .insert(ws, db_id, Some(owner), sql)
+            .await
+            .expect("owner query");
+    }
+    store
+        .insert(ws, db_id, Some(other), "SELECT 'other'")
+        .await
+        .expect("other query");
+
+    let app = engine_router().with_state(st);
+    let call = |method: &'static str, tok: String| {
+        let app = app.clone();
+        let uri = format!("/ws/{slug}/queries");
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Cookie", format!("egret_session={tok}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let sqls: Vec<String> = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+                .map(|v| {
+                    v.iter()
+                        .map(|q| q["sql"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (status, sqls)
+        }
+    };
+
+    // A member without query:run cannot clear anything.
+    let (s, _) = call("DELETE", viewer_tok).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "ws_viewer must not clear history");
+
+    // The other member clears THEIR history: the owner's entries stay.
+    let (s, _) = call("DELETE", other_tok.clone()).await;
+    assert_eq!(s, StatusCode::OK, "a member clears their own history");
+    let (_, other_list) = call("GET", other_tok).await;
+    assert!(
+        other_list.is_empty(),
+        "the caller's history is cleared: {other_list:?}"
+    );
+    let (_, owner_list) = call("GET", owner_tok.clone()).await;
+    assert_eq!(
+        owner_list.len(),
+        2,
+        "another member's clear must not touch the owner's history: {owner_list:?}"
+    );
+
+    // The owner clears: their list is empty; a later query is listed again.
+    let (s, _) = call("DELETE", owner_tok.clone()).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, owner_list) = call("GET", owner_tok.clone()).await;
+    assert!(
+        owner_list.is_empty(),
+        "owner's history is cleared: {owner_list:?}"
+    );
+    store
+        .insert(ws, db_id, Some(owner), "SELECT 'after clear'")
+        .await
+        .expect("query after clear");
+    let (_, owner_list) = call("GET", owner_tok).await;
+    assert_eq!(owner_list, vec!["SELECT 'after clear'".to_string()]);
+
+    // Clearing hides the entries from the history list only: the query rows
+    // (status, results by id) stay.
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM query.queries WHERE workspace_id=$1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 4);
 }
