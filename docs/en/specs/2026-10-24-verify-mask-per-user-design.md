@@ -587,3 +587,8 @@ Deviations the code forces are recorded here, per task, as they happen.
   with an empty `via` ("compiled policy is older than the rule"). Now a no-transform answer counts as the exempt item
   only when the rule row exists and its own outcome transforms (`ExplainCache::rule_has_exempt_item`). Test
   `a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption`. The lag case of §5.4 step 4 keeps its empty `via`.
+- **Finding 2 (reproduced).** A cleared StarRocks reader under a rule that nulls the column gets `MASK_NULL` from
+  the clearance mask (the fold replays the rule), and explain inferred "not cleared" from the type, so it skipped the
+  replay and said "NULL (clearance PII)". Cleared-ness now comes from the served clearance mask itself: the subject
+  is named in one of its `dataMaskPolicyItems` (the `{public}` item names a group), which is what the engine matches
+  and needs no extra read. Test `a_cleared_reader_under_a_nulling_rule_is_told_the_rule_nulls_them`.

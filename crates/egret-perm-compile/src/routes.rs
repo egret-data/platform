@@ -2698,11 +2698,14 @@ pub(crate) async fn explain_users(
                 );
                 let (attribution, exemption) =
                     mask_reason(&mut *conn, &mut cache, &decision, user).await?;
-                let cleared_by_clearance = matches!(
-                    &attribution,
-                    Some(ExplainAttribution::Clearance { .. })
-                ) && !matches!(&decision, MaskDecision::Masked(m)
-                        if m.mask_type.as_deref() == Some(crate::clearance_mask::CLEARANCE_MASK_TYPE));
+                // Cleared = named in one of the served clearance mask's own items
+                // (the `{public}` item names a group), which is what the engine
+                // matches. Not the mask TYPE: a cleared reader under a rule that
+                // nulls the column gets `MASK_NULL` too (review finding 2).
+                let cleared_by_clearance =
+                    matches!(&attribution, Some(ExplainAttribution::Clearance { .. }))
+                        && matches!(&decision, MaskDecision::Masked(m)
+                        if named_in_mask_items(&artifact, &m.policy_name, user));
                 let replayed = if cleared_by_clearance {
                     let without = replay_artifact
                         .get_or_insert_with(|| without_clearance_policies(&artifact));
@@ -3602,6 +3605,17 @@ async fn mask_reason(
         _ => None,
     };
     Ok((attribution, exemption))
+}
+
+/// Whether `user` is named in a `dataMaskPolicyItems` entry of the served
+/// policy `policy_name`.
+fn named_in_mask_items(artifact: &ServicePolicySet, policy_name: &str, user: &str) -> bool {
+    artifact
+        .policies
+        .iter()
+        .filter(|p| p.name == policy_name)
+        .flat_map(|p| &p.data_mask_policy_items)
+        .any(|item| item.users.iter().any(|u| u == user))
 }
 
 /// `artifact` without its clearance policies: the set the clearance mask's

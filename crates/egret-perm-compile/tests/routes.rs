@@ -4635,6 +4635,62 @@ async fn a_cleared_starrocks_reader_s_mask_replays_the_rule() {
     lift_gate(&f, tag_id).await;
 }
 
+/// Review finding 2: a cleared reader under a rule that NULLs the column gets
+/// `MASK_NULL` from the clearance mask too (the fold replays the rule). That
+/// is the rule's outcome, not "not cleared": the replay names the rule, and the
+/// uncleared reader still gets no replay.
+#[tokio::test]
+async fn a_cleared_reader_under_a_nulling_rule_is_told_the_rule_nulls_them() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, uncleared) = clearance_readers(&f, &token).await;
+    let mut rule = mask_rule(
+        "vmask-null-rule",
+        json!({ "type": "path", "catalog_id": f.catalog_id,
+                "schema": "sales", "table": "orders", "column": "email" }),
+        json!([]),
+    );
+    rule["kind"]["mask_type"] = json!("MASK_NULL");
+    let name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let profile = profile_for(&body, "starrocks");
+    let mask = &profile["mask"];
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["replayed"]["attribution"]["kind"], "rule",
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["replayed"]["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    let line = profile["effect_lines"][0]["text"].as_str().unwrap();
+    assert!(
+        line.starts_with(&format!(
+            "{cleared} reads email as NULL by rule {name} (cleared for "
+        )),
+        "body: {body}"
+    );
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    assert!(
+        profile_for(&body, "starrocks")["mask"]
+            .get("replayed")
+            .is_none(),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
 async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
     let (status, _) = into_json(
         f.app()
