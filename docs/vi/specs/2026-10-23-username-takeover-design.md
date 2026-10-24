@@ -3,7 +3,7 @@
 > **Trạng thái:** Bản tham khảo tiếng Việt · **Ngày:** 2026-10-23
 > ⚠️ Bản gốc (canonical) là tiếng Anh: [`docs/en/specs/2026-10-23-username-takeover-design.md`](../../en/specs/2026-10-23-username-takeover-design.md). Khác biệt thì ưu tiên bản tiếng Anh.
 
-Trạng thái: backend đã triển khai (plan Task 1–6, 2026-10-23); frontend, docs và live check còn chờ. Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
+Trạng thái: đã triển khai (plan Task 1–8, 2026-10-23), đã live check trên stack riêng 2026-10-24; Platform docs theo PR riêng (D5). Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
 Plan: [`../../en/plans/2026-10-23-username-takeover.md`](../../en/plans/2026-10-23-username-takeover.md).
 Chương trình: KI fix programme, gói security. Là follow-up của review #692 (một trong tám follow-up; bảy cái còn
 lại là non-goal, §11).

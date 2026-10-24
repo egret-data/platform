@@ -1,6 +1,6 @@
 # Username takeover after user delete: design
 
-Status: backend implemented (plan Tasks 1–6, 2026-10-23); frontend, docs and live check pending. Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
+Status: implemented (plan Tasks 1–8, 2026-10-23), live-checked on an own stack 2026-10-24; Platform docs follow in a separate PR (D5). Base: `origin/main` `aec59807`. Branch `fix/username-takeover`.
 Plan: [`../plans/2026-10-23-username-takeover.md`](../plans/2026-10-23-username-takeover.md).
 Programme: KI fix programme, security package. Follow-up of the #692 review (one of eight follow-ups; the other
 seven are non-goals, §11).
