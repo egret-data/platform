@@ -53,7 +53,9 @@ import {
   RefusalBody,
   showsNotEnforced,
   tickReason,
+  StarRocksTableOnlyNotice,
   TrinoColumnOnlyNotice,
+  starrocksTickReason,
   trinoTickReason,
   type ConflictActions,
 } from "@/routes/governance/RulePreview";
@@ -77,9 +79,9 @@ const EMPTY_SCOPE: Scope = { catalog_id: "" };
 
 /** Create's reason when only the preview is missing or out of date (spec C8.2). */
 export const PREVIEW_TO_ENABLE_CREATE = "Preview the rule to enable Create.";
-/** Spec §5.8 (D3): shown under Kind for a row filter on a classification, whatever it reaches today. */
+/** Spec §5.8 (D3) and live check finding 2: shown under Kind for a row filter on a classification. */
 export const TRINO_ROW_FILTER_HINT =
-  "On Trino, a row filter by classification applies only where the classification is on the whole table.";
+  "On Trino, a row filter by classification applies only where the classification is on the whole table; on StarRocks, only where it is on a column.";
 /** The path-mask help (spec C8.1): an absent column is legal and means every column. */
 export const EMPTY_COLUMN_MASKS_EVERY_COLUMN = "Leave Column empty to mask every column of the table.";
 
@@ -590,7 +592,9 @@ function RuleForm({
   const secondMask = !!effect && effect.kind === "mask" && effect.alreadyMasked.length > 0;
   // Spec §5.8 (D3, C9): a classification row filter Trino would not apply on some tables asks for the same tick.
   const trinoColumnOnly = effect?.kind === "row_filter" ? (effect.trinoColumnOnly ?? null) : null;
-  const needsTick = (secondMask || trinoColumnOnly !== null) && !ticked;
+  // Its StarRocks mirror (live check finding 2): a classification on the whole table filters nothing there.
+  const starrocksTableOnly = effect?.kind === "row_filter" ? (effect.starrocksTableOnly ?? null) : null;
+  const needsTick = (secondMask || trinoColumnOnly !== null || starrocksTableOnly !== null) && !ticked;
   const createReason =
     blockedReason ??
     (previewStale || (!preview && !previewError)
@@ -600,16 +604,24 @@ function RuleForm({
         : needsTick
           ? secondMask
             ? tickReason(!!existing)
-            : trinoTickReason(!!existing)
+            : trinoColumnOnly
+              ? trinoTickReason(!!existing)
+              : starrocksTickReason(!!existing)
           : null);
   const canSave = createReason === null;
   const reasonId = useId();
   const warnId = useId();
   const trinoWarnId = useId();
+  const starrocksWarnId = useId();
   const kindHintId = useId();
   // The reason when Create waits, and the warnings even when it does not (spec C7 A11y).
   const createDescribedBy =
-    [canSave ? null : reasonId, showsNotEnforced(effect) ? warnId : null, trinoColumnOnly ? trinoWarnId : null]
+    [
+      canSave ? null : reasonId,
+      showsNotEnforced(effect) ? warnId : null,
+      trinoColumnOnly ? trinoWarnId : null,
+      starrocksTableOnly ? starrocksWarnId : null,
+    ]
       .filter(Boolean)
       .join(" ") || undefined;
   // The classification's name for the D3 warning: from the list, else as the entry point knows it, else its key.
@@ -868,6 +880,16 @@ function RuleForm({
                       onTick={setTicked}
                       editing={!!existing}
                       id={trinoWarnId}
+                    />
+                  )}
+                  {starrocksTableOnly && (
+                    <StarRocksTableOnlyNotice
+                      only={starrocksTableOnly}
+                      classification={tagName}
+                      ticked={ticked}
+                      onTick={setTicked}
+                      editing={!!existing}
+                      id={starrocksWarnId}
                     />
                   )}
                 </>

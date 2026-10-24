@@ -632,6 +632,7 @@ export * from './starRocksConfigBodyCnResources';
 export * from './starRocksConfigBodyFeConfig';
 export * from './starRocksConfigBodyFeResources';
 export * from './starRocksConfigBodyPod';
+export * from './starRocksTableOnly';
 export * from './startExecutionMultipart';
 export * from './startExecutionRequest';
 export * from './startImpersonation';

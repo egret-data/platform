@@ -2,7 +2,7 @@ import { Fragment } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 
-import type { ExistingMask, PreviewResponse, PrincipalSet, RuleEffect, TrinoColumnOnly } from "@/api/generated/model";
+import type { ExistingMask, PreviewResponse, PrincipalSet, RuleEffect, StarRocksTableOnly, TrinoColumnOnly } from "@/api/generated/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -166,6 +166,10 @@ export function AlreadyMaskedNotice({
 export const trinoTickReason = (editing: boolean) =>
   `Tick '${tickVerb(editing)} anyway' to ${editing ? "save" : "create"} a row filter that filters nothing on Trino on these tables.`;
 
+/** Create's (or Save's) reason while a row filter that filters nothing on StarRocks waits for the tick. */
+export const starrocksTickReason = (editing: boolean) =>
+  `Tick '${tickVerb(editing)} anyway' to ${editing ? "save" : "create"} a row filter that filters nothing on StarRocks on these tables.`;
+
 /** "wh", "lake and wh", "a, b and c". */
 function andList(items: string[]): string {
   return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
@@ -213,6 +217,53 @@ export function TrinoColumnOnlyNotice({
         <Checkbox id="rule-create-anyway-trino" checked={ticked} onCheckedChange={(v) => onTick(v === true)} />
         <Label htmlFor="rule-create-anyway-trino" className="font-normal">
           {`${tickVerb(editing)} anyway: I understand this row filter filters nothing on Trino on these tables`}
+        </Label>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The StarRocks mirror of {@link TrinoColumnOnlyNotice} (live check finding 2):
+ * StarRocks applies a classification row filter only on tables with the
+ * classification on a column, so a classification on the whole table filters
+ * nothing there. Trino filters those tables. Create waits for the same tick.
+ */
+export function StarRocksTableOnlyNotice({
+  only,
+  classification,
+  ticked,
+  onTick,
+  editing,
+  id,
+}: {
+  only: StarRocksTableOnly;
+  /** The classification's name, as the form shows it. */
+  classification: string;
+  ticked: boolean;
+  onTick: (ticked: boolean) => void;
+  editing: boolean;
+  id: string;
+}) {
+  const one = only.tables === 1;
+  return (
+    <div data-testid="starrocks-table-only" className="space-y-2 rounded-md border border-border bg-background p-3">
+      <p id={id} className="flex gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <span>
+          {`On StarRocks this row filter filters nothing on `}
+          <span className="tabular-nums">{only.tables}</span>
+          {` ${one ? "table" : "tables"} in ${andList(only.catalogs)}: `}
+          <em>{classification}</em>
+          {` is on the table, not on ${one ? "its" : "their"} columns. Trino filters ${one ? "it" : "them"}. Attach `}
+          <em>{classification}</em>
+          {` to a column of ${one ? "the" : "each"} table to filter on StarRocks.`}
+        </span>
+      </p>
+      <div className="flex items-start gap-2">
+        <Checkbox id="rule-create-anyway-starrocks" checked={ticked} onCheckedChange={(v) => onTick(v === true)} />
+        <Label htmlFor="rule-create-anyway-starrocks" className="font-normal">
+          {`${tickVerb(editing)} anyway: I understand this row filter filters nothing on StarRocks on these tables`}
         </Label>
       </div>
     </div>

@@ -9,6 +9,7 @@ import type { EffectCatalog } from './effectCatalog';
 import type { EffectKind } from './effectKind';
 import type { ExistingMask } from './existingMask';
 import type { NotEnforced } from './notEnforced';
+import type { StarRocksTableOnly } from './starRocksTableOnly';
 import type { TrinoColumnOnly } from './trinoColumnOnly';
 
 /**
@@ -52,4 +53,5 @@ export interface RuleEffect {
      */
   truncated: boolean;
   trinoColumnOnly?: null | TrinoColumnOnly;
+  starrocksTableOnly?: null | StarRocksTableOnly;
 }

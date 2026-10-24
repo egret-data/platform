@@ -1299,7 +1299,8 @@ describe("RuleDialog — live walkthrough fixes (Task 13)", () => {
  * where it is on columns only, warns with the count and asks for the tick.
  */
 describe("RuleDialog — a classification row filter that filters nothing on Trino (D3)", () => {
-  const HINT = "On Trino, a row filter by classification applies only where the classification is on the whole table.";
+  const HINT =
+    "On Trino, a row filter by classification applies only where the classification is on the whole table; on StarRocks, only where it is on a column.";
 
   async function filterRows(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
@@ -1357,6 +1358,27 @@ describe("RuleDialog — a classification row filter that filters nothing on Tri
     expect(await screen.findByTestId("trino-column-only")).toHaveTextContent(
       "On Trino this row filter filters nothing on 1 table in wh: PII Data is on its columns, not on the table.",
     );
+  });
+
+  test("a preview counting table-only tables warns about StarRocks, and Create waits for the tick", async () => {
+    const user = userEvent.setup();
+    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: null, starrocksTableOnly: { catalogs: ["wh"], tables: 2 } };
+    previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await filterRows(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    const warning = await screen.findByTestId("starrocks-table-only");
+    expect(warning).toHaveTextContent(
+      "On StarRocks this row filter filters nothing on 2 tables in wh: PII Data is on the table, not on their columns. Trino filters them. Attach PII Data to a column of each table to filter on StarRocks.",
+    );
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    expect(create).toHaveAccessibleDescription(
+      expect.stringContaining("Tick 'Create anyway' to create a row filter that filters nothing on StarRocks on these tables."),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Create anyway: I understand this row filter filters nothing on StarRocks on these tables" }));
+    expect(create).toHaveAttribute("aria-disabled", "false");
   });
 
   test("without the count there is no warning and no tick", async () => {

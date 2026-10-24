@@ -629,3 +629,14 @@ Deviations the code forces are recorded here, per task, as they happen.
   NULL, and the query still needs SELECT on the other columns it reads", with no rows line; undecidable reads
   undecided. The table verdict stands in for "the other columns", which explain cannot know. Test
   `an_ungranted_starrocks_reader_of_a_nulled_column_is_refused_not_masked`.
+- **Finding 2 (StarRocks row filter on a table-level classification): stated; the compiler fix goes in the D2
+  package.** StarRocks expands a classification row filter over the tagged columns of each table
+  (`tagged_columns_for_service_via`, `column_name <> ''`), so a classification on the table only compiles nothing (the
+  preview's compile shows 0 created). Explain: `row_filter_not_applied` now also lists, on a StarRocks profile, the
+  classification row filters whose classification is on the target table and on none of its columns, and the rows
+  line reads "u sees **every row**: rule *X* does not filter on StarRocks here, because *PII* is on the table, not on
+  a column". Rule dialog: `RuleEffect.starrocksTableOnly` (`{catalogs, tables}`, the D3 pattern) drives a warning and
+  the same "Create anyway" tick, and the Kind hint now reads "On Trino, a row filter by classification applies only
+  where the classification is on the whole table; on StarRocks, only where it is on a column." Test
+  `a_starrocks_row_filter_on_a_table_classification_filters_nothing`; vitest "a preview counting table-only tables
+  warns about StarRocks, and Create waits for the tick".

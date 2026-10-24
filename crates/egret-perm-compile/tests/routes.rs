@@ -9822,6 +9822,72 @@ async fn a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption() {
     );
 }
 
+/// Live check finding 2, the mirror of D3: StarRocks expands a classification
+/// row filter over the tagged COLUMNS of a table, so a classification on the
+/// table only compiles nothing there. Explain lists the rule on the StarRocks
+/// profile and the rows line says why; the rule preview counts the tables
+/// (`starrocksTableOnly`). The compiler fix is the D2 StarRocks package.
+#[tokio::test]
+async fn a_starrocks_row_filter_on_a_table_classification_filters_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let _lock = exclusive(&f).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule = row_filter_rule(
+        "vmask-sr-table",
+        json!({"type": "tag", "key": tag.key}),
+        "region = 'us'",
+    );
+    let (status, preview) = preview_rule(&f, &token, rule.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(
+        preview["effect"]["starrocksTableOnly"],
+        json!({"catalogs": [name], "tables": 1}),
+        "{preview}"
+    );
+    let rule_name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_with(&f, &token, explain_body(f.catalog_id, "analyst")).await;
+    let sr = profile_for(&body, "starrocks");
+    assert_eq!(
+        sr["row_filter"]["decision"]["kind"], "no_filter",
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["row_filter_not_applied"],
+        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["effect_lines"][1]["text"],
+        json!(format!(
+            "analyst sees every row: rule {rule_name} does not filter on StarRocks here, because \
+             {} is on the table, not on a column",
+            tag.name
+        )),
+        "body: {body}"
+    );
+}
+
 /// A classification rule is compiled for a Trino profile only through the
 /// profile's `tagService`, and skipped (`MissingTagService`) when it names no
 /// existing profile. So a Trino engine on such a profile does NOT enforce a

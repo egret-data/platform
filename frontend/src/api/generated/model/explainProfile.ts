@@ -105,9 +105,10 @@ export interface ExplainProfile {
      */
   clearance_not_enforced?: ExplainClearanceGap[];
   /**
-     * Trino only, for a read naming a table, when the profile's download has
-     * tag policies: the classification row filters that filter nothing here
-     * ([`ExplainRowFilterGap`]).
+     * For a read naming a table: the classification row filters that filter
+     * nothing here ([`ExplainRowFilterGap`]). On Trino (when the download has
+     * tag policies), those whose classification is on columns of the table
+     * only; on StarRocks, those whose classification is on the table only.
      */
   row_filter_not_applied?: ExplainRowFilterGap[];
   /**

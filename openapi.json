@@ -45671,7 +45671,7 @@
             "items": {
               "$ref": "#/components/schemas/ExplainRowFilterGap"
             },
-            "description": "Trino only, for a read naming a table, when the profile's download has\ntag policies: the classification row filters that filter nothing here\n([`ExplainRowFilterGap`])."
+            "description": "For a read naming a table: the classification row filters that filter\nnothing here ([`ExplainRowFilterGap`]). On Trino (when the download has\ntag policies), those whose classification is on columns of the table\nonly; on StarRocks, those whose classification is on the table only."
           },
           "effect_lines": {
             "type": "array",
@@ -45849,7 +45849,7 @@
       },
       "ExplainRowFilterGap": {
         "type": "object",
-        "description": "A classification row-filter rule that filters nothing on a Trino profile\nfor the target's table (spec §5.8, D3, E14): its classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment.",
+        "description": "A classification row-filter rule that filters nothing on a profile for the\ntarget's table. Trino (spec §5.8, D3, E14): the classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment. StarRocks (live check finding 2): the\nclassification is on the table and on none of its columns, and StarRocks\nexpands the rule over tagged columns, so nothing compiles.",
         "required": [
           "rule_id",
           "rule_name",
@@ -52917,6 +52917,17 @@
                 "description": "A classification ROW FILTER only: the tables it filters nothing on in\nTrino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when\nthere is none."
               }
             ]
+          },
+          "starrocksTableOnly": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StarRocksTableOnly",
+                "description": "A classification ROW FILTER only: the tables it filters nothing on in\nStarRocks ([`StarRocksTableOnly`]); `null` otherwise."
+              }
+            ]
           }
         }
       },
@@ -54707,6 +54718,29 @@
             ],
             "description": "Size of the FE metadata PVC, as a k8s binary quantity (`\"20Gi\"`).\nOmitted ⇒ preserved on update, then\n`egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.",
             "default": null
+          }
+        }
+      },
+      "StarRocksTableOnly": {
+        "type": "object",
+        "description": "Where a classification row filter filters nothing on StarRocks (live check\nfinding 2, the mirror of D3): tables where the classification is on the\ntable and on none of its columns, in catalogs a StarRocks engine enforces the\nrule on. StarRocks expands a classification row filter over the TAGGED\nCOLUMNS of each table, so a table-level attachment compiles nothing. The\ncompiler fix belongs with the StarRocks table-level clearance (D2) package.",
+        "required": [
+          "catalogs",
+          "tables"
+        ],
+        "properties": {
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The catalogs those tables are in, by name, sorted."
+          },
+          "tables": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct tables.",
+            "minimum": 0
           }
         }
       },

@@ -931,19 +931,21 @@ impl Builder<'_> {
         l.code(filter_expr);
     }
 
-    /// D3: ": rule *X* does not filter on Trino here, because *PII* is on a
-    /// column, not on the table".
+    /// D3 and its StarRocks mirror: ": rule *X* does not filter on Trino here,
+    /// because *PII* is on a column, not on the table" (StarRocks: "on the
+    /// table, not on a column").
     fn append_row_filter_gaps(&self, l: &mut Line, gaps: &[ExplainRowFilterGap]) {
-        if self.input.profile.engine != WireEngineType::Trino {
-            return;
-        }
+        let (engine, here, there) = match self.input.profile.engine {
+            WireEngineType::Trino => ("Trino", "a column", "the table"),
+            WireEngineType::StarRocks => ("StarRocks", "the table", "a column"),
+        };
         match gaps {
             [] => {}
             [gap] => {
                 l.text(": rule ");
                 l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
                 l.text(format!(
-                    " does not filter on Trino here, because {} is on a column, not on the table",
+                    " does not filter on {engine} here, because {} is on {here}, not on {there}",
                     gap.tag_name
                 ));
             }
@@ -959,10 +961,10 @@ impl Builder<'_> {
                     }
                     l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
                 }
-                l.text(
-                    " do not filter on Trino here, because their classifications are on a \
-                     column, not on the table",
-                );
+                l.text(format!(
+                    " do not filter on {engine} here, because their classifications are on \
+                     {here}, not on {there}"
+                ));
             }
         }
     }
