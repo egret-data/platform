@@ -72,7 +72,8 @@ use egret_policy::{
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
-    AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
+    AccessRequest, Decision, EngineConfig, MaskDecision, RowFilterDecision, TagServiceResource,
+    UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::requests_all_values;
@@ -80,7 +81,7 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
-use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
+use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision};
 use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
@@ -335,13 +336,13 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         // `WireUnmodelled`/`WireServiceDefIssue`, which carry the four leaf
         // enums. The mask mirrors (`WireMaskDecision`, `WireMaskResult`) are
         // registered because `ExplainProfile::mask` returns one (view governance
-        // Task 3). The row-filter mirrors are deliberately NOT: no response
-        // shape carries one yet, and a registered-but-unreachable schema is a
-        // contract claim nothing honours. Register them in the same breath as
-        // the field that returns one.
+        // Task 3), and the row-filter mirrors because `ExplainProfile::row_filter`
+        // does (spec §5.3).
         crate::explain_wire::WireDecision,
         crate::explain_wire::WireMaskDecision,
         crate::explain_wire::WireMaskResult,
+        crate::explain_wire::WireRowFilterDecision,
+        crate::explain_wire::WireRowFilterResult,
         crate::explain_wire::WireDenyReason,
         crate::explain_wire::WireUndecidableCause,
         // Reachable from `WireUndecidableCause::EvalOrderAmbiguous::outcomes`.
@@ -765,6 +766,12 @@ pub struct ExplainProfile {
     /// request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
+    /// The rows the subject sees: present for a `read` explain whose target
+    /// names a table (or a column of one), on every engine. Asked against the
+    /// table with a TABLE-level tag resolution, so a classification on a column
+    /// does not reach it (E14: on Trino it filters nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_filter: Option<ExplainRowFilter>,
     /// `true` when StarRocks consults no access policy for the target column:
     /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
     /// policy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written
@@ -805,6 +812,19 @@ pub struct ExplainMask {
     pub decision: WireMaskDecision,
     /// The deciding mask policy's `perm` model object, as for an access verdict;
     /// `None` for no mask or an undecidable answer.
+    pub attribution: Option<ExplainAttribution>,
+}
+
+/// The row-filter verdict for the target's TABLE (spec §5.3): Ranger's
+/// `select` request against the table, which is the granularity both engines
+/// filter at, so a column target shows its table's filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainRowFilter {
+    /// Always `select`: a row filter is applied to a read.
+    pub access_type: String,
+    pub decision: WireRowFilterDecision,
+    /// The deciding row-filter policy's `perm` model object; `None` for no
+    /// filter or an undecidable answer.
     pub attribution: Option<ExplainAttribution>,
 }
 
@@ -2430,6 +2450,19 @@ pub(crate) async fn explain_users(
         .map(resolved_tags_for_display)
         .unwrap_or_default();
 
+    // The row-filter question is about the TABLE (spec §5.3), so it gets its
+    // own resolution of the table scope: reusing the column's would hand a
+    // column-level tag to the table request, which no engine does (E14). Its
+    // decline needs no report of its own: the table scope carries a subset of
+    // the column target's values, so it declines only where that one did.
+    let table_scope = (action == Action::Read && target.table.is_some()).then(|| Scope {
+        column: None,
+        ..target.clone()
+    });
+    let table_tags = match &table_scope {
+        Some(scope) => explain_tag_inputs(resolved_tags_for_target(&mut *conn, scope).await?).0,
+        None => None,
+    };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
@@ -2467,6 +2500,9 @@ pub(crate) async fn explain_users(
         // consults) travels inside the same envelope.
         let service_def = ServiceDef::parse(&artifact.service_def);
         let resource = crate::handwritten::object_request(engine, &catalog_name, target);
+        let table_resource = table_scope
+            .as_ref()
+            .map(|scope| crate::handwritten::object_request(engine, &catalog_name, scope));
         // `EngineConfig::without_super_users()` records a fact about egret's
         // own provisioning, and an unknown super-user list would make every
         // decision unknowable (`isSuperUser` is checked before any policy and
@@ -2607,6 +2643,38 @@ pub(crate) async fn explain_users(
                 });
             }
 
+            let row_filter = match &table_resource {
+                Some(table_resource) => {
+                    let request = AccessRequest {
+                        user: user.clone(),
+                        groups: BTreeSet::new(),
+                        roles: BTreeSet::new(),
+                        access_type: "select".to_string(),
+                        resource: table_resource.clone(),
+                        owner: None,
+                        resolved_tags: table_tags.clone(),
+                    };
+                    let decision = egret_ranger_eval::eval::evaluate_row_filter(
+                        &artifact,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let attribution = match &decision {
+                        RowFilterDecision::Filtered(r) => {
+                            attribution_for_name(&mut *conn, &mut cache, &r.policy_name).await?
+                        }
+                        RowFilterDecision::NoFilter | RowFilterDecision::Undecidable { .. } => None,
+                    };
+                    Some(ExplainRowFilter {
+                        access_type: "select".to_string(),
+                        decision: WireRowFilterDecision::from(&decision),
+                        attribution,
+                    })
+                }
+                None => None,
+            };
+
             per_user[i].push(ExplainProfile {
                 service_id,
                 service_name: svc.name.clone(),
@@ -2615,6 +2683,7 @@ pub(crate) async fn explain_users(
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,
                 mask,
+                row_filter,
                 masked_read_skips_access,
             });
         }
@@ -3329,7 +3398,7 @@ pub(crate) struct ExplainCache {
     /// part of the attribution), each costing two reads uncached (E18).
     clearances: HashMap<String, ExplainAttribution>,
     /// `perm.rules` rows by id, `None` when the rule is gone.
-    rules: HashMap<Uuid, Option<egret_perm::Rule>>,
+    rules: HashMap<Uuid, Option<Rule>>,
 }
 
 impl ExplainCache {
@@ -3337,7 +3406,7 @@ impl ExplainCache {
         &mut self,
         conn: &mut L,
         id: Uuid,
-    ) -> Result<Option<&egret_perm::Rule>, PermHttpError> {
+    ) -> Result<Option<&Rule>, PermHttpError> {
         let rule = match self.rules.entry(id) {
             std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
             std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
@@ -3353,11 +3422,11 @@ trait RuleLookups {
     fn rule(
         &mut self,
         id: Uuid,
-    ) -> impl std::future::Future<Output = Result<Option<egret_perm::Rule>, PermHttpError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<Rule>, PermHttpError>> + Send;
 }
 
 impl RuleLookups for sqlx::PgConnection {
-    async fn rule(&mut self, id: Uuid) -> Result<Option<egret_perm::Rule>, PermHttpError> {
+    async fn rule(&mut self, id: Uuid) -> Result<Option<Rule>, PermHttpError> {
         Ok(egret_perm::get_rule_via(self, id).await?)
     }
 }
@@ -4594,7 +4663,7 @@ mod explain_target_tests {
 #[cfg(test)]
 mod wiring_tests {
     use super::{
-        attribution_for, ClearanceLookups, ExplainAttribution, ExplainCache, PermHttpError,
+        attribution_for, ClearanceLookups, ExplainAttribution, ExplainCache, PermHttpError, Rule,
         RuleLookups,
     };
     use egret_ranger_eval::eval::{Decision, DenyReason};
@@ -4655,7 +4724,7 @@ mod wiring_tests {
     /// No rule row: the attribution then carries `name: None`, which is what a
     /// deleted rule whose compiled policy is still served reads as.
     impl RuleLookups for FakeLookups {
-        async fn rule(&mut self, id: Uuid) -> Result<Option<egret_perm::Rule>, PermHttpError> {
+        async fn rule(&mut self, id: Uuid) -> Result<Option<Rule>, PermHttpError> {
             self.rules_asked.push(id);
             Ok(None)
         }

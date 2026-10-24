@@ -453,3 +453,14 @@ Deviations the code forces are recorded here, per task, as they happen.
 - The helper `trino_tag_profile` returns the catalog and the **tag** service's id (not the Trino profile's), because
   the table-level and declined-resolution tests write a hand tag mask into it (`hand_tag_mask`). The declined
   resolution uses the fold-divergent column fixture (`emaıl`), as the existing access test does.
+
+### Task 4 (row-filter decision)
+
+- Reuses the existing `WireRowFilterDecision`/`WireRowFilterResult` (Step 0, E5) and registers them in the OpenAPI
+  components now that `ExplainProfile.row_filter` returns one.
+- `ExplainRowFilter` carries `access_type`, `decision`, `attribution`; `exemption` joins it in Task 5.
+- The table-scope resolution's own decline is not reported separately: the table scope's values are a subset of the
+  column target's, so it declines only where the column resolution already did (and `tag_resolution_declined` says
+  so).
+- Mutation: handing the column-level tag set to the table request turns
+  `a_trino_row_filter_on_a_column_classification_filters_nothing` red (it filters), which is E14's mechanism.

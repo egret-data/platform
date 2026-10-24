@@ -9132,6 +9132,145 @@ async fn a_declined_resolution_leaves_the_trino_mask_undecidable() {
     );
 }
 
+/// `POST /perm/explain` with `ask` as the body.
+async fn explain_with(f: &Fixture, token: &str, ask: Value) -> Value {
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body
+}
+
+fn row_filter_rule(name: &str, selector: Value, filter_expr: &str) -> Value {
+    json!({
+        "name": unique(name),
+        "kind": { "type": "row_filter", "filter_expr": filter_expr },
+        "selector": selector,
+        "exempt": { "include": [], "exclude": [] }
+    })
+}
+
+/// Spec §5.3 (C3): the row-filter decision joins the answer, asked against the
+/// TABLE; a column target shows its table's filter.
+#[tokio::test]
+async fn explain_reports_a_path_row_filter_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let rule_id = store_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-path-rf",
+            json!({"type": "path", "catalog_id": f.catalog_id,
+                   "schema": "sales", "table": "orders", "column": null}),
+            "region = 'us'",
+        ),
+    )
+    .await;
+
+    let table = explain_with(&f, &token, explain_body(f.catalog_id, "analyst")).await;
+    let column = explain_column(&f, &token, "analyst").await;
+    for body in [&table, &column] {
+        let rf = &profile_for(body, "starrocks")["row_filter"];
+        assert_eq!(rf["access_type"], "select", "body: {body}");
+        assert_eq!(rf["decision"]["kind"], "filtered", "body: {body}");
+        assert_eq!(
+            rf["decision"]["result"]["filter_expr"], "region = 'us'",
+            "body: {body}"
+        );
+        assert_eq!(rf["attribution"]["kind"], "rule", "body: {body}");
+        assert_eq!(rf["attribution"]["rule_id"], json!(rule_id), "body: {body}");
+    }
+}
+
+/// A Trino classification row filter on a TABLE-level classification filters.
+#[tokio::test]
+async fn explain_reports_a_trino_classification_row_filter_on_a_tagged_table() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rft").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    let _lock = exclusive(&f).await;
+    store_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-trino-rft",
+            json!({"type": "tag", "key": tag.key}),
+            "region = 'us'",
+        ),
+    )
+    .await;
+
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let body = explain_with(&f, &token, ask).await;
+    let rf = &profile_for(&body, "trino")["row_filter"];
+    assert_eq!(rf["decision"]["kind"], "filtered", "body: {body}");
+    assert_eq!(
+        rf["decision"]["result"]["filter_expr"], "region = 'us'",
+        "body: {body}"
+    );
+}
+
+/// E14: on Trino a classification on a COLUMN reaches the table request as a
+/// descendant, so its row filter filters nothing. The table request is asked
+/// with the table-level resolution, so explain says so.
+#[tokio::test]
+async fn a_trino_row_filter_on_a_column_classification_filters_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rfc").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    let _lock = exclusive(&f).await;
+    store_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-trino-rfc",
+            json!({"type": "tag", "key": tag.key}),
+            "region = 'us'",
+        ),
+    )
+    .await;
+
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let body = explain_with(&f, &token, ask).await;
+    let rf = &profile_for(&body, "trino")["row_filter"];
+    assert_eq!(rf["decision"]["kind"], "no_filter", "body: {body}");
+}
+
+/// A table with no row filter answers `no_filter`; a `write` has no row filter.
+#[tokio::test]
+async fn a_read_without_a_filter_is_no_filter_and_a_write_has_none() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (_trino, _starrocks, catalog_id) = two_profile_catalog(&f, "vmask-rf-none").await;
+
+    let read = explain_with(&f, &token, explain_body(catalog_id, "analyst")).await;
+    for engine in ["trino", "starrocks"] {
+        assert_eq!(
+            profile_for(&read, engine)["row_filter"]["decision"]["kind"],
+            "no_filter",
+            "body: {read}"
+        );
+    }
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["action"] = json!("write");
+    let write = explain_with(&f, &token, ask).await;
+    for engine in ["trino", "starrocks"] {
+        assert!(
+            profile_for(&write, engine).get("row_filter").is_none(),
+            "body: {write}"
+        );
+    }
+}
+
 /// A classification rule is compiled for a Trino profile only through the
 /// profile's `tagService`, and skipped (`MissingTagService`) when it names no
 /// existing profile. So a Trino engine on such a profile does NOT enforce a
