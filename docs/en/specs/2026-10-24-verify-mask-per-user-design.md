@@ -435,3 +435,15 @@ Deviations the code forces are recorded here, per task, as they happen.
   there.
 - `WireTiedOutcome` (`kind: mask | row_filter`) is registered in the OpenAPI components beside
   `WireUndecidableCause`; the wire omits an empty `outcomes`.
+
+### Task 2 (snapshot, cache, rule names)
+
+- Merged `origin/main` `624ec61f` (#741) after Task 1: no conflict, no generated-client change yet.
+- The cache holds only what is read so far: clearance attributions by policy name and `perm.rules` rows by id
+  (`egret_perm::Rule` from `get_rule_via`, which already carries the exemptions, so no separate `RuleFacts`).
+  Exemption, membership and tag entries join it in the tasks that read them.
+- The rule read is a second seam trait `RuleLookups` beside `ClearanceLookups` (the wiring tests' fake implements
+  both) rather than a method on `ClearanceLookups`, whose name and docs are about clearances.
+- `ExplainAttribution::Rule.name` also reaches `POST /perm/engine-grants/explain` (`routes/engine_grants.rs`), which
+  calls `attribution_for` with a fresh cache.
+- Both snapshots end with `rollback`, as every other read-only snapshot in the crate does.

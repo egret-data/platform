@@ -43,7 +43,7 @@
 //! family rather than adding a key: SP4c may fold the hand-written policy
 //! editor away entirely, and a key added now would have to be retired twice.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
@@ -589,9 +589,13 @@ pub enum ExplainAttribution {
     /// `perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'
     /// per-column expansion, where ONE `perm.rules` row becomes N policies and
     /// the locator is the only thing that says which expansion decided.
+    ///
+    /// `name` is the rule's `perm.rules.name` (spec C11), `None` when the row
+    /// is gone: a compiled policy outlives its rule until the next recompile.
     Rule {
         rule_id: Uuid,
         locator: Option<String>,
+        name: Option<String>,
     },
     /// `perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger
     /// analogue on the wire, so `tag` and `required_roles` are reconstructed
@@ -2315,15 +2319,23 @@ async fn explain(
     Json(body): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    check_explain_target(&mut conn, &p, &body.target).await?;
+    // One read-only snapshot (spec C8): the model rows that explain a verdict
+    // (a rule's name, later its exemptions) and the artifact the verdict is
+    // evaluated over see one state.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    check_explain_target(&mut tx, &p, &body.target).await?;
     let mut out = explain_users(
-        &mut conn,
+        &mut tx,
         std::slice::from_ref(&body.subject.user),
         body.action,
         &body.target,
     )
     .await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
     Ok(Json(out.remove(0)))
 }
 
@@ -2417,6 +2429,7 @@ pub(crate) async fn explain_users(
         .map(resolved_tags_for_display)
         .unwrap_or_default();
 
+    let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
         let svc = get_service_by_id_via(&mut *conn, service_id).await?;
@@ -2534,7 +2547,7 @@ pub(crate) async fn explain_users(
                 );
                 let attribution = match &decision {
                     MaskDecision::Masked(m) => {
-                        attribution_for_name(&mut *conn, &m.policy_name).await?
+                        attribution_for_name(&mut *conn, &mut cache, &m.policy_name).await?
                     }
                     MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
                 };
@@ -2586,7 +2599,7 @@ pub(crate) async fn explain_users(
                 // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
                 // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
                 // and a `PoolConnection` does not — inference needs the deref.
-                let attribution = attribution_for(&mut *conn, &decision).await?;
+                let attribution = attribution_for(&mut *conn, &mut cache, &decision).await?;
                 accesses.push(ExplainAccess {
                     access_type: access_type.to_string(),
                     decision: WireDecision::from(&decision),
@@ -3243,21 +3256,23 @@ async fn envelope_via(
 /// reached this function was DB-gated. `ClearanceLookups` is the seam that
 /// closes it; `sqlx::PgConnection` is the production implementation and the
 /// tests at the bottom of this file hand it a fake that records what was asked.
-async fn attribution_for<L: ClearanceLookups + Send>(
+async fn attribution_for<L: ClearanceLookups + RuleLookups + Send>(
     conn: &mut L,
+    cache: &mut ExplainCache,
     decision: &Decision,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     let name = match decision {
         Decision::Allowed { policy_name, .. } | Decision::Denied { policy_name, .. } => policy_name,
         Decision::Undecidable { .. } => return Ok(None),
     };
-    attribution_for_name(conn, name).await
+    attribution_for_name(conn, cache, name).await
 }
 
 /// [`attribution_for`] for a deciding policy's NAME, which is all a mask
 /// verdict carries.
-async fn attribution_for_name<L: ClearanceLookups + Send>(
+async fn attribution_for_name<L: ClearanceLookups + RuleLookups + Send>(
     conn: &mut L,
+    cache: &mut ExplainCache,
     name: &str,
 ) -> Result<Option<ExplainAttribution>, PermHttpError> {
     Ok(match attribute_policy_name(name) {
@@ -3266,6 +3281,7 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
         Some(PolicyAttribution::Rule { id, locator }) => Some(ExplainAttribution::Rule {
             rule_id: id,
             locator,
+            name: cache.rule(conn, id).await?.map(|r| r.name.clone()),
         }),
         // A clearance names a `tags.id` and nothing else. `tag` and
         // `required_roles` are the two facts a steward needs and neither is on
@@ -3278,6 +3294,9 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
             Some(ExplainAttribution::EngineGrant { engine_grant_id })
         }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
+            if let Some(hit) = cache.clearances.get(name) {
+                return Ok(Some(hit.clone()));
+            }
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
             // lookup to run. What the result MEANS is `clearing_roles`' job.
@@ -3285,14 +3304,62 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
                 Some(key) => conn.gates_for(key).await?,
                 None => Vec::new(),
             };
-            Some(ExplainAttribution::Clearance {
+            let attribution = ExplainAttribution::Clearance {
                 tag_id,
                 required_roles: clearing_roles(tag.as_deref(), &gates),
                 tag,
                 locator,
-            })
+            };
+            cache
+                .clearances
+                .insert(name.to_string(), attribution.clone());
+            Some(attribution)
         }
     })
+}
+
+/// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).
+/// A group answer evaluates up to `EXPLAIN_MEMBER_LIMIT` members against one
+/// artifact per profile, so without it every member's clearance or rule verdict
+/// re-reads the same rows. Per request and never shared: it lives inside the
+/// request's snapshot, so it cannot serve a row another state wrote.
+#[derive(Default)]
+pub(crate) struct ExplainCache {
+    /// Clearance attributions by the deciding policy's NAME (the locator is
+    /// part of the attribution), each costing two reads uncached (E18).
+    clearances: HashMap<String, ExplainAttribution>,
+    /// `perm.rules` rows by id, `None` when the rule is gone.
+    rules: HashMap<Uuid, Option<egret_perm::Rule>>,
+}
+
+impl ExplainCache {
+    async fn rule<L: RuleLookups + Send>(
+        &mut self,
+        conn: &mut L,
+        id: Uuid,
+    ) -> Result<Option<&egret_perm::Rule>, PermHttpError> {
+        let rule = match self.rules.entry(id) {
+            std::collections::hash_map::Entry::Occupied(hit) => hit.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
+        };
+        Ok(rule.as_ref())
+    }
+}
+
+/// The rule read a rule attribution needs, behind a trait for the same reason
+/// as [`ClearanceLookups`]: the attribution wiring is tested with no database.
+trait RuleLookups {
+    /// The rule with its exemptions, or `None` when the row is gone.
+    fn rule(
+        &mut self,
+        id: Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<egret_perm::Rule>, PermHttpError>> + Send;
+}
+
+impl RuleLookups for sqlx::PgConnection {
+    async fn rule(&mut self, id: Uuid) -> Result<Option<egret_perm::Rule>, PermHttpError> {
+        Ok(egret_perm::get_rule_via(self, id).await?)
+    }
 }
 
 /// The two reads a clearance attribution needs, behind a trait so that
@@ -4526,7 +4593,10 @@ mod explain_target_tests {
 
 #[cfg(test)]
 mod wiring_tests {
-    use super::{attribution_for, ClearanceLookups, ExplainAttribution, PermHttpError};
+    use super::{
+        attribution_for, ClearanceLookups, ExplainAttribution, ExplainCache, PermHttpError,
+        RuleLookups,
+    };
     use egret_ranger_eval::eval::{Decision, DenyReason};
     use uuid::Uuid;
 
@@ -4536,6 +4606,7 @@ mod wiring_tests {
         gates: Vec<(String, Vec<String>)>,
         tags_asked: Vec<Uuid>,
         gates_asked: Vec<String>,
+        rules_asked: Vec<Uuid>,
     }
 
     impl FakeLookups {
@@ -4553,6 +4624,7 @@ mod wiring_tests {
                     .collect(),
                 tags_asked: Vec::new(),
                 gates_asked: Vec::new(),
+                rules_asked: Vec::new(),
             }
         }
     }
@@ -4577,6 +4649,15 @@ mod wiring_tests {
                 .filter(|(k, _)| k == tag_key)
                 .cloned()
                 .collect())
+        }
+    }
+
+    /// No rule row: the attribution then carries `name: None`, which is what a
+    /// deleted rule whose compiled policy is still served reads as.
+    impl RuleLookups for FakeLookups {
+        async fn rule(&mut self, id: Uuid) -> Result<Option<egret_perm::Rule>, PermHttpError> {
+            self.rules_asked.push(id);
+            Ok(None)
         }
     }
 
@@ -4605,9 +4686,13 @@ mod wiring_tests {
     async fn a_resolved_clearance_carries_the_gates_roles_onto_the_wire() {
         let mut lookups =
             FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(None)),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4630,9 +4715,13 @@ mod wiring_tests {
     #[tokio::test]
     async fn an_unresolved_clearance_sends_null_roles_and_asks_no_gate() {
         let mut lookups = FakeLookups::new(None, &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(Some("wh.s.t.ssn"))))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(Some("wh.s.t.ssn"))),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4654,9 +4743,13 @@ mod wiring_tests {
     #[tokio::test]
     async fn a_resolved_clearance_with_no_gate_sends_an_empty_list() {
         let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[]);
-        let got = attribution_for(&mut lookups, &denied(&clearance_name(None)))
-            .await
-            .expect("no error");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&clearance_name(None)),
+        )
+        .await
+        .expect("no error");
         assert_eq!(
             got,
             Some(ExplainAttribution::Clearance {
@@ -4686,6 +4779,7 @@ mod wiring_tests {
                 Some(ExplainAttribution::Rule {
                     rule_id: rule,
                     locator: Some("wh.s.t.c".to_string()),
+                    name: None,
                 }),
             ),
             // Ranger's own super-user short-circuit: a real decider with no
@@ -4694,11 +4788,39 @@ mod wiring_tests {
             (Decision::Undecidable { why: Vec::new() }, None),
         ] {
             let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
-            let got = attribution_for(&mut lookups, &decision).await.expect("ok");
+            let got = attribution_for(&mut lookups, &mut ExplainCache::default(), &decision)
+                .await
+                .expect("ok");
             assert_eq!(got, want, "for {decision:?}");
             assert_eq!(lookups.tags_asked, Vec::<Uuid>::new(), "for {decision:?}");
             assert!(lookups.gates_asked.is_empty(), "for {decision:?}");
         }
+    }
+
+    /// Spec C7: one request attributes many verdicts to the same clearance
+    /// (every member of a group, every profile), and the two reads behind it
+    /// run once. The same holds for a rule's row.
+    #[tokio::test]
+    async fn a_clearance_is_looked_up_once_per_request() {
+        let mut lookups =
+            FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["sp4d2a_cleared"])]);
+        let mut cache = ExplainCache::default();
+        let rule = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            for name in [clearance_name(None), format!("perm-rule-{rule}")] {
+                answers.push(
+                    attribution_for(&mut lookups, &mut cache, &denied(&name))
+                        .await
+                        .expect("ok"),
+                );
+            }
+        }
+        assert_eq!(lookups.tags_asked.len(), 1, "{:?}", lookups.tags_asked);
+        assert_eq!(lookups.gates_asked.len(), 1, "{:?}", lookups.gates_asked);
+        assert_eq!(lookups.rules_asked, vec![rule]);
+        assert_eq!(answers[0], answers[2], "a cached answer is the same answer");
+        assert_eq!(answers[0], answers[4]);
     }
 
     /// F11 (spec §4.3 item 5): a deciding `perm-engine-{uuid}` attributes to
@@ -4708,9 +4830,13 @@ mod wiring_tests {
     async fn an_engine_grant_attributes_by_its_id_and_asks_no_clearance_lookup() {
         let id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
         let mut lookups = FakeLookups::new(Some("sp4d2a_ssn"), &[("sp4d2a_ssn", &["r"])]);
-        let got = attribution_for(&mut lookups, &denied(&format!("perm-engine-{id}")))
-            .await
-            .expect("ok");
+        let got = attribution_for(
+            &mut lookups,
+            &mut ExplainCache::default(),
+            &denied(&format!("perm-engine-{id}")),
+        )
+        .await
+        .expect("ok");
         assert_eq!(
             got,
             Some(ExplainAttribution::EngineGrant {

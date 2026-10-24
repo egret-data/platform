@@ -4469,6 +4469,43 @@ async fn a_hand_written_column_deny_under_the_clearance_mask_null_is_skipped_on_
     lift_gate(&f, tag_id).await;
 }
 
+/// Spec C11: a verdict a rule decides names the rule, so the answer can say
+/// "rule *Hash personal data*" without a second lookup by the client.
+#[tokio::test]
+async fn explain_names_the_rule_it_attributes() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name = unique("vmask-names-the-rule");
+    let rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, written) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {written}");
+
+    let body = explain_column(&f, &token, "analyst").await;
+    let mask = &profile_for(&body, "starrocks")["mask"];
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["rule_id"], written["id"],
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["name"], json!(name), "body: {body}");
+}
+
 /// Final review V-1, live 2c: a rule `MASK_HASH` folded into the clearance mask
 /// for a cleared reader, plus a hand-written column `select` deny. StarRocks
 /// refused that read (`5204`): a `MASK_HASH` column IS access-checked. So the
