@@ -1,4 +1,4 @@
-import { type ScheduleSummary } from "@/api/alerts";
+import { type ScheduleSummary, type ScheduleType } from "@/api/alerts";
 import {
   Dialog,
   DialogContent,
@@ -34,7 +34,7 @@ export function RunLogDrawer({
         <DialogHeader>
           <DialogTitle>Run log — {schedule.name}</DialogTitle>
         </DialogHeader>
-        <RunLogTable ws={ws} scheduleId={schedule.id} />
+        <RunLogTable ws={ws} scheduleId={schedule.id} type={schedule.type as ScheduleType} />
       </DialogContent>
     </Dialog>
   );

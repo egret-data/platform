@@ -1,4 +1,12 @@
-import { useScheduleRuns } from "@/api/alerts";
+import { useScheduleRuns, type ScheduleType } from "@/api/alerts";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { StateBadge } from "@/routes/explore/Alerts";
@@ -13,16 +21,22 @@ import { StateBadge } from "@/routes/explore/Alerts";
  *
  * `limit` exists because the page shows a recent slice while the drawer shows
  * the log — the same rows, a different amount of them.
+ *
+ * A report's run measures nothing, so its log has no Value column (KI-171):
+ * the column was always "—" and squeezed its heading into Detail's.
  */
 export function RunLogTable({
   ws,
   scheduleId,
+  type,
   limit,
 }: {
   ws: string;
   scheduleId: string;
+  type: ScheduleType;
   limit?: number;
 }) {
+  const hasValue = type !== "report";
   const { data, isLoading } = useScheduleRuns(ws, scheduleId);
   const all = data ?? [];
   const runs = limit ? all.slice(0, limit) : all;
@@ -37,26 +51,30 @@ export function RunLogTable({
   }
 
   return (
-    <table className="w-full text-sm">
-      <thead className="border-b text-left text-muted-foreground">
-        <tr>
-          <th className="py-2 font-medium">State</th>
-          <th className="py-2 font-medium">Started</th>
-          <th className="py-2 font-medium">Value</th>
-          <th className="py-2 font-medium">Detail</th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table>
+      <TableHeader>
+        <TableRow className="hover:bg-transparent">
+          <TableHead className="w-28 font-medium text-muted-foreground">State</TableHead>
+          <TableHead className="w-32 font-medium text-muted-foreground">Started</TableHead>
+          {hasValue && (
+            <TableHead className="w-24 font-medium text-muted-foreground">Value</TableHead>
+          )}
+          <TableHead className="font-medium text-muted-foreground">Detail</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {runs.map((r) => (
-          <tr key={r.id} className="border-b align-top last:border-0">
-            <td className="py-2">
+          <TableRow key={r.id} className="align-top">
+            <TableCell className="py-2">
               <StateBadge state={r.state} />
-            </td>
-            <td className="py-2 text-muted-foreground">
+            </TableCell>
+            <TableCell className="py-2 text-muted-foreground">
               <RelativeTime iso={r.started_at} />
-            </td>
-            <td className="py-2">{r.value ?? "—"}</td>
-            <td className="py-2 text-muted-foreground">
+            </TableCell>
+            {hasValue && <TableCell className="py-2 tabular-nums">{r.value ?? "—"}</TableCell>}
+            {/* Detail is the one column that wraps: it carries the server's
+                error message verbatim, which can be long. */}
+            <TableCell className="whitespace-normal break-words py-2 text-muted-foreground">
               {r.error ? (
                 <span className="text-destructive">{r.error}</span>
               ) : r.notification_sent_at ? (
@@ -64,10 +82,10 @@ export function RunLogTable({
               ) : (
                 "—"
               )}
-            </td>
-          </tr>
+            </TableCell>
+          </TableRow>
         ))}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   );
 }
