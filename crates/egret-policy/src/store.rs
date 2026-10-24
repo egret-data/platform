@@ -158,7 +158,7 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
 /// Deliberately does not require `origin = 'generated'`: a `manual` profile
 /// is exactly the case the round-2 report showed getting silently
 /// steamrolled, so gating this on `origin` would reopen the same hole.
-fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
+pub(crate) fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     if is_compiler_owned_policy_name(name) {
         return Err(PolicyStoreError::CompilerOwned(format!(
             "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
@@ -189,7 +189,10 @@ async fn service_type_of(
 /// of `service_type`. A hard error, not a `debug_assert`, so the writer cannot
 /// drift from the predicate. This is also what refuses a Trino-shaped
 /// `all - …` name aimed at a StarRocks profile.
-fn refuse_non_infrastructure_name(service_type: &str, name: &str) -> Result<(), PolicyStoreError> {
+pub(crate) fn refuse_non_infrastructure_name(
+    service_type: &str,
+    name: &str,
+) -> Result<(), PolicyStoreError> {
     if !is_egret_infrastructure_policy(service_type, name) {
         return Err(PolicyStoreError::BadRequest(format!(
             "policy name {name:?} is not an egret infrastructure policy name on a \

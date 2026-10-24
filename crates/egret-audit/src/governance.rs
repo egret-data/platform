@@ -41,6 +41,9 @@ pub mod action {
     pub const ENGINE_GRANT_CREATE: &str = "engine_grant:create";
     pub const ENGINE_GRANT_UPDATE: &str = "engine_grant:update";
     pub const ENGINE_GRANT_DELETE: &str = "engine_grant:delete";
+    // Username takeover (spec 2026-10-23 §4.4): who was deleted, with the
+    // username retired for good.
+    pub const USER_DELETE: &str = "user:delete";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -51,14 +54,17 @@ pub mod resource {
     pub const RANGER_POLICY: &str = "ranger_policy";
     pub const POLICY_PROFILE: &str = "policy_profile";
     pub const ENGINE_GRANT: &str = "engine_grant";
+    pub const USER: &str = "user";
 }
 
 /// Which permission reads an event in the feed: `Policy` needs `policy:read`,
-/// `Tag` needs `tag:read`.
+/// `Tag` needs `tag:read`, `User` needs `user:read`. `User` is its own family
+/// because its events carry a person's email (username-takeover spec, D4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
     Policy,
     Tag,
+    User,
 }
 
 /// Every governance `(action, resource_type)` pair and its family. The last
@@ -129,6 +135,7 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
         resource::ENGINE_GRANT,
         Family::Policy,
     ),
+    (action::USER_DELETE, resource::USER, Family::User),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -156,6 +163,7 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::ENGINE_GRANT_CREATE,
     action::ENGINE_GRANT_UPDATE,
     action::ENGINE_GRANT_DELETE,
+    action::USER_DELETE,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

@@ -862,7 +862,7 @@ async fn hard_deleting_a_member_recompiles() {
     );
 
     UserRepo::new(db.clone())
-        .hard_delete(UserId(gone_id), &PermGroupRecompiler)
+        .hard_delete(UserId(gone_id), &deleter(), &PermGroupRecompiler)
         .await
         .expect("hard delete");
     assert_eq!(
@@ -1182,4 +1182,17 @@ async fn the_port_reports_grant_and_rule_references_to_a_group() {
     let mut expected = grants;
     expected.extend(rules);
     assert_eq!(got, expected);
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }

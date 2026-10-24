@@ -20,8 +20,9 @@ pub const LINEAGE_PRINCIPAL: &str = "egret-lineage";
 /// `DELEGATOR_USERNAME`). Declared here so `egret-perm-compile`, which cannot
 /// depend on `egret-engine-mgmt`, can refuse it as an impersonation target.
 ///
-/// **Not in [`RESERVED_ENGINE_USERNAMES`] yet**: a human can still be minted
-/// this username. That is a separate fix (engine grants spec, E21).
+/// **Not in [`RESERVED_ENGINE_USERNAMES`], but reserved all the same**:
+/// migration 0209 seeds it into `username_ledger` (step 5), so no human can be
+/// minted it (username-takeover spec §4.1; engine grants spec E21).
 pub const DELEGATOR_PRINCIPAL: &str = "egret_delegator";
 
 /// Usernames no human may hold (see the module doc).
@@ -38,10 +39,11 @@ mod tests {
     use super::*;
 
     /// F11 (spec C6): the delegator's name lives here so `egret-perm-compile`
-    /// can refuse it as an impersonation target. It is NOT a reserved username
-    /// yet (spec E21 records that as a separate fix).
+    /// can refuse it as an impersonation target. It is not in
+    /// `RESERVED_ENGINE_USERNAMES`: migration 0209's `username_ledger` reserves
+    /// it (`egret-auth`'s `tests/username_ledger.rs`).
     #[test]
-    fn the_delegator_principal_is_named_here_and_not_yet_reserved() {
+    fn the_delegator_principal_is_not_in_the_list_but_is_reserved_by_the_ledger() {
         assert_eq!(DELEGATOR_PRINCIPAL, "egret_delegator");
         assert!(!is_reserved_engine_username(DELEGATOR_PRINCIPAL));
     }

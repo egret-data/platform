@@ -86,14 +86,14 @@
 //! not re-checked. A USER or ROLE deleted after it was validly written is kept
 //! rather than refused: refusing every later edit of the row (even an
 //! actions-only one) until the author removed it would block unrelated work.
-//! That is NOT because nobody can carry the name again — both can, and this
-//! is a known gap, a pre-existing follow-up not closed here. A user's
-//! `hard_delete` frees `users.username`, and `ensure_username` can then mint
-//! the same base slug for the next person, who inherits every direct `user`
-//! ref left naming it (an allow grants them; a deny or exclude still binds
-//! them). A role name can be recreated (`roles` is keyed by scope and name),
-//! and its new holders inherit every `role` ref likewise. Until that closes,
-//! a ref to a deleted user or role names whoever next carries the name.
+//! For a USER that is safe because nobody can carry the name again: migration
+//! 0209's `username_ledger` retires a username for good when its holder is
+//! deleted or renamed, and seeds every name a stale ref, policy body or event
+//! still named, so `ensure_username` never mints it for the next person (spec
+//! `2026-10-23-username-takeover-design.md` §4.1). Such a ref matches nobody,
+//! forever. A ROLE name is still a known gap, a pre-existing follow-up not
+//! closed here: it can be recreated (`roles` is keyed by scope and name), and
+//! its new holders inherit every `role` ref left naming it.
 //!
 //! **A GROUP is guarded (2026-10-18 design R1, R2).** A group name can be
 //! carried again: a new local group, a rename into it, or an IdP claim would

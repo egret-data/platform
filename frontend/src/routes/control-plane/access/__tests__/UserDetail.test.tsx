@@ -33,6 +33,27 @@ const USERS: api.AccessUser[] = [
     status: "active",
     roles: ["data_steward"],
     groups: ["Engineering"],
+    username: "alice_eng",
+  },
+  {
+    id: "u2",
+    email: "noname@example.com",
+    name: "Nora",
+    provider: "oidc",
+    status: "active",
+    roles: ["platform_admin"],
+    groups: [],
+    username: null,
+  },
+  {
+    id: "u3",
+    email: "off@example.com",
+    name: "Otto",
+    provider: "local",
+    status: "disabled",
+    roles: [],
+    groups: [],
+    username: "otto",
   },
 ];
 
@@ -149,5 +170,87 @@ describe("UserDetail", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeDisabled();
     expect(screen.queryByRole("button", { name: /^Disable$/ })).not.toBeInTheDocument();
+  });
+
+  // Username takeover (spec 2026-10-23 §4.4): a delete retires the engine
+  // username for good, so the dialog names it and steers to Disable.
+  test("the delete dialog names the username it retires", async () => {
+    const user = userEvent.setup();
+    renderDetail("u1");
+    await screen.findByRole("heading", { name: "Alice" });
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "Their engine username alice_eng is retired for good: nobody can be given it again",
+    );
+    expect(within(dialog).getByText("alice_eng").tagName).toBe("STRONG");
+    expect(dialog).toHaveTextContent(/disable them instead/);
+    expect(dialog).not.toHaveTextContent("They have no engine username yet.");
+  });
+
+  test("the delete dialog of a user with no username says so", async () => {
+    const user = userEvent.setup();
+    renderDetail("u2");
+    await screen.findByRole("heading", { name: "Nora" });
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("They have no engine username yet.");
+    expect(dialog).not.toHaveTextContent("is retired for good");
+    expect(dialog).toHaveTextContent(/disable them instead/);
+  });
+
+  test("Disable instead opens the disable confirmation and never deletes", async () => {
+    vi.mocked(api.updateUser).mockClear();
+    vi.mocked(api.deleteUser).mockClear();
+    const user = userEvent.setup();
+    renderDetail("u1");
+    await screen.findByRole("heading", { name: "Alice" });
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    const deleteDialog = await screen.findByRole("alertdialog");
+    await user.click(within(deleteDialog).getByRole("button", { name: "Disable instead" }));
+
+    const disableDialog = await screen.findByRole("alertdialog");
+    expect(
+      within(disableDialog).getByRole("heading", { name: "Disable alice@example.com?" }),
+    ).toBeInTheDocument();
+    await user.click(within(disableDialog).getByRole("button", { name: "Disable user" }));
+    await waitFor(() => expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }));
+    expect(api.deleteUser).not.toHaveBeenCalled();
+  });
+
+  test("a disabled user's delete dialog offers no Disable instead", async () => {
+    const user = userEvent.setup();
+    renderDetail("u3");
+    await screen.findByRole("heading", { name: "Otto" });
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Their engine username otto is retired for good");
+    expect(within(dialog).queryByRole("button", { name: "Disable instead" })).not.toBeInTheDocument();
+  });
+
+  test("the disable dialog says the username stays theirs", async () => {
+    const user = userEvent.setup();
+    renderDetail("u1");
+    await screen.findByRole("heading", { name: "Alice" });
+
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Their engine username stays theirs.");
+    expect(dialog).not.toHaveTextContent("lose all-access on engines");
+  });
+
+  test("disabling a platform admin says they lose all-access on engines", async () => {
+    const user = userEvent.setup();
+    renderDetail("u2");
+    await screen.findByRole("heading", { name: "Nora" });
+
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Their engine username stays theirs.");
+    expect(dialog).toHaveTextContent("While disabled they lose all-access on engines.");
   });
 });

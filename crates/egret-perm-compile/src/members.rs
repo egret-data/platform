@@ -413,6 +413,23 @@ pub(crate) async fn premint_model_usernames(
             unnamed.insert(m.user_id);
         }
     }
+    // The engine admins, when any engine carries an `egret-admin` set: every
+    // recompile of such a profile names them (`crate::trigger`'s
+    // `sync_admin_policy_in_tx`).
+    if !egret_policy::default_policies::admin_policy_services_via(conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?
+        .is_empty()
+    {
+        let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+        let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
+        let named = egret_auth::users::usernames_via(conn, &ids)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+        unnamed.extend(ids.into_iter().filter(|id| !named.contains_key(id)));
+    }
 
     for &user_id in &unnamed {
         let minted = mint_for_compile(conn, user_id).await?;
@@ -423,6 +440,31 @@ pub(crate) async fn premint_model_usernames(
         );
     }
     Ok(unnamed.len())
+}
+
+/// The engine admins' usernames, sorted and deduped: the users `egret-admin`
+/// names. A missing one is minted under [`lock_compile_mints_in_tx`] (the
+/// pre-mint sweep normally got there first).
+pub(crate) async fn engine_admin_usernames_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<String>, CompileError> {
+    let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
+    let named = egret_auth::users::usernames_via(conn, &ids)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        match named.get(&id) {
+            Some(u) => out.push(u.clone()),
+            None => out.push(mint_for_compile(conn, id).await?),
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// What [`role_usernames`] does with a holder who has no `users.username`

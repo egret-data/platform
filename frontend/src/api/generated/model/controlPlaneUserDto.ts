@@ -14,4 +14,11 @@ export interface ControlPlaneUserDto {
   status: string;
   roles: string[];
   groups: string[];
+  /**
+     * The engine username, `null` until one is minted. Read-only: a delete
+     * retires it for good (username-takeover spec 2026-10-23 §4.4), so the
+     * delete dialog names it.
+     * @nullable
+     */
+  username?: string | null;
 }

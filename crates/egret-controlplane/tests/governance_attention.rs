@@ -1256,3 +1256,122 @@ async fn a_rejection_row_whose_engine_is_gone_is_not_reported() {
     let (_, body) = attention(&st, &session(&f, &["platform_admin"]).await).await;
     assert!(finding(&body, "engine_auth_failing").is_none(), "{body}");
 }
+
+// ── username reuse (username-takeover spec §4.5) ────────────────────────
+
+/// A grant naming `user:<name>` written long ago, on a catalog of its own.
+async fn old_user_grant(f: &Fixture, effect: &str, name: &str) -> Uuid {
+    let cat: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'tpch', '{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("reuse_cat"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let g: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, created_at) \
+         VALUES ($1::perm.effect, '{read}', $2, '2020-01-01T00:00:00Z') RETURNING id",
+    )
+    .bind(effect)
+    .bind(cat)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) VALUES ($1, 'user', $2, 'include')",
+    )
+    .bind(g)
+    .bind(name)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    g
+}
+
+#[tokio::test]
+async fn username_reuse_is_a_finding_for_platform_admins_only() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let bob = unique("bob");
+    let g = old_user_grant(&f, "allow", &bob).await;
+    sqlx::query(
+        "INSERT INTO audit.audit_log (ts, kind, action, resource_type, resource_id, detail) \
+         VALUES ('2020-01-01T00:00:00Z', 'mutation', 'perm_grant:create', 'perm_grant', $1, $2)",
+    )
+    .bind(g.to_string())
+    .bind(json!({"before": null, "after": {"include": [format!("user:{bob}")]}}))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    // The next person, given the freed name later, before migration 0209: the
+    // ledger row is 0209's backfill, not a mint (a name minted since is one
+    // nobody held before, and no finding).
+    let holder: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name) VALUES ('local', $1, 'B') RETURNING id",
+    )
+    .bind(format!("{bob}@new.example"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO username_ledger (username, user_id, minted_for, source) \
+         VALUES ($1, $2, $2, 'backfill_user')",
+    )
+    .bind(&bob)
+    .bind(holder)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE users SET username = $2 WHERE id = $1")
+        .bind(holder)
+        .bind(&bob)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let admin = session(&f, &["platform_admin"]).await;
+    let reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &admin).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = finding(&body, "username_reuse").unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(found["severity"], "critical", "{found}");
+    // Only what the evidence shows: written before the holder existed, not
+    // "for a deleted user".
+    let message = found["sentence"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("written for a username before the person who holds it now existed")
+            && !message.contains("deleted user"),
+        "{found}"
+    );
+    assert_eq!(found["ref"], json!({"type": "reused_names"}));
+    assert!(labels(&body, "username_reuse").contains(&bob), "{found}");
+    assert!(
+        !found["sample"].to_string().contains('@'),
+        "a sample shows an email: {found}"
+    );
+
+    let (status, body) = attention(&st, &reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(finding(&body, "username_reuse").is_none(), "{body}");
+    assert!(
+        not_checked(&body).contains(&("username_reuse".to_string(), json!(["platform_admin"]))),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_ref_nobody_holds_is_no_username_reuse_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let gone = unique("gone");
+    old_user_grant(&f, "deny", &gone).await;
+    let admin = session(&f, &["platform_admin"]).await;
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &admin).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !labels(&body, "username_reuse").contains(&gone),
+        "a dead ref is reported as a takeover: {body}"
+    );
+}

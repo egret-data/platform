@@ -43,6 +43,7 @@ describe("refUrl", () => {
     [{ type: "grant", id: "g-1" }, "/governance/grants/g-1"],
     [{ type: "rule", id: "r-1" }, "/governance/rules/r-1"],
     [{ type: "unmatched" }, "/governance/people?kind=unmatched"],
+    [{ type: "reused_names" }, "/governance/people?kind=reused"],
     [{ type: "profile", name: "trino prod" }, "/governance/engines/profiles/trino%20prod"],
     [{ type: "profile", name: "a/b" }, "/governance/engines/profiles/a%2Fb"],
     [{ type: "profiles" }, "/governance/engines"],
