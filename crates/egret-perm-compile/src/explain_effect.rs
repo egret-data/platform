@@ -23,8 +23,8 @@ use crate::explain_wire::{
     WireRowFilterDecision, WireTiedOutcome, WireUndecidableCause,
 };
 use crate::routes::{
-    ExplainAttribution, ExplainClearanceGap, ExplainExemption, ExplainProfile, ExplainRowFilterGap,
-    ExplainTagDecline, ExplainTargetLevel,
+    ExplainAccess, ExplainAttribution, ExplainClearanceGap, ExplainExemption, ExplainProfile,
+    ExplainRowFilterGap, ExplainTagDecline, ExplainTargetLevel,
 };
 
 /// One sentence about one person on one engine.
@@ -585,7 +585,41 @@ impl Builder<'_> {
                 let line = self.undecided(why, EffectAbout::Column);
                 return self.with_clearance_gaps(line);
             }
-            // Allowed, or not asked (StarRocks under a MASK_NULL): the mask decides.
+            // Not asked: StarRocks under a MASK_NULL. The mask decides only if the
+            // query may read the table's other columns at all.
+            None if p.masked_read_skips_access => match p.other_columns_access.as_ref() {
+                Some(
+                    a @ ExplainAccess {
+                        decision: WireDecision::Denied { .. },
+                        ..
+                    },
+                ) => {
+                    let mut l = Line::default();
+                    self.subject(&mut l);
+                    l.text(" is ");
+                    l.strong("refused");
+                    l.text(" ");
+                    l.code(column);
+                    self.deny_reason(&mut l, &a.decision, a.attribution.as_ref());
+                    l.text(
+                        ": StarRocks masks it to NULL, and the query still needs SELECT on the \
+                         other columns it reads",
+                    );
+                    (l, EffectAbout::Column, EffectOutcome::Refused)
+                }
+                Some(ExplainAccess {
+                    decision: WireDecision::Undecidable { why },
+                    ..
+                }) => {
+                    let line = self.undecided(why, EffectAbout::Column);
+                    return self.with_clearance_gaps(line);
+                }
+                _ => match self.mask_line(column) {
+                    Ok(parts) => parts,
+                    Err(done) => return self.with_clearance_gaps(done),
+                },
+            },
+            // Allowed: the mask decides.
             _ => match self.mask_line(column) {
                 Ok(parts) => parts,
                 Err(done) => return self.with_clearance_gaps(done),
@@ -1008,6 +1042,7 @@ mod tests {
             clearance_not_enforced: Vec::new(),
             row_filter_not_applied: Vec::new(),
             masked_read_skips_access: false,
+            other_columns_access: None,
             effect_lines: Vec::new(),
         }
     }

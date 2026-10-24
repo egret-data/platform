@@ -618,3 +618,14 @@ Deviations the code forces are recorded here, per task, as they happen.
   states are unreachable through egret's own writes today (an engine binds only a trino/starrocks profile, and the
   second is a race the existing `NoProfileServesTheCatalog` doc already names). Distinguishing them needs a third
   reason in `NotEnforced` and its own copy; left for when one becomes reachable.
+
+### Live-check fixes (2026-10-25)
+
+- **Defect 1 (StarRocks, ungranted reader of a nulled column).** Root cause: under `masked_read_skips_access`
+  `accesses` carries no `select`, and the builder read "not asked" as "allowed", so the mask decided the line. But
+  StarRocks still needs SELECT on the query's other columns and refuses the query without it (live: `ERROR 5204`). New
+  `ExplainProfile.other_columns_access`: the `select` verdict for the target's table, present exactly under
+  `masked_read_skips_access`. When it is denied, the line reads "u is **refused** `c` (<reason>): StarRocks masks it to
+  NULL, and the query still needs SELECT on the other columns it reads", with no rows line; undecidable reads
+  undecided. The table verdict stands in for "the other columns", which explain cannot know. Test
+  `an_ungranted_starrocks_reader_of_a_nulled_column_is_refused_not_masked`.

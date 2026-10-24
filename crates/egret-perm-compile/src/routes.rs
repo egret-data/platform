@@ -820,6 +820,14 @@ pub struct ExplainProfile {
     /// the rule, and the database it asked about held nothing.)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub masked_read_skips_access: bool,
+    /// Present exactly when [`ExplainProfile::masked_read_skips_access`]: the
+    /// `select` verdict for the target's TABLE, standing in for the SELECT the
+    /// query still needs on the other columns it reads. StarRocks returns NULL
+    /// for the masked column, but without that SELECT it refuses the whole
+    /// query (live check: a reader with no grant got `ERROR 5204 need SELECT
+    /// on COLUMN region`). A denied verdict here makes the answer a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_columns_access: Option<ExplainAccess>,
 }
 
 /// The data-mask verdict for the target column: Ranger's `select` request
@@ -2784,6 +2792,35 @@ pub(crate) async fn explain_users(
                 });
             }
 
+            // The SELECT the masked read still needs (live check defect 1): asked
+            // against the TABLE, standing in for the query's other columns.
+            let other_columns_access = match (&table_resource, masked_read_skips_access) {
+                (Some(table_resource), true) => {
+                    let request = AccessRequest {
+                        user: user.clone(),
+                        groups: BTreeSet::new(),
+                        roles: BTreeSet::new(),
+                        access_type: "select".to_string(),
+                        resource: table_resource.clone(),
+                        owner: None,
+                        resolved_tags: table_tags.clone(),
+                    };
+                    let decision = egret_ranger_eval::eval::evaluate(
+                        &artifact,
+                        &request,
+                        &service_def,
+                        &config,
+                    );
+                    let attribution = attribution_for(&mut *conn, &mut cache, &decision).await?;
+                    Some(ExplainAccess {
+                        access_type: "select".to_string(),
+                        decision: WireDecision::from(&decision),
+                        attribution,
+                    })
+                }
+                _ => None,
+            };
+
             let row_filter = match &table_resource {
                 Some(table_resource) => {
                     let request = AccessRequest {
@@ -2850,6 +2887,7 @@ pub(crate) async fn explain_users(
                     Vec::new()
                 },
                 masked_read_skips_access,
+                other_columns_access,
                 effect_lines: Vec::new(),
             };
             let (tied, tag_names) = line_names(&mut *conn, &mut cache, &profile).await?;

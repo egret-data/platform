@@ -147,4 +147,5 @@ export interface ExplainProfile {
      * the rule, and the database it asked about held nothing.)
      */
   masked_read_skips_access?: boolean;
+  other_columns_access?: null | ExplainAccess;
 }

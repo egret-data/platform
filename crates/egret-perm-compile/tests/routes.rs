@@ -4747,6 +4747,47 @@ async fn a_reader_cleared_for_two_classifications_is_told_both() {
     lift_gate(&f, tag_id).await;
 }
 
+/// Live check defect 1: StarRocks asks no `select` for a column its clearance
+/// nulls, but the query still needs `SELECT` on the other columns it reads.
+/// A reader with no grant at all is refused by the engine (5204), so the line
+/// must say so instead of "reads email as NULL". A granted, uncleared reader
+/// does read NULL.
+#[tokio::test]
+async fn an_ungranted_starrocks_reader_of_a_nulled_column_is_refused_not_masked() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let stranger = ungranted_reader(&f).await;
+
+    let body = explain_column(&f, &token, &stranger).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    let lines = profile["effect_lines"].as_array().expect("lines");
+    assert_eq!(
+        lines.len(),
+        1,
+        "a refused read has no rows line; body: {body}"
+    );
+    assert_eq!(lines[0]["outcome"], "refused", "body: {body}");
+    assert_eq!(
+        lines[0]["text"],
+        json!(format!(
+            "{stranger} is refused email (no policy allows it): StarRocks masks it to NULL, \
+             and the query still needs SELECT on the other columns it reads"
+        )),
+        "body: {body}"
+    );
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    assert_eq!(
+        profile_for(&body, "starrocks")["effect_lines"][0]["outcome"],
+        "nullified",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
 async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
     let (status, _) = into_json(
         f.app()
