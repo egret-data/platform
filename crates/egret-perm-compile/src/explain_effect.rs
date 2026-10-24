@@ -667,12 +667,31 @@ impl Builder<'_> {
                             outcome
                         }
                         Some(replay) => {
+                            // The word is always the SERVED mask's (what the engine
+                            // applies); the replay only says who decided it, and only
+                            // while the two agree. When they differ the compiled
+                            // clearance mask predates the rule masks (review finding 5).
+                            let as_outcome = |r: &WireMaskResult| {
+                                (
+                                    r.mask_type.clone().unwrap_or_else(|| "MASK_NONE".into()),
+                                    r.masked_value.clone(),
+                                )
+                            };
+                            let stale = match &replay.decision {
+                                WireMaskDecision::NoMask => {
+                                    as_outcome(result) != ("MASK_NONE".to_string(), None)
+                                }
+                                WireMaskDecision::Masked { result: r } => {
+                                    as_outcome(r) != as_outcome(result)
+                                }
+                                WireMaskDecision::Undecidable { .. } => false,
+                            };
                             let outcome = match (&replay.decision, &replay.attribution) {
                                 (
-                                    WireMaskDecision::Masked { result: r },
+                                    WireMaskDecision::Masked { .. },
                                     Some(ExplainAttribution::Rule { rule_id, name, .. }),
-                                ) => {
-                                    let outcome = self.masked_result(&mut l, column, r);
+                                ) if !stale => {
+                                    let outcome = self.masked_result(&mut l, column, result);
                                     match &replay.exemption {
                                         Some(e) => {
                                             l.text(" (");
@@ -687,8 +706,8 @@ impl Builder<'_> {
                                     }
                                     outcome
                                 }
-                                (WireMaskDecision::Masked { result: r }, attribution) => {
-                                    let outcome = self.masked_result(&mut l, column, r);
+                                (WireMaskDecision::Masked { result: r }, attribution) if !stale => {
+                                    let outcome = self.masked_result(&mut l, column, result);
                                     l.text(" by ");
                                     self.decider(
                                         &mut l,
@@ -709,6 +728,9 @@ impl Builder<'_> {
                             };
                             l.text("cleared for ");
                             self.cleared_for(&mut l, clearance);
+                            if stale {
+                                l.text("; the served clearance mask is older than the rule masks");
+                            }
                             l.text(")");
                             outcome
                         }
@@ -1212,6 +1234,10 @@ mod tests {
                 p.mask = mask(masked("MASK_NONE"), clearance());
                 p.mask.as_mut().unwrap().replayed = Some(ExplainReplay { decision: WireMaskDecision::NoMask, attribution: None, exemption: None });
             }), "u reads email as the real value (cleared for PII)"),
+            col("StarRocks cleared, replay disagrees with the served mask", with(sr(), |p| {
+                p.mask = mask(masked("MASK_NONE"), clearance());
+                p.mask.as_mut().unwrap().replayed = Some(ExplainReplay { decision: masked("MASK_HASH"), attribution: rule(RULE, "X"), exemption: None });
+            }), "u reads email as the real value (cleared for PII; the served clearance mask is older than the rule masks)"),
             col("agreeing tie", with(t(), |p| p.mask = mask(WireMaskDecision::Undecidable { why: tie(vec![tied_mask("MASK_HASH"), tied_mask("MASK_HASH")]) }, None)),
                 "u reads email as hashed (2 rules agree: A, B)"),
             col("conflicting tie", with(t(), |p| p.mask = mask(WireMaskDecision::Undecidable { why: tie(vec![tied_mask("MASK_HASH"), tied_mask("MASK")]) }, None)),

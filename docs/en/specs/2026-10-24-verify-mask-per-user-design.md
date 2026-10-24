@@ -608,3 +608,13 @@ Deviations the code forces are recorded here, per task, as they happen.
   `a_reader_cleared_for_two_classifications_is_told_both`.
 - **Finding 6 (does not reproduce).** `registry.catalogs.warehouse_id` is UNIQUE (`catalogs_warehouse_id_key`), so two
   reached catalogs cannot share a warehouse and `trinoColumnOnly.tables` cannot double-count. Not changed.
+- **Finding 5 (reproduced in the builder).** The replay line used the replay's mask type. It now always uses the
+  served clearance mask's type (what the engine applies) and credits the replayed rule only while the two agree;
+  when they differ it says "(cleared for *PII*; the served clearance mask is older than the rule masks)". Table
+  case "StarRocks cleared, replay disagrees with the served mask".
+- **Finding 7 (follow-up, not fixed).** The C5 reason is `NoProfile` whenever an engine is attached; a catalog whose
+  bound profiles are all skipped for another reason (a profile type the compiler does not target, or a catalog absent
+  from the profile's own map under a concurrent detach) would also read "'s engines have no policy profile". Both
+  states are unreachable through egret's own writes today (an engine binds only a trino/starrocks profile, and the
+  second is a race the existing `NoProfileServesTheCatalog` doc already names). Distinguishing them needs a third
+  reason in `NotEnforced` and its own copy; left for when one becomes reachable.
