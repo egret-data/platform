@@ -6,8 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAccess } from './explainAccess';
+import type { ExplainClearanceGap } from './explainClearanceGap';
+import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainMask } from './explainMask';
 import type { ExplainResolvedTag } from './explainResolvedTag';
+import type { ExplainRowFilter } from './explainRowFilter';
+import type { ExplainRowFilterGap } from './explainRowFilterGap';
 import type { WireEngineType } from './wireEngineType';
 
 /**
@@ -92,6 +96,27 @@ export interface ExplainProfile {
      */
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
+  row_filter?: null | ExplainRowFilter;
+  /**
+     * StarRocks only, for a column read: the gated classifications that reach
+     * the column only from its table and so compile no clearance here
+     * ([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the
+     * column as an `ANCESTOR`.
+     */
+  clearance_not_enforced?: ExplainClearanceGap[];
+  /**
+     * Trino only, for a read naming a table, when the profile's download has
+     * tag policies: the classification row filters that filter nothing here
+     * ([`ExplainRowFilterGap`]).
+     */
+  row_filter_not_applied?: ExplainRowFilterGap[];
+  /**
+     * The answer in words (spec §5.1, C1): for a `read`, the column (or
+     * table) line and then the rows line, which a refused read does not get;
+     * for a `write`, one access line. Built by `explain_effect` from the
+     * fields above and nothing else.
+     */
+  effect_lines: ExplainEffectLine[];
   /**
      * `true` when StarRocks consults no access policy for the target column:
      * a `read` of a column whose deciding mask is `MASK_NULL`, from whichever

@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainOutcome } from './explainOutcome';
 import type { ExplainProfile } from './explainProfile';
 import type { ExplainTagDecline } from './explainTagDecline';
@@ -18,4 +19,5 @@ export interface ExplainResponse {
   /** Empty exactly when `outcome` is `no_profile_serves_the_catalog`. */
   profiles: ExplainProfile[];
   tag_resolution_declined?: null | ExplainTagDecline;
+  effect_line?: null | ExplainEffectLine;
 }

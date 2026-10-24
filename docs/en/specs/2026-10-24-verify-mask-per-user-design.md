@@ -529,3 +529,15 @@ Deviations the code forces are recorded here, per task, as they happen.
   effect fields, rather than being omitted. "Catalogs with an enforcing Trino engine" reads the effect's own
   `catalogs[].engines` (for a classification rule these are already only engines whose profile hosts it). Levels
   compare case-folded. `null` also when no table qualifies.
+
+### Task 10 (OpenAPI, generated client)
+
+- `openapi.json` regenerated (`cargo run -p egret-bin --bin egret -- openapi`): 14 new schemas (`EffectAbout`,
+  `EffectOutcome`, `EffectPart`, `ExemptVia`, `ExplainClearanceGap`, `ExplainEffectLine`, `ExplainExemption`,
+  `ExplainReplay`, `ExplainRowFilter`, `ExplainRowFilterGap`, `TrinoColumnOnly`, `WireRowFilterDecision`,
+  `WireRowFilterResult`, `WireTiedOutcome`) and new fields on existing ones; nothing removed. Client regenerated with
+  `npm run gen:api`. `committed_openapi_json_is_current` and `generated_client_was_emitted_from_the_committed_spec`
+  pass.
+- `npx tsc -b` reports 51 errors, all in test fixtures that build an `ExplainProfile` without the new required
+  `effect_lines` (`ExplainResult.test.tsx` 45, `CheckAccess.test.tsx` 4, `ColumnPanel.test.tsx` 1,
+  `WhoCanReadDialog.test.tsx` 1). They are Task 11's.

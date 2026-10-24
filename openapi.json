@@ -43520,6 +43520,15 @@
           "deny"
         ]
       },
+      "EffectAbout": {
+        "type": "string",
+        "description": "What a line is about.",
+        "enum": [
+          "column",
+          "rows",
+          "access"
+        ]
+      },
       "EffectCatalog": {
         "type": "object",
         "description": "One catalog a rule reaches, and who enforces it there.",
@@ -43585,6 +43594,225 @@
           "mask",
           "row_filter"
         ]
+      },
+      "EffectOutcome": {
+        "type": "string",
+        "description": "The outcome a line states, as a word a client can style without reading\nthe text.",
+        "enum": [
+          "real_value",
+          "masked",
+          "nullified",
+          "refused",
+          "undecided",
+          "all_rows",
+          "filtered",
+          "allowed",
+          "not_enforced"
+        ]
+      },
+      "EffectPart": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The outcome word.",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strong"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A column, a table, a filter expression, a custom mask expression.",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "code"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The username the line is about.",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "subject"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A rule, by name (its id when the row is gone); links to the rule.",
+            "required": [
+              "text",
+              "rule_id",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "rule_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A classification's clearance; links to its Clearance tab.",
+            "required": [
+              "text",
+              "tag_id",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "tag_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clearance"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A user or group that exempts the subject from a rule.",
+            "required": [
+              "text",
+              "principal_kind",
+              "ref",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "principal_kind": {
+                "$ref": "#/components/schemas/PrincipalKind"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "principal"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A manual policy (one egret's compiler does not own), by Ranger name.",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "policy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "catalog_id",
+              "kind"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "catalog_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "catalog"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One run of a line."
       },
       "EffectiveAccess": {
         "type": "object",
@@ -44796,6 +45024,23 @@
           }
         }
       },
+      "ExemptVia": {
+        "type": "object",
+        "description": "One exempt principal of a rule that reaches the subject.",
+        "required": [
+          "principal_kind",
+          "ref"
+        ],
+        "properties": {
+          "principal_kind": {
+            "$ref": "#/components/schemas/PrincipalKind",
+            "description": "`user` (the subject is named directly) or `group`."
+          },
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
       "ExistingMask": {
         "type": "object",
         "description": "Another mask rule that already reaches a column this rule reaches.",
@@ -44887,7 +45132,7 @@
           },
           {
             "type": "object",
-            "description": "`perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'\nper-column expansion, where ONE `perm.rules` row becomes N policies and\nthe locator is the only thing that says which expansion decided.",
+            "description": "`perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'\nper-column expansion, where ONE `perm.rules` row becomes N policies and\nthe locator is the only thing that says which expansion decided.\n\n`name` is the rule's `perm.rules.name` (spec C11), `None` when the row\nis gone: a compiled policy outlives its rule until the next recompile.",
             "required": [
               "rule_id",
               "kind"
@@ -44898,6 +45143,12 @@
                 "format": "uuid"
               },
               "locator": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
                 "type": [
                   "string",
                   "null"
@@ -45080,6 +45331,75 @@
           }
         }
       },
+      "ExplainClearanceGap": {
+        "type": "object",
+        "description": "A gated classification that StarRocks does not enforce on the target column\n(spec §5.8, D2): it reaches the column only from its table, and StarRocks\ncompiles a clearance only where the classification is on a column (E13).",
+        "required": [
+          "tag_id",
+          "tag_name"
+        ],
+        "properties": {
+          "tag_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tag_name": {
+            "type": "string",
+            "description": "`tags.name`."
+          }
+        }
+      },
+      "ExplainEffectLine": {
+        "type": "object",
+        "description": "One sentence about one person on one engine.",
+        "required": [
+          "about",
+          "outcome",
+          "text",
+          "parts"
+        ],
+        "properties": {
+          "about": {
+            "$ref": "#/components/schemas/EffectAbout"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/EffectOutcome"
+          },
+          "text": {
+            "type": "string",
+            "description": "The parts' texts, joined: for aria labels, tests and copying."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectPart"
+            }
+          }
+        }
+      },
+      "ExplainExemption": {
+        "type": "object",
+        "description": "Who exempts the subject from the rule that decided a verdict (spec §5.4,\nD1). The compiled exempt item names usernames only (groups are expanded at\ncompile time), so this is rebuilt from the model: the rule's exempt\nprincipals and the subject's group memberships, read with the compiler's own\n`group_members_via` on the request's snapshot. A rule exempts only users and\ngroups (`validate_rule_shape` refuses a role or a workspace at write).\n\nAn empty `via` is an answer: the served policy exempts the subject and the\ncurrent model does not, so the compiled policy is older than the rule or\nthan a membership change (spec §5.4 step 4).",
+        "required": [
+          "via",
+          "more"
+        ],
+        "properties": {
+          "via": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExemptVia"
+            },
+            "description": "At most [`EXEMPTION_VIA_SHOWN`] principals: a user named directly\nfirst, then groups by name."
+          },
+          "more": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many more exempting principals there are beyond `via`.",
+            "minimum": 0
+          }
+        }
+      },
       "ExplainMask": {
         "type": "object",
         "description": "The data-mask verdict for the target column: Ranger's `select` request\nevaluated as a masked read.",
@@ -45103,6 +45423,28 @@
               {
                 "$ref": "#/components/schemas/ExplainAttribution",
                 "description": "The deciding mask policy's `perm` model object, as for an access verdict;\n`None` for no mask or an undecidable answer."
+              }
+            ]
+          },
+          "exemption": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainExemption",
+                "description": "Present when a rule's exempt item decided (`MASK_NONE`)."
+              }
+            ]
+          },
+          "replayed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainReplay",
+                "description": "Present when a clearance mask decided and the subject is cleared (its\ntype is not `MASK_NULL`): what the rule masks give them ([`ExplainReplay`])."
               }
             ]
           }
@@ -45202,7 +45544,8 @@
           "engine",
           "accesses",
           "tags",
-          "tag_policies_in_download"
+          "tag_policies_in_download",
+          "effect_lines"
         ],
         "properties": {
           "service_id": {
@@ -45242,13 +45585,77 @@
               },
               {
                 "$ref": "#/components/schemas/ExplainMask",
-                "description": "What the engine masks the target COLUMN to for this subject — where a\nStarRocks clearance shows (view governance A2). The clearance is a\nper-column deny AND a priority-1 data mask that applies through every\nview. For an uncleared reader the mask is `MASK_NULL`, and then the deny\nis not consulted: see [`ExplainProfile::masked_read_skips_access`].\n\nPresent only for a `read` explain of a COLUMN on a StarRocks profile. A\ntable-level target has no column to mask, a `write` has no masked request,\nand Trino's masks come from the tag service, which the evaluator refuses\n(tier c), so none is asked there."
+                "description": "What the engine masks the target COLUMN to for this subject — where a\nStarRocks clearance shows (view governance A2). The clearance is a\nper-column deny AND a priority-1 data mask that applies through every\nview. For an uncleared reader the mask is `MASK_NULL`, and then the deny\nis not consulted: see [`ExplainProfile::masked_read_skips_access`].\n\nPresent for a `read` explain of a COLUMN, on every engine (spec C2). On\nTrino the masks come from the resource policies and from the tag\nservice, asked with the same resolved tags as the access verdicts. A\ntable-level target has no column to mask and a `write` has no masked\nrequest."
               }
             ]
+          },
+          "row_filter": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainRowFilter",
+                "description": "The rows the subject sees: present for a `read` explain whose target\nnames a table (or a column of one), on every engine. Asked against the\ntable with a TABLE-level tag resolution, so a classification on a column\ndoes not reach it (E14: on Trino it filters nothing)."
+              }
+            ]
+          },
+          "clearance_not_enforced": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainClearanceGap"
+            },
+            "description": "StarRocks only, for a column read: the gated classifications that reach\nthe column only from its table and so compile no clearance here\n([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the\ncolumn as an `ANCESTOR`."
+          },
+          "row_filter_not_applied": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainRowFilterGap"
+            },
+            "description": "Trino only, for a read naming a table, when the profile's download has\ntag policies: the classification row filters that filter nothing here\n([`ExplainRowFilterGap`])."
+          },
+          "effect_lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainEffectLine"
+            },
+            "description": "The answer in words (spec §5.1, C1): for a `read`, the column (or\ntable) line and then the rows line, which a refused read does not get;\nfor a `write`, one access line. Built by `explain_effect` from the\nfields above and nothing else."
           },
           "masked_read_skips_access": {
             "type": "boolean",
             "description": "`true` when StarRocks consults no access policy for the target column:\na `read` of a column whose deciding mask is `MASK_NULL`, from whichever\npolicy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written\n`MASK_NULL` with a hand-written deny measured too, §4.4 case 3a). The read returns\n`NULL` for the column whoever denies it, so\n[`ExplainProfile::accesses`] carries no `select` verdict and\n[`ExplainProfile::mask`] is the answer.\n\nWhat this cannot say is the query-level consequence: the query as a\nwhole is still refused unless the reader may select another column it\nreads, and when it selects only such columns StarRocks checks the\ntable's first unmasked column (measured: `id` on a partly classified\nIceberg table, live result §3.4 case 2a) or `___count___` for\n`count(*)` (§3.4 case 2a). When no column is unmasked, on an Iceberg\ntable it checks the hidden `_file` / `_pos` columns, so a no-grant\nreader of a fully classified Iceberg table is refused (§4.4 case 3b).\nExplain does not know the query's other columns.\n\nAny other mask type keeps the `select` verdict (`MASK_HASH` was measured\nchecked; the rest are unmeasured), and so does no mask. When the mask\nverdict is undecidable the access verdict is kept and is provisional: if\nStarRocks applies a `MASK_NULL` there, it does not check that access.\nNever set on Trino, which checks access on a masked column.\n\n(Explain no longer answers `create materialized view`, Task 12 M-4: the\nA3 deny is engine-wide, so no single database's verdict says more than\nthe rule, and the database it asked about held nothing.)"
+          }
+        }
+      },
+      "ExplainReplay": {
+        "type": "object",
+        "description": "The mask a cleared StarRocks reader would get without the clearance (spec\n§5.5, D4). The clearance mask hands each cleared user the FOLDED outcome of\nthe profile's other masks (`clearance_mask::fold_clearance_mask`), so its\nown attribution hides the rule that decided; this is that outcome,\nre-evaluated over the served artifact with every clearance policy removed.",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/WireMaskDecision"
+          },
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution"
+              }
+            ]
+          },
+          "exemption": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainExemption"
+              }
+            ]
           }
         }
       },
@@ -45317,6 +45724,78 @@
                 "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for more than one\nstate and the states have different remedies and different REACHES, and\n`.is_some()` at the call site threw the distinction away. The page then\nrendered round 1's single sentence for every one of them — naming a stored\nrow that does not exist, and claiming a per-catalog reach for the state that\nis per-REQUEST. (There were four states when that was measured; migration\n0177 made two of them unrepresentable and left two.)\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
               }
             ]
+          },
+          "effect_line": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainEffectLine",
+                "description": "C5: \"Not enforced: <catalog> has no engine.\" (or \"…'s engines have no\npolicy profile.\"), present exactly for `no_profile_serves_the_catalog`."
+              }
+            ]
+          }
+        }
+      },
+      "ExplainRowFilter": {
+        "type": "object",
+        "description": "The row-filter verdict for the target's TABLE (spec §5.3): Ranger's\n`select` request against the table, which is the granularity both engines\nfilter at, so a column target shows its table's filter.",
+        "required": [
+          "access_type",
+          "decision"
+        ],
+        "properties": {
+          "access_type": {
+            "type": "string",
+            "description": "Always `select`: a row filter is applied to a read."
+          },
+          "decision": {
+            "$ref": "#/components/schemas/WireRowFilterDecision"
+          },
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution",
+                "description": "The deciding row-filter policy's `perm` model object; `None` for no\nfilter or an undecidable answer."
+              }
+            ]
+          },
+          "exemption": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainExemption",
+                "description": "Present when a rule's exempt item decided (an empty filter)."
+              }
+            ]
+          }
+        }
+      },
+      "ExplainRowFilterGap": {
+        "type": "object",
+        "description": "A classification row-filter rule that filters nothing on a Trino profile\nfor the target's table (spec §5.8, D3, E14): its classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment.",
+        "required": [
+          "rule_id",
+          "rule_name",
+          "tag_name"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rule_name": {
+            "type": "string"
+          },
+          "tag_name": {
+            "type": "string",
+            "description": "`tags.name`."
           }
         }
       },
@@ -52357,6 +52836,17 @@
           "truncated": {
             "type": "boolean",
             "description": "`alreadyMasked` may be incomplete: a cap cut the columns examined\n(50), the classifications read (1000) or the entries listed (20)."
+          },
+          "trinoColumnOnly": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrinoColumnOnly",
+                "description": "A classification ROW FILTER only: the tables it filters nothing on in\nTrino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when\nthere is none."
+              }
+            ]
           }
         }
       },
@@ -55623,6 +56113,29 @@
         ],
         "description": "A row of the workspace list: the flow, then the entry's fields.\n\nThe flow's uuid is `flow_uuid`, not `flow`: the entry is flattened in, and\nits own `flow` (a `Flow` trigger's info) would otherwise be a second key\nof the same name in one object."
       },
+      "TrinoColumnOnly": {
+        "type": "object",
+        "description": "Where a classification row filter filters nothing on Trino (spec §5.8, D3,\nE14): tables where the classification is on at least one column and not on\nthe table, in catalogs a Trino engine enforces the rule on. A Trino tag row\nfilter fires only for a table-level attachment; StarRocks filters these.",
+        "required": [
+          "catalogs",
+          "tables"
+        ],
+        "properties": {
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The catalogs those tables are in, by name, sorted."
+          },
+          "tables": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct tables.",
+            "minimum": 0
+          }
+        }
+      },
       "TrinoViewItem": {
         "type": "object",
         "description": "One Trino view in the DEFINER audit (spec B5).",
@@ -57660,6 +58173,87 @@
           "row_filter"
         ]
       },
+      "WireRowFilterDecision": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_filter"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "kind"
+            ],
+            "properties": {
+              "result": {
+                "$ref": "#/components/schemas/WireRowFilterResult"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "filtered"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "why",
+              "kind"
+            ],
+            "properties": {
+              "why": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireUndecidableCause"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undecidable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`RowFilterDecision`]."
+      },
+      "WireRowFilterResult": {
+        "type": "object",
+        "description": "Wire mirror of [`RowFilterResult`].",
+        "required": [
+          "policy_name",
+          "filter_expr"
+        ],
+        "properties": {
+          "policy_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "policy_name": {
+            "type": "string"
+          },
+          "filter_expr": {
+            "type": "string"
+          }
+        }
+      },
       "WireServiceDefIssue": {
         "oneOf": [
           {
@@ -57983,6 +58577,61 @@
           "hypothetical"
         ]
       },
+      "WireTiedOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "mask_type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "masked_value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mask_condition": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "filter_expr",
+              "kind"
+            ],
+            "properties": {
+              "filter_expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "row_filter"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TiedOutcome`]."
+      },
       "WireUndecidableCause": {
         "oneOf": [
           {
@@ -58243,7 +58892,7 @@
           },
           {
             "type": "object",
-            "description": "`policy_ids`/`policy_names` are the FULL tied set — see\n[`UndecidableCause::EvalOrderAmbiguous`]'s own doc for why collapsing\nthis to one id would misreport a tie this crate cannot order.",
+            "description": "`policy_ids`/`policy_names` are the FULL tied set — see\n[`UndecidableCause::EvalOrderAmbiguous`]'s own doc for why collapsing\nthis to one id would misreport a tie this crate cannot order.\n\n`outcomes` is each tied policy's own yield in the same order, present\nfor a mask or row-filter tie and absent for an access tie.",
             "required": [
               "policy_ids",
               "policy_names",
@@ -58264,6 +58913,12 @@
                 "type": "array",
                 "items": {
                   "type": "string"
+                }
+              },
+              "outcomes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireTiedOutcome"
                 }
               },
               "kind": {
