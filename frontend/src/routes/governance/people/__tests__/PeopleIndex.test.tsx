@@ -445,6 +445,22 @@ describe("People index: Reused names", () => {
     expect(within(gone).getByRole("link", { name: "Grant" })).toHaveAttribute("href", "/governance/grants/g-gone");
   });
 
+  it("lets the prose columns wrap, so the table fits at 1440 px without scrolling sideways", async () => {
+    // Live check: `ui/table` cells are `whitespace-nowrap`, so a long evidence
+    // sentence widened the table past 1440 px and the Evidence column needed
+    // the table's sideways scroll. jsdom does no layout: this pins the classes.
+    serve(() => page([]), undefined, { status: 200, body: REPORT });
+    open("/governance/people?kind=reused", ADMIN);
+    const table = await screen.findByRole("table");
+    const bob = within(table).getAllByRole("row")[1];
+    const cell = (label: string) => bob.querySelector(`td[data-label="${label}"]`);
+    for (const label of ["Finding", "In", "Holder", "Evidence"]) {
+      expect(cell(label), label).toHaveClass("whitespace-normal");
+    }
+    // Wrapping needs somewhere to break: the evidence is server prose.
+    expect(cell("Evidence")).toHaveClass("break-words");
+  });
+
   it("filters by ?q= on the username", async () => {
     serve(() => page([]), undefined, { status: 200, body: REPORT });
     open("/governance/people?kind=reused&q=bo", ADMIN);

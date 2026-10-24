@@ -139,16 +139,16 @@ export function ReusedNames({ q, onClearSearch }: { q: string; onClearSearch: ()
               <TableCell data-label="Verdict" className="whitespace-nowrap">
                 <VerdictCell f={f} />
               </TableCell>
-              <TableCell data-label="Finding" className="min-w-40 max-sm:min-w-0">
+              <TableCell data-label="Finding" className="min-w-40 whitespace-normal max-sm:min-w-0">
                 {KIND[f.kind] ?? f.kind}
               </TableCell>
-              <TableCell data-label="In">
+              <TableCell data-label="In" className="whitespace-normal">
                 <PlaceLink p={f.place} />
               </TableCell>
-              <TableCell data-label="Holder">
+              <TableCell data-label="Holder" className="whitespace-normal">
                 <HolderCell f={f} />
               </TableCell>
-              <TableCell data-label="Evidence" className="min-w-48 max-sm:min-w-0">
+              <TableCell data-label="Evidence" className="min-w-48 whitespace-normal break-words max-sm:min-w-0">
                 <span className="flex flex-col gap-0.5">
                   {f.evidenceAt ? (
                     <time dateTime={f.evidenceAt} className="tabular-nums">
