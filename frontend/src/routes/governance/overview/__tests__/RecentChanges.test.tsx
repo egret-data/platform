@@ -223,6 +223,27 @@ describe("Recent changes", () => {
     expect(t).not.toHaveTextContent(/MASK|tag:/);
   });
 
+  // Username takeover (spec 2026-10-23 §4.4, D4): the server leaves the row out
+  // for a reader without `user:read`, so the client renders what it is sent.
+  it("says who deleted which user, with no link to the deleted user", async () => {
+    serve(attentionOk, () => ({
+      status: 200,
+      body: page([
+        entry(41, {
+          action: "user:delete",
+          sentence: "Ana deleted user bob",
+          target: null,
+          targetExists: false,
+          detail: { before: { username: "bob", email: "bob@example.com" }, after: null },
+        }),
+      ]),
+    }));
+    openOverview();
+    const row = within(await table()).getByText("Ana deleted user bob").closest("tr")!;
+    expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(row).queryByText("(deleted)")).not.toBeInTheDocument();
+  });
+
   it("keeps the server's sentence for a change too large to record its details", async () => {
     const sentence = "Ana created a rule; the change was too large to record its details.";
     serve(attentionOk, () => ({

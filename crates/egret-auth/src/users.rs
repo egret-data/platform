@@ -220,6 +220,23 @@ impl UserRepo {
         Ok(())
     }
 
+    /// [`Self::set_status`] on the caller's transaction, so a status change and
+    /// the recompile it forces commit together
+    /// (`egret_perm_compile::set_user_status_and_recompile`).
+    pub async fn set_status_in_tx(
+        conn: &mut sqlx::PgConnection,
+        id: UserId,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE users SET status = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(status)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Set a local user's password hash (admin reset). Caller hashes the plaintext.
     pub async fn set_password(&self, id: UserId, password_hash: &str) -> Result<()> {
         sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
@@ -295,11 +312,16 @@ impl UserRepo {
     /// profiles of engine grants that target this user (they cascade with the
     /// row; their compiled policies name the freed username), through
     /// `GroupMembershipRecompiler::lock_affected_by_user_delete_in_tx`.
+    /// Since the username-takeover fix (spec 2026-10-23 §4.3) that pass also
+    /// covers the profiles reached through the user's roles, workspace
+    /// memberships and clearances, and the delete records a `user:delete`
+    /// governance event, by `actor`, on the same transaction.
     pub async fn hard_delete(
         &self,
         target: UserId,
+        actor: &egret_core::Principal,
         recompiler: &dyn crate::groups::GroupMembershipRecompiler,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<DeletedUser>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         // Fix round 1: hold this user's membership lock, so no ADD can commit
         // between reading their groups and the DELETE that removes them
@@ -350,11 +372,13 @@ impl UserRepo {
         // as an idempotent success rather than an error — see the doc comment
         // above. `fetch_one` would turn that into a `RowNotFound` and, via
         // `db_err`, a 500 for a caller that never asked for one.
-        let res: std::result::Result<Option<(String, String)>, sqlx::Error> =
-            sqlx::query_as("DELETE FROM users WHERE id = $1 RETURNING name, email")
-                .bind(target.0)
-                .fetch_optional(&mut *tx)
-                .await;
+        let res: std::result::Result<Option<DeletedUser>, sqlx::Error> = sqlx::query_as(
+            "DELETE FROM users WHERE id = $1 \
+             RETURNING name, email, username::text AS username, provider",
+        )
+        .bind(target.0)
+        .fetch_optional(&mut *tx)
+        .await;
         let deleted = match res {
             Ok(row) => row,
             Err(e) => {
@@ -371,9 +395,45 @@ impl UserRepo {
         if !groups.is_empty() || !services.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
+        // Who was deleted, on this transaction: the event exists exactly when
+        // the delete committed. The username is retired for good (migration
+        // 0209), so this is where a later audit learns whose it was.
+        if let Some(d) = &deleted {
+            egret_audit::governance::record_change(
+                &mut tx,
+                egret_audit::governance::Change {
+                    action: egret_audit::governance::action::USER_DELETE,
+                    resource_type: egret_audit::governance::resource::USER,
+                    resource_id: target.0.to_string(),
+                    summary: serde_json::json!({
+                        "before": {
+                            "username": d.username,
+                            "email": d.email,
+                            "name": d.name,
+                            "provider": d.provider,
+                        },
+                        "after": null,
+                    }),
+                    principal: actor,
+                },
+            )
+            .await
+            .map_err(db_err)?;
+        }
         tx.commit().await.map_err(db_err)?;
         Ok(deleted)
     }
+}
+
+/// What [`UserRepo::hard_delete`] removed, from its own `RETURNING`: the
+/// columns a later audit needs to name the person (the row is gone).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct DeletedUser {
+    pub name: String,
+    pub email: String,
+    /// `None` when they never got one.
+    pub username: Option<String>,
+    pub provider: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -426,6 +486,18 @@ fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// unique violation aborts the *enclosing* transaction in Postgres, so the
 /// `continue` that tries `base-2` after `base` was taken would poison a
 /// caller's whole recompile instead of retrying inside it.
+///
+/// **A name is never minted twice (migration 0209, username-takeover spec
+/// §4.1).** Triggers on `users` insert every name a row takes into the
+/// append-only `username_ledger`, and a name stays there after its holder is
+/// deleted or renamed. So the `UPDATE` below also fails with 23505 on
+/// `username_ledger_pkey` for a name someone ever held, or that a stale ref,
+/// policy body or event named when 0209 ran, and the same `continue` tries the
+/// next suffix: the next person whose email slugs to a deleted user's name
+/// gets `base-2` (or the suffix past the highest the ledger holds for the
+/// base), never the name refs still point at. The trigger runs inside this
+/// savepoint, so there is no check-then-insert race with a concurrent delete:
+/// the ledger read only picks where probing starts, and the insert decides.
 pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId) -> Result<String> {
     use sqlx::Connection as _;
 
@@ -453,8 +525,23 @@ pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId)
         .map_err(db_err)?;
     let base = slugify_localpart(&email);
 
-    // 3. Try base, then base-2, base-3, … until the unique UPDATE sticks.
-    for n in 1..1000u32 {
+    // 3. Try base, then the suffixes past the highest the ledger ever saw for
+    //    it (`base-<max+1>`, …), until the unique UPDATE sticks. Names are
+    //    never freed, so probing from `base-2` would walk every retired one,
+    //    one failing savepoint each, and run out after 999.
+    let highest: Option<i64> = sqlx::query_scalar(
+        "SELECT max(substr(username::text, length($1) + 2)::bigint) FROM username_ledger \
+          WHERE starts_with(lower(username::text), $1 || '-') \
+            AND substr(username::text, length($1) + 2) ~ '^[0-9]{1,9}$'",
+    )
+    .bind(&base)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let first = u32::try_from(highest.unwrap_or(1) + 1)
+        .unwrap_or(u32::MAX - 1000)
+        .max(2);
+    for n in std::iter::once(1).chain(first..first + 998) {
         let cand = if n == 1 {
             base.clone()
         } else {
@@ -531,6 +618,13 @@ fn slugify_localpart(email: &str) -> String {
     } else {
         slug
     }
+}
+
+/// [`slugify_localpart`], for the test that compares it with migration 0209's
+/// SQL `username_slug`. Not an API.
+#[doc(hidden)]
+pub fn slugify_localpart_for_tests(email: &str) -> String {
+    slugify_localpart(email)
 }
 
 /// Connection-generic core of [`UserRepo::usernames`] — SP4c Task 2.
@@ -693,7 +787,20 @@ mod tests {
             .unwrap();
         assert!(sessions.validate(&issued.token).await.unwrap().is_some());
 
-        repo.hard_delete(uid, &NoProfiles).await.unwrap();
+        repo.hard_delete(
+            uid,
+            &egret_core::Principal {
+                user_id: UserId(Uuid::nil()),
+                email: "deleter@test.local".into(),
+                platform_roles: vec![],
+                permissions: vec![],
+                group_ids: vec![],
+                impersonator: None,
+            },
+            &NoProfiles,
+        )
+        .await
+        .unwrap();
 
         assert!(
             repo.find_by_id(uid).await.unwrap().is_none(),

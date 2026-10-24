@@ -100,6 +100,12 @@ pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
             && is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX))
 }
 
+/// Whether `name` is one of the `egret-admin - …` per-admin all-access
+/// policies `build_default_policies` mints, one per resource hierarchy.
+pub fn is_admin_all_access_policy_name(name: &str) -> bool {
+    is_seeded_hierarchy_name(name, ADMIN_ALL_ACCESS_NAME_PREFIX)
+}
+
 fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {
     match name.strip_prefix(prefix) {
         Some(rest) => rest.starts_with(SEEDED_NAME_SEPARATOR),

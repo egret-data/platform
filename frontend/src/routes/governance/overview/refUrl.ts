@@ -26,6 +26,8 @@ export function refUrl(r: Ref, tab?: EngineTab): string | null {
       return `/governance/rules/${r.id}`;
     case "unmatched":
       return `${PEOPLE_BASE}?kind=unmatched`;
+    case "reused_names":
+      return `${PEOPLE_BASE}?kind=reused`;
     case "profile":
       return profileUrl(r.name, tab);
     case "profiles":

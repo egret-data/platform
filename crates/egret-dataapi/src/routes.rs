@@ -679,7 +679,7 @@ async fn delete_service_account(
     // recompiled in the same transaction, through `group_recompiler`.
     let deleted = st
         .users
-        .hard_delete(UserId(sa), &*st.group_recompiler)
+        .hard_delete(UserId(sa), &ctx.principal, &*st.group_recompiler)
         .await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
@@ -696,14 +696,18 @@ async fn delete_service_account(
     // always been for its other caller, not an error, so there is nothing
     // this route actually destroyed to describe. Emitting a `delete` event
     // with fabricated or absent columns would be worse than emitting none.
-    if let Some((name, email)) = deleted {
+    if let Some(deleted) = deleted {
         st.audit.emit(egret_audit::mutation_for(
             &ctx.principal,
             Some(ctx.workspace_id.0),
             "service_account:delete",
             "service_account",
             Some(sa.to_string()),
-            serde_json::json!({ "name": name, "email": email }),
+            serde_json::json!({
+                "name": deleted.name,
+                "email": deleted.email,
+                "username": deleted.username,
+            }),
         ));
     }
     Ok(Json(Ack::ok()))

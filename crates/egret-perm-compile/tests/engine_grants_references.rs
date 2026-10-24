@@ -454,7 +454,7 @@ async fn deleting_the_target_user_deletes_the_grant_and_reaps_its_policy_at_once
     assert_eq!(compiled_users(&e, id).await, Some(vec![a]));
 
     UserRepo::new(e.db.clone())
-        .hard_delete(UserId(uc), &PermGroupRecompiler)
+        .hard_delete(UserId(uc), &deleter(), &PermGroupRecompiler)
         .await
         .expect("hard delete");
 
@@ -500,7 +500,7 @@ async fn a_user_delete_waits_on_an_uncommitted_rebind_of_a_targeting_grants_engi
     let db = e.db.clone();
     let h = tokio::spawn(async move {
         UserRepo::new(db)
-            .hard_delete(UserId(uc), &PermGroupRecompiler)
+            .hard_delete(UserId(uc), &deleter(), &PermGroupRecompiler)
             .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -615,4 +615,17 @@ async fn call_json(e: &Env, method: &str, uri: &str, body: Value) -> (StatusCode
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+/// Who deletes in these tests: `hard_delete` records it on the `user:delete`
+/// event.
+fn deleter() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(uuid::Uuid::nil()),
+        email: "deleter@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
 }

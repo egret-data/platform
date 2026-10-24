@@ -65,7 +65,8 @@ use sqlx::{Postgres, Transaction};
 use egret_perm::CompileError;
 
 use crate::trigger::{
-    affected_services_for_group_membership, affected_services_for_user_delete,
+    affected_services_for_group_membership, affected_services_for_role_membership,
+    affected_services_for_user_delete, affected_services_for_workspace_members,
     group_references_via, lock_services_in_tx, recompile_services_in_tx,
 };
 
@@ -121,6 +122,15 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
 
     /// F11 (spec E21, amended): the groups' services plus the profiles of
     /// every engine grant targeting `user_id`, locked in one ascending pass.
+    ///
+    /// Username takeover (spec 2026-10-23 §4.3): also every profile the user
+    /// is named in through a ROLE they hold (any scope: clearance, grant and
+    /// engine-grant arms, and for `platform_admin` the impersonation arm) and
+    /// through a WORKSPACE they are a member of. Read here, before the delete
+    /// sweeps `access_grants`. A role granted concurrently after this read is
+    /// swept without its profiles being recompiled; they then name a retired
+    /// username, which the ledger makes match nobody, until their next
+    /// recompile.
     async fn lock_affected_by_user_delete_in_tx(
         &self,
         tx: &mut Transaction<'static, Postgres>,
@@ -135,6 +145,37 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
                 .await
                 .map_err(|e| to_core(e, Some(group_names)))?,
         );
+        let roles: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT r.name FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+              WHERE ag.principal_type = 'user' AND ag.principal_id = $1 ORDER BY r.name",
+        )
+        .bind(user_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        for role in &roles {
+            services.extend(
+                affected_services_for_role_membership(tx, role)
+                    .await
+                    .map_err(|e| to_core(e, Some(group_names)))?,
+            );
+        }
+        let workspaces: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT scope_id FROM access_grants \
+              WHERE principal_type = 'user' AND principal_id = $1 \
+                AND scope_type = 'workspace' AND scope_id IS NOT NULL ORDER BY scope_id",
+        )
+        .bind(user_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        for ws in workspaces {
+            services.extend(
+                affected_services_for_workspace_members(tx, ws)
+                    .await
+                    .map_err(|e| to_core(e, Some(group_names)))?,
+            );
+        }
         services.sort_unstable();
         services.dedup();
         lock_services_in_tx(tx, &services)

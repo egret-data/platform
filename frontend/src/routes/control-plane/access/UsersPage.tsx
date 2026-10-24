@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   Compass,
   Eye,
@@ -12,7 +13,9 @@ import {
   Plus,
   ShieldCheck,
   Trash2,
+  UserCheck,
   UserCog,
+  UserX,
   Users,
 } from "lucide-react";
 
@@ -31,6 +34,8 @@ import {
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { ImpersonateDialog } from "@/components/ImpersonateDialog";
+import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
+import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -40,7 +45,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -138,6 +142,7 @@ export default function UsersPage() {
   const [resetTarget, setResetTarget] = useState<AccessUser | null>(null);
   const [impersonateTarget, setImpersonateTarget] = useState<AccessUser | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccessUser | null>(null);
+  const [disableTarget, setDisableTarget] = useState<AccessUser | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusFacet, setStatusFacet] = useState(FACET_ALL);
   const [providerFacet, setProviderFacet] = useState(FACET_ALL);
@@ -150,6 +155,14 @@ export default function UsersPage() {
       setDeleteError(null);
     },
     onError: (err) => setDeleteError(err.message ?? "Failed to delete user."),
+  });
+  const statusMutation = useMutation<AccessUser, ApiError, { id: string; status: "active" | "disabled" }>({
+    mutationFn: ({ id, status }) => updateUser(id, { status }),
+    onSuccess: (_, { status }) => {
+      qc.invalidateQueries({ queryKey: usersQueryKey });
+      toast.success(status === "active" ? "User enabled" : "User disabled");
+    },
+    onError: (err) => toast.error(err.message ?? "Failed to update status."),
   });
 
   const columns: Column<AccessUser>[] = [
@@ -276,6 +289,33 @@ export default function UsersPage() {
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
+            {/* The detail page's guards: admins only, never yourself. Enable
+                needs no confirmation; Disable signs the user out (KI-209).
+                On your own row Disable stays listed, aria-disabled, with the
+                reason in the item (FE-ACTION-4). */}
+            {isAdmin &&
+              (u.status === "active" ? (
+                <DropdownMenuItem
+                  disabled={u.id === me?.user_id}
+                  className="items-start"
+                  onClick={() => setDisableTarget(u)}
+                >
+                  <UserX className="mr-2 h-4 w-4" />
+                  <span className="flex flex-col">
+                    <span>Disable</span>
+                    {u.id === me?.user_id ? (
+                      <span className="text-xs text-muted-foreground">You cannot disable your own account</span>
+                    ) : null}
+                  </span>
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem
+                  onClick={() => statusMutation.mutate({ id: u.id, status: "active" })}
+                >
+                  <UserCheck className="mr-2 h-4 w-4" />
+                  Enable
+                </DropdownMenuItem>
+              ))}
             <DropdownMenuItem
               disabled={u.id === me?.user_id}
               title={u.id === me?.user_id ? "You cannot delete your own account" : undefined}
@@ -496,17 +536,32 @@ export default function UsersPage() {
         refresh={refreshUsers}
         onDone={() => bulk.clear()}
       />
-      <ConfirmDeleteDialog
+      <DeleteUserDialog
+        user={deleteTarget}
         open={deleteTarget !== null}
         onOpenChange={(o) => {
           if (!o) setDeleteTarget(null);
         }}
-        title={deleteTarget ? `Delete "${deleteTarget.email}"?` : "Delete user?"}
-        description="This user, their sessions, group memberships, and role grants will be permanently removed. This cannot be undone."
-        confirmText="delete"
         onConfirm={() => {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
           setDeleteTarget(null);
+        }}
+        onDisableInstead={() => {
+          setDisableTarget(deleteTarget);
+          setDeleteTarget(null);
+        }}
+        canDisable={isAdmin}
+        disableBlockedReason={lastActiveAdminReason(deleteTarget, users.data ?? [])}
+      />
+      <DisableUserDialog
+        user={disableTarget}
+        open={disableTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDisableTarget(null);
+        }}
+        onConfirm={() => {
+          if (disableTarget) statusMutation.mutate({ id: disableTarget.id, status: "disabled" });
+          setDisableTarget(null);
         }}
       />
     </PageContainer>

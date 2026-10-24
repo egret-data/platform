@@ -442,6 +442,18 @@ async fn an_impersonation_target_is_rendered_from_its_id_and_skipped_when_it_fai
     );
 
     // The target becomes an engine admin of the profile: skipped, reaped.
+    // A real platform admin: since the username-takeover fix every recompile
+    // rewrites `egret-admin` to the active platform admins, so a body seeded
+    // for a non-admin would not survive the recompile below.
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
+         SELECT 'user', $1, id, 'platform' FROM roles \
+          WHERE name = 'platform_admin' AND scope = 'platform'",
+    )
+    .bind(uc_id)
+    .execute(pool)
+    .await
+    .expect("make the target a platform admin");
     f.policy
         .seed_admin_all_access(
             f.trino_profile,

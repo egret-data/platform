@@ -806,6 +806,12 @@ async fn deleting_a_service_account_records_what_it_destroyed() {
         .to_string();
     let create_ev = f.one_event();
     assert_eq!(create_ev.action, "service_account:create");
+    // The engine username it was minted (first query, token issue): the name
+    // refs and policies keep naming after the row is gone.
+    let username = egret_auth::users::UserRepo::new(f.db.clone())
+        .ensure_username(egret_core::UserId(sa_id.parse().expect("uuid")))
+        .await
+        .expect("mint");
 
     let (status, body) = f
         .send(
@@ -831,6 +837,11 @@ async fn deleting_a_service_account_records_what_it_destroyed() {
     // event is the ONLY surviving record that the principal existed. A bare
     // uuid would say something was deleted without ever saying what.
     assert_eq!(ev.detail["name"], serde_json::json!("doomed"));
+    assert_eq!(
+        ev.detail["username"],
+        serde_json::json!(username),
+        "the username is retired for good, so the event is where an audit finds whose it was"
+    );
     assert_eq!(
         ev.detail["email"],
         serde_json::json!(email),

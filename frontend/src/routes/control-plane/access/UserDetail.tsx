@@ -18,21 +18,12 @@ import {
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { RolesEditor } from "@/components/access/RolesEditor";
+import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
+import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -296,38 +287,27 @@ export default function UserDetail() {
 
       <ResetPasswordDialog userId={id} email={user.email} open={resetOpen} onOpenChange={setResetOpen} />
 
-      {/* KI-209: disabling signs the user out at once, so it asks first. */}
-      <AlertDialog open={disableOpen} onOpenChange={setDisableOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Disable {user.email}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              They are signed out at once and cannot sign in until the account is enabled again.
-              Their memberships and role grants are kept.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => setStatus("disabled")}
-              className="bg-destructive text-white hover:bg-destructive/90"
-            >
-              Disable user
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DisableUserDialog
+        user={user}
+        open={disableOpen}
+        onOpenChange={setDisableOpen}
+        onConfirm={() => setStatus("disabled")}
+      />
 
-      <ConfirmDeleteDialog
+      <DeleteUserDialog
+        user={user}
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
-        title={`Delete "${user.email}"?`}
-        description="This user, their sessions, group memberships, and role grants will be permanently removed. This cannot be undone."
-        confirmText="delete"
         onConfirm={() => {
           deleteMut.mutate();
           setDeleteOpen(false);
         }}
+        onDisableInstead={() => {
+          setDeleteOpen(false);
+          setDisableOpen(true);
+        }}
+        canDisable={isAdmin}
+        disableBlockedReason={lastActiveAdminReason(user, usersQ.data ?? [])}
       />
     </PageContainer>
   );
