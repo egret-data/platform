@@ -118,4 +118,15 @@ describe("DashboardView width", () => {
       expect.objectContaining({ description: "notes", width: "fixed" }),
     );
   });
+
+  // KI-068: opening the edit panel on a fixed dashboard must not take its width from the canvas.
+  it("edit mode: opening a side panel widens the fixed wrapper by the panel", () => {
+    detail = { ...base, width: "fixed" };
+    const { container } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(container.querySelector(FIXED)).toBeTruthy();
+    fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
+    expect(container.querySelector(FIXED)).toBeNull();
+    expect(container.querySelector(".max-w-\\[1404px\\]")).toBeTruthy();
+  });
 });

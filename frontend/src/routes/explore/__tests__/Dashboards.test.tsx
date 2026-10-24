@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -120,6 +120,8 @@ describe("Dashboards — bulk select only reaches rows on screen", () => {
     expect(screen.queryByLabelText("Select Hidden dash")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    // Confirmed first (KI-075).
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
     // by trashing exactly the wrong dashboard, which is the whole defect.
@@ -146,6 +148,8 @@ describe("Dashboards — bulk select only reaches rows on screen", () => {
     expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    // Confirmed first (KI-075).
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     await waitFor(() => expect(trashMock).toHaveBeenCalledWith("d-shown"));
     expect(trashMock).not.toHaveBeenCalledWith("d-hidden");

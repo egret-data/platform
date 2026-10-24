@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -11,7 +11,7 @@ import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "
 import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { FIELD_LABEL } from "@/components/chart/settings/FieldLabel";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
-import { OPERATORS } from "./operators";
+import { OPERATORS, PARAM_TYPE_LABELS } from "./operators";
 import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 import { linkedFilterState } from "./linkedFilters";
 import { DefaultValueField } from "./DefaultValueField";
@@ -77,6 +77,35 @@ function Choice<T extends string>({ id, label, value, options, onChange }: {
   );
 }
 
+/**
+ * The filter's slug: its name in URLs and in `{{slug}}` (KI-065). Typed freely and committed on
+ * blur or Enter; the route makes the committed text URL-safe and unique and rewrites the
+ * `{{slug}}` references on the dashboard's cards. A blank box goes back to the current slug.
+ */
+function SlugField({ id, slug, onCommit }: { id: string; slug: string; onCommit: (slug: string) => void }) {
+  // Seeded once: the caller keys this field on the slug, so a new slug is a new field.
+  const [draft, setDraft] = useState(slug);
+  const commit = () => {
+    if (draft.trim() === "" || draft === slug) { setDraft(slug); return; }
+    onCommit(draft.trim());
+    // Back to the slug in force: a changed one remounts this field anyway, and text that
+    // normalises to the same slug ("Region" for `region`) must not linger as if it were pending.
+    setDraft(slug);
+  };
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id} className={FIELD_LABEL}>URL name</Label>
+      <Input id={id} aria-label="parameter URL name" aria-describedby={`${id}-help`} className="font-mono" value={draft}
+        onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }} />
+      <p id={`${id}-help`} className="text-xs text-muted-foreground">
+        In links as <code>?{slug}=…</code> and in text cards as <code>{`{{${slug}}}`}</code>. Changing it
+        updates the cards on this dashboard; links already shared stop setting this filter.
+      </p>
+    </div>
+  );
+}
+
 /** Label on the left, switch on the right: the card settings panel's on/off row. */
 function Toggle({ id, label, ariaLabel, checked, onChange }: {
   id: string; label: ReactNode; ariaLabel: string; checked: boolean; onChange: (v: boolean) => void;
@@ -122,12 +151,13 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], va
       <Field id={`${id}-name`} label="Name">
         <Input id={`${id}-name`} aria-label="parameter name" value={param.name} onChange={(e) => onChange({ ...param, name: e.target.value })} />
       </Field>
+      <SlugField key={`${param.id}:${param.slug}`} id={`${id}-slug`} slug={param.slug} onCommit={(slug) => onChange({ ...param, slug })} />
       <Field id={`${id}-type`} label="Type">
         <Select value={param.type}
           onValueChange={(v) => { const t = v as ParamType; onChange({ ...param, type: t, operator: OPERATORS[t][0] }); }}>
           <SelectTrigger id={`${id}-type`} aria-label="parameter type" className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {(Object.keys(OPERATORS) as ParamType[]).map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+            {(Object.keys(OPERATORS) as ParamType[]).map((t) => <SelectItem key={t} value={t}>{PARAM_TYPE_LABELS[t]}</SelectItem>)}
           </SelectContent>
         </Select>
       </Field>

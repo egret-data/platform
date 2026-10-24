@@ -24,6 +24,21 @@ describe("dashboardWidthClass", () => {
   });
 });
 
+// KI-068: the side panel sat INSIDE the 1048px measure, so opening it left the canvas 692px and
+// the grid flipped to its one-column phone layout. The measure is the canvas's, and the panel
+// sits beside it.
+describe("dashboardWidthClass with a side panel open (KI-068)", () => {
+  it("widens a fixed dashboard by the panel and its gap, so the canvas keeps its measure", () => {
+    expect(dashboardWidthClass("fixed", "edit")).toBe(`mx-auto w-full max-w-[${DASHBOARD_FIXED_WIDTH_PX + 16 + 340}px]`);
+    expect(dashboardWidthClass("fixed", "info")).toBe(`mx-auto w-full max-w-[${DASHBOARD_FIXED_WIDTH_PX + 16 + 300}px]`);
+  });
+
+  it("leaves a full-width dashboard unconstrained", () => {
+    expect(dashboardWidthClass("full", "edit")).toBe("");
+    expect(dashboardWidthClass("full", "info")).toBe("");
+  });
+});
+
 describe("DashboardViewActionsMenu", () => {
   it("shows the switch off for a fixed dashboard and reports 'full' when it is turned on", async () => {
     const user = userEvent.setup();

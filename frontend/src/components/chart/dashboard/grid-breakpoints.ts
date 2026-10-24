@@ -68,3 +68,13 @@ export function toMobileLayout(layout: LayoutItem[], kindOf: (id: string) => str
 export function mayPersistLayout(editing: boolean, breakpoint: GridBreakpoint): boolean {
   return editing && breakpoint === "desktop";
 }
+
+/** How far the pointer may travel between press and click for it to still be a click. */
+const CLICK_SLOP_PX = 4;
+
+/** Did the pointer travel between the press and this click? Then the click is the end of a drag
+ *  (a card moved by its handle) and must not act as a click on the card. */
+export function movedSincePress(press: { x: number; y: number } | null, click: { clientX: number; clientY: number }): boolean {
+  if (!press) return false;
+  return Math.abs(click.clientX - press.x) > CLICK_SLOP_PX || Math.abs(click.clientY - press.y) > CLICK_SLOP_PX;
+}
