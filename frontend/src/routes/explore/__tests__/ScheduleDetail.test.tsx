@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ScheduleRun, ScheduleSummary } from "@/api/alerts";
@@ -308,8 +308,8 @@ describe("Alerts & Reports editor page", () => {
     // rest of the WHEN lives — Superset's division, and the reason the tab is
     // gone entirely rather than merely renamed.
     await goTo(user, /^schedule$/i);
-    await user.clear(screen.getByLabelText(/grace period/i));
-    await user.type(screen.getByLabelText(/grace period/i), "600");
+    await user.clear(screen.getByLabelText(/^grace period/i));
+    await user.type(screen.getByLabelText(/^grace period/i), "600");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -575,11 +575,11 @@ describe("Alerts & Reports editor page", () => {
     renderEditor();
 
     // Owners: General, beside what the thing is called.
-    expect(screen.getByLabelText(/owners/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^owners$/i)).toBeInTheDocument();
     // Timers: Schedule, beside when it runs.
     await goTo(user, /^schedule$/i);
-    expect(screen.getByLabelText(/grace period/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/working timeout/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^grace period/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^working timeout/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/run log retention/i)).toBeInTheDocument();
   });
 
@@ -608,7 +608,7 @@ describe("Alerts & Reports editor page", () => {
     // Focus, not click: Radix's popover trigger opens on the input's own
     // focus handler, and a jsdom click on the wrapper does not deliver the
     // pointer events the trigger listens for.
-    screen.getByLabelText(/owners/i).focus();
+    screen.getByLabelText(/^owners$/i).focus();
     // The suggestion list is a Radix popover fed by a react-query lookup, so
     // it lands a tick or two after the click.
     expect(
@@ -955,7 +955,7 @@ describe("Data API alert condition (Task 6)", () => {
     const user = userEvent.setup();
     renderDataapiEditor();
     await user.click(screen.getByRole("button", { name: "schedule" }));
-    expect(screen.getByLabelText(/grace period/i)).toHaveValue("900");
+    expect(screen.getByLabelText(/^grace period/i)).toHaveValue("900");
   });
 
   it("sends the window and the comparison the user set", async () => {
@@ -1026,5 +1026,182 @@ describe("ScheduleDetail — dataapi_alert reachability (Task 6 fix round 1)", (
       await screen.findByRole("heading", { name: /new data api alert/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /^condition$/i })).toBeInTheDocument();
+  });
+});
+
+describe("Alerts & Reports UX (U7)", () => {
+  const runs = [
+    {
+      id: "r1",
+      state: "success",
+      started_at: "2026-08-11T09:00:00Z",
+      ended_at: "2026-08-11T09:00:02Z",
+      value: null,
+      error: null,
+      notification_sent_at: "2026-08-11T09:00:02Z",
+    },
+  ] as ScheduleRun[];
+
+  function existing(over: Record<string, unknown> = {}) {
+    return {
+      data: {
+        ...row(),
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        recipients: [],
+        targets: [],
+        ...over,
+      },
+      isLoading: false,
+    };
+  }
+
+  // KI-038 — the header, the list and the editor read a schedule through one formatter.
+  it("says an hourly schedule in words in the page header (KI-038)", async () => {
+    scheduleMock.mockReturnValue(existing({ crontab: "0 * * * *" }));
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText("Every hour at minute 0")).toBeInTheDocument();
+  });
+
+  it("previews the picked schedule in words, with the expression beside it (KI-038)", async () => {
+    const user = userEvent.setup();
+    renderEditor("/explore/eng/alerts/new");
+    await goTo(user, /^schedule$/i);
+
+    const preview = screen.getByText(/^Runs every day at 09:00/);
+    expect(preview).toBeInTheDocument();
+    expect(preview.textContent).toContain("0 9 * * *");
+  });
+
+  it("reads a raw cron expression back in words under the field (KI-038)", async () => {
+    scheduleMock.mockReturnValue(existing({ crontab: "30 8 * * 1-5" }));
+    renderEditor("/explore/eng/alerts/s1?section=schedule");
+
+    expect(await screen.findByLabelText(/cron expression/i)).toHaveValue("30 8 * * 1-5");
+    expect(screen.getByText(/Runs every Monday to Friday at 08:30/)).toBeInTheDocument();
+  });
+
+  // KI-039 — the option appears only where it does something.
+  it.each([
+    ["alert", true],
+    ["report", false],
+    ["dataapi_alert", false],
+  ])("offers \"Don't send when there are no rows\" on a new %s: %s (KI-039)", async (type, shown) => {
+    renderEditor(`/explore/eng/alerts/new?type=${type}&section=notification`);
+    await screen.findByRole("tab", { name: /^notification$/i, selected: true });
+
+    expect(screen.queryByLabelText(/don't send when there are no rows/i) !== null).toBe(shown);
+  });
+
+  // KI-171 — a report's run has no value, so its log has no Value column.
+  it("shows no Value column in a report's run log (KI-171)", async () => {
+    runsMock.mockReturnValue({ data: runs, isLoading: false });
+    scheduleMock.mockReturnValue(existing({ type: "report" }));
+    renderEditor("/explore/eng/alerts/s1");
+
+    const panel = (await screen.findByRole("heading", { name: /recent runs/i })).parentElement!;
+    const headers = within(panel).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toContain("Started");
+    expect(headers).not.toContain("Value");
+  });
+
+  it("keeps the Value column in an alert's run log (KI-171)", async () => {
+    runsMock.mockReturnValue({ data: [{ ...runs[0], value: 42 }], isLoading: false });
+    scheduleMock.mockReturnValue(existing());
+    renderEditor("/explore/eng/alerts/s1");
+
+    const panel = (await screen.findByRole("heading", { name: /recent runs/i })).parentElement!;
+    expect(within(panel).getAllByRole("columnheader").map((h) => h.textContent)).toContain("Value");
+    expect(screen.getByText("42")).toBeInTheDocument();
+  });
+
+  // KI-219 — Details is one short line; the rest is one click away.
+  it("keeps every Details cell of the Data API condition to one short line (KI-219)", async () => {
+    renderEditor("/explore/eng/alerts/new?type=dataapi_alert&section=condition");
+    await screen.findByRole("tab", { name: /^condition$/i, selected: true });
+
+    for (const r of screen.getAllByRole("row").slice(1)) {
+      const cells = r.querySelectorAll("td");
+      if (cells.length < 3) continue;
+      expect((cells[1].textContent ?? "").length, cells[0].textContent ?? "").toBeLessThanOrEqual(90);
+    }
+  });
+
+  it("moves the long explanation behind a More button (KI-219)", async () => {
+    const user = userEvent.setup();
+    renderEditor("/explore/eng/alerts/new?type=dataapi_alert&section=condition");
+
+    // Rendered twice: in the Details column and, below lg, under the label.
+    const [more] = await screen.findAllByRole("button", { name: /more about window/i });
+    await user.click(more);
+    expect(await screen.findByText(/only the traffic still kept/i)).toBeInTheDocument();
+  });
+
+  // KI-220 — the Notification tab is one Setting | Details | Value table.
+  it("lists destinations as rows of the notification table (KI-220)", async () => {
+    const user = userEvent.setup();
+    renderEditor("/explore/eng/alerts/new?section=notification");
+    await addDestination(user, /email/i);
+
+    const tables = screen.getAllByRole("table");
+    expect(tables).toHaveLength(1);
+    const table = tables[0];
+    expect(within(table).getByRole("rowheader", { name: /deliver to/i })).toBeInTheDocument();
+    expect(within(table).getByLabelText(/addresses/i)).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: /add delivery method/i })).toBeInTheDocument();
+  });
+
+  // KI-221 — section keys are the tab labels; old keys still work; unknown ones say so.
+  it.each([
+    ["alert", "condition", /^condition$/i],
+    ["alert", "what", /^condition$/i],
+    ["dataapi_alert", "condition", /^condition$/i],
+    ["dataapi_alert", "what", /^condition$/i],
+    ["report", "contents", /^contents$/i],
+    ["report", "what", /^contents$/i],
+    ["alert", "schedule", /^schedule$/i],
+    ["report", "notification", /^notification$/i],
+  ])("opens %s ?section=%s on its tab (KI-221)", async (type, key, tab) => {
+    renderEditor(`/explore/eng/alerts/new?type=${type}&section=${key}`);
+
+    expect(await screen.findByRole("tab", { name: tab, selected: true })).toBeInTheDocument();
+    expect(screen.queryByText(/no section called/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to General with a message for an unknown section (KI-221)", async () => {
+    const user = userEvent.setup();
+    renderEditor("/explore/eng/alerts/new?type=dataapi_alert&section=bogus");
+
+    expect(await screen.findByRole("tab", { name: /^general$/i, selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/no section called “bogus”/i);
+
+    // Choosing a tab replaces the bad key, and the message goes with it.
+    await goTo(user, /^schedule$/i);
+    expect(screen.queryByText(/no section called/i)).not.toBeInTheDocument();
+  });
+
+  it("writes the tab label as the key when you change tab (KI-221)", async () => {
+    const user = userEvent.setup();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Spy() {
+      return <output data-testid="search">{useLocation().search}</output>;
+    }
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={["/explore/eng/alerts/new?type=report"]}>
+            <Routes>
+              <Route path="/explore/:workspace/alerts/new" element={<><ScheduleDetail /><Spy /></>} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    await goTo(user, /^contents$/i);
+    const search = screen.getByTestId("search").textContent ?? "";
+    expect(new URLSearchParams(search).get("section")).toBe("contents");
   });
 });
