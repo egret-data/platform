@@ -18,6 +18,7 @@ import {
   getQueriesResultsCsvUrl,
   queriesCancel,
   queriesHistory,
+  queriesHistoryClear,
   queriesResults,
   queriesStatus,
 } from "./generated/queries/queries";
@@ -122,6 +123,14 @@ export function useCancelQuery(ws: string) {
 }
 export function useHistory(ws: string) {
   return useQuery<HistoryItem[]>({ queryKey: qk.history(ws), queryFn: async () => (await queriesHistory(ws)).data as unknown as HistoryItem[] });
+}
+/** Clear the caller's own query history in this workspace (KI-092). */
+export function useClearHistory(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => queriesHistoryClear(ws),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.history(ws) }),
+  });
 }
 /** Max rows pulled into the browser for client-side sort/filter/expand. The
  *  results endpoint clamps `page_size` to 1000; larger result sets show the

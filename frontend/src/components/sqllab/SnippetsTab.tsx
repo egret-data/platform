@@ -6,6 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   useCreateSnippet, useDeleteSnippet, useSnippets, useUpdateSnippet, type SqlSnippet,
 } from "@/api/sqllab";
 
@@ -19,6 +23,7 @@ export function SnippetsTab({ ws, onInsert, currentSql }: {
   const update = useUpdateSnippet(ws);
   const del = useDeleteSnippet(ws);
   const [editing, setEditing] = useState<Editing>(null);
+  const [deleting, setDeleting] = useState<SqlSnippet | null>(null);
 
   const items = data ?? [];
   const guard = (p: Promise<unknown>, ok: string) => p.then(() => toast.success(ok), (e) => toast.error(String(e)));
@@ -66,7 +71,7 @@ export function SnippetsTab({ ws, onInsert, currentSql }: {
                   <Pencil className="h-4 w-4" />
                 </button>
                 <button className="rounded p-1 text-red-600 hover:bg-background" title="Delete" aria-label={`Delete ${s.name}`}
-                  onClick={() => guard(del.mutateAsync(s.id), "Snippet deleted")}>
+                  onClick={() => setDeleting(s)}>
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
@@ -74,6 +79,23 @@ export function SnippetsTab({ ws, onInsert, currentSql }: {
           ))}
         </div>
       )}
+
+      {/* Confirmed first, as deleting a saved query is (KI-091). */}
+      <AlertDialog open={deleting != null} onOpenChange={(o) => { if (!o) setDeleting(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete snippet?</AlertDialogTitle>
+            <AlertDialogDescription>“{deleting?.name}” will be permanently deleted for everyone in this workspace.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={() => { if (deleting) guard(del.mutateAsync(deleting.id), "Snippet deleted"); setDeleting(null); }}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog open={editing != null} onOpenChange={(o) => { if (!o) setEditing(null); }}>
         <DialogContent className="max-w-lg">
