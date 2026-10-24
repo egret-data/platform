@@ -640,3 +640,6 @@ Deviations the code forces are recorded here, per task, as they happen.
   where the classification is on the whole table; on StarRocks, only where it is on a column." Test
   `a_starrocks_row_filter_on_a_table_classification_filters_nothing`; vitest "a preview counting table-only tables
   warns about StarRocks, and Create waits for the tick".
+- **UI 3a.** The subject suggestion list stayed open after Explain ran from the field (Enter). The shared
+  `useSuggestionCombobox` now closes the list when the enclosing form submits (Enter or the submit button). Vitest
+  "closes the list when Explain runs from the field (Enter), …" (`WhoCanReadDialog.test.tsx`).

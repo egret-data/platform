@@ -349,6 +349,18 @@ describe("Who can read? — one click on Explain runs Explain while the suggesti
     expect(lookups()).toHaveLength(1);
   });
 
+  it("closes the list when Explain runs from the field (Enter), so it does not hang under the answer (live check)", async () => {
+    serve({ userLookup: () => ok({ items: [], total: 0 }) });
+    const user = userEvent.setup();
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Who can read?" });
+    await user.type(within(dialog).getByLabelText("User"), "nobody");
+    expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(await within(dialog).findByText("No user named nobody. Pick a user from the suggestions.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("closes the list when focus leaves by keyboard", async () => {
     serve({});
     const user = userEvent.setup();
