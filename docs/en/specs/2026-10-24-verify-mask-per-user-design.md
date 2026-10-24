@@ -447,3 +447,9 @@ Deviations the code forces are recorded here, per task, as they happen.
 - `ExplainAttribution::Rule.name` also reaches `POST /perm/engine-grants/explain` (`routes/engine_grants.rs`), which
   calls `attribution_for` with a fresh cache.
 - Both snapshots end with `rollback`, as every other read-only snapshot in the crate does.
+
+### Task 3 (masks on Trino)
+
+- The helper `trino_tag_profile` returns the catalog and the **tag** service's id (not the Trino profile's), because
+  the table-level and declined-resolution tests write a hand tag mask into it (`hand_tag_mask`). The declined
+  resolution uses the fold-divergent column fixture (`emaıl`), as the existing access test does.

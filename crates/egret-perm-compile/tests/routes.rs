@@ -8969,6 +8969,169 @@ async fn trino_catalog_with_config(f: &Fixture, tag: &str, config: Value) -> Uui
     catalog_id
 }
 
+/// A Trino profile whose `tagService` names a real, empty tag service, bound to
+/// an engine on a new catalog (spec Task 3). Returns the catalog and the TAG
+/// service's id, which a test writes hand policies into.
+async fn trino_tag_profile(f: &Fixture, label: &str) -> (Uuid, i64) {
+    egret_policy::seed_tag(&f.policy)
+        .await
+        .expect("seed tag def");
+    let tag_service = f
+        .policy
+        .create_service(&unique(&format!("{label}_tag")), "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let catalog_id =
+        trino_catalog_with_config(f, label, json!({ "tagService": tag_service.name })).await;
+    (catalog_id, tag_service.id)
+}
+
+/// A hand-written tag MASK policy for `{public}` on `tag_name`, in the tag
+/// service `tag_service_id`.
+async fn hand_tag_mask(f: &Fixture, tag_service_id: i64, tag_name: &str, mask_type: &str) {
+    let tag_service = f
+        .policy
+        .get_service_by_id(tag_service_id)
+        .await
+        .expect("tag service row");
+    let name = unique("hand-tag-mask");
+    f.policy
+        .create_policy(
+            tag_service_id,
+            &name,
+            &json!({
+                "name": name, "service": tag_service.name, "serviceType": "tag",
+                "policyType": 1, "isEnabled": true, "policyPriority": 0,
+                "resources": { "tag": { "values": [tag_name], "isExcludes": false, "isRecursive": false } },
+                "dataMaskPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                    "dataMaskInfo": {"dataMaskType": mask_type}}],
+                "policyItems": [], "denyPolicyItems": [],
+                "allowExceptions": [], "denyExceptions": []
+            }),
+        )
+        .await
+        .expect("hand tag mask");
+}
+
+/// `POST /perm/explain` for `user` reading `sales.orders.email` in `catalog_id`.
+async fn explain_email(f: &Fixture, token: &str, catalog_id: Uuid, user: &str) -> Value {
+    let mut ask = explain_body(catalog_id, user);
+    ask["target"]["column"] = json!("email");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body
+}
+
+/// Spec §5.2 (C2): a classification mask on Trino is asked and answered, with
+/// the resolved tags, and attributed to the rule.
+#[tokio::test]
+async fn explain_reports_a_trino_classification_mask() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-mask").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    let reader = known_user(&f, unique("vmask-reader")).await;
+    // After the fixtures: `trino_catalog_with_config` takes the lock itself.
+    let _lock = exclusive(&f).await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(catalog_id, &reader)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+    let rule_id = store_rule(
+        &f,
+        &token,
+        mask_rule(
+            "vmask-trino-hash",
+            json!({"type": "tag", "key": tag.key}),
+            json!([]),
+        ),
+    )
+    .await;
+
+    let body = explain_email(&f, &token, catalog_id, &reader).await;
+    let trino = profile_for(&body, "trino");
+    assert_eq!(
+        access_for(trino, "select")["decision"]["kind"],
+        "allowed",
+        "body: {body}"
+    );
+    let mask = &trino["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["rule_id"],
+        json!(rule_id),
+        "body: {body}"
+    );
+    assert!(
+        trino.get("masked_read_skips_access").is_none(),
+        "Trino checks access on a masked column; body: {body}"
+    );
+}
+
+/// The same question when the classification is on the TABLE only: the tag
+/// reaches the column request as `ANCESTOR`, and a tag mask applies there.
+#[tokio::test]
+async fn explain_reports_a_trino_mask_from_a_table_classification() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, tag_service) = trino_tag_profile(&f, "vmask-trino-anc").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    hand_tag_mask(&f, tag_service, &tag.name, "MASK_HASH").await;
+
+    let body = explain_email(&f, &token, catalog_id, "analyst").await;
+    let mask = &profile_for(&body, "trino")["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_HASH",
+        "body: {body}"
+    );
+}
+
+/// A resolution explain declines (a fold-divergent stored column) leaves the
+/// mask undecidable with `tags_unresolved`, never answered from a narrower set.
+#[tokio::test]
+async fn a_declined_resolution_leaves_the_trino_mask_undecidable() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, tag_service) = trino_tag_profile(&f, "vmask-trino-decl").await;
+    let tag = assign_tag(&f, catalog_id, "sales", "orders", "email").await;
+    assign_tag(&f, catalog_id, "sales", "orders", "emaıl").await;
+    hand_tag_mask(&f, tag_service, &tag.name, "MASK_HASH").await;
+
+    let body = explain_email(&f, &token, catalog_id, "analyst").await;
+    let mask = &profile_for(&body, "trino")["mask"];
+    assert_eq!(mask["decision"]["kind"], "undecidable", "body: {body}");
+    assert!(
+        mask["decision"]["why"]
+            .as_array()
+            .expect("why")
+            .iter()
+            .any(|c| c["kind"] == "tags_unresolved"),
+        "body: {body}"
+    );
+}
+
 /// A classification rule is compiled for a Trino profile only through the
 /// profile's `tagService`, and skipped (`MissingTagService`) when it names no
 /// existing profile. So a Trino engine on such a profile does NOT enforce a

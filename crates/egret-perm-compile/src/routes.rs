@@ -758,10 +758,11 @@ pub struct ExplainProfile {
     /// view. For an uncleared reader the mask is `MASK_NULL`, and then the deny
     /// is not consulted: see [`ExplainProfile::masked_read_skips_access`].
     ///
-    /// Present only for a `read` explain of a COLUMN on a StarRocks profile. A
-    /// table-level target has no column to mask, a `write` has no masked request,
-    /// and Trino's masks come from the tag service, which the evaluator refuses
-    /// (tier c), so none is asked there.
+    /// Present for a `read` explain of a COLUMN, on every engine (spec C2). On
+    /// Trino the masks come from the resource policies and from the tag
+    /// service, asked with the same resolved tags as the access verdicts. A
+    /// table-level target has no column to mask and a `write` has no masked
+    /// request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
     /// `true` when StarRocks consults no access policy for the target column:
@@ -2525,10 +2526,7 @@ pub(crate) async fn explain_users(
             // The masked-read question, asked only where a mask can be the answer.
             // Asked BEFORE the accesses, because on StarRocks it decides whether
             // the column's access is consulted at all (Task 12, C2).
-            let mask = if action == Action::Read
-                && engine == EngineType::StarRocks
-                && target.column.is_some()
-            {
+            let mask = if action == Action::Read && target.column.is_some() {
                 let request = AccessRequest {
                     user: user.clone(),
                     groups: BTreeSet::new(),
@@ -2536,8 +2534,10 @@ pub(crate) async fn explain_users(
                     access_type: "select".to_string(),
                     resource: resource.clone(),
                     owner: None,
-                    // StarRocks has no tag service: no tag can reach a mask.
-                    resolved_tags: None,
+                    // The same resolution as the access verdicts (spec C2): a
+                    // Trino tag mask needs it, and StarRocks' enricher drops
+                    // every tag, so passing it there changes nothing.
+                    resolved_tags: resolved_tags.clone(),
                 };
                 let decision = egret_ranger_eval::eval::evaluate_data_mask(
                     &artifact,
@@ -2561,7 +2561,7 @@ pub(crate) async fn explain_users(
             };
             // StarRocks asks no access decision for a column whose deciding mask
             // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
-            // `mask` is only ever `Some` for a StarRocks column read.
+            // Trino checks access on a masked column, so never there.
             let masked_read_skips_access = engine == EngineType::StarRocks
                 && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
 
