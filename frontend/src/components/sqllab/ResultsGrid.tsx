@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle, ArrowDown, Ban, ArrowUp, ChevronsUpDown, Copy, Download, Search, TableProperties,
@@ -12,6 +12,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { ResultsPage } from "@/api/sqllab";
+import { rowsLabel } from "@/components/sqllab/rowsLabel";
 
 // Match engine numeric types (Trino + StarRocks) at the start of the type
 // string, with a word boundary so `interval`/`varchar` don't false-match. Longer
@@ -40,14 +41,14 @@ function copyText(text: string, label: string) {
 
 type SortDir = "asc" | "desc";
 
-export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Query failed", cancelled, statusLine, loading }: {
+export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Query failed", cancelled, loading }: {
   page: ResultsPage | null; csvHref: string | null; truncated: boolean;
   error?: string | null;
   /** The error panel's heading: "Query failed" unless the query never started. */
   errorTitle?: string;
   /** The run was cancelled: say so instead of the empty state (KI-078). */
   cancelled?: boolean;
-  statusLine?: ReactNode; loading?: boolean;
+  loading?: boolean;
 }) {
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -123,7 +124,6 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
             onClick={() => copyText(error, "Error copied")}><Copy className="h-3 w-3" /> Copy</Button>
         </div>
         <div className="flex-1 overflow-auto whitespace-pre-wrap p-4 font-mono text-xs text-destructive">{error}</div>
-        {statusLine && <div className="border-t px-3 py-1.5 text-xs text-muted-foreground">{statusLine}</div>}
       </div>
     );
   }
@@ -145,7 +145,6 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
           <div className="font-medium text-foreground">Query cancelled</div>
           <div className="text-xs">The run was stopped before it returned rows. Run it again to see results.</div>
         </div>
-        {statusLine && <div className="border-t px-3 py-1.5 text-xs text-muted-foreground">{statusLine}</div>}
       </div>
     );
   }
@@ -161,6 +160,13 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
   }
 
   const loadedAll = page.rows.length >= page.row_count;
+  // JSON and Copy carry the rows in the grid (loaded, then filtered); CSV is
+  // streamed by the server and carries the whole result. Each says which (KI-089).
+  const gridRows = filter
+    ? `${rows.length.toLocaleString()} filtered ${rows.length === 1 ? "row" : "rows"}`
+    : loadedAll ? `all ${rowsLabel(rows.length)}`
+    : `${rows.length.toLocaleString()} loaded ${rows.length === 1 ? "row" : "rows"}`;
+  const scope = (text: string) => <span className="ml-auto pl-4 text-xs text-muted-foreground">{text}</span>;
   return (
     <div className="flex h-full flex-col">
       {/* Result toolbar: filter + export. */}
@@ -172,7 +178,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
             className="h-7 w-48 rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring" />
         </div>
         <span className="text-xs tabular-nums text-muted-foreground">
-          {filter ? `${rows.length.toLocaleString()} of ${page.row_count.toLocaleString()}` : `${page.row_count.toLocaleString()} rows`}
+          {filter ? `${rows.length.toLocaleString()} of ${page.row_count.toLocaleString()}` : rowsLabel(page.row_count)}
         </span>
         {truncated && (
           <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-700 dark:text-amber-400">
@@ -183,7 +189,8 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
           <span className="text-[11px] text-muted-foreground">interactive over first {page.rows.length.toLocaleString()} rows</span>
         )}
         <div className="ml-auto flex items-center gap-1">
-          <Button variant="outline" size="sm" className="h-7 gap-1" onClick={() => copyText(tsv(), "Copied to clipboard")}>
+          <Button variant="outline" size="sm" className="h-7 gap-1" aria-label={`Copy ${gridRows}`} title={`Copy ${gridRows} as TSV`}
+            onClick={() => copyText(tsv(), "Copied to clipboard")}>
             <Copy className="h-3.5 w-3.5" /> Copy
           </Button>
           <DropdownMenu>
@@ -191,9 +198,9 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
               <Button variant="outline" size="sm" className="h-7 gap-1"><Download className="h-3.5 w-3.5" /> Export</Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {csvHref && <DropdownMenuItem asChild><a href={csvHref} download>Download CSV</a></DropdownMenuItem>}
-              <DropdownMenuItem onClick={downloadJson}>Download JSON</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => copyText(tsv(), "Copied to clipboard")}>Copy as TSV</DropdownMenuItem>
+              {csvHref && <DropdownMenuItem asChild><a href={csvHref} download>Download CSV {scope(`all ${rowsLabel(page.row_count)}`)}</a></DropdownMenuItem>}
+              <DropdownMenuItem onClick={downloadJson}>Download JSON {scope(gridRows)}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => copyText(tsv(), "Copied to clipboard")}>Copy as TSV {scope(gridRows)}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -247,13 +254,14 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td colSpan={cols.length + 1} className="px-3 py-6 text-center text-xs text-muted-foreground">No rows match “{filter}”.</td></tr>
+              <tr><td colSpan={cols.length + 1} className="px-3 py-6 text-center text-xs text-muted-foreground">
+                {page.rows.length === 0 ? "The query returned no rows." : `No rows match “${filter}”.`}
+              </td></tr>
             )}
           </tbody>
         </table>
       </div>
 
-      {statusLine && <div className="border-t px-3 py-1.5 text-xs text-muted-foreground">{statusLine}</div>}
 
       {/* Cell value expander. */}
       <Dialog open={expanded != null} onOpenChange={(o) => { if (!o) setExpanded(null); }}>

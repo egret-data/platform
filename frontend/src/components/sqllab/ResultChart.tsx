@@ -10,13 +10,24 @@ type ChartType = "bar" | "line" | "area";
 const MAX_CATEGORIES = 50;
 const PAD = { top: 16, right: 24, bottom: 66, left: 64 };
 
-function niceTicks(min: number, max: number, count = 4): number[] {
+/** About `count` ticks on round steps (1, 2 or 5 × 10ⁿ) that cover [min, max].
+ *  For a whole-number measure (a count) the step is at least 1, so no tick is
+ *  fractional (KI-162). */
+function niceTicks(min: number, max: number, integer: boolean, count = 4): number[] {
   if (min === max) return [min];
-  const step = (max - min) / count;
-  return Array.from({ length: count + 1 }, (_, i) => min + step * i);
+  const raw = (max - min) / count;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const norm = raw / mag;
+  let step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  if (integer) step = Math.max(1, Math.round(step));
+  const first = Math.floor(min / step), last = Math.ceil(max / step);
+  // Multiply rather than accumulate, so 0.1-steps do not drift (0.30000000000000004).
+  return Array.from({ length: last - first + 1 }, (_, i) => Number(((first + i) * step).toPrecision(12)));
 }
 const fmt = (n: number) => (Math.abs(n) >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 1 }) : String(Math.round(n * 100) / 100));
 const short = (s: string) => (s.length > 14 ? s.slice(0, 13) + "…" : s);
+/** Rough width of an 11px label: labels that fit their band stay upright. */
+const LABEL_CHAR_PX = 6.5;
 
 export function ResultChart({ page }: { page: ResultsPage | null }) {
   const cols = page?.columns ?? [];
@@ -62,13 +73,15 @@ export function ResultChart({ page }: { page: ResultsPage | null }) {
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
   const values = data.map((d) => d.value);
-  const yMax = Math.max(0, ...values);
-  const yMin = Math.min(0, ...values);
+  const ticks = niceTicks(Math.min(0, ...values), Math.max(0, ...values), values.every(Number.isInteger));
+  // The axis runs from the lowest to the highest tick, so the top tick sits on the plot.
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
   const yScale = (v: number) => PAD.top + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
   const n = data.length || 1;
   const band = plotW / n;
   const xCenter = (i: number) => PAD.left + band * i + band / 2;
-  const ticks = niceTicks(yMin, yMax);
+  const rotate = data.some((d) => short(d.label).length * LABEL_CHAR_PX > band - 4);
   const zeroY = yScale(0);
 
   const linePts = data.map((d, i) => `${xCenter(i)},${yScale(d.value)}`).join(" ");
@@ -123,8 +136,8 @@ export function ResultChart({ page }: { page: ResultsPage | null }) {
           )}
           {/* x labels */}
           {data.map((d, i) => (
-            <text key={i} x={xCenter(i)} y={H - PAD.bottom + 16} textAnchor="end" fontSize={11} fill="var(--muted-foreground)"
-              transform={`rotate(-35 ${xCenter(i)} ${H - PAD.bottom + 16})`}>{short(d.label)}</text>
+            <text key={i} x={xCenter(i)} y={H - PAD.bottom + 16} textAnchor={rotate ? "end" : "middle"} fontSize={11} fill="var(--muted-foreground)"
+              transform={rotate ? `rotate(-35 ${xCenter(i)} ${H - PAD.bottom + 16})` : undefined}>{short(d.label)}</text>
           ))}
         </svg>
       </div>

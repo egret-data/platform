@@ -284,6 +284,99 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getQueriesSubmitMutationOptions(options), queryClient);
     }
+    export type queriesHistoryClearResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type queriesHistoryClearResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type queriesHistoryClearResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type queriesHistoryClearResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type queriesHistoryClearResponseSuccess = (queriesHistoryClearResponse200) & {
+  headers: Headers;
+};
+export type queriesHistoryClearResponseError = (queriesHistoryClearResponse401 | queriesHistoryClearResponse403 | queriesHistoryClearResponse500) & {
+  headers: Headers;
+};
+
+export type queriesHistoryClearResponse = (queriesHistoryClearResponseSuccess | queriesHistoryClearResponseError)
+
+export const getQueriesHistoryClearUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/queries`
+}
+
+export const queriesHistoryClear = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<queriesHistoryClearResponse> => {
+
+  return customInstance<queriesHistoryClearResponse>(getQueriesHistoryClearUrl(workspace),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getQueriesHistoryClearMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queriesHistoryClear>>, TError,{workspace: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof queriesHistoryClear>>, TError,{workspace: string}, TContext> => {
+
+const mutationKey = ['queriesHistoryClear'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof queriesHistoryClear>>, {workspace: string}> = (props) => {
+          const {workspace} = props ?? {};
+
+          return  queriesHistoryClear(workspace,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type QueriesHistoryClearMutationResult = NonNullable<Awaited<ReturnType<typeof queriesHistoryClear>>>
+
+    export type QueriesHistoryClearMutationError = ErrorBody
+
+    export const useQueriesHistoryClear = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queriesHistoryClear>>, TError,{workspace: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof queriesHistoryClear>>,
+        TError,
+        {workspace: string},
+        TContext
+      > => {
+      return useMutation(getQueriesHistoryClearMutationOptions(options), queryClient);
+    }
     export type queriesStatusResponse200 = {
   data: QueryStatusDto
   status: 200

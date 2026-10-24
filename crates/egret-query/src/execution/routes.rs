@@ -63,7 +63,10 @@ const PERM: &str = "query:run";
 
 pub fn engine_router() -> Router<EngineState> {
     Router::new()
-        .route("/ws/{workspace}/queries", post(submit).get(history))
+        .route(
+            "/ws/{workspace}/queries",
+            post(submit).get(history).delete(history_clear),
+        )
         .route("/ws/{workspace}/queries/{id}", get(status))
         .route("/ws/{workspace}/queries/{id}/results", get(results))
         .route("/ws/{workspace}/queries/{id}/results.csv", get(results_csv))
@@ -407,7 +410,7 @@ async fn cancel(
     tag = "queries",
     params(WorkspacePath),
     responses(
-        (status = 200, description = "Recent queries submitted by the caller (max 50)", body = Vec<QueryListItem>),
+        (status = 200, description = "Recent queries submitted by the caller (max 50), less those they cleared", body = Vec<QueryListItem>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing query:run permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -439,11 +442,37 @@ async fn history(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/queries",
+    tag = "queries",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The caller's query history in this workspace is cleared; nobody else's is touched", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn history_clear(
+    State(st): State<EngineState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Ack>, EngineApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+        .await
+        .map_err(EngineApiError::from)?;
+    st.store
+        .clear_history_for_user(ctx.workspace_id.0, ctx.principal.user_id.0)
+        .await
+        .map_err(EngineApiError::from)?;
+    Ok(Json(Ack::ok()))
+}
+
 /// OpenAPI fragment for the workspace query-execution router. Merged into the
 /// Query seam's `egret_query::openapi()`.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(submit, history, status, results, results_csv, cancel),
+    paths(submit, history, history_clear, status, results, results_csv, cancel),
     components(schemas(
         SubmitQuery,
         crate::execution::model::QueryParam,

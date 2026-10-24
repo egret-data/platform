@@ -15,12 +15,13 @@ vi.mock("@/api/sqllab", () => ({
 }));
 
 const setFolderMock = vi.fn().mockResolvedValue({});
+const createFolderMock = vi.fn().mockResolvedValue({ id: "f2", name: "F2" });
 const foldersMock = vi.fn(() => ({ data: [{ id: "f1", name: "Reports" }] }));
 vi.mock("@/api/folders", () => ({
   useFolders: () => foldersMock(),
   useSetFolder: () => ({ mutateAsync: setFolderMock }),
   useFolderMutations: () => ({
-    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f2", name: "F2" }) },
+    create: { mutateAsync: createFolderMock },
     rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
     remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
   }),
@@ -63,7 +64,8 @@ test("clicking the row opens the query", () => {
   const onOpen = vi.fn();
   renderTab(onOpen);
   fireEvent.click(screen.getByText("Monthly revenue"));
-  expect(onOpen).toHaveBeenCalledWith("SELECT 1", "db1");
+  // KI-083: the query's name travels with it, so the new tab is titled after it.
+  expect(onOpen).toHaveBeenCalledWith("SELECT 1", "db1", "Monthly revenue");
 });
 
 test("edit opens the dialog prefilled and saving calls update with the full body", async () => {
@@ -103,4 +105,17 @@ it("groups saved queries under folder headers and offers a Share action", async 
   expect(
     screen.getByText("Grant people and groups access to this saved_query."),
   ).toBeInTheDocument();
+});
+
+/** KI-093: a folder can be made from the list itself, as on the Datasets list. */
+test("New folder creates an empty folder without moving a query", async () => {
+  createFolderMock.mockClear(); setFolderMock.mockClear();
+  const user = userEvent.setup();
+  renderTab();
+  await user.click(screen.getByRole("button", { name: "New folder" }));
+  const dialog = screen.getByRole("dialog");
+  await user.type(within(dialog).getByPlaceholderText("Folder name"), "u4-folder");
+  await user.click(within(dialog).getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(createFolderMock).toHaveBeenCalledWith("u4-folder"));
+  expect(setFolderMock).not.toHaveBeenCalled();
 });

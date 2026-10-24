@@ -37,7 +37,9 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
                     ? "border-t-2 border-t-primary bg-background font-medium text-foreground"
                     : "border-t-2 border-t-transparent text-muted-foreground hover:bg-accent/60"}`}>
                 {editing === t.id ? (
-                  <input autoFocus defaultValue={t.title}
+                  <input autoFocus defaultValue={t.title} aria-label="Tab name"
+                    // Select the old name, so typing replaces it (KI-094).
+                    onFocus={(e) => e.currentTarget.select()}
                     className="my-1.5 w-28 rounded bg-transparent px-1 outline-none ring-2 ring-ring"
                     onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
                     onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditing(null); }} />
@@ -62,14 +64,17 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
           <Command className="h-3 w-3" /> K for commands
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {active && (
-          <SqlTab key={active.id} ws={ws} tab={active}
-            patch={(p) => patchTab(active.id, p)}
-            onOpenSaved={(sql, dbId) => openTab({ title: "Saved", sql, dbId, limit: active.limit })}
+      {/* Every tab stays mounted and only the active one is shown, so a tab
+          keeps its result, run status and parameter values while another is
+          in front (KI-082). */}
+      {tabs.map((t) => (
+        <div key={t.id} hidden={t.id !== active?.id} className="min-h-0 flex-1 overflow-hidden">
+          <SqlTab ws={ws} tab={t} active={t.id === active?.id}
+            patch={(p) => patchTab(t.id, p)}
+            onOpenSaved={(sql, dbId, name) => openTab({ title: name, sql, dbId, limit: t.limit })}
             onOpenPreview={(init) => openTab({ ...init, limit: 100, autoRun: true })} />
-        )}
-      </div>
+        </div>
+      ))}
     </PageContainer>
   );
 }
