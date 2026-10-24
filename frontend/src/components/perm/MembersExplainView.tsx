@@ -219,7 +219,7 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
   return (
     <Fragment>
       <TableRow>
-        <TableCell className="whitespace-normal">
+        <TableCell className="min-w-24 whitespace-normal">
           <p className="text-sm break-words">{member.label}</p>
           <p className="font-mono text-xs text-muted-foreground break-words">{member.username}</p>
         </TableCell>

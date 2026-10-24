@@ -197,6 +197,8 @@ describe("Who can read? — member names wrap only where they must (live check, 
     const name = within(view).getByText("exempt-g");
     expect(name.className).not.toMatch(/\bbreak-all\b/);
     expect(name.className).toMatch(/\bbreak-words\b/);
+    // At 390 px the cell shrank to 71 px and "exempt-g" broke at its hyphen: the cell keeps a floor.
+    expect(name.closest("td")?.className).toMatch(/\bmin-w-24\b/);
   });
 });
 
