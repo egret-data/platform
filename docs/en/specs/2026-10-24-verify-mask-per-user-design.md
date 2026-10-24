@@ -514,3 +514,11 @@ Deviations the code forces are recorded here, per task, as they happen.
   tag service only when it resolves). The gap query folds case on schema and table like the tag resolution.
 - `ExplainResponse.effect_line` uses `effect::catalog_not_enforced` (new), the same attachment read as
   `attached_engines`: no attached engine → `NoEngine`, else `NoProfile`.
+
+### Task 8 (cost)
+
+- `explain_200_members_on_two_engines_timing` (`tests/explain_principal.rs`, `#[ignore]`), release build, local
+  Postgres, 2026-10-24: 200 members × a Trino and a StarRocks profile, a mask rule and a row filter exempting a
+  10-member group, a gated classification on the column. `POST /perm/explain/principal` for a column read, 5 runs:
+  **min 61.6 ms, median 70.2 ms, max 88.9 ms**. Under the 1 s bound, so no `PreparedPolicySet` (C7). The test asserts
+  the median stays under 1 s.
