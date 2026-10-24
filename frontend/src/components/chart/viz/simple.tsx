@@ -216,10 +216,22 @@ const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display",
  */
 function FunnelStepsControl({ config, onChange, resultColumns, rows, columnSettings }: VizControlProps<Cfg>) {
   const dim = typeof config.dimension === "string" ? config.dimension : undefined;
-  const di = dim ? resultColumns.findIndex((c) => c.name === dim) : -1;
-  if (di < 0) return null;
-  const names = [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
-  if (names.length === 0) return null;
+  if (!dim) return null;
+  const di = resultColumns.findIndex((c) => c.name === dim);
+  const names = di < 0 ? [] : [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
+  // Before the first run there is nothing to list, and the list used to vanish without a word
+  // (KI-056): say that it is coming, and what orders the stages until it, or a sort, does.
+  if (names.length === 0) {
+    return (
+      <div className="space-y-1.5">
+        <div className="text-xs text-muted-foreground">Steps</div>
+        <p className="text-xs text-muted-foreground">
+          The steps appear here after the first run, to reorder or hide. Until they are ordered
+          here or by a sort, the funnel shows them in the order the database returns them.
+        </p>
+      </div>
+    );
+  }
   const dimType = resultColumns[di]?.type ?? "varchar";
   const dimFormat = dim ? columnSettings[dim] : undefined;
   const labels = Object.fromEntries(names.map((n) => [n, formatDimensionValue(n, dimType, dimFormat)]));
