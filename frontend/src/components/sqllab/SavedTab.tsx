@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
@@ -70,7 +70,8 @@ function FolderHeader({ name, count, collapsed, onToggle, onShare, onRename, onD
 export function SavedTab({ ws, databases, onOpen }: {
   ws: string;
   databases: DatabaseListItem[] | undefined;
-  onOpen: (sql: string, dbId: string | null) => void;
+  /** Open the query in a new SQL Lab tab, titled with its name (KI-083). */
+  onOpen: (sql: string, dbId: string | null, name: string) => void;
 }) {
   const { data } = useSavedQueries(ws);
   const update = useUpdateSavedQuery(ws);
@@ -86,7 +87,7 @@ export function SavedTab({ ws, databases, onOpen }: {
   const [shareTarget, setShareTarget] = useState<SavedQuery | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{
-    mode: "rename" | "move";
+    mode: "new" | "rename" | "move";
     query?: SavedQuery;
     folder?: { id: string; name: string };
   } | null>(null);
@@ -103,7 +104,7 @@ export function SavedTab({ ws, databases, onOpen }: {
       draggable
       onDragStart={(e) => e.dataTransfer.setData("text/plain", q.id)}
     >
-      <button className="min-w-0 flex-1 text-left" onClick={() => onOpen(q.sql, q.database_id)}>
+      <button className="min-w-0 flex-1 text-left" onClick={() => onOpen(q.sql, q.database_id, q.name)}>
         <div className="flex items-center gap-2 text-sm">
           <span className="font-semibold">{q.name}</span>
           <span className="text-xs text-muted-foreground">{dbName(databases, q.database_id)}</span>
@@ -127,10 +128,19 @@ export function SavedTab({ ws, databases, onOpen }: {
     </div>
   );
 
-  if (items.length === 0) return <div className="p-4 text-center text-sm text-muted-foreground">No saved queries.</div>;
-
   return (
     <>
+      {/* A folder can be made here, not only from a row's "Move to new
+          folder…", as on the Datasets list (KI-093). */}
+      <div className="flex items-center justify-between border-b px-3 py-1.5">
+        <span className="text-xs font-medium text-muted-foreground">{items.length} saved quer{items.length === 1 ? "y" : "ies"}</span>
+        <Button size="sm" variant="outline" className="h-7 gap-1" onClick={() => setFolderDialog({ mode: "new" })}>
+          <FolderPlus className="h-3.5 w-3.5" /> New folder
+        </Button>
+      </div>
+      {items.length === 0 && !showFolderSections(folders) && (
+        <div className="p-4 text-center text-sm text-muted-foreground">No saved queries.</div>
+      )}
       {/* The original folderless-header gate, now the shared
           `showFolderSections` all seven grouped lists call. This file is where
           it was first written; `dataapi/Endpoints.tsx` was the second, and the
@@ -191,14 +201,16 @@ export function SavedTab({ ws, databases, onOpen }: {
 
       <FolderNameDialog
         open={!!folderDialog}
-        title={folderDialog?.mode === "rename" ? "Rename folder" : "Move to new folder"}
-        submitLabel={folderDialog?.mode === "rename" ? "Rename" : "Move"}
+        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : "New folder"}
+        submitLabel={folderDialog?.mode === "rename" ? "Rename" : folderDialog?.mode === "move" ? "Move" : "Create"}
         initialValue={folderDialog?.mode === "rename" ? folderDialog.folder!.name : ""}
         onOpenChange={(o) => { if (!o) setFolderDialog(null); }}
         onSubmit={(name) => {
           const d = folderDialog!;
           if (d.mode === "rename")
             guard(renameFolder.mutateAsync({ id: d.folder!.id, name }));
+          else if (d.mode === "new")
+            guard(createFolder.mutateAsync(name).then(() => toast.success("Folder created")));
           else
             guard(
               createFolder

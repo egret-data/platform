@@ -33,6 +33,7 @@ import { SnippetsTab } from "@/components/sqllab/SnippetsTab";
 import { CommandPalette, type PaletteAction } from "@/components/sqllab/CommandPalette";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { emptySchemaIndex, type SchemaIndex } from "@/components/sqllab/schemaIndex";
+import { appendName, rowsLabel } from "@/components/sqllab/rowsLabel";
 import type { SqlTabState } from "@/hooks/useTabs";
 
 const LIMITS = [10, 100, 1000, 10000, 100000];
@@ -52,9 +53,12 @@ function extractParams(sql: string): string[] {
   return [...seen];
 }
 
-export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
-  ws: string; tab: SqlTabState; patch: (p: Partial<SqlTabState>) => void;
-  onOpenSaved: (sql: string, dbId: string | null) => void;
+export function SqlTab({ ws, tab, active = true, patch, onOpenSaved, onOpenPreview }: {
+  ws: string; tab: SqlTabState;
+  /** The tab in front. Every tab stays mounted (KI-082); only this one answers ⌘K. */
+  active?: boolean;
+  patch: (p: Partial<SqlTabState>) => void;
+  onOpenSaved: (sql: string, dbId: string | null, name: string) => void;
   onOpenPreview?: (init: { title: string; sql: string; dbId: string | null }) => void;
 }) {
   const { data: databases } = useDatabases(ws);
@@ -120,7 +124,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
     const language = engine === "starrocks" ? "mysql" : "trino";
     try { patch({ sql: formatSql(tab.sql, { language }) }); } catch { /* keep as-is */ }
   }
-  function insert(name: string) { patch({ sql: tab.sql + name }); }
+  function insert(name: string) { patch({ sql: appendName(tab.sql, name) }); }
   // Show the engine's query plan without changing the editor: run EXPLAIN over
   // the current SQL (or selection) and render the plan in the Results grid.
   function explain() {
@@ -151,6 +155,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   // cursor was in the editor (KI-079). Stopped here, so Monaco does not also
   // wait for a chord's second key.
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -160,7 +165,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  }, [active]);
 
   const actions = useMemo<PaletteAction[]>(() => {
     const list: PaletteAction[] = [
@@ -189,13 +194,15 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
       : cancelled ? "border bg-muted text-muted-foreground"
              : "border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"}`}>
       {failed || cancelled ? <Ban className="h-3 w-3" /> : <Check className="h-3 w-3" />}
-      {statusLine}{rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}
+      {statusLine}{rowCount != null ? ` · ${rowsLabel(rowCount)}` : ""}
     </span>
   ) : null;
 
   const main = (
     <Group orientation="vertical">
-      <Panel defaultSize="55%" minSize="20%">
+      {/* The results get the larger share: at 1440×900 the editor keeps about
+          a dozen lines and the grid shows about twice the rows (KI-229). */}
+      <Panel defaultSize="40%" minSize="20%">
         <div className="flex h-full flex-col">
           {/* Toolbar — grouped, wraps gracefully instead of clipping. */}
           <div className="flex flex-wrap items-center gap-1.5 border-b bg-muted/20 px-2 py-1.5">
@@ -315,25 +322,22 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
         </div>
       </Panel>
       <PanelSeparator className="h-1.5 bg-border transition-colors hover:bg-primary/60 active:bg-primary" />
-      <Panel defaultSize="45%" minSize="20%">
+      <Panel defaultSize="60%" minSize="20%">
         <Tabs value={tabValue} onValueChange={setTabValue} className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b px-2 py-1.5">
             <TabsList variant="underline" className="w-auto border-b-0"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
-            {tabValue === "results" && (
-              <div className="ml-auto flex items-center gap-2">
-                {finished && results.data && (
-                  <div className="flex rounded-md border p-0.5">
-                    <button onClick={() => setResultView("table")} title="Table"
-                      className={`flex h-6 items-center gap-1 rounded px-2 text-xs ${resultView === "table" ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-                      <Table2 className="h-3.5 w-3.5" /> Table
-                    </button>
-                    <button onClick={() => setResultView("chart")} title="Chart"
-                      className={`flex h-6 items-center gap-1 rounded px-2 text-xs ${resultView === "chart" ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-                      <BarChart3 className="h-3.5 w-3.5" /> Chart
-                    </button>
-                  </div>
-                )}
-                {statusChip}
+            {/* The run status is announced once, on the toolbar next to Run;
+                not again here or under the grid (KI-228). */}
+            {tabValue === "results" && finished && results.data && (
+              <div className="ml-auto flex rounded-md border p-0.5">
+                <button onClick={() => setResultView("table")} title="Table"
+                  className={`flex h-6 items-center gap-1 rounded px-2 text-xs ${resultView === "table" ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+                  <Table2 className="h-3.5 w-3.5" /> Table
+                </button>
+                <button onClick={() => setResultView("chart")} title="Chart"
+                  className={`flex h-6 items-center gap-1 rounded px-2 text-xs ${resultView === "chart" ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+                  <BarChart3 className="h-3.5 w-3.5" /> Chart
+                </button>
               </div>
             )}
           </div>
@@ -344,7 +348,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
               <ResultsGrid page={results.data ?? null} truncated={status.data?.truncated ?? false}
                 error={submitError ?? (failed ? (status.data?.error ?? "Query failed") : null)}
                 errorTitle={submitError ? "Query not started" : undefined}
-                cancelled={cancelled} statusLine={statusLine} loading={running}
+                cancelled={cancelled} loading={running}
                 csvHref={csvHref} />
             )}
           </TabsContent>
