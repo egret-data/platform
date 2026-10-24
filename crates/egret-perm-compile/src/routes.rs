@@ -317,6 +317,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::ExistingMask,
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
+        crate::effect::TrinoColumnOnly,
         crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,

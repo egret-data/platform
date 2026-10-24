@@ -9544,6 +9544,65 @@ async fn no_profile_explain_says_not_enforced_with_the_catalog() {
     assert!(body.get("effect_line").is_none(), "body: {body}");
 }
 
+/// Spec §5.8 (D3, C9): a classification row filter's preview counts the
+/// tables where the classification is on columns only, in catalogs a Trino
+/// engine enforces it: there it filters nothing. A table carrying it as a
+/// whole is not counted; a mask, and a catalog only StarRocks enforces, get
+/// `null`. The stored rule's effect says the same.
+#[tokio::test]
+async fn a_classification_row_filter_preview_counts_trino_column_only_tables() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-d3-count").await;
+    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let _lock = exclusive(&f).await;
+    let (key, tag_id) = classification_named(&f, &unique("VmaskD3")).await;
+    let wh = warehouse_of(&f, catalog_id).await;
+    assign(&f, tag_id, wh, "orders", "email").await;
+    assign(&f, tag_id, wh, "orders", "phone").await;
+    // On the whole table AND a column: the table attachment filters, so it
+    // is not counted.
+    assign(&f, tag_id, wh, "customers", "").await;
+    assign(&f, tag_id, wh, "customers", "id").await;
+    let selector = json!({"type": "tag", "key": key});
+
+    let rule = row_filter_rule("vmask-d3", selector.clone(), "region = 'us'");
+    let (status, body) = preview_rule(&f, &token, rule.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["effect"]["trinoColumnOnly"],
+        json!({"catalogs": [name], "tables": 1}),
+        "{body}"
+    );
+    let id = store_rule(&f, &token, rule).await;
+    let (status, stored) = get_json(&f, &token, &format!("/perm/rules/{id}/effect")).await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(
+        stored["trinoColumnOnly"], body["effect"]["trinoColumnOnly"],
+        "{stored}"
+    );
+
+    let (_, body) = preview_rule(&f, &token, mask_rule("vmask-d3-mask", selector, json!([]))).await;
+    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
+
+    // The fixture's StarRocks-only catalog, its classification on a column.
+    let (_, body) = preview_rule(
+        &f,
+        &token,
+        row_filter_rule(
+            "vmask-d3-sr",
+            json!({"type": "tag", "key": f.tag_key}),
+            "1=1",
+        ),
+    )
+    .await;
+    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
+}
+
 /// A classification rule is compiled for a Trino profile only through the
 /// profile's `tagService`, and skipped (`MissingTagService`) when it names no
 /// existing profile. So a Trino engine on such a profile does NOT enforce a

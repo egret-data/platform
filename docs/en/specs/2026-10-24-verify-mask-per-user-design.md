@@ -522,3 +522,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   10-member group, a gated classification on the column. `POST /perm/explain/principal` for a column read, 5 runs:
   **min 61.6 ms, median 70.2 ms, max 88.9 ms**. Under the 1 s bound, so no `PreparedPolicySet` (C7). The test asserts
   the median stays under 1 s.
+
+### Task 9 (D3 count on the rule effect)
+
+- `RuleEffect.trino_column_only` (`trinoColumnOnly`) serialises as `null` when absent, like the other optional
+  effect fields, rather than being omitted. "Catalogs with an enforcing Trino engine" reads the effect's own
+  `catalogs[].engines` (for a classification rule these are already only engines whose profile hosts it). Levels
+  compare case-folded. `null` also when no table qualifies.

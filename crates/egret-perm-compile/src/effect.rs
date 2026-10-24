@@ -97,6 +97,23 @@ pub struct RuleEffect {
     /// `alreadyMasked` may be incomplete: a cap cut the columns examined
     /// (50), the classifications read (1000) or the entries listed (20).
     pub truncated: bool,
+    /// A classification ROW FILTER only: the tables it filters nothing on in
+    /// Trino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when
+    /// there is none.
+    pub trino_column_only: Option<TrinoColumnOnly>,
+}
+
+/// Where a classification row filter filters nothing on Trino (spec §5.8, D3,
+/// E14): tables where the classification is on at least one column and not on
+/// the table, in catalogs a Trino engine enforces the rule on. A Trino tag row
+/// filter fires only for a table-level attachment; StarRocks filters these.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrinoColumnOnly {
+    /// The catalogs those tables are in, by name, sorted.
+    pub catalogs: Vec<String>,
+    /// Distinct tables.
+    pub tables: u32,
 }
 
 /// One catalog a rule reaches, and who enforces it there.
@@ -274,6 +291,11 @@ pub async fn rule_effect(
         (Vec::new(), false)
     };
 
+    let trino_column_only = match &rule.selector {
+        Selector::Tag { key } if !is_mask => trino_column_only(conn, key, &catalogs).await?,
+        _ => None,
+    };
+
     Ok(RuleEffect {
         kind: if is_mask {
             EffectKind::Mask
@@ -289,7 +311,51 @@ pub async fn rule_effect(
         exempt_everyone,
         already_masked,
         truncated: is_mask && (reach.targets_truncated || scan_truncated),
+        trino_column_only,
     })
+}
+
+/// [`TrinoColumnOnly`] for a classification row filter keyed `key`, over the
+/// reached `catalogs` whose enforcing engines include a Trino one. Levels
+/// compare case-folded, as the tag resolution does.
+async fn trino_column_only(
+    conn: &mut sqlx::PgConnection,
+    key: &str,
+    catalogs: &[EffectCatalog],
+) -> Result<Option<TrinoColumnOnly>, PermHttpError> {
+    let trino: Vec<Uuid> = catalogs
+        .iter()
+        .filter(|c| c.engines.iter().any(|e| e.engine_type == "trino"))
+        .map(|c| c.catalog_id)
+        .collect();
+    if trino.is_empty() {
+        return Ok(None);
+    }
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT c.name, lower(a.schema_name), lower(a.table_name) \
+           FROM catalog_tag_assignments a \
+           JOIN tags t ON t.id = a.tag_id \
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+          WHERE t.key = $1 AND c.id = ANY($2) AND a.column_name <> '' \
+            AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments b \
+                             WHERE b.tag_id = a.tag_id AND b.warehouse_id = a.warehouse_id \
+                               AND lower(b.schema_name) = lower(a.schema_name) \
+                               AND lower(b.table_name) = lower(a.table_name) \
+                               AND b.column_name = '')",
+    )
+    .bind(key)
+    .bind(&trino)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let names: BTreeSet<String> = rows.iter().map(|(name, _, _)| name.clone()).collect();
+    Ok(Some(TrinoColumnOnly {
+        catalogs: names.into_iter().collect(),
+        tables: u32::try_from(rows.len()).unwrap_or(u32::MAX),
+    }))
 }
 
 /// Whether a STORED rule is enforced: the `enforcedBy`/`notEnforced`/`catalogs`
