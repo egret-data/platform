@@ -24,9 +24,9 @@ import type { WorkspaceNames } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 
-/** Spec §5.2: what a required role compiles to, stated under the table. */
+/** Spec §5.2: what a required role compiles to, stated under the table. Package 2 (D2): StarRocks compiles nothing for a whole-table classification. */
 export const COMPILES_TO =
-  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
+  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. On StarRocks, a classification on a whole table compiles no clearance. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
 
 /** Why a picker's list is missing when the server refused it (403): the permission that lists it. */
 export const LIST_NEEDS: Record<"role" | "group", string> = {

@@ -565,3 +565,17 @@ Deviations the code forces are recorded here, per task, as they happen.
   its `effect_line`. Counts unchanged.
 - The `WhoCanReadDialog` test now renders inside a `MemoryRouter` (the dialog lives in the Data area's routes; the
   lines carry links). The 390 px wrap (`break-words` on the line) is not checked in jsdom; the live check covers it.
+
+### Task 12 (frontend, the gaps)
+
+- `COMPILES_TO` places the D2 sentence right after "…a NULL mask per tagged column." The bundle marker
+  ("Compiles to one deny tag policy in each Trino profile") is unchanged.
+- The D3 hint (`TRINO_ROW_FILTER_HINT`) sits under Kind and is the Kind picker's description while Applies to =
+  Classification and Kind = Filter rows.
+- The D3 warning (`TrinoColumnOnlyNotice`, `RulePreview.tsx`) names the classification as the form shows it (the
+  classification list, else the entry point's name, else the key), writes the singular for one table ("1 table in wh:
+  PII is on its columns … StarRocks filters it"), joins catalogs as "a, b and c", and is listed in Create's
+  `aria-describedby`. It is a bordered block like the second-mask notice, not a `role="status"` alert, so the "Not
+  enforced yet" status stays the dialog's one status region. Create's reason while it waits: "Tick 'Create anyway' to
+  create a row filter that filters nothing on Trino on these tables." The tick is the C6 `ticked` state, cleared by
+  every preview.

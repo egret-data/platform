@@ -1291,3 +1291,84 @@ describe("RuleDialog — live walkthrough fixes (Task 13)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "open rule" })).toHaveFocus());
   });
 });
+
+/**
+ * Package 2 (spec §5.8, D3, C9): on Trino a row filter by classification
+ * filters only where the classification is on the whole table. The dialog
+ * says so as a hint for any such rule, and, when the preview counts tables
+ * where it is on columns only, warns with the count and asks for the tick.
+ */
+describe("RuleDialog — a classification row filter that filters nothing on Trino (D3)", () => {
+  const HINT = "On Trino, a row filter by classification applies only where the classification is on the whole table.";
+
+  async function filterRows(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    await user.type(screen.getByLabelText(/^Filter expression/), "region = 'us'");
+  }
+
+  test("the hint shows for a row filter on a classification, not for a mask or a path", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    await filterRows(user);
+    expect(screen.getByText(HINT)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Kind" })).toHaveAccessibleDescription(HINT);
+    await user.click(screen.getByRole("combobox", { name: "Applies to" }));
+    await user.click(await screen.findByRole("option", { name: "Path" }));
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+  });
+
+  test("a preview counting column-only tables warns with the count and the catalogs, and Create waits for the tick", async () => {
+    const user = userEvent.setup();
+    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 2, catalogs: [], trinoColumnOnly: { catalogs: ["lake", "wh"], tables: 3 } };
+    previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await filterRows(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    const warning = await screen.findByTestId("trino-column-only");
+    expect(warning).toHaveTextContent(
+      "On Trino this row filter filters nothing on 3 tables in lake and wh: PII Data is on their columns, not on the table. StarRocks filters them. Attach PII Data to the table to filter on Trino.",
+    );
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toHaveAttribute("aria-disabled", "true");
+    expect(create).toHaveAccessibleDescription(
+      expect.stringContaining("Tick 'Create anyway' to create a row filter that filters nothing on Trino on these tables."),
+    );
+    const tick = screen.getByRole("checkbox", { name: "Create anyway: I understand this row filter filters nothing on Trino on these tables" });
+    await user.click(tick);
+    expect(create).toHaveAttribute("aria-disabled", "false");
+
+    // A new preview asks again.
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("checkbox", { name: /Create anyway/ })).not.toBeChecked();
+    expect(create).toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("one table in one catalog is said in the singular", async () => {
+    const user = userEvent.setup();
+    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: { catalogs: ["wh"], tables: 1 } };
+    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await filterRows(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByTestId("trino-column-only")).toHaveTextContent(
+      "On Trino this row filter filters nothing on 1 table in wh: PII Data is on its columns, not on the table.",
+    );
+  });
+
+  test("without the count there is no warning and no tick", async () => {
+    const user = userEvent.setup();
+    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: null };
+    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    await filterRows(user);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await screen.findByText(/Filters rows of/);
+    expect(screen.queryByTestId("trino-column-only")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
+  });
+});
