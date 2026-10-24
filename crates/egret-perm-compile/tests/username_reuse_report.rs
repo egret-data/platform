@@ -624,3 +624,86 @@ async fn an_engine_grant_event_naming_the_user_as_an_object_is_definite() {
         "{f:?}"
     );
 }
+
+/// A row of the 0209 baseline for the live policy `policy_id`, as 0209 saw it:
+/// its body last written at `written`, naming `username` held by `holder`.
+async fn baseline_row_of(e: &Env, policy_id: i64, username: &str, holder: Uuid, written: &str) {
+    sqlx::query(
+        "INSERT INTO username_reuse_baseline (service_id, policy_id, policy_name, managed_by, \
+           policy_updated_at, username, holder_id, holder_created_at, holder_is_active_admin) \
+         SELECT p.service_id, p.id, p.name, p.managed_by, $2::timestamptz, $3, $4, u.created_at, \
+                false \
+           FROM policy.authz_policies p, users u WHERE p.id = $1 AND u.id = $4",
+    )
+    .bind(policy_id)
+    .bind(written)
+    .bind(username)
+    .bind(holder)
+    .execute(&e.db.pool)
+    .await
+    .expect("baseline row");
+}
+
+#[tokio::test]
+async fn a_policy_both_live_and_in_the_baseline_is_one_finding() {
+    let Some(e) = env().await else { return };
+    // A compiled body naming `jdoe_…`, written before its holder existed and
+    // unchanged since: the live body and the 0209 baseline row say the same
+    // thing about the same place.
+    let jdoe = format!("jdoe_{}", tag());
+    let pc = policy_naming(
+        &e,
+        "compiler",
+        &format!("perm-grant-{}", Uuid::new_v4()),
+        &jdoe,
+    )
+    .await;
+    let holder = pre_0209_holder(&e.db, &jdoe).await;
+    baseline_row_of(&e, pc, &jdoe, holder, LONG_AGO).await;
+
+    let f = findings_for(&e, &jdoe).await;
+    assert_eq!(f.len(), 1, "one place, one finding: {f:?}");
+    assert_eq!(f[0]["kind"], "policy_predates_holder");
+    assert_eq!(f[0]["verdict"], "definite");
+    assert_eq!(f[0]["place"]["policyId"], json!(pc));
+    // The live body wins a tie: its evidence carries no baseline suffix.
+    assert_eq!(
+        f[0]["evidence"], "the policy body was last written before its holder existed",
+        "{f:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_stronger_verdict_wins_when_live_and_baseline_disagree() {
+    let Some(e) = env().await else { return };
+    // An egret-admin body naming a non-admin: when 0209 ran it had last been
+    // written before its holder existed (definite); it was rewritten since,
+    // after they joined, so the live body alone reads `possible`. The baseline
+    // still proves it was written for someone else.
+    let kim = format!("kim_{}", tag());
+    let holder = pre_0209_holder(&e.db, &kim).await;
+    sqlx::query("UPDATE users SET created_at = '2021-01-01T00:00:00Z' WHERE id = $1")
+        .bind(holder)
+        .execute(&e.db.pool)
+        .await
+        .expect("backdate");
+    let pc = policy_naming(&e, "infra", "egret-admin - catalog", &kim).await;
+    baseline_row_of(&e, pc, &kim, holder, LONG_AGO).await;
+    sqlx::query("UPDATE policy.authz_policies SET updated_at = now() WHERE id = $1")
+        .bind(pc)
+        .execute(&e.db.pool)
+        .await
+        .expect("rewritten since");
+
+    let f = findings_for(&e, &kim).await;
+    assert_eq!(f.len(), 1, "one place, one finding: {f:?}");
+    assert_eq!(f[0]["kind"], "admin_policy_named_non_admin");
+    assert_eq!(f[0]["verdict"], "definite", "{f:?}");
+    assert!(
+        f[0]["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("(at migration 0209)"),
+        "{f:?}"
+    );
+}

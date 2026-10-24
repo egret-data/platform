@@ -713,3 +713,13 @@ Deviations from the text above that the code forced or that implementation found
   " (at migration 0209)"), the OpenAPI descriptions, the test helper (`pre_0209_holder`) and §2 to §8 above now say
   0209. The notes earlier in this section keep "0208": they record what was true when they were written, and every
   "0208" in them means this migration.
+- **One finding per name per place.** A policy that names a reused username and is both live and in the baseline
+  was reported twice: once from its live body and once from its baseline row, differing only in the evidence suffix.
+  The live check counted 10 findings for 6 places, and the Overview counts doubled. The report now keys findings on
+  (username, place type, place id or policy id, position) and keeps one per key. The kind is not in the key: one
+  place yields one kind. The policy name, service and `managedBy` are not in it either, because the baseline keeps
+  them as they were when it was taken. When both rows report the place, the stronger verdict wins (definite, then
+  possible, then stale, then dead), and the live body wins a tie. A baseline `definite` beats a live `possible`: a
+  body proved written before its holder existed stays proof after a later rewrite (M2's rule for a body rewritten
+  since its holder joined). Tests: `a_policy_both_live_and_in_the_baseline_is_one_finding`,
+  `the_stronger_verdict_wins_when_live_and_baseline_disagree`.

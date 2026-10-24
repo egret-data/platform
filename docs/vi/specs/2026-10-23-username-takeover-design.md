@@ -674,3 +674,12 @@ Các sai khác so với phần trên mà code buộc phải có hoặc quá trì
   " (at migration 0209)"), mô tả OpenAPI, helper test (`pre_0209_holder`) và §2 đến §8 ở trên giờ ghi 0209. Các ghi
   chú trước đó trong mục này giữ "0208": chúng ghi lại điều đúng lúc được viết, và mọi "0208" trong đó là migration
   này.
+- **Một finding cho mỗi tên ở mỗi chỗ.** Một policy ghi một username bị dùng lại, vừa live vừa có trong baseline,
+  từng bị báo hai lần: một lần từ body live và một lần từ dòng baseline, chỉ khác hậu tố evidence. Live check đếm 10
+  finding cho 6 chỗ, và số đếm của Overview bị gấp đôi. Giờ báo cáo lấy khoá finding là (username, loại chỗ, id chỗ
+  hoặc policy id, position) và giữ một finding cho mỗi khoá. Kind không nằm trong khoá: một chỗ chỉ cho một kind.
+  Tên policy, service và `managedBy` cũng không nằm trong khoá, vì baseline giữ chúng như lúc chụp. Khi cả hai dòng
+  cùng báo một chỗ, verdict mạnh hơn thắng (definite, rồi possible, rồi stale, rồi dead), và body live thắng khi
+  hoà. `definite` từ baseline thắng `possible` từ live: một body đã được chứng minh là viết trước khi holder tồn tại
+  thì vẫn là bằng chứng sau một lần ghi lại về sau (quy tắc của M2 cho body được ghi lại sau khi holder vào). Test:
+  `a_policy_both_live_and_in_the_baseline_is_one_finding`, `the_stronger_verdict_wins_when_live_and_baseline_disagree`.

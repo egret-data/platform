@@ -564,19 +564,54 @@ pub async fn findings_via(conn: &mut PgConnection) -> Result<UsernameReuseReport
         sqlx::query_scalar("SELECT min(taken_at) FROM username_reuse_baseline")
             .fetch_one(&mut *conn)
             .await?;
-    let mut findings: Vec<ReuseFinding> = refs
+    let mut found: Vec<(ReuseFinding, bool)> = refs
         .into_iter()
         .filter_map(classify_ref)
-        .chain(policies.into_iter().filter_map(classify_policy))
+        .map(|f| (f, false))
+        .chain(policies.into_iter().filter_map(|p| {
+            let from_baseline = p.from_baseline;
+            classify_policy(p).map(|f| (f, from_baseline))
+        }))
         .collect();
-    findings.sort_by(|a, b| {
-        (a.username.as_str(), noun(a.place.place_type))
-            .cmp(&(b.username.as_str(), noun(b.place.place_type)))
+    // Within one place, the strongest verdict first, then the live body.
+    found.sort_by(|(a, a_baseline), (b, b_baseline)| {
+        place_key(a)
+            .cmp(&place_key(b))
+            .then(strength(a.verdict).cmp(&strength(b.verdict)))
+            .then(a_baseline.cmp(b_baseline))
     });
-    findings.dedup();
+    found.dedup_by(|(later, _), (kept, _)| place_key(later) == place_key(kept));
     Ok(UsernameReuseReport {
         generated_at: Utc::now(),
-        findings,
+        findings: found.into_iter().map(|(f, _)| f).collect(),
         baseline_taken_at,
     })
+}
+
+/// One finding per name per place, ordered by username then place. A policy
+/// that is both live and in the baseline is one place: its live body and its
+/// baseline row would otherwise each report it, differing only in the
+/// evidence. The name, service and `managedBy` are left out of the key: the
+/// baseline keeps them as they were when it was taken.
+fn place_key(f: &ReuseFinding) -> (&str, &'static str, Option<Uuid>, Option<i64>, Option<&str>) {
+    (
+        f.username.as_str(),
+        noun(f.place.place_type),
+        f.place.id,
+        f.place.policy_id,
+        f.place.position.as_deref(),
+    )
+}
+
+/// Which finding stands for a place reported twice (lower is stronger). A
+/// baseline row that proves the body was written for someone else stays proof
+/// after a rewrite, so `definite` beats the live body's `possible`; a live
+/// `stale` or `dead` says less than either.
+fn strength(v: Verdict) -> u8 {
+    match v {
+        Verdict::Definite => 0,
+        Verdict::Possible => 1,
+        Verdict::Stale => 2,
+        Verdict::Dead => 3,
+    }
 }
