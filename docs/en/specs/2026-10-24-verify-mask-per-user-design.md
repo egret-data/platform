@@ -601,3 +601,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   be found); at the same or a lower priority the resource policy is shut out (offset 529) and the outcomes stay. The
   builder then says "undecided". Test
   `tag_arbitration::a_tag_tie_names_its_outcomes_only_when_no_resource_mask_can_intervene`.
+- **Finding 4 (reproduced).** A column with several gated classifications has one clearance mask (named after the
+  lowest tag id, cleared set = intersection), and the replay line named only that tag. The line now names every gated
+  classification on the column ("cleared for *PII* and *Finance*"), computed per request with the D2 gap
+  (`gated_clearances` splits the gated resolved tags into on-column and table-only). Test
+  `a_reader_cleared_for_two_classifications_is_told_both`.
+- **Finding 6 (does not reproduce).** `registry.catalogs.warehouse_id` is UNIQUE (`catalogs_warehouse_id_key`), so two
+  reached catalogs cannot share a warehouse and `trinoColumnOnly.tables` cannot double-count. Not changed.

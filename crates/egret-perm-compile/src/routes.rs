@@ -2565,12 +2565,13 @@ pub(crate) async fn explain_users(
         Some(scope) => explain_tag_inputs(resolved_tags_for_target(&mut *conn, scope).await?).0,
         None => None,
     };
-    // D2 (spec §5.8): per request, from the column resolution and the gates.
-    let clearance_gaps = match (&resolved_tags, &target.column) {
+    // D2 (spec §5.8) and the classifications a column's clearance mask clears
+    // for: per request, from the column resolution and the gates.
+    let (column_clearances, clearance_gaps) = match (&resolved_tags, &target.column) {
         (Some(tags), Some(_)) if action == Action::Read => {
-            table_only_clearances(&mut *conn, tags).await?
+            gated_clearances(&mut *conn, tags).await?
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), Vec::new()),
     };
     let row_filter_gaps = match &table_scope {
         Some(scope) => row_filters_not_applied(&mut *conn, scope).await?,
@@ -2861,6 +2862,7 @@ pub(crate) async fn explain_users(
                     tag_resolution_declined: tag_resolution_declined.as_ref(),
                     tied: &tied,
                     tag_names: &tag_names,
+                    cleared_for: &column_clearances,
                 });
             per_user[i].push(profile);
         }
@@ -3632,32 +3634,34 @@ fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
     out
 }
 
-/// The resolved tags that reach the target column only from its table and
-/// carry a gate with a required role ([`ExplainClearanceGap`]). Sorted by name.
-async fn table_only_clearances(
+/// The resolved tags that carry a gate with a required role, split by where
+/// they reach the target column: `(on_column, table_only)`, each sorted by
+/// name. `table_only` is the D2 gap ([`ExplainClearanceGap`]); `on_column` is
+/// every classification a StarRocks clearance mask on the column clears for
+/// (one merged mask, the intersection of their cleared sets).
+async fn gated_clearances(
     conn: &mut sqlx::PgConnection,
     tags: &UnenrichedTags,
-) -> Result<Vec<ExplainClearanceGap>, PermHttpError> {
+) -> Result<(Vec<ExplainClearanceGap>, Vec<ExplainClearanceGap>), PermHttpError> {
     let display = resolved_tags_for_display(tags);
     let on_column: BTreeSet<&str> = display
         .iter()
         .filter(|t| t.attached_at_column)
         .map(|t| t.name.as_str())
         .collect();
-    let table_only: Vec<String> = display
+    let names: Vec<String> = display
         .iter()
-        .filter(|t| !on_column.contains(t.name.as_str()))
         .map(|t| t.name.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    if table_only.is_empty() {
-        return Ok(Vec::new());
+    if names.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
     // `tags.name` is unique (migration 0207), so a name names one tag.
     let rows: Vec<(Uuid, String, String)> =
         sqlx::query_as("SELECT id, key, name FROM tags WHERE name = ANY($1) ORDER BY name")
-            .bind(&table_only)
+            .bind(&names)
             .fetch_all(&mut *conn)
             .await
             .map_err(PermHttpError::db)?;
@@ -3671,7 +3675,7 @@ async fn table_only_clearances(
         .into_iter()
         .filter(|(_, key, _)| gated.contains(key))
         .map(|(tag_id, _, tag_name)| ExplainClearanceGap { tag_id, tag_name })
-        .collect())
+        .partition(|g| on_column.contains(g.tag_name.as_str())))
 }
 
 /// The names the line builder needs that the profile does not carry: the

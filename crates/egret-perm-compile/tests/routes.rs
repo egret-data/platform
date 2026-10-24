@@ -4691,6 +4691,62 @@ async fn a_cleared_reader_under_a_nulling_rule_is_told_the_rule_nulls_them() {
     lift_gate(&f, tag_id).await;
 }
 
+/// Review finding 4: a column carrying two gated classifications gets ONE
+/// clearance mask (named after the lower tag id) whose cleared set is the
+/// intersection, so a reader it clears is cleared for both, and the line names
+/// both.
+#[tokio::test]
+async fn a_reader_cleared_for_two_classifications_is_told_both() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let first: String = sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("first tag name");
+    let second = assign_tag(&f, f.catalog_id, "sales", "orders", "email").await;
+    let second_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&second.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("second tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(second_id)
+    .bind(&role)
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the second tag");
+    // A rule write recompiles the profile, folding both gates into one mask.
+    let rule = mask_rule(
+        "vmask-two-tags",
+        json!({ "type": "path", "catalog_id": f.catalog_id,
+                "schema": "sales", "table": "orders", "column": "email" }),
+        json!([]),
+    );
+    let name = rule["name"].as_str().unwrap().to_string();
+    let rule_id = store_rule(&f, &token, rule).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let mut tags = [first, second.name.clone()];
+    tags.sort();
+    assert_eq!(
+        profile_for(&body, "starrocks")["effect_lines"][0]["text"],
+        json!(format!(
+            "{cleared} reads email as hashed by rule {name} (cleared for {} and {})",
+            tags[0], tags[1]
+        )),
+        "body: {body}"
+    );
+    delete_rule(&f, &token, &rule_id).await;
+    lift_gate(&f, second_id).await;
+    lift_gate(&f, tag_id).await;
+}
+
 async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
     let (status, _) = into_json(
         f.app()

@@ -23,8 +23,8 @@ use crate::explain_wire::{
     WireRowFilterDecision, WireTiedOutcome, WireUndecidableCause,
 };
 use crate::routes::{
-    ExplainAttribution, ExplainExemption, ExplainProfile, ExplainRowFilterGap, ExplainTagDecline,
-    ExplainTargetLevel,
+    ExplainAttribution, ExplainClearanceGap, ExplainExemption, ExplainProfile, ExplainRowFilterGap,
+    ExplainTagDecline, ExplainTargetLevel,
 };
 
 /// One sentence about one person on one engine.
@@ -139,6 +139,10 @@ pub(crate) struct EffectInput<'a> {
     pub tied: &'a HashMap<String, Option<ExplainAttribution>>,
     /// `tags.name` by tag id, for the clearances the profile names.
     pub tag_names: &'a HashMap<Uuid, String>,
+    /// Every gated classification on the target column, by name: what a
+    /// StarRocks clearance mask (one per column, the intersection of their
+    /// cleared sets) clears a reader for. Empty for a table target.
+    pub cleared_for: &'a [ExplainClearanceGap],
 }
 
 /// The lines for one profile: for a `read`, the column (or table) line and
@@ -704,7 +708,7 @@ impl Builder<'_> {
                                 }
                             };
                             l.text("cleared for ");
-                            l.push(clearance);
+                            self.cleared_for(&mut l, clearance);
                             l.text(")");
                             outcome
                         }
@@ -725,6 +729,25 @@ impl Builder<'_> {
             },
         };
         Ok((l, EffectAbout::Column, outcome))
+    }
+
+    /// "*PII* and *Finance*": every gated classification on the column, or
+    /// the deciding clearance's own when none is known.
+    fn cleared_for(&self, l: &mut Line, deciding: EffectPart) {
+        let all = self.input.cleared_for;
+        if all.is_empty() {
+            l.push(deciding);
+            return;
+        }
+        for (i, c) in all.iter().enumerate() {
+            if i > 0 {
+                l.text(if i + 1 == all.len() { " and " } else { ", " });
+            }
+            l.push(EffectPart::Clearance {
+                text: c.tag_name.clone(),
+                tag_id: c.tag_id,
+            });
+        }
     }
 
     /// D2: ". Clearance *PII* is **not enforced** here: …", once per gap.
@@ -934,9 +957,7 @@ mod tests {
 
     use super::*;
     use crate::explain_wire::{WireMaskResult, WireRowFilterResult};
-    use crate::routes::{
-        ExemptVia, ExplainAccess, ExplainClearanceGap, ExplainMask, ExplainReplay, ExplainRowFilter,
-    };
+    use crate::routes::{ExemptVia, ExplainAccess, ExplainMask, ExplainReplay, ExplainRowFilter};
 
     const RULE: Uuid = Uuid::from_u128(1);
     const RULE_B: Uuid = Uuid::from_u128(2);
@@ -1111,6 +1132,7 @@ mod tests {
             tag_resolution_declined: c.decline.as_ref(),
             tied: &tied,
             tag_names: &tag_names,
+            cleared_for: &[],
         })
     }
 
