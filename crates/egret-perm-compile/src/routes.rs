@@ -2806,7 +2806,10 @@ pub(crate) async fn explain_users(
                     let exempt_item = matches!(&decision, RowFilterDecision::Filtered(r)
                         if r.filter_expr.is_empty());
                     let exemption = match &attribution {
-                        Some(ExplainAttribution::Rule { rule_id, .. }) if exempt_item => {
+                        Some(ExplainAttribution::Rule { rule_id, .. })
+                            if exempt_item
+                                && cache.rule_has_exempt_item(&mut *conn, *rule_id).await? =>
+                        {
                             Some(cache.exemption(&mut *conn, *rule_id, user).await?)
                         }
                         _ => None,
@@ -3591,7 +3594,8 @@ async fn mask_reason(
     let attribution = attribution_for_name(&mut *conn, cache, &m.policy_name).await?;
     let exemption = match &attribution {
         Some(ExplainAttribution::Rule { rule_id, .. })
-            if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE) =>
+            if m.mask_type.as_deref() == Some(EXEMPT_MASK_TYPE)
+                && cache.rule_has_exempt_item(conn, *rule_id).await? =>
         {
             Some(cache.exemption(conn, *rule_id, user).await?)
         }
@@ -3791,6 +3795,25 @@ impl ExplainCache {
             std::collections::hash_map::Entry::Vacant(slot) => slot.insert(conn.rule(id).await?),
         };
         Ok(rule.as_ref())
+    }
+
+    /// Whether a no-transform answer from `rule_id` can only be its exempt
+    /// item: the rule exists and its OWN outcome transforms (a mask type other
+    /// than `MASK_NONE`, a non-empty filter). A rule whose own outcome is "no
+    /// transform" decides through its `{public}` item for everyone, which is
+    /// not an exemption (review finding 1).
+    async fn rule_has_exempt_item(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        rule_id: Uuid,
+    ) -> Result<bool, PermHttpError> {
+        Ok(self
+            .rule(conn, rule_id)
+            .await?
+            .is_some_and(|r| match &r.kind {
+                RuleKind::Mask { mask_type, .. } => mask_type != EXEMPT_MASK_TYPE,
+                RuleKind::RowFilter { filter_expr } => !filter_expr.is_empty(),
+            }))
     }
 
     /// `tags.name` for `id`, or `None` when the tag is gone.

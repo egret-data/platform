@@ -9603,6 +9603,72 @@ async fn a_classification_row_filter_preview_counts_trino_column_only_tables() {
     assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
 }
 
+/// Review finding 1: a rule whose OWN mask is `MASK_NONE` ("Unmasked"), or a
+/// row filter whose own filter is empty, decides through its `{public}` item.
+/// That is the rule's outcome for everyone, not an exemption, so explain must
+/// not report one (nor call the compiled policy stale).
+#[tokio::test]
+async fn a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let path = |column: Value| {
+        json!({"type": "path", "catalog_id": f.catalog_id,
+               "schema": "sales", "table": "orders", "column": column})
+    };
+    let mut unmasked = mask_rule("vmask-unmasked", path(json!("email")), json!([]));
+    unmasked["kind"]["mask_type"] = json!("MASK_NONE");
+    let name = unmasked["name"].as_str().unwrap().to_string();
+    store_rule(&f, &token, unmasked).await;
+    store_rule(
+        &f,
+        &token,
+        row_filter_rule("vmask-nofilter", path(Value::Null), ""),
+    )
+    .await;
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {out}");
+
+    let body = explain_column(&f, &token, "analyst").await;
+    let starrocks = profile_for(&body, "starrocks");
+    let mask = &starrocks["mask"];
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "rule", "body: {body}");
+    assert!(
+        mask.get("exemption").is_none(),
+        "not an exemption; body: {body}"
+    );
+    let rows = &starrocks["row_filter"];
+    assert_eq!(
+        rows["decision"]["result"]["filter_expr"], "",
+        "body: {body}"
+    );
+    assert!(
+        rows.get("exemption").is_none(),
+        "not an exemption; body: {body}"
+    );
+    assert_eq!(
+        starrocks["effect_lines"][0]["text"],
+        json!(format!(
+            "analyst reads email as the real value (rule {name})"
+        )),
+        "body: {body}"
+    );
+}
+
 /// A classification rule is compiled for a Trino profile only through the
 /// profile's `tagService`, and skipped (`MissingTagService`) when it names no
 /// existing profile. So a Trino engine on such a profile does NOT enforce a

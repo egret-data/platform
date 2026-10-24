@@ -579,3 +579,11 @@ Deviations the code forces are recorded here, per task, as they happen.
   enforced yet" status stays the dialog's one status region. Create's reason while it waits: "Tick 'Create anyway' to
   create a row filter that filters nothing on Trino on these tables." The tick is the C6 `ticked` state, cleared by
   every preview.
+
+### Review fixes (after Task 10)
+
+- **Finding 1 (reproduced).** The rule API accepts a mask rule of type `MASK_NONE` ("Unmasked") and a row filter with
+  `filter_expr = ''`; both compile to a `{public}` item with no transform, which explain reported as an exemption
+  with an empty `via` ("compiled policy is older than the rule"). Now a no-transform answer counts as the exempt item
+  only when the rule row exists and its own outcome transforms (`ExplainCache::rule_has_exempt_item`). Test
+  `a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption`. The lag case of §5.4 step 4 keeps its empty `via`.
