@@ -39,4 +39,18 @@ describe("DashboardView edit sidebar", () => {
     fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
     expect(screen.getByText(/Insert a filter value/i)).toBeInTheDocument();
   });
+  // KI-068: a drag ends with a mouseup on the card, and the click that follows opened the panel,
+  // which then narrowed the canvas under the card that had just been placed.
+  it("the click that ends a drag does not open the card panel", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const body = screen.getAllByTestId("dashcard-body")[0];
+    fireEvent.mouseDown(body, { clientX: 10, clientY: 10 });
+    fireEvent.click(body, { clientX: 210, clientY: 60 });
+    expect(screen.queryByText(/Insert a filter value/i)).toBeNull();
+    // A click that did not move still opens it.
+    fireEvent.mouseDown(body, { clientX: 10, clientY: 10 });
+    fireEvent.click(body, { clientX: 11, clientY: 10 });
+    expect(screen.getByText(/Insert a filter value/i)).toBeInTheDocument();
+  });
 });

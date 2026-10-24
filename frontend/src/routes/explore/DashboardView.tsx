@@ -26,7 +26,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
-import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
+import { mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
@@ -48,7 +48,7 @@ import { DashboardViewActionRows, dashboardWidthClass } from "@/components/chart
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
 import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
-import { slugify, applyParamsToChart, paramFiltersForCard, temporalOverridesForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
+import { slugify, nextParameterSlug, renameSlugReferences, applyParamsToChart, paramFiltersForCard, temporalOverridesForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -154,6 +154,8 @@ export default function DashboardView() {
     setOptionsBySlug((m) => (m[slug]?.join("") === vals.join("") ? m : { ...m, [slug]: vals }));
   }, []);
   // Drill state — must be declared above the early return (Rules of Hooks).
+  /** Where the pointer went down on a card, to tell a click from the end of a drag. */
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
   // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
@@ -478,6 +480,20 @@ export default function DashboardView() {
     openPanel({ kind: "filter", paramId: id });
   }
 
+  /** A filter edited in its settings panel. Its slug is settled by `nextParameterSlug` (KI-065), and
+   *  when it changes, the `{{slug}}` references on the dashboard's cards are rewritten to follow. */
+  function changeParameter(next: DashboardParameter) {
+    const prev = parameters.find((x) => x.id === next.id);
+    if (!prev) return;
+    const others = parameters.filter((x) => x.id !== next.id).map((x) => x.slug);
+    const saved = (dashboard.parameters ?? []).some((x) => x.id === next.id);
+    const slug = nextParameterSlug(prev, next, others, saved);
+    setDraftParameters(parameters.map((x) => (x.id === next.id ? { ...next, slug } : x)));
+    if (slug !== prev.slug) {
+      setDraftCards((cur) => (cur ?? cardsAsDraft()).map((c) => ({ ...c, options: renameSlugReferences(c.options, prev.slug, slug) })));
+    }
+  }
+
   function addSection(layout: SectionLayout) {
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
@@ -678,7 +694,7 @@ export default function DashboardView() {
           </span>
         </div>
       )}
-<div className={dashboardWidthClass(effectiveWidth)}>
+<div className={dashboardWidthClass(effectiveWidth, editing ? (editPanel ? "edit" : null) : showInfo ? "info" : null)}>
       {dash.deleted_at && (
         <div className="mb-3 flex items-center justify-between rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
           <span>This dashboard is in the trash.</span>
@@ -867,7 +883,10 @@ export default function DashboardView() {
                 data-testid="dashcard-body"
                 role={editing && c.card_type !== "placeholder" ? "button" : undefined}
                 tabIndex={editing && c.card_type !== "placeholder" ? 0 : undefined}
-                onClick={editing && c.card_type !== "placeholder" ? () => openPanel({ kind: "card", cardId: c.id }) : undefined}
+                onMouseDown={editing ? (e) => { pressRef.current = { x: e.clientX, y: e.clientY }; } : undefined}
+                /* Not the click that ends a drag (KI-068): it opened the panel, which narrowed the
+                   canvas under the card that had just been placed. */
+                onClick={editing && c.card_type !== "placeholder" ? (e) => { if (!movedSincePress(pressRef.current, e)) openPanel({ kind: "card", cardId: c.id }); } : undefined}
                 /* Only a key pressed ON the card itself activates it (KI-059). The heading input, the text
                    textarea and any inline filter inside the card bubble their keydown up here, and
                    the preventDefault swallowed every space and newline typed into them. */
@@ -957,7 +976,7 @@ export default function DashboardView() {
             onAddChart={(c) => addCard(c)}
             onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
-            onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
+            onChangeParam={changeParameter}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
             onClose={() => setEditPanel(null)}
             onBack={() => setEditPanel({ kind: "add" })}

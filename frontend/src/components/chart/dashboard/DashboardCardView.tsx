@@ -10,6 +10,7 @@ import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import { shellSettings } from "@/components/chart/viz/renderConfig";
+import { getDescriptor } from "@/components/chart/viz/registry";
 import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
 import { HeadingCard } from "./HeadingCard";
@@ -127,6 +128,11 @@ function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, au
   // Computed once the chart is known to exist, so both the export menu (which needs the
   // rename that's actually in effect) and the render branch below share the same override.
   const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+  // What the chart editor still asks for ("Set up your Bar" — Add: X-axis), from the same
+  // descriptor. A chart saved without it would otherwise draw an empty card with no word of why
+  // (KI-003).
+  const descriptor = getDescriptor(eff.viz_type);
+  const missing = descriptor ? descriptor.requiredFields(descriptor.fromParams(eff.params)) : [];
   return (
     <div className="group relative flex h-full flex-col">
       {/* THE PENCIL IS A SECOND <svg> IN THE TILE, which is exactly why this cluster sits OUTSIDE
@@ -149,7 +155,13 @@ function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, au
       {headerRow}
       <div ref={chartRef} className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {(() => {
-          const body = blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>
+          const body = missing.length > 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-1 px-3 text-center text-sm text-muted-foreground">
+                <p className="font-medium text-foreground">This chart is not set up yet</p>
+                <p>Add: {missing.join(", ")}</p>
+              </div>
+            )
+            : blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>
             : data.error ? <div className="text-sm text-destructive">{data.error}</div>
             : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
             : (() => {

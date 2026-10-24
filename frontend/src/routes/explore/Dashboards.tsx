@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { ConfirmActionDialog } from "@/components/explore/ConfirmActionDialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
@@ -51,6 +52,10 @@ export default function Dashboards() {
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(null);
   const [shareTarget, setShareTarget] = useState<DashboardSummary | null>(null);
+  // Moving to the Trash and deleting a folder are confirmed first (KI-075): what is being
+  // trashed — one row, or the bulk selection — and which folder is being deleted.
+  const [pendingTrash, setPendingTrash] = useState<DashboardSummary | "bulk" | null>(null);
+  const [pendingFolderDelete, setPendingFolderDelete] = useState<{ id: string; name: string } | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; dash?: DashboardSummary; folder?: { id: string; name: string } } | null>(null);
 
@@ -210,7 +215,7 @@ export default function Dashboards() {
           onDuplicate={(x) => guard(duplicate.mutateAsync(x.id).then((c) => nav(`/explore/${ws}/dashboards/${c.id}`)))}
           onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
           onNewFolder={(x) => setFolderDialog({ mode: "move", dash: x })}
-          onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
+          onTrash={setPendingTrash}
           onRestore={(x) => guard(restore.mutateAsync(x.id))}
           onDeletePermanent={setPendingDelete}
           // Sharing hands out grants, so it belongs with the manage actions, not with Open.
@@ -265,7 +270,8 @@ export default function Dashboards() {
       }
       action={
         <Dialog open={open && canManage} onOpenChange={setOpen}>
-          {canManage && <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>}
+          {/* Nothing is created in the Trash (KI-074). */}
+          {canManage && !showTrash && <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>}
           <DialogContent>
             <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
             <div className="flex flex-col gap-3 py-2">
@@ -321,7 +327,7 @@ export default function Dashboards() {
                   onMove={doBulkMoveTo}
                   onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
                 />
-                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                <Button variant="destructive" size="sm" onClick={() => setPendingTrash("bulk")}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
@@ -332,7 +338,8 @@ export default function Dashboards() {
             <SummaryStrip
               items={[
                 { label: "dashboards", singular: "dashboard", value: rows.length },
-                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
+                // The Trash is a flat list with no folders on show, so it counts none (KI-074).
+                ...(folders.length && !showTrash ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>
@@ -370,7 +377,7 @@ export default function Dashboards() {
                         // mutations, so they travel with the same gate as the row menu.
                         onShare={group.folder && canManage ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
                         onRename={group.folder && canManage ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
-                        onDelete={group.folder && canManage ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                        onDelete={group.folder && canManage ? () => setPendingFolderDelete(group.folder!) : undefined}
                         onDropItem={canManage ? (id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e))) : undefined}
                       />
                       {!isCollapsed && group.rows.map(renderRow)}
@@ -397,6 +404,39 @@ export default function Dashboards() {
           else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.dash!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(String(e)));
           else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e)));
+        }}
+      />
+
+      <ConfirmActionDialog
+        open={pendingTrash !== null}
+        onOpenChange={(o) => { if (!o) setPendingTrash(null); }}
+        title="Move to Trash?"
+        description={pendingTrash === "bulk"
+          ? `${bulk.selectedIds.length === 1 ? "1 dashboard moves" : `${bulk.selectedIds.length} dashboards move`} to the Trash. You can restore them from there.`
+          : `"${pendingTrash?.name ?? ""}" moves to the Trash. You can restore it from there.`}
+        confirmLabel="Move to Trash"
+        onConfirm={() => {
+          const target = pendingTrash;
+          setPendingTrash(null);
+          if (target === "bulk") void doBulkTrash();
+          else if (target) guard(trash.mutateAsync(target.id).then(() => toast.success("Moved to Trash")));
+        }}
+      />
+
+      <ConfirmActionDialog
+        open={pendingFolderDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingFolderDelete(null); }}
+        title="Delete folder?"
+        description={(() => {
+          const n = (data ?? []).filter((d) => d.folder_id === pendingFolderDelete?.id).length;
+          const what = n === 0 ? "It is empty." : `The ${n === 1 ? "dashboard in it moves" : `${n} dashboards in it move`} to Uncategorized; none is deleted.`;
+          return `Delete the folder "${pendingFolderDelete?.name ?? ""}"? ${what}`;
+        })()}
+        confirmLabel="Delete folder"
+        onConfirm={() => {
+          const target = pendingFolderDelete;
+          setPendingFolderDelete(null);
+          if (target) removeFolder.mutateAsync(target.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e)));
         }}
       />
 

@@ -27,7 +27,8 @@ vi.mock("@/components/chart/ChartRenderer", () => ({
 
 const chart: Chart = {
   id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "",
-  params: { spec: { metrics: [], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } },
+  // A table with a column: a chart that is not set up renders a hint instead (KI-003).
+  params: { spec: { metrics: [], dimensions: [], columns: ["rev"], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } },
   created_by: null, updated_at: "", folder_id: null,
 };
 const card = (over: Partial<DashboardCard>): DashboardCard => ({
@@ -112,5 +113,27 @@ describe("DashboardCardView", () => {
     renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} onValueClick={onValueClick} />);
     fireEvent.click(screen.getByTestId("chart"));
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
+  });
+});
+
+// KI-003: a chart saved without an X-axis drew an empty card with no word of why, while the
+// chart editor says "Set up your Bar". The card now says the same thing.
+describe("DashboardCardView — a chart that is not set up", () => {
+  const unfinished: Chart = {
+    ...chart, name: "Half a bar", viz_type: "bar",
+    params: { version: 2, spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] }, settings: { "cartesian.yMetrics": ["rev"] } } as Chart["params"],
+  };
+
+  it("says what the chart still needs instead of drawing an empty card", () => {
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={unfinished} />);
+    expect(screen.getByText("Half a bar")).toBeInTheDocument();
+    expect(screen.getByText("This chart is not set up yet")).toBeInTheDocument();
+    expect(screen.getByText("Add: X-axis")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart")).toBeNull();
+  });
+
+  it("says it in edit mode too", () => {
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={unfinished} editing />);
+    expect(screen.getByText("This chart is not set up yet")).toBeInTheDocument();
   });
 });

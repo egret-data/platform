@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ChartFilter } from "@/api/charts";
 import { drillFilters, type DrillContext, type DrillDim } from "./drill";
 import { isExtractUnit, temporalLabel } from "./temporal-units";
@@ -17,6 +18,18 @@ function describe(d: DrillDim, filters: ChartFilter[]): string {
   return `${d.col} is ${isExtractUnit(d.unit) ? temporalLabel(d.unit, d.value) : String(d.value)}`;
 }
 
+/** Gap kept between the menu and the viewport edge. */
+const EDGE = 8;
+
+/** The menu's top-left corner: at the pointer, moved left and up just enough to keep a menu of
+ *  `w`×`h` inside the viewport (KI-069). Never past the top-left margin. */
+export function clampMenuPosition(x: number, y: number, w: number, h: number, vw: number, vh: number) {
+  return {
+    left: Math.max(EDGE, Math.min(x, vw - w - EDGE)),
+    top: Math.max(EDGE, Math.min(y, vh - h - EDGE)),
+  };
+}
+
 export function DrillMenu({
   ctx, x, y, onFilterBy, onSeeRecords, onClose,
 }: {
@@ -26,12 +39,23 @@ export function DrillMenu({
   onSeeRecords: (filters: ChartFilter[]) => void;
   onClose: () => void;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  // Measured before paint, so the menu never flashes at the unclamped position.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    setPos(clampMenuPosition(x, y, width, height, window.innerWidth, window.innerHeight));
+  }, [x, y]);
   return (
     <>
       <button type="button" aria-label="close menu" className="fixed inset-0 z-40 cursor-default" onClick={onClose} />
       <div
-        className="fixed z-50 min-w-48 overflow-hidden rounded-md border bg-popover p-1 text-sm shadow-md"
-        style={{ left: x, top: y }}
+        ref={ref}
+        data-testid="drill-menu"
+        className="fixed z-50 min-w-48 overflow-hidden whitespace-nowrap rounded-md border bg-popover p-1 text-sm shadow-md"
+        style={pos}
       >
         {ctx.dims.map((d, i) => {
           const filters = drillFilters({ dims: [d] });

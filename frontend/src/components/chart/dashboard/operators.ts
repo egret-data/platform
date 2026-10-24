@@ -11,3 +11,16 @@ export const OPERATORS: Record<ParamType, ParamOperator[]> = {
   location: ["is", "is-not"],
   temporal_unit: ["is"],
 };
+
+/** What the Type select calls each parameter type. The keys are stored in the dashboard and in
+ *  URLs; an author picks by these labels (KI-067). */
+export const PARAM_TYPE_LABELS: Record<ParamType, string> = {
+  text: "Text",
+  number: "Number",
+  date: "Date",
+  id: "ID",
+  category: "Category",
+  boolean: "True / False",
+  location: "Location",
+  temporal_unit: "Time grouping",
+};

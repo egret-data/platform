@@ -144,3 +144,27 @@ it("asks for nothing extra when a parameter is not mapped to the card", async ()
   await waitFor(() => expect(dataMock).toHaveBeenCalled());
   expect(dataMock.mock.calls[0][1][0].filters).toEqual([]);
 });
+
+// KI-168: the chart box is a fixed 384px with nothing to contain what is drawn in it, so a table
+// taller than that ran past the card's border into the next card. jsdom does no layout, so these
+// pin the two halves of the rule on the box itself.
+it("contains a chart in its fixed box, and lets a table card grow to its rows", async () => {
+  payloadMock.mockResolvedValue({
+    kind: "dashboard", id: "d1", title: "Ops", parameters: [],
+    cards: [
+      { chart_id: "c1", title: "A", viz_type: "bar", params: { spec: { filters: [] } }, param_mappings: {} },
+      { chart_id: "c2", title: "B", viz_type: "table", params: { spec: { filters: [] } }, param_mappings: {} },
+    ],
+  });
+  dataMock.mockResolvedValue([
+    { chart_id: "c1", columns: [{ name: "n", type: "double" }], rows: [[1]] },
+    { chart_id: "c2", columns: [{ name: "n", type: "double" }], rows: [[1]] },
+  ]);
+  const { findAllByTestId } = renderPrint();
+  const [bar, table] = (await findAllByTestId("chart")).map((c) => c.closest("[data-print-chart]")!);
+  expect(bar.className).toContain("h-96");
+  // Clipped to its height only: a horizontal clip cut the chart off on the PDF page.
+  expect(bar.className).toContain("overflow-y-clip");
+  expect(bar.className).not.toContain("overflow-hidden");
+  expect(table.className).not.toContain("h-96");
+});

@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useDashboardMutations, useDashboards } from "@/api/dashboards";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
+import { ConfirmActionDialog } from "@/components/explore/ConfirmActionDialog";
 
 /** Metabase's fixed canvas measure. Measured live at an 1800px viewport on localhost:3033: the
  *  dashboard grid stayed 1048px wide, centred. egret's previous 1200px was not a Metabase
@@ -20,8 +21,15 @@ export const DASHBOARD_FIXED_WIDTH_PX = 1048;
  *  Tailwind's scanner emits only the classes it can see in the source, so an interpolated
  *  `max-w-[…]` would render as a class name with no rule behind it and the canvas would silently
  *  go full width. A test asserts the two agree. */
-export function dashboardWidthClass(width: "fixed" | "full"): string {
-  return width === "fixed" ? "mx-auto w-full max-w-[1048px]" : "";
+export function dashboardWidthClass(width: "fixed" | "full", sidePanel: "edit" | "info" | null = null): string {
+  if (width !== "fixed") return "";
+  // The measure is the CANVAS's. A side panel (the 340px edit panel, the 300px info panel, each
+  // after a 16px gap) sits beside the canvas, so the wrapper grows by it. Inside the 1048px it
+  // left the canvas 692px, under the grid's 753px breakpoint, and the cards flipped to the
+  // one-column phone layout while the author was editing them (KI-068).
+  if (sidePanel === "edit") return "mx-auto w-full max-w-[1404px]";
+  if (sidePanel === "info") return "mx-auto w-full max-w-[1364px]";
+  return "mx-auto w-full max-w-[1048px]";
 }
 
 /** Ghost icon button, matching the density of the surfaces this menu is rendered on. Callers
@@ -116,14 +124,14 @@ interface RowsProps {
  *  the popover before opening a dialog; hence the controlled `open`.
  *
  *  BEHAVIOUR IS COPIED FROM THE LIST PAGE (Dashboards.tsx:112-121) DELIBERATELY. Duplicate
- *  navigates to the copy; a folder move applies immediately; Move to trash trashes and toasts
- *  "Moved to Trash" with NO confirmation, because the list page does not confirm it either and one
- *  action must not behave two ways. The only thing the list page confirms is "Delete permanently",
- *  which is not on Metabase's dashboard-page menu and is not on this one. */
+ *  navigates to the copy; a folder move applies immediately; Move to trash asks first and then
+ *  trashes and toasts "Moved to Trash", as the list page does (KI-075): one action must not behave
+ *  two ways. "Delete permanently" is not on Metabase's dashboard-page menu and is not on this one. */
 export function DashboardViewActionRows({ ws, dashboardId, canResetFilters, onResetFilters }: RowsProps) {
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const { duplicate, trash } = useDashboardMutations(ws);
   const { data: folders = [] } = useFolders(ws, "dashboards");
   const { create: createFolder } = useFolderMutations(ws, "dashboards");
@@ -180,20 +188,24 @@ export function DashboardViewActionRows({ ws, dashboardId, canResetFilters, onRe
           <Copy className="h-4 w-4 shrink-0" aria-hidden /> Duplicate
         </button>
         <div role="separator" className="my-1 h-px bg-border" />
-        <button
-          type="button"
-          className={ROW}
-          onClick={() => run(trash.mutateAsync(dashboardId).then(() => {
-            toast.success("Moved to Trash");
-            // Leave the page: `trash`'s onSuccess invalidates only the LIST key
-            // (api/dashboards.ts:129-132), so staying here would show a dashboard the server now
-            // considers trashed with no banner to say so.
-            nav(`/explore/${ws}/dashboards`);
-          }))}
-        >
+        <button type="button" className={ROW} onClick={() => { setOpen(false); setTrashOpen(true); }}>
           <Trash2 className="h-4 w-4 shrink-0" aria-hidden /> Move to trash
         </button>
       </DashboardViewActionsMenu>
+      <ConfirmActionDialog
+        open={trashOpen}
+        onOpenChange={setTrashOpen}
+        title="Move to Trash?"
+        description="The dashboard moves to the Trash. You can restore it from there."
+        confirmLabel="Move to Trash"
+        onConfirm={() => run(trash.mutateAsync(dashboardId).then(() => {
+          toast.success("Moved to Trash");
+          // Leave the page: `trash`'s onSuccess invalidates only the LIST key
+          // (api/dashboards.ts:129-132), so staying here would show a dashboard the server now
+          // considers trashed with no banner to say so.
+          nav(`/explore/${ws}/dashboards`);
+        }))}
+      />
       {/* Sibling of the popover, not a child: the popover is closed by the time this opens. Same
           dialog, same labels and same flow as the list page (Dashboards.tsx:259-272). */}
       <FolderNameDialog

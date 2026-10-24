@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { DashboardHistoryTab } from "../DashboardHistoryTab";
 import type { DashboardRevision } from "@/api/dashboards";
 
@@ -44,11 +44,25 @@ describe("DashboardHistoryTab", () => {
     const onRevert = vi.fn();
     render(<DashboardHistoryTab revisions={revisions} isLoading={false} onRevert={onRevert} reverting={false} />);
     fireEvent.click(screen.getAllByRole("button", { name: "Revert" })[1]);
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Revert" }));
     expect(onRevert).toHaveBeenCalledWith("r1");
   });
 
   it("says so when there is no history yet", () => {
     render(<DashboardHistoryTab revisions={[]} isLoading={false} onRevert={vi.fn()} reverting={false} />);
     expect(screen.getByText("No history yet — this dashboard hasn't been saved since revisions were turned on.")).toBeTruthy();
+  });
+
+  it("asks before reverting, and reverts only on confirm (KI-075)", () => {
+    const onRevert = vi.fn();
+    render(<DashboardHistoryTab revisions={revisions} isLoading={false} onRevert={onRevert} reverting={false} />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Revert" })[0]);
+    expect(onRevert).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onRevert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Revert" })[0]);
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Revert" }));
+    expect(onRevert).toHaveBeenCalledWith("r2");
   });
 });

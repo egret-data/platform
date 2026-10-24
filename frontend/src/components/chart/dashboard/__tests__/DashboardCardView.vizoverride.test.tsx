@@ -30,8 +30,8 @@ const chart = {
   id: "c", dataset_id: "d", name: "C", description: "", created_by: null, updated_at: "", viz_type: "bar",
   params: {
     version: 2,
-    spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
-    settings: { "cartesian.yMetrics": ["rev"], "cartesian.stacked": false },
+    spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+    settings: { "cartesian.xAxis": "region", "cartesian.yMetrics": ["rev"], "cartesian.stacked": false },
   },
 } as never;
 const card = {

@@ -17,6 +17,27 @@ describe("CardSettingsPanel (chart card)", () => {
     fireEvent.change(screen.getByLabelText("card title"), { target: { value: "Hi" } });
     expect(onUpdateOptions).toHaveBeenCalledWith({ title: "Hi" });
   });
+  // KI-064: the box says "Blank = chart name", but clearing it stored `title: ""`, which is how a
+  // card hides its caption, so the caption vanished instead of falling back.
+  it("clearing the title falls back to the chart name rather than hiding the caption", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={card({ title: "x" })} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("card title"), { target: { value: "" } });
+    expect(onUpdateOptions).toHaveBeenCalledWith({ title: undefined });
+  });
+  it("hides the caption only through Show title (KI-064)", () => {
+    const onUpdateOptions = vi.fn();
+    const { rerender } = render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    const show = screen.getByLabelText("show title");
+    expect(show.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(show);
+    expect(onUpdateOptions).toHaveBeenCalledWith({ title: "" });
+    // A hidden caption has no title to edit, and switching it back on returns to the chart name.
+    rerender(<CardSettingsPanel card={card({ title: "" })} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText("card title")).toBeNull();
+    fireEvent.click(screen.getByLabelText("show title"));
+    expect(onUpdateOptions).toHaveBeenLastCalledWith({ title: undefined });
+  });
   it("no longer shows the per-param mapping (moved to in-card overlay)", () => {
     render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
     expect(screen.queryByLabelText(/^map /)).toBeNull();

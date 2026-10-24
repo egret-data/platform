@@ -13,8 +13,8 @@ describe("FilterSettingsPanel tier2d", () => {
     render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()} />);
     await user.click(screen.getByRole("combobox", { name: "parameter type" }));
     const opts = (await screen.findAllByRole("option")).map((o) => o.textContent);
-    expect(opts).toContain("boolean");
-    expect(opts).toContain("location");
+    expect(opts).toContain("True / False");
+    expect(opts).toContain("Location");
   });
 
   it("widget radio writes param.widget", () => {
@@ -72,7 +72,7 @@ describe("FilterSettingsPanel base", () => {
     const onChange = vi.fn();
     render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
     await user.click(screen.getByRole("combobox", { name: "parameter type" }));
-    await user.click(await screen.findByRole("option", { name: "number" }));
+    await user.click(await screen.findByRole("option", { name: "Number" }));
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: "number", operator: "=" }));
   });
 

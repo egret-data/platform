@@ -129,9 +129,19 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="text-sm font-medium">{chart?.name ?? "Card"} settings</div>
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">Title
-        <input aria-label="card title" placeholder="Blank = chart name" className={inp} value={(card.options.title as string) ?? ""} onChange={(e) => onUpdateOptions({ title: e.target.value })} />
+      {/* `title: ""` is how a card hides its caption (DashboardCardView), so the text box never
+          writes it: clearing the box removes the override and the chart name comes back, as the
+          placeholder says. Hiding is its own switch (KI-064). */}
+      <label htmlFor={`cs-show-title-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>Show title</span>
+        <Checkbox id={`cs-show-title-${card.id}`} aria-label="show title" checked={card.options.title !== ""}
+          onCheckedChange={(v) => onUpdateOptions({ title: v === true ? undefined : "" })} />
       </label>
+      {card.options.title !== "" && (
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">Title
+          <input aria-label="card title" placeholder="Blank = chart name" className={inp} value={(card.options.title as string) ?? ""}
+            onChange={(e) => onUpdateOptions({ title: e.target.value === "" ? undefined : e.target.value })} />
+        </label>
+      )}
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Description
         <Textarea aria-label="card description" rows={2} placeholder="Shown behind the info button on the card header"
           value={(card.options.description as string) ?? ""} onChange={(e) => onUpdateOptions({ description: e.target.value })} />
