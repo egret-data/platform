@@ -84,19 +84,7 @@ impl SchemaService {
     /// anywhere in the database. Trino searches across catalogs via the JDBC
     /// metadata table; StarRocks uses information_schema (no catalog level).
     pub async fn search(&self, spec: &ConnSpec, query: &str) -> Result<Vec<SearchHit>, BiError> {
-        let like = like_literal(query);
-        let sql = match spec.engine {
-            Engine::Trino => format!(
-                "SELECT table_cat, table_schem, table_name FROM system.jdbc.tables \
-                 WHERE lower(table_name) LIKE lower('%{like}%') ESCAPE '\\' \
-                 ORDER BY table_name LIMIT 200"
-            ),
-            Engine::StarRocks => format!(
-                "SELECT '', table_schema, table_name FROM information_schema.tables \
-                 WHERE lower(table_name) LIKE lower('%{like}%') ESCAPE '\\\\' \
-                 ORDER BY table_name LIMIT 200"
-            ),
-        };
+        let sql = search_sql(spec.engine, query);
         let conn = build_connector(spec);
         let r = conn
             .execute(&sql, &Self::limits(), CancellationToken::new())
@@ -147,6 +135,27 @@ impl SchemaService {
     }
 }
 
+/// The object-search statement. Same-named tables are ordered by catalog and
+/// schema after the name (KI-160): ordered by the name alone, the engine
+/// returned `customer` from `tpch.sf1000`, `tpch.sf300`, …, `tpch.tiny` in a
+/// different order on each run, and which 200 rows the `LIMIT` kept was not
+/// fixed either.
+fn search_sql(engine: Engine, query: &str) -> String {
+    let like = like_literal(query);
+    match engine {
+        Engine::Trino => format!(
+            "SELECT table_cat, table_schem, table_name FROM system.jdbc.tables \
+             WHERE lower(table_name) LIKE lower('%{like}%') ESCAPE '\\' \
+             ORDER BY table_name, table_cat, table_schem LIMIT 200"
+        ),
+        Engine::StarRocks => format!(
+            "SELECT '', table_schema, table_name FROM information_schema.tables \
+             WHERE lower(table_name) LIKE lower('%{like}%') ESCAPE '\\\\' \
+             ORDER BY table_name, table_schema LIMIT 200"
+        ),
+    }
+}
+
 fn val_to_string(v: serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s,
@@ -192,7 +201,18 @@ pub(crate) fn quote_ident(engine: Engine, ident: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::like_literal;
+    use super::{like_literal, search_sql};
+    use egret_query_api::Engine;
+
+    /// KI-160: same-named tables come back in a fixed order, by catalog and
+    /// schema after the name, on both engines.
+    #[test]
+    fn search_orders_same_named_tables_by_catalog_and_schema() {
+        assert!(search_sql(Engine::Trino, "customer")
+            .contains("ORDER BY table_name, table_cat, table_schem LIMIT 200"));
+        assert!(search_sql(Engine::StarRocks, "customer")
+            .contains("ORDER BY table_name, table_schema LIMIT 200"));
+    }
 
     #[test]
     fn like_literal_neutralizes_quotes_and_wildcards() {
