@@ -223,13 +223,29 @@ describe("Alerts & Reports list", () => {
   });
 
   it("falls back to the raw expression for a crontab it cannot humanise", () => {
+    // A minute list: no phrase here says it honestly.
     schedulesMock.mockReturnValue({
-      data: [row({ crontab: "0 9 * * 1-5" })],
+      data: [row({ crontab: "0,30 9 * * *" })],
       isLoading: false,
       isError: false,
     });
     renderPage();
-    expect(screen.getByText("0 9 * * 1-5")).toBeInTheDocument();
+    expect(screen.getByText("0,30 9 * * *")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["0 * * * *", "Every hour at minute 0"],
+    ["0 9 * * *", "Every day at 09:00"],
+    ["30 8 * * 1-5", "Every Monday to Friday at 08:30"],
+    ["0 9 1 * *", "Every month on day 1 at 09:00"],
+  ])("shows %s in words in the Schedule column (KI-038)", (crontab, words) => {
+    schedulesMock.mockReturnValue({
+      data: [row({ crontab })],
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    expect(screen.getByText(words)).toHaveAttribute("title", crontab);
   });
 
   it("runs a schedule now and reports the result, for a user who can manage", async () => {
