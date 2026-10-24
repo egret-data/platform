@@ -478,8 +478,16 @@ function RuleForm({
    * where the constraint starts applying — not silently at submit, which
    * would send something other than what the form last showed.
    */
+  // A new rule's seeded name ("Mask PII") follows Kind ("Filter rows PII") until the user edits it (live check).
+  const autoName = (kind: KindType): string | null =>
+    !existing && seed.name.startsWith("Mask ") ? (kind === "mask" ? seed.name : `Filter rows ${seed.name.slice("Mask ".length)}`) : null;
   function changeKind(next: KindType) {
-    update(next === "row_filter" && scope.column ? { kindType: next, scope: { ...scope, column: undefined } } : { kindType: next });
+    const renamed = autoName(kindType) !== null && name === autoName(kindType) ? { name: autoName(next) ?? name } : {};
+    update(
+      next === "row_filter" && scope.column
+        ? { kindType: next, scope: { ...scope, column: undefined }, ...renamed }
+        : { kindType: next, ...renamed },
+    );
   }
 
   const previewStale = previewedFor !== bodySnapshot;

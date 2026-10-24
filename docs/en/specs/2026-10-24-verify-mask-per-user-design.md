@@ -646,3 +646,10 @@ Deviations the code forces are recorded here, per task, as they happen.
 - **UI 3b.** At 390 px a member's username broke mid-word (`break-all`). The members table now wraps names
   normally and breaks only a token too long for the cell (`break-words`). Vitest "does not break a member's username
   mid-word …"; the painted result is a browser check.
+- **UI 3c.** A new rule's seeded name ("Mask PII Data") now follows Kind ("Filter rows PII Data") while it is still
+  the seeded one; an edited name, and every name of a rule being edited, stays as typed. Vitest "the seeded name
+  follows Kind until the user edits it".
+- **Finding 4 (follow-up, not fixed).** A second row filter on the same table is refused by the preview ("two row
+  filters decide … differently"), and the refusal links the NEW rule to `/governance/rules/<preview uuid>`, an id that
+  was never stored (`GET /perm/rules/{id}/effect` → 404). The refusal should name only stored rules, or describe the
+  new one without a link. Probably older than this package (the ambiguous-arbitration refusal); left for a follow-up.

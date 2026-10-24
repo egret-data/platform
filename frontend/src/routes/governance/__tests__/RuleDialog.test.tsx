@@ -1308,6 +1308,25 @@ describe("RuleDialog — a classification row filter that filters nothing on Tri
     await user.type(screen.getByLabelText(/^Filter expression/), "region = 'us'");
   }
 
+  test("the seeded name follows Kind until the user edits it (live check)", async () => {
+    const user = userEvent.setup();
+    renderDialog({ entry: CLASSIFICATION_ENTRY });
+    const name = screen.getByLabelText(/^Name/);
+    expect(name).toHaveValue("Mask PII Data");
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    expect(name).toHaveValue("Filter rows PII Data");
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Mask a column" }));
+    expect(name).toHaveValue("Mask PII Data");
+    // An edited name is the user's: Kind leaves it alone.
+    await user.clear(name);
+    await user.type(name, "Hide PII");
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    expect(name).toHaveValue("Hide PII");
+  });
+
   test("the hint shows for a row filter on a classification, not for a mask or a path", async () => {
     const user = userEvent.setup();
     renderDialog({ entry: CLASSIFICATION_ENTRY });
