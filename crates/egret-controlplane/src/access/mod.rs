@@ -101,7 +101,7 @@ async fn guard_last_admin(
     .await?;
     if !now.is_empty() && after.is_empty() {
         return Err(CpError::Conflict(
-            "Cannot remove the last platform admin".to_string(),
+            "Cannot remove the last active platform admin".to_string(),
         ));
     }
     Ok(())
@@ -141,7 +141,7 @@ async fn guard_not_last_admin(
     let admins = egret_auth::roles::engine_admin_user_ids_via(&mut conn).await?;
     if admins.contains(&target) && admins.iter().all(|a| *a == target) {
         return Err(CpError::Conflict(
-            "Cannot remove the last platform admin".into(),
+            "Cannot remove the last active platform admin".into(),
         ));
     }
     Ok(())
@@ -309,7 +309,7 @@ async fn create_user(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing user:update (or user:disable) permission", body = ErrorBody),
         (status = 404, description = "No such user", body = ErrorBody),
-        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -402,7 +402,7 @@ async fn update_user(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing user:delete permission", body = ErrorBody),
         (status = 404, description = "No such user", body = ErrorBody),
-        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -544,7 +544,7 @@ async fn assign_user_role(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Requires platform_admin", body = ErrorBody),
         (status = 404, description = "No such role", body = ErrorBody),
-        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -942,7 +942,7 @@ async fn assign_group_role(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Requires platform_admin", body = ErrorBody),
         (status = 404, description = "No such role", body = ErrorBody),
-        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

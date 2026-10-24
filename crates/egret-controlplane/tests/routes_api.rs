@@ -1001,7 +1001,7 @@ async fn last_admin_guard() {
         j["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("last platform admin"),
+            .contains("last active platform admin"),
         "409 body should explain the last-admin guard; body={j}"
     );
 
@@ -2701,7 +2701,7 @@ async fn cannot_disable_the_last_platform_admin() {
         j["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("last platform admin"),
+            .contains("last active platform admin"),
         "409 body should explain the last-admin guard; body={j}"
     );
 
@@ -3011,7 +3011,7 @@ async fn cannot_delete_the_last_platform_admin() {
         j["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("last platform admin"),
+            .contains("last active platform admin"),
         "409 body should explain the last-admin guard; body={j}"
     );
     assert!(
@@ -3551,7 +3551,7 @@ async fn the_last_active_admin_cannot_be_removed_while_a_disabled_admin_remains(
             j["error"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("last platform admin"),
+                .contains("last active platform admin"),
             "body={j}"
         );
     }

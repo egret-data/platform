@@ -7775,7 +7775,7 @@
             }
           },
           "409": {
-            "description": "Would remove the last platform admin",
+            "description": "Would remove the last active platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -13264,7 +13264,7 @@
             }
           },
           "409": {
-            "description": "Would remove the last platform admin",
+            "description": "Would remove the last active platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -13364,7 +13364,7 @@
             }
           },
           "409": {
-            "description": "Would remove the last platform admin",
+            "description": "Would remove the last active platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -13610,7 +13610,7 @@
             }
           },
           "409": {
-            "description": "Would remove the last platform admin",
+            "description": "Would remove the last active platform admin",
             "content": {
               "application/json": {
                 "schema": {
