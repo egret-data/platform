@@ -179,6 +179,33 @@ describe("PrincipalPicker", () => {
     expect(screen.queryByRole("textbox", { name: /role name/ })).not.toBeInTheDocument();
   });
 
+  // #729 follow-up: in a rule's exemptions the typed text stayed after a pick, so the next
+  // search started by deleting the last one. The field empties and keeps focus for the next pick.
+  test("exempt mode empties the search after a pick and keeps focus in it, by pointer and by keyboard", async () => {
+    const user = userEvent.setup();
+    mockPrincipals([
+      { kind: "user", name: "alice.doe@example.com", label: "Alice Doe", username: "alice-doe" },
+      { kind: "group", name: "data-team", label: "data-team", username: null },
+    ]);
+    renderPicker({ exempt: true }, { stateful: true });
+    const field = screen.getByRole("combobox", { name: "Exempt search" });
+
+    await user.type(field, "data");
+    await user.click(await screen.findByRole("option", { name: /^data-team/ }));
+    expect(screen.getByRole("button", { name: "Remove data-team from exempt" })).toBeInTheDocument();
+    expect(field).toHaveValue("");
+    expect(field).toHaveFocus();
+    expect(field).toHaveAttribute("aria-expanded", "true");
+
+    await user.type(field, "ali");
+    await screen.findByRole("option", { name: /^Alice Doe/ });
+    // Alice is the first option.
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(screen.getByRole("button", { name: "Remove alice-doe from exempt" })).toBeInTheDocument();
+    expect(field).toHaveValue("");
+    expect(field).toHaveFocus();
+  });
+
   // N26 (spec C8.5): in a rule's exemptions the group suggestions used to float over the
   // "current members" line, hiding the very sentence that explains the choice.
   test("exempt mode lists the suggestions after the group help line, not over it", async () => {
@@ -276,6 +303,8 @@ describe("PrincipalPicker", () => {
     await user.click(await screen.findByRole("option", { name: /Alice Doe/ }));
     expect(screen.getByRole("button", { name: "Remove alice-doe from include" })).toBeInTheDocument();
     expect(field).toHaveFocus();
+    // Unlike a rule's exemptions, the search stays: the next pick is often from the same results.
+    expect(field).toHaveValue("o");
     expect(field).toHaveAttribute("aria-expanded", "true");
 
     await user.click(screen.getByRole("option", { name: /Bob Roe/ }));

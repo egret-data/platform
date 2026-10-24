@@ -28,7 +28,7 @@ import {
   type PatternLevel,
 } from "@/routes/governance/data/coverage";
 import { tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
-import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { dataRuleUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
@@ -334,11 +334,6 @@ function deleteDescription(r: RuleView | null): string {
   return `This rule selects ${reach}, not one object. ${removed}`;
 }
 
-/** A rule's page, opened from this Data page, so its way back returns here (`?from=data:`, spec C1). */
-function ruleHref(ruleId: string, back: string): string {
-  return `/governance/rules/${encodeURIComponent(ruleId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
-}
-
 function RuleTable({
   label,
   rows,
@@ -382,7 +377,7 @@ function RuleTable({
             <TableCell className="whitespace-normal">
               <div className="space-y-0.5">
                 <p className="text-sm font-medium break-words">
-                  <Link to={ruleHref(rule.id, back)} className={ENTITY_LINK_CLASS}>
+                  <Link to={dataRuleUrl(rule.id, back)} className={ENTITY_LINK_CLASS}>
                     {rule.name}
                   </Link>
                 </p>

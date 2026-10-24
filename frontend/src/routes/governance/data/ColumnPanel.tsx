@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Plus, Tag as TagIcon, UserSearch } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
+import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -14,7 +16,7 @@ import { useRemoveClassification } from "@/routes/governance/RemoveClassificatio
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import { grantCoverage, patternLevels, ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import { assignmentsOf, fullPath, tagReach, type BrowseResult, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
-import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
+import { dataRuleUrl, pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
 import { HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
@@ -367,6 +369,9 @@ function TagList({
 function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
   const workspaceName = useWorkspaceNames(catalog);
+  // This page with the panel open: the rule page's way back reopens it.
+  const location = useLocation();
+  const back = location.pathname + location.search;
   const reach = tagReach(path, catalog, tags);
   const names = reach.status === "ok" ? tagNamesOn(reach.assignments, path) : [];
   const selected: { rule: RuleView; by: "path" | "tag" }[] = [];
@@ -402,7 +407,9 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
       <ul aria-label={`${TERM.rules} of ${path.column}`} className="space-y-1">
         {selected.map(({ rule, by }) => (
           <li key={rule.id} className="text-sm break-words">
-            {rule.name}
+            <Link to={dataRuleUrl(rule.id, back)} className={ENTITY_LINK_CLASS}>
+              {rule.name}
+            </Link>
             <span className="text-xs text-muted-foreground">
               {` ${formatRuleKind(rule)} · `}
               {by === "path" ? "by path" : `by classification ${rule.tag_name ?? ""}`}

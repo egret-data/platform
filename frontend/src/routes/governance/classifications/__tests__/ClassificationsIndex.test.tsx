@@ -14,6 +14,7 @@ import {
   TAG_READER,
   where,
 } from "./harness";
+import { ACTIONS_CELL } from "@/routes/governance/tabParts";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -114,6 +115,19 @@ describe("the Classification index", () => {
     for (const name of ["Name", "Data", "Clearance"]) {
       expect(within(table).getByRole("columnheader", { name: new RegExp(name) })).not.toHaveClass("hidden");
     }
+  });
+
+  // #729 follow-up (U3): at 390 px the actions sat past the table's scroll edge (measured at x 625 in a
+  // 244 px scroller). jsdom has no layout: this pins the class that keeps them in view, as on other governance tables.
+  it("pins the actions column to the right edge of the table's scroller", async () => {
+    serve({ "/tags": ok(TAGS) });
+    openArea(INDEX, STEWARD);
+    const actions = await screen.findByRole("button", { name: "Actions for PII" }, T);
+    // As sized for one menu button: the pinned column's fixed width gives way to `w-auto`.
+    const pinned = ACTIONS_CELL.split(" ").filter((c) => c !== "w-24");
+    expect(actions.closest("td")).toHaveClass(...pinned);
+    const headers = within(screen.getByRole("table")).getAllByRole("columnheader");
+    expect(headers[headers.length - 1]).toHaveClass(...pinned);
   });
 
   it("marks a clearance with a lock icon beside the words, never colour alone", async () => {

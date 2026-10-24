@@ -2373,6 +2373,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // Migration 0207 renamed classifications that shared a name; their
+    // compiled tag policies still name the old one until this recompiles them
+    // (see `TagRepo::recompile_queued_renames`). Off the boot path: until it
+    // commits no `tag_version` moves, so plugins keep serving the old map,
+    // which agrees with the old policies. A failure is logged and retried at
+    // the next boot.
+    {
+        let tags = egret_bi::TagRepo::new(db.clone());
+        tokio::spawn(async move {
+            match tags.recompile_queued_renames().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    renamed = n,
+                    "recompiled the policies of classifications migration 0207 renamed"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the recompile after migration 0207's classification renames did not run; \
+                     it is retried at the next boot"
+                ),
+            }
+        });
+    }
     // Design R5 (2026-10-17): one `warn!` per group membership whose
     // provenance is unknown — local groups with OIDC-provider members (a login
     // before R1 may have added them), and local users in OIDC groups (no login

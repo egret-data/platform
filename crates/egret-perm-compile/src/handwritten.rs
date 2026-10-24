@@ -1421,13 +1421,6 @@ pub struct TagPolicyRow {
     pub engines: Vec<HandWrittenEngineRef>,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SameNameTag {
-    pub id: Uuid,
-    pub key: String,
-}
-
 /// Route D's answer.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1435,9 +1428,6 @@ pub struct TagHandWritten {
     pub tag: TagRef,
     pub state: TagPolicyState,
     pub policies: Vec<TagPolicyRow>,
-    /// Other tags with this name: engine tag policies on the name apply to
-    /// them too (CL10).
-    pub same_name: Vec<SameNameTag>,
     /// Hand-written tag policies whose body could not be read: they may name
     /// this tag, so the list above may be incomplete.
     pub unreadable: Vec<UnreadablePolicy>,
@@ -1458,12 +1448,6 @@ pub async fn handwritten_for_tag_via(
     let Some((id, key, name)) = tag else {
         return Err(HandWrittenError::NotFound);
     };
-    let same: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, key FROM tags WHERE name = $1 AND id <> $2 ORDER BY key")
-            .bind(&name)
-            .bind(id)
-            .fetch_all(&mut *conn)
-            .await?;
 
     // Every Trino profile and its usable tag service.
     let trino: Vec<(i64, String)> = sqlx::query_as(
@@ -1493,10 +1477,6 @@ pub async fn handwritten_for_tag_via(
         },
         state: tag_policy_state(by_tag_service.len()),
         policies: Vec::new(),
-        same_name: same
-            .into_iter()
-            .map(|(id, key)| SameNameTag { id, key })
-            .collect(),
         unreadable: Vec::new(),
     };
     let request = RequestResource::new().with("tag", name.as_str());

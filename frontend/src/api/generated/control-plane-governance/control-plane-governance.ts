@@ -105,7 +105,7 @@ export const getControlPlaneGovernanceTagHandwrittenUrl = (id: string,) => {
 }
 
 /**
- * Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it; `sameName` lists other tags with this name, which those policies reach too. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.
+ * Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it. Classification names are unique ignoring case (migration 0207), so no other classification shares the name. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.
  * @summary Hand-written tag policies of a classification.
  */
 export const controlPlaneGovernanceTagHandwritten = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceTagHandwrittenResponse> => {

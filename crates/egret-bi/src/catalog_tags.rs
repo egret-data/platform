@@ -651,6 +651,45 @@ async fn list_resource_tags(
     Ok(Json(rows.into_iter().map(ResourceTagDto::from).collect()))
 }
 
+/// A `…/resource-tags` write must name a warehouse and a classification that
+/// exist (spec §11.1). `catalog_tag_assignments.warehouse_id` has no foreign
+/// key (migration 0081), so an unknown warehouse stored a row no catalog serves
+/// and answered 200; an unknown `tag_id` hit the tag foreign key and answered
+/// 500. Both are a coded 404 instead.
+async fn require_warehouse_and_tag(
+    db: &Db,
+    warehouse_id: Uuid,
+    tag_id: Uuid,
+) -> Result<(), crate::error::BiError> {
+    use crate::error::BiError;
+    use axum::http::StatusCode;
+    let (warehouse, tag): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM catalog.warehouses WHERE id = $1), \
+                EXISTS (SELECT 1 FROM tags WHERE id = $2)",
+    )
+    .bind(warehouse_id)
+    .bind(tag_id)
+    .fetch_one(&db.pool)
+    .await?;
+    if !warehouse {
+        return Err(BiError::coded(
+            StatusCode::NOT_FOUND,
+            "warehouse_not_found",
+            format!("No warehouse has the id {warehouse_id}."),
+            serde_json::json!({ "warehouseId": warehouse_id }),
+        ));
+    }
+    if !tag {
+        return Err(BiError::coded(
+            StatusCode::NOT_FOUND,
+            "tag_not_found",
+            format!("No classification has the id {tag_id}."),
+            serde_json::json!({ "tagId": tag_id }),
+        ));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     put,
     path = "/api/control-plane/warehouses/{warehouse_id}/resource-tags",
@@ -662,6 +701,7 @@ async fn list_resource_tags(
         (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
+        (status = 404, description = "`code` is `warehouse_not_found` (no warehouse has `warehouse_id`; the body adds `warehouseId`) or `tag_not_found` (no classification has `tag_id`; the body adds `tagId`)", body = egret_core::http::ErrorBody),
         (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -673,6 +713,7 @@ async fn assign_resource_tag(
     Json(b): Json<ResourceTagBody>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     egret_core::authz::require(&*st.pdp, &p, WAREHOUSE_WRITE).await?;
+    require_warehouse_and_tag(&st.db, warehouse_id, b.tag_id).await?;
     let column = b.column.as_deref().unwrap_or("");
     CatalogTagRepo::new(st.db.clone())
         .assign_catalog(
@@ -708,6 +749,7 @@ async fn assign_resource_tag(
         (status = 200, description = "Tag removed from the catalog resource (idempotent)", body = egret_core::Ack),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
+        (status = 404, description = "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment", body = egret_core::http::ErrorBody),
         (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -719,6 +761,7 @@ async fn unassign_resource_tag(
     Json(b): Json<ResourceTagBody>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     egret_core::authz::require(&*st.pdp, &p, WAREHOUSE_WRITE).await?;
+    require_warehouse_and_tag(&st.db, warehouse_id, b.tag_id).await?;
     let column = b.column.as_deref().unwrap_or("");
     CatalogTagRepo::new(st.db.clone())
         .unassign_catalog(b.tag_id, warehouse_id, &b.schema, &b.table, column)

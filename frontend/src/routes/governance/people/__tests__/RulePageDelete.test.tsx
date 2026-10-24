@@ -20,6 +20,13 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: v
 afterEach(() => vi.unstubAllGlobals());
 
 const T = { timeout: 3000 };
+/**
+ * The whole journey, two pages and a dialog: about 0.6 s alone, measured at
+ * 2.5 s with the CPU saturated and 5.05 s (a timeout at vitest's 5 s default)
+ * under heavier load, no single wait above 1.4 s. Each wait keeps its own `T`;
+ * only the sum gets room, as the App routing journeys do (`governanceRouting`).
+ */
+const JOURNEY = 15_000;
 const WRITER = me(["policy:read", "policy:update", "tag:read"]);
 const PII = tag({ id: "t-pii", key: "pii", name: "PII" });
 const rule = (id: string, name: string): RuleView => ({
@@ -70,7 +77,8 @@ function renderFrom(entries: string[]) {
 
 describe("RulePage: deleting with the real cache", () => {
   it("returns to the classification's Rules tab without the deleted rule, and Back skips its page", async () => {
-    const user = userEvent.setup();
+    // No delay between events, and the name pasted: the dialog's typing is its own tests' subject.
+    const user = userEvent.setup({ delay: null });
     const answers: Record<string, Answer> = {
       "/tags": ok([PII]),
       "/perm/rules": ok([HASH, KEEP]),
@@ -79,7 +87,8 @@ describe("RulePage: deleting with the real cache", () => {
     serve(answers);
     renderFrom([TAG_RULES, RULE_PAGE]);
     await user.click(await screen.findByRole("button", { name: "Delete" }, T));
-    await user.type(await screen.findByRole("textbox"), "Hash email");
+    await user.click(await screen.findByRole("textbox"));
+    await user.paste("Hash email");
     // From here the server's list is never answered again: what the next page shows is the cache.
     answers["/perm/rules"] = "never";
     await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
@@ -93,5 +102,5 @@ describe("RulePage: deleting with the real cache", () => {
     await user.click(screen.getByRole("button", { name: "history back" }));
     expect(screen.getByTestId("where")).not.toHaveTextContent("/governance/rules/r1");
     expect(screen.queryByText(/No rule has this id/)).not.toBeInTheDocument();
-  });
+  }, JOURNEY);
 });

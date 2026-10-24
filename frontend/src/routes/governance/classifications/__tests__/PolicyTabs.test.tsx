@@ -99,7 +99,7 @@ function row(over: Partial<TagPolicyRow> & Pick<TagPolicyRow, "id" | "name">): T
 }
 
 function handwritten(over: Partial<TagHandWritten> = {}): TagHandWritten {
-  return { tag: { id: "t-pii", key: "pii", name: "PII" }, state: "listed", policies: [], sameName: [], unreadable: [], ...over };
+  return { tag: { id: "t-pii", key: "pii", name: "PII" }, state: "listed", policies: [], unreadable: [], ...over };
 }
 
 const rowOf = (name: string) => screen.getByRole("link", { name }).closest("tr") as HTMLElement;
@@ -193,19 +193,6 @@ describe("Manual policies tab (route D)", () => {
     expect(r).toHaveTextContent("Denies every access its items do not allow (deny all else).");
     expect(r).toHaveTextContent("Has conditions egret does not evaluate.");
     expect(r).toHaveTextContent("Names this classification through a pattern.");
-  });
-
-  it("says when another tag has this name (CL10)", async () => {
-    open("handwritten", STEWARD, {
-      [HW]: ok(handwritten({ policies: [row({ id: 1, name: "p1" })], sameName: [{ id: "t-2", key: "pii2" }] })),
-    });
-    const line = await screen.findByText(
-      (_c, el) => el?.tagName === "P" && /^Classification pii2 has this name too/.test(el.textContent ?? ""),
-      {},
-      T,
-    );
-    expect(line).toHaveTextContent("Classification pii2 has this name too; engine tag policies on this name apply to both.");
-    expect(within(line).getByRole("link", { name: "pii2" })).toHaveAttribute("href", "/governance/classifications/t-2");
   });
 
   it("lists unreadable tag policies and says the list may be incomplete", async () => {

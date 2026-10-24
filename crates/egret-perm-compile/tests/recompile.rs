@@ -120,7 +120,7 @@ async fn seed_starrocks_engine_with_tag_rule(db: &Db) -> Fixture {
     .expect("attach catalog");
 
     let tag_key = unique("pii");
-    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, 'PII')")
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $1)")
         .bind(&tag_key)
         .execute(pool)
         .await

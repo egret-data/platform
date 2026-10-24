@@ -152,20 +152,6 @@ async fn tag_policies_match_by_name_through_the_tag_matcher() {
             .unwrap()
             .through_pattern
     );
-    assert!(r.same_name.is_empty());
-}
-
-#[tokio::test]
-async fn another_tag_with_the_same_name_is_named() {
-    let e = env().await;
-    profile(&e).await;
-    let n = unique("DUP");
-    let a = tag(&e, &n).await;
-    let b = tag(&e, &n).await;
-    let r = read(&e, a).await.unwrap();
-    assert_eq!(r.same_name.len(), 1);
-    assert_eq!(r.same_name[0].id, b);
-    assert_eq!(r.tag.id, a);
 }
 
 #[tokio::test]

@@ -117,7 +117,8 @@ export function DeleteTagDialog({
 
   // `mutateAsync`, not `mutate`'s per-call callbacks: the dialog closes on
   // confirm, and from the index that unmounts it, which drops those callbacks
-  // (no toast either way).
+  // (no toast at all). From either place a toast confirms the delete: the index
+  // cannot show what is gone (as a rule's page toasts when its delete leaves it).
   // Set once a delete from this page succeeds: the page is leaving.
   const leaving = useRef(false);
   const confirm = () => {
@@ -129,10 +130,9 @@ export function DeleteTagDialog({
           focusHeadingOnArrival();
           navigate(CLASSIFICATIONS_BASE);
         } else {
-          // Opened from the index: the page stays, so a toast confirms it (FE-ACTION-2).
-          toast.success(`${TERM.classification} ${tag.name} deleted.`);
           onDeleted?.();
         }
+        toast.success(`${TERM.classification} ${tag.name} deleted.`);
       },
       (e: unknown) => {
         // A rule written meanwhile: the next look at this dialog lists it.
