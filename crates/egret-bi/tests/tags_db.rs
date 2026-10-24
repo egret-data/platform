@@ -157,7 +157,7 @@ async fn deleting_a_tag_a_live_rule_selects_is_refused_not_silently_cascaded() {
     let by = seed_user(&db).await;
     let key = format!("fk-guard-{}", Uuid::new_v4().simple());
     let tag = repo
-        .create(&key, "PII", "", "", Some(by))
+        .create(&key, &key, "", "", Some(by))
         .await
         .expect("create tag");
 
@@ -238,4 +238,69 @@ async fn name_taken_is_case_insensitive_and_skips_the_tag_itself() {
         .await
         .unwrap()
         .is_none());
+}
+
+/// Migration 0207's unique index on `lower(tags.name)` is the backstop for the
+/// handlers' `name_taken` check, which two concurrent writes can both pass. The
+/// repo is called directly here, past that check, so the write that loses the
+/// race reaches the index: both a create and a rename must answer the same coded
+/// `tag_name_taken` the check gives, not a 500.
+#[tokio::test]
+async fn a_name_the_index_refuses_is_tag_name_taken() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let repo = TagRepo::new(db.clone());
+    let suffix = Uuid::new_v4().simple().to_string();
+    let name = format!("Race {suffix}");
+    let holder = repo
+        .create(&format!("race-a-{suffix}"), &name, "", "", None)
+        .await
+        .expect("create the holder");
+
+    let created = repo
+        .create(
+            &format!("race-b-{suffix}"),
+            &name.to_uppercase(),
+            "",
+            "",
+            None,
+        )
+        .await
+        .expect_err("a create into a taken name must be refused");
+    let other = repo
+        .create(
+            &format!("race-c-{suffix}"),
+            &format!("Other {suffix}"),
+            "",
+            "",
+            None,
+        )
+        .await
+        .expect("create a second classification");
+    let renamed = repo
+        .update(other.id, Some(&name.to_lowercase()), None, None)
+        .await
+        .expect_err("a rename into a taken name must be refused");
+
+    for (what, err) in [("create", created), ("rename", renamed)] {
+        let egret_bi::BiError::Coded { status, body } = &err else {
+            panic!("{what}: {err:?}")
+        };
+        assert_eq!(*status, axum::http::StatusCode::CONFLICT, "{what}: {body}");
+        assert_eq!(body["code"], "tag_name_taken", "{what}: {body}");
+        assert_eq!(
+            body["existing"]["id"],
+            holder.id.to_string(),
+            "{what}: {body}"
+        );
+    }
+    assert_eq!(
+        repo.get(other.id).await.unwrap().expect("still there").name,
+        format!("Other {suffix}"),
+        "the refused rename wrote nothing"
+    );
 }

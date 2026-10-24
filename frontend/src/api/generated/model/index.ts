@@ -551,7 +551,6 @@ export * from './ruleKind';
 export * from './ruleView';
 export * from './runDto';
 export * from './runState';
-export * from './sameNameTag';
 export * from './sample';
 export * from './savedQueryDto';
 export * from './saveQuery';

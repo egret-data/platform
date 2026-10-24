@@ -227,6 +227,22 @@ describe("ColumnPanel", () => {
     }
   });
 
+  // #729 follow-up: the rule names were plain text; each opens its rule's page, whose way back returns here.
+  it("links each rule to its page, with a way back to this column", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    const back = encodeURIComponent(`data:${encodeURIComponent("/governance/data/ice/sales/orders?column=email")}`);
+    const rules = await within(panel).findByRole("list", { name: "Rules of email" });
+    await waitFor(() =>
+      expect(within(rules).getAllByRole("link").map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+        ["hash_email", `/governance/rules/hash_email?from=${back}`],
+        ["redact_confidential", `/governance/rules/redact_confidential?from=${back}`],
+        ["redact_pii", `/governance/rules/redact_pii?from=${back}`],
+      ]),
+    );
+  });
+
   it("says beside a rule that no engine enforces it, and nothing while that is unknown", async () => {
     serveData({ ...fixture(), ruleEnforcement: ok([{ ruleId: "hash_email", enforcedBy: 0, notEnforced: "no_engine", catalogs: [{ catalogId: "c-ice", catalogName: "ice", engines: [], notEnforced: "no_engine" }] }]) });
     renderPage("/governance/data/ice/sales/orders?column=email");

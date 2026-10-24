@@ -13,8 +13,6 @@ import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import { HandWrittenItems } from "@/routes/governance/handwritten/HandWrittenItems";
 import { DENY_ALL_ELSE, policyTypeWord } from "@/routes/governance/handwritten/handwrittenText";
 import { UnreadablePolicies } from "@/routes/governance/handwritten/UnreadablePolicies";
-import { tagUrl } from "@/routes/governance/classifications/tagUrl";
-import { TERM } from "@/routes/governance/glossary";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
@@ -74,15 +72,6 @@ function Body({ tagId }: { tagId: string }) {
         classification&apos;s name. A listed policy names the classification; it may still be disabled or outranked on
         the engine.
       </p>
-      {d.sameName.map((s) => (
-        <p key={s.id} className="text-sm">
-          {`${TERM.classification} `}
-          <Link to={tagUrl(s.id)} className="font-mono text-primary hover:underline">
-            {s.key}
-          </Link>
-          {" has this name too; engine tag policies on this name apply to both."}
-        </p>
-      ))}
       {policies.length === 0 ? (
         // With unreadable policies a clean "none" would be an overclaim: they may name this tag.
         <EmptyState

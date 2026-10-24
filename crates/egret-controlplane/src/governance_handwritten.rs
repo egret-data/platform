@@ -14,8 +14,8 @@ use egret_perm_compile::handwritten::{
     HandWrittenEngineRef, HandWrittenError, HandWrittenPolicy, HandWrittenProfile,
     HandWrittenProfileRef, HandWrittenTarget, ItemSummary, ListedState, MatchWord, Naming,
     NamingHow, NotDeterminedReason, ObjectHandWritten, ObjectTarget, PrincipalHandWritten,
-    PrincipalMark, PrincipalPolicy, PrincipalRef, PrincipalState, SameNameTag, SeededCount,
-    TagHandWritten, TagOn, TagPolicyRow, TagPolicyState, TagRef, UnreadablePolicy, ViaTag,
+    PrincipalMark, PrincipalPolicy, PrincipalRef, PrincipalState, SeededCount, TagHandWritten,
+    TagOn, TagPolicyRow, TagPolicyState, TagRef, UnreadablePolicy, ViaTag,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -69,7 +69,6 @@ pub(crate) fn router() -> Router<CpState> {
         TagPolicyState,
         TagPolicyRow,
         HandWrittenProfileRef,
-        SameNameTag,
         UnreadablePolicy
     ))
 )]
@@ -184,8 +183,9 @@ async fn principal_handwritten(
     description = "Every hand-written (operator) policy of every usable tag service whose tag \
                    resource matches this classification's NAME through the tag service-def's \
                    matcher (wildcards yes, case folding no), with the Trino profiles and engines \
-                   that download it; `sameName` lists other tags with this name, which those \
-                   policies reach too. `no_tag_service` when no Trino profile has a tag service. \
+                   that download it. Classification names are unique ignoring case (migration \
+                   0207), so no other classification shares the name. `no_tag_service` when no \
+                   Trino profile has a tag service. \
                    Requires policy:read.",
     responses(
         (status = 200, description = "The hand-written tag policies naming the classification", body = TagHandWritten),

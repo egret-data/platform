@@ -129,7 +129,7 @@ async fn seed_tag_assignment(pool: &sqlx::PgPool, warehouse_id: Uuid) {
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("pii-{}", Uuid::new_v4().simple()))
-            .bind("PII")
+            .bind(format!("PII {}", Uuid::new_v4().simple()))
             .fetch_one(pool)
             .await
             .expect("insert tag");
@@ -294,7 +294,7 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("pii-{base}"))
-            .bind("PII")
+            .bind(format!("PII {}", Uuid::new_v4().simple()))
             .fetch_one(&pool)
             .await
             .expect("insert tag");
@@ -696,7 +696,7 @@ async fn the_secure_tags_path_serves_the_same_body_as_the_plain_path() {
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("pii-{}", Uuid::new_v4().simple()))
-            .bind("PII")
+            .bind(format!("PII {}", Uuid::new_v4().simple()))
             .fetch_one(&pool)
             .await
             .expect("insert tag");

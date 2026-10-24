@@ -211,7 +211,9 @@ describe("Delete a classification (CL14)", () => {
     await waitFor(() => expect(where()).toBe("/governance/classifications/t-pii?tab=rules"));
   });
 
-  it("deletes and goes to the index without a toast", async () => {
+  // #729 follow-up: the index the page returns to cannot show what was deleted, so a toast
+  // says it (as a rule's page does when its delete leaves it).
+  it("deletes, goes to the index and toasts", async () => {
     const user = userEvent.setup();
     const served = open({ "DELETE /tags/t-pii": { status: 204, body: null } });
     const dialog = await openDialog(user);
@@ -219,7 +221,7 @@ describe("Delete a classification (CL14)", () => {
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(where()).toBe("/governance/classifications"));
     expect(served.asked).toContain("DELETE /tags/t-pii");
-    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith("Classification PII deleted.");
     // Focus lands on the index's heading, never on <body>.
     await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Classifications" })).toHaveFocus(), T);
     // The deleted classification's own reads are dropped, not refetched into a 404.

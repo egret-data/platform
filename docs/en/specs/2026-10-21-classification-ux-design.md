@@ -736,3 +736,36 @@ After Create, only the transient preview said "Not enforced yet". Every surface 
   - Overview Recent changes says "attached classification X to <path>" with no trailing dot, and names a mask by its glossary label.
 - **Tab name.** "Manual policies" is final (§4, §12.3).
 - **Not done here.** N1 (Package 2) and N25 (U3). The classifications list's clipped actions column at 390 px is U3's scroll-cue work. The Overview rewording is done client-side from the server's sentence; moving it into `governance_changes.rs` is a follow-up.
+
+## 17. Follow-ups (2026-10-23)
+
+This section supersedes §9's "No database migration" and "existing duplicate names keep working", and answers §12.2. The text above is left as written.
+
+### 17.1 Classification names are unique, ignoring case
+
+**User decision:** a unique index, and existing duplicates are renamed. Rules, clearances and the unreadable-table guard select columns by `tags.key`, while engines match a tag policy by `tags.name`. The two agree only while key and name are one-to-one.
+
+- **Index.** `tags_name_lower_key` on `lower(tags.name)` (migration `0207_tags_name_unique.sql`). The handlers keep the `tag_name_taken` check, which gives the coded refusal. A create or rename that races past the check meets the index, and `TagRepo::create`/`update` answer it with the same `tag_name_taken`.
+- **Existing duplicates.** In each group, the oldest classification (by `created_at`, then `id`) keeps its name. Each of the others becomes `<name> (<key>)`, with ` 2`, ` 3`, … appended when that name is also taken. Each rename writes one `audit.audit_log` row (`tag:rename` on `tag`, no actor). It is not a governance-feed event. A rename changes which data rules reach: a rule or manual tag policy that names the shared name now applies only to the classification that kept it.
+- **Recompile at boot.** A compiled tag policy carries the name as it stood at compile time, and SQL cannot recompile. The migration therefore queues each rename in `tag_rename_recompiles`. At boot, `TagRepo::recompile_queued_renames` runs the API rename's own recompile and deletes the queue rows, in one transaction: it bumps the `tag_version` of every service serving a warehouse that carries the tag, then recompiles every profile the name reaches. A failure keeps the rows, and the next boot retries.
+- **Why the `tag_version` bump is at boot, not in the migration.** Until the recompile commits, plugins keep answering 304 and serve the old tag map. That map names the same old names as the stored policies, so the two agree. A bump in the migration would make plugins fetch the new names while the policies still name the old ones, so the masks would stop applying until the boot pass ran.
+
+### 17.2 `PUT`/`DELETE …/resource-tags` refuse unknown ids (§6, §11.1)
+
+- A warehouse id that names no `catalog.warehouses` row: **404** `warehouse_not_found`, with `warehouseId`.
+- A `tag_id` that names no classification: **404** `tag_not_found`, with `tagId`. This used to be a 500 from the foreign key.
+- Both apply to PUT and DELETE. Nothing is stored.
+
+Route tests create a real warehouse with `egret_test_db::seed_warehouse`.
+
+### 17.3 `sameName` removed
+
+Route D's `TagHandWritten.sameName` listed other classifications with the same name. That can no longer happen, so the field is removed from the API, and its line is removed from the Manual policies tab.
+
+### 17.4 Frontend follow-ups
+
+- **C1.** The rule dialog's Exempt field empties its search after a pick. The grant fields keep their text (D9a).
+- **C2.** Deleting a classification from its own page toasts, as the index delete does.
+- **C3.** Rule names in the column panel link to the rule's page, with the Data page's way back.
+- **C4.** At 390 px the Classifications list pins its actions, and Where used stacks its tables into cards and wraps the heading.
+- **D.** The rule-delete journey test gets a measured 15 s overall budget. Each wait keeps its 3 s bound.

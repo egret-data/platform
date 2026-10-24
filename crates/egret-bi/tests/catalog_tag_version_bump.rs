@@ -207,7 +207,7 @@ async fn assign_and_unassign_bump_bound_service_tag_version() {
     let tag = tags
         .create(
             &format!("pii-{}", Uuid::new_v4().simple()),
-            "PII",
+            &format!("PII {}", Uuid::new_v4().simple()),
             "Personal data",
             "#ff0000",
             Some(by),
@@ -272,7 +272,7 @@ async fn secondary_attachment_bump_reaches_engines_bound_service() {
     let tag = tags
         .create(
             &format!("pii-{}", Uuid::new_v4().simple()),
-            "PII",
+            &format!("PII {}", Uuid::new_v4().simple()),
             "Personal data",
             "#ff0000",
             Some(by),

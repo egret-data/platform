@@ -3707,7 +3707,7 @@
           "control-plane-governance"
         ],
         "summary": "Hand-written tag policies of a classification.",
-        "description": "Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it; `sameName` lists other tags with this name, which those policies reach too. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.",
+        "description": "Every hand-written (operator) policy of every usable tag service whose tag resource matches this classification's NAME through the tag service-def's matcher (wildcards yes, case folding no), with the Trino profiles and engines that download it. Classification names are unique ignoring case (migration 0207), so no other classification shares the name. `no_tag_service` when no Trino profile has a tag service. Requires policy:read.",
         "operationId": "tag_handwritten",
         "parameters": [
           {
@@ -15532,6 +15532,16 @@
               }
             }
           },
+          "404": {
+            "description": "`code` is `warehouse_not_found` (no warehouse has `warehouse_id`; the body adds `warehouseId`) or `tag_not_found` (no classification has `tag_id`; the body adds `tagId`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
@@ -15604,6 +15614,16 @@
           },
           "403": {
             "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment",
             "content": {
               "application/json": {
                 "schema": {
@@ -52239,22 +52259,6 @@
           "grace"
         ]
       },
-      "SameNameTag": {
-        "type": "object",
-        "required": [
-          "id",
-          "key"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "key": {
-            "type": "string"
-          }
-        }
-      },
       "Sample": {
         "type": "object",
         "required": [
@@ -54564,7 +54568,6 @@
           "tag",
           "state",
           "policies",
-          "sameName",
           "unreadable"
         ],
         "properties": {
@@ -54579,13 +54582,6 @@
             "items": {
               "$ref": "#/components/schemas/TagPolicyRow"
             }
-          },
-          "sameName": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SameNameTag"
-            },
-            "description": "Other tags with this name: engine tag policies on the name apply to\nthem too (CL10)."
           },
           "unreadable": {
             "type": "array",

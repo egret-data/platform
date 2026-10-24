@@ -12,6 +12,8 @@ publish = false
 # server uses, so a clone cannot drift from production schema.
 egret-metastore.workspace = true
 sqlx.workspace = true
+# `seed_warehouse` returns the id it inserted.
+uuid.workspace = true
 tokio.workspace = true
 # `libc::atexit` only — see `register_exit_drop`. A test process that ends
 # cleanly drops its own clone; the sweep exists for the ones that do not.
