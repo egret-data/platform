@@ -15,6 +15,8 @@ import {
   FORM_ID,
   SECTIONS,
   ScheduleEditor,
+  parseSection,
+  sectionParam,
   type SectionKey,
 } from "@/components/alerts/ScheduleEditor";
 import { Button } from "@/components/ui/button";
@@ -90,16 +92,14 @@ export default function ScheduleDetail() {
   const [busy, setBusy] = useState(false);
   // The open section rides in the URL, like DatasetDetail's `?tab` — so a
   // colleague can be sent straight to the part being discussed, and Back walks
-  // out of the form the way it walked in.
-  const sectionParam = params.get("section");
-  const section: SectionKey = SECTIONS.some((s) => s.key === sectionParam)
-    ? (sectionParam as SectionKey)
-    : "general";
+  // out of the form the way it walked in. The key is the tab's label
+  // (KI-221); `parseSection` keeps the old keys working.
+  const { section, unknown: unknownSection } = parseSection(params.get("section"), type);
   const setSection = (key: SectionKey) =>
     setParams(
       (p) => {
         if (key === "general") p.delete("section");
-        else p.set("section", key);
+        else p.set("section", sectionParam(key, type));
         return p;
       },
       { replace: true },
@@ -180,6 +180,17 @@ export default function ScheduleDetail() {
         // "keeps what you typed when you move between sections" is what pins
         // that, and it fails if this is split.
         <Tabs value={section} onValueChange={(v) => setSection(v as SectionKey)}>
+          {/* A link to a section that does not exist opens General — and says
+              so, rather than leaving the reader to wonder where the part they
+              were sent to went (KI-221). Choosing a tab replaces the key. */}
+          {unknownSection !== null && (
+            <Alert role="status" className="mb-3">
+              <AlertDescription>
+                There is no section called “{unknownSection}”, so General is shown. The sections
+                are {SECTIONS.map((s) => s.label(type)).join(", ")}.
+              </AlertDescription>
+            </Alert>
+          )}
           <TabsList>
             {SECTIONS.map((s) => {
               const SIcon = SECTION_ICONS[s.key];
@@ -239,7 +250,7 @@ export default function ScheduleDetail() {
             The last five, newest first.
           </p>
           <div className="rounded-lg border px-4 py-1">
-            <RunLogTable ws={ws} scheduleId={id} limit={5} />
+            <RunLogTable ws={ws} scheduleId={id} type={type} limit={5} />
           </div>
         </div>
       )}
