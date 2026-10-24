@@ -3901,6 +3901,47 @@ fn sub_result_identity(result: &SubResult) -> (Option<i64>, String) {
     }
 }
 
+/// A TAG-phase [`UndecidableCause::EvalOrderAmbiguous`] returns before the
+/// resource phase runs, so its tied outcomes are the answer's data only when
+/// no resource policy could take the result from the tie: one at a STRICTLY
+/// higher priority that yields would replace or split it (the arbitration
+/// below, offset 529 and the split refusal). Then — or when the tied policies'
+/// priority cannot be found — the outcomes are withheld (emptied). Payload
+/// only: the cause, and so the decision, is unchanged.
+fn withhold_tag_tie_outcomes<'p>(
+    why: &mut [UndecidableCause],
+    tag_policies: &[RangerPolicy],
+    candidates: &[PolicyView<'p>],
+    yields: impl Fn(&PolicyView<'p>) -> bool,
+) {
+    for cause in why.iter_mut() {
+        let UndecidableCause::EvalOrderAmbiguous {
+            policy_ids,
+            policy_names,
+            outcomes,
+        } = cause
+        else {
+            continue;
+        };
+        if outcomes.is_empty() {
+            continue;
+        }
+        let tie_priority = tag_policies
+            .iter()
+            .find(|p| p.id == policy_ids[0] && p.name == policy_names[0])
+            .map(|p| p.policy_priority);
+        let intervenes = match tie_priority {
+            Some(priority) => candidates
+                .iter()
+                .any(|v| v.policy.policy_priority > priority && yields(v)),
+            None => true,
+        };
+        if intervenes {
+            outcomes.clear();
+        }
+    }
+}
+
 /// Evaluate one data-mask request against one policy download.
 ///
 /// Pure, like [`evaluate`], and the same three-valued contract: a mask this
@@ -4091,6 +4132,9 @@ fn evaluate_sub(
         view.collect_causes(kind, request, implied, all_access_types, &mut why);
     }
     if !why.is_empty() {
+        withhold_tag_tie_outcomes(&mut why, &policies.tag_policies, &candidates, |view| {
+            view.decide_sub(kind, request, implied).is_some()
+        });
         return Err(why);
     }
 

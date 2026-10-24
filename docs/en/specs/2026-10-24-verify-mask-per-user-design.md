@@ -592,3 +592,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   replay and said "NULL (clearance PII)". Cleared-ness now comes from the served clearance mask itself: the subject
   is named in one of its `dataMaskPolicyItems` (the `{public}` item names a group), which is what the engine matches
   and needs no extra read. Test `a_cleared_reader_under_a_nulling_rule_is_told_the_rule_nulls_them`.
+- **Finding 3 (mechanism reproduced; narrow reach).** A tag-phase `EvalOrderAmbiguous` returns before the resource
+  phase, so its outcomes could read as "hashed (2 rules agree)" where a higher-priority resource mask would replace
+  or split the result. Reach is narrower than the review's scenario: the tag comparator includes the policy name and
+  compiled rules are uniquely named (`perm-rule-{uuid}`), so two rules never tie in the tag phase; only hand-written
+  tag policies with duplicate body names do. Fix in the evaluator, payload only: `withhold_tag_tie_outcomes` empties
+  a tag tie's `outcomes` when a resource candidate at a strictly higher priority yields (or the tie's priority cannot
+  be found); at the same or a lower priority the resource policy is shut out (offset 529) and the outcomes stay. The
+  builder then says "undecided". Test
+  `tag_arbitration::a_tag_tie_names_its_outcomes_only_when_no_resource_mask_can_intervene`.

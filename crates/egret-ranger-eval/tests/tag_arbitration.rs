@@ -95,7 +95,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
     EngineConfig, MaskDecision, PluginVersion, ResolvedTag, RowFilterDecision, TagServiceResource,
-    UndecidableCause, UnenrichedTags,
+    TiedOutcome, UndecidableCause, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -816,6 +816,70 @@ fn a_tag_mask_stands_against_a_same_priority_resource_mask() {
         }
         other => panic!("a same-priority resource mask must not displace the tag mask: {other:?}"),
     }
+}
+
+/// Review finding 3: a TAG-phase tie reports its tied outcomes only when no
+/// resource policy can take the result from it. A resource mask at a STRICTLY
+/// higher priority that yields would either replace the tag result or split
+/// it, so an agreeing pair of tag masks is not the engine's answer there and
+/// `outcomes` stays empty. At the same priority the resource mask is shut out
+/// (offset 529), so the tie's outcomes are the answer's data. The decision is
+/// `EvalOrderAmbiguous` either way.
+#[test]
+fn a_tag_tie_names_its_outcomes_only_when_no_resource_mask_can_intervene() {
+    let tied = || {
+        json!([
+            tag_policy(
+                10,
+                "same-name",
+                0,
+                1,
+                "dataMaskPolicyItems",
+                mask_items("MASK_HASH")
+            ),
+            tag_policy(
+                11,
+                "same-name",
+                0,
+                1,
+                "dataMaskPolicyItems",
+                mask_items("MASK_HASH")
+            ),
+        ])
+    };
+    let outcomes = |resource_priority: i32| {
+        let mut res = resource_policy(
+            1,
+            "res-mask",
+            resource_priority,
+            "dataMaskPolicyItems",
+            mask_items("MASK_NULL"),
+        );
+        res["policyType"] = json!(1);
+        let set = envelope(json!([res]), tied());
+        match evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers()) {
+            MaskDecision::Undecidable { why } => match why.as_slice() {
+                [UndecidableCause::EvalOrderAmbiguous { outcomes, .. }] => outcomes.clone(),
+                other => panic!("expected one EvalOrderAmbiguous: {other:?}"),
+            },
+            other => panic!("a tie must stay undecidable: {other:?}"),
+        }
+    };
+    let hash = TiedOutcome::Mask {
+        mask_type: Some("MASK_HASH".to_string()),
+        masked_value: None,
+        mask_condition: None,
+    };
+    assert_eq!(
+        outcomes(0),
+        vec![hash.clone(), hash],
+        "shut out: the tie is the answer"
+    );
+    assert_eq!(
+        outcomes(1),
+        Vec::<TiedOutcome>::new(),
+        "a higher resource mask can intervene"
+    );
 }
 
 /// The row-filter half of the same arm — a different comparator orders the
