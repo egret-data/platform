@@ -74,7 +74,7 @@ function humanizeStatus(status: string): string {
 /** The shared refusal (KI-231): a 403, or the redacted listing a member who
  *  may only query gets, both mean this section is not theirs to manage. */
 function AdminOnlyNotice() {
-  return <Forbidden level="section" reason="Only a workspace admin can manage engine connections." />;
+  return <Forbidden level="section" reason="Only a workspace admin can manage connections." />;
 }
 
 export default function DatabasesPage() {
@@ -97,7 +97,8 @@ export default function DatabasesPage() {
     setTestingId(conn.id);
     try {
       const outcome = await testMutation.mutateAsync(conn.id);
-      setTestResult((prev) => ({ ...prev, [conn.id]: outcome }));
+      // A failed test says why in `detail` (KI-001: e.g. the Trino setting to change).
+      setTestResult((prev) => ({ ...prev, [conn.id]: { ok: outcome.ok, message: outcome.ok ? undefined : outcome.detail } }));
     } catch (err) {
       setTestResult((prev) => ({
         ...prev,
@@ -124,7 +125,7 @@ export default function DatabasesPage() {
     if (status === 403) return <AdminOnlyNotice />;
     return (
       <Alert variant="destructive">
-        <AlertTitle>Failed to load engines</AlertTitle>
+        <AlertTitle>Failed to load connections</AlertTitle>
         <AlertDescription>Something went wrong. Please try again.</AlertDescription>
       </Alert>
     );
@@ -300,13 +301,13 @@ export default function DatabasesPage() {
               <div>
                 <h3 className="text-sm font-semibold">Your connections</h3>
                 <p className="text-sm text-muted-foreground">
-                  Self-service engine connections managed by this workspace.
+                  Self-service connections managed by this workspace.
                 </p>
               </div>
             )}
             <SummaryStrip
               items={[
-                { label: "connections", value: selfServiceRows.length },
+                { label: "connections", singular: "connection", value: selfServiceRows.length },
                 { label: "ok", value: okCount },
                 { label: "error", value: errorCount },
               ]}
@@ -321,17 +322,18 @@ export default function DatabasesPage() {
           </div>
         ) : provisionedRows.length === 0 ? (
           <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-            <p>No engines connected yet.</p>
+            <p>No connections yet.</p>
           </div>
         ) : null}
       </div>
 
-      {/* Add dialog */}
+      {/* Add dialog. A new connection is tested at once, so its status is known (KI-011). */}
       <DatabaseConnDialog
         ws={ws}
         open={addOpen}
         onOpenChange={setAddOpen}
         editConn={null}
+        onCreated={(conn) => void handleTest(conn)}
       />
 
       {/* Edit dialog — key forces remount when target changes so useState initializers re-run */}
@@ -351,8 +353,8 @@ export default function DatabasesPage() {
         onOpenChange={(o) => {
           if (!o) setDeleteTarget(null);
         }}
-        title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete engine connection?"}
-        description="This engine connection will be removed. Any SQL Lab tabs or charts that reference it may break."
+        title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete connection?"}
+        description="This connection will be removed. Any SQL Lab tabs or charts that reference it may break."
         confirmText="delete"
         onConfirm={() => {
           if (deleteTarget)
@@ -370,9 +372,9 @@ function SectionHeader({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
-        <h2 className="text-base font-semibold">Engines</h2>
+        <h2 className="text-base font-semibold">Connections</h2>
         <p className="text-sm text-muted-foreground">
-          Query engine connections this workspace can use in SQL Lab and charts.
+          Connections to query engines that this workspace can use in SQL Lab and charts.
         </p>
       </div>
       <Button onClick={onAdd}>
@@ -497,11 +499,14 @@ function DatabaseConnDialog({
   open,
   onOpenChange,
   editConn,
+  onCreated,
 }: {
   ws: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   editConn: DatabaseConn | null;
+  /** Called with a connection this dialog has just created. */
+  onCreated?: (conn: DatabaseConn) => void;
 }) {
   const isEdit = editConn !== null;
   const createMutation = useCreateDatabase(ws);
@@ -631,11 +636,12 @@ function DatabaseConnDialog({
       if (isEdit && editConn) {
         await updateMutation.mutateAsync({ id: editConn.id, input });
       } else {
-        await createMutation.mutateAsync(input);
+        const created = await createMutation.mutateAsync(input);
+        onCreated?.(created);
       }
       closeAndReset();
     } catch (err) {
-      setError((err as ApiError).message ?? "Failed to save engine connection.");
+      setError((err as ApiError).message ?? "Failed to save the connection.");
     }
   }
 
@@ -645,12 +651,12 @@ function DatabaseConnDialog({
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>
-              {isEdit ? "Edit engine connection" : "Add engine connection"}
+              {isEdit ? "Edit connection" : "Add connection"}
             </DialogTitle>
             <DialogDescription>
               {isEdit
                 ? "Update the connection details. Leave password blank to keep the current secret."
-                : "Connect a Trino or StarRocks query engine. Egret validates reachability on save."}
+                : "Connect a Trino or StarRocks query engine. Egret tests the connection once it is saved."}
             </DialogDescription>
           </DialogHeader>
 

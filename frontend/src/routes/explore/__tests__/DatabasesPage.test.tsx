@@ -170,7 +170,7 @@ describe("DatabasesPage", () => {
       error: null,
     });
     renderAt();
-    expect(screen.getByText("No engines connected yet.")).toBeInTheDocument();
+    expect(screen.getByText("No connections yet.")).toBeInTheDocument();
   });
 
   it("shows skeleton while loading", () => {
@@ -197,7 +197,7 @@ describe("DatabasesPage", () => {
 
     // The shared refusal (KI-231).
     expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
-    expect(screen.getByText("Only a workspace admin can manage engine connections.")).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can manage connections.")).toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
 
@@ -214,7 +214,7 @@ describe("DatabasesPage", () => {
 
     // The shared refusal (KI-231).
     expect(screen.getByRole("heading", { level: 2, name: "You don't have access to this section." })).toBeInTheDocument();
-    expect(screen.getByText("Only a workspace admin can manage engine connections.")).toBeInTheDocument();
+    expect(screen.getByText("Only a workspace admin can manage connections.")).toBeInTheDocument();
     expect(screen.queryByText("prod-trino")).not.toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
@@ -225,7 +225,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "new-db" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "db.example.com" } });
@@ -255,6 +255,30 @@ describe("DatabasesPage", () => {
     });
   });
 
+  it("tests a new connection right after it is saved (KI-011)", async () => {
+    createMutateAsync.mockResolvedValue({ ...mockDb1, id: "db-new", name: "new-db", status: "unknown" });
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
+    expect(screen.queryByText(/validates reachability on save/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "new-db" } });
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "db.example.com" } });
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: "8080" } });
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => expect(testMutateAsync).toHaveBeenCalledWith("db-new"));
+  });
+
+  it("names the section Connections and counts one connection in the singular (KI-007, KI-011)", () => {
+    databasesMock.mockReturnValue({ data: [mockDb1], isLoading: false, isError: false, error: null });
+    const { container } = renderAt();
+    expect(screen.getByRole("heading", { name: "Connections" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Engines" })).not.toBeInTheDocument();
+    expect(container.textContent).toContain("1connection·");
+    expect(container.textContent).not.toContain("1connections");
+  });
+
   // ── Edit dialog ───────────────────────────────────────────────────────────
 
   it("opens the Edit dialog with fields (incl options) prefilled", async () => {
@@ -263,7 +287,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit engine connection"));
+    await waitFor(() => screen.getByText("Edit connection"));
 
     expect(screen.getByDisplayValue("prod-trino")).toBeInTheDocument();
     expect(screen.getByDisplayValue("trino.corp.local")).toBeInTheDocument();
@@ -281,7 +305,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit engine connection"));
+    await waitFor(() => screen.getByText("Edit connection"));
 
     const hostInput = screen.getByDisplayValue("trino.corp.local");
     fireEvent.change(hostInput, { target: { value: "new-host" } });
@@ -315,8 +339,9 @@ describe("DatabasesPage", () => {
     });
   });
 
-  it("shows the failure message when Test connection fails", async () => {
-    testMutateAsync.mockResolvedValue({ ok: false, message: "connection refused" });
+  it("shows the outcome's detail when Test connection fails (KI-001)", async () => {
+    // The real `TestOutcome` shape: `detail`, never `message`.
+    testMutateAsync.mockResolvedValue({ ok: false, latency_ms: 3, detail: "connection refused" });
     renderAt();
 
     fireEvent.click(
@@ -362,7 +387,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     // Default engine is trino — toggle should be present
     expect(
@@ -374,7 +399,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     // Switch to starrocks
     const nativeSelect = Array.from(
@@ -400,7 +425,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-imp" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
@@ -434,7 +459,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit engine connection"));
+    await waitFor(() => screen.getByText("Edit connection"));
 
     // Toggle impersonate switch on
     const impersonateSwitch = screen.getByRole("switch", {
@@ -458,7 +483,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     expect(
       screen.getByRole("switch", { name: /per-user delegation/i }),
@@ -469,7 +494,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-deleg" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
@@ -495,7 +520,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit engine connection"));
+    await waitFor(() => screen.getByText("Edit connection"));
 
     fireEvent.click(screen.getByRole("switch", { name: /per-user delegation/i }));
 
@@ -511,7 +536,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "no-deleg" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "db.example.com" } });
@@ -532,7 +557,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add engine connection"));
+    await waitFor(() => screen.getByText("Add connection", { selector: "h2" }));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-gov" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
@@ -571,7 +596,7 @@ describe("DatabasesPage", () => {
     renderAt();
 
     fireEvent.click(screen.getAllByRole("button", { name: /^edit/i })[0]);
-    await waitFor(() => screen.getByText("Edit engine connection"));
+    await waitFor(() => screen.getByText("Edit connection"));
 
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "moved.corp.local" } });
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
