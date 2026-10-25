@@ -41,6 +41,7 @@ import ExecutionOutputsTab from "@/components/workflows/executions/outputs/Execu
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
 import {
   canKill,
+  canReplay,
   canResume,
   killFeedback,
   resumeFeedback,
@@ -365,6 +366,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const resumeShown = showsResume(execution);
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
+  const replayState = canReplay(execution);
   const killShown = showsKill(execution);
   const killState = canKill(execution);
 
@@ -425,10 +427,10 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
           </ReasonButton>
         ) : null}
         {replayShown ? (
-          <Button type="button" size="sm" variant="outline" onClick={() => setOpen("replay")}>
+          <ReasonButton enablement={replayState} reasonId={`${reasonsId}-replay`} variant="outline" onClick={() => setOpen("replay")}>
             <History aria-hidden />
             Replay
-          </Button>
+          </ReasonButton>
         ) : null}
         {killShown ? (
           <ReasonButton
@@ -449,6 +451,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
       <DisabledReasons
         actions={[
           ...(resumeShown ? [{ id: `${reasonsId}-resume`, label: "Resume", enablement: resumeState }] : []),
+          ...(replayShown ? [{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }] : []),
           ...(killShown ? [{ id: `${reasonsId}-kill`, label: "Kill", enablement: killState }] : []),
         ]}
       />
