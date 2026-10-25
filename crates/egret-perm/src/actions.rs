@@ -568,6 +568,21 @@ pub enum CompileError {
 }
 
 impl CompileError {
+    /// The coded body of an expansion-ceiling refusal (a rule, a clearance or
+    /// a profile total over its ceiling) — `{error, code: "expansion_ceiling"}`
+    /// — or `None` for any other error. It is a refusal of the write that
+    /// caused it (D2, U3), so every write route answers it as a 409 and keeps
+    /// the sentence, which names the tables and their column counts.
+    pub fn expansion_ceiling_body(&self) -> Option<serde_json::Value> {
+        matches!(
+            self,
+            CompileError::ExpansionCeiling { .. }
+                | CompileError::ClearanceExpansionCeiling { .. }
+                | CompileError::ProfileExpansionCeiling { .. }
+        )
+        .then(|| serde_json::json!({ "error": self.to_string(), "code": "expansion_ceiling" }))
+    }
+
     /// The structured 409 body of an order-ambiguous pair —
     /// `{error, code: "rule_overlap", rules, coordinate, kind}` — or `None` for
     /// any other error. Spelled HERE, once, so the perm routes

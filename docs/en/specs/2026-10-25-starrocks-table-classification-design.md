@@ -644,3 +644,18 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   or rule write between a dry run and its commit (§11 item 6).
 - **After-commit failures (review finding 5): not mitigated.** Recorded in §11 item 5 with the window. The module doc
   and C10's "the boot pass retries it" now read "the next recompile of the profile, or the next boot".
+
+### Live check fixes (2026-10-26)
+
+- **F1: a ceiling refusal is a 409 on every write path.** `CompileError::expansion_ceiling_body()` (egret-perm) gives
+  `{error: <the compiler's sentence>, code: "expansion_ceiling"}` for `ExpansionCeiling`,
+  `ClearanceExpansionCeiling` and `ProfileExpansionCeiling`. Before → after:
+  - tag assignment and tag rename (`BiError`): 502 → coded 409;
+  - clearance write (`PUT /tags/{id}/access-policy`, via `BiError` → `CpError`) and a role-membership write
+    (`CpError` directly): 500 → coded 409;
+  - rule writes (`PermHttpError`): 400 → coded 409;
+  - catalog-workspace assignment (`EngineHttpError`): 500 → 409 `Conflict` with the sentence; an engine bind
+    already answered 409.
+  - A genuine engine failure keeps 502 (`BiError::Engine`), a database failure 500.
+  The frontend already shows a write's `error` sentence (`ApiError.message`); `AddTagDialog` gained a test pinning
+  it for the 409. No API schema changed.

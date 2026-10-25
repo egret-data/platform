@@ -158,6 +158,21 @@ describe("Add classification on a whole table", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("internal error");
   });
 
+  // D2 live check F1: a StarRocks ceiling refusal is a coded 409 whose sentence names the tables.
+  it("shows a ceiling refusal's sentence beside the field", async () => {
+    const sentence =
+      'compiling the clearance on tag "PII" would expand to 530 policies on StarRocks, over the ceiling of 500: whole-table on wh.sales.orders (1 deny + 520 column masks). Attach PII to fewer tables, or to columns';
+    serve({
+      "/tags": ok([PII]),
+      "/perm/rules": ok([]),
+      "PUT /warehouses/wh-1/resource-tags": { status: 409, body: { error: sentence, code: "expansion_ceiling" } },
+    });
+    open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    await userEvent.click(screen.getByRole("button", { name: "Add classification" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(sentence);
+  });
+
   it("waits for the rules before a whole-table add, and says so", async () => {
     serve({ "/tags": ok([PII]), "/perm/rules": "never" });
     open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));

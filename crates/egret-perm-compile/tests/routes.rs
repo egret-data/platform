@@ -5229,6 +5229,73 @@ async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire
     assert!(reason.contains("not protected"), "{reason}");
 }
 
+/// Live check F1 (D2, U3): a rule write that would push a tag rule's StarRocks
+/// expansion over its ceiling is refused as the caller's conflict, a coded
+/// 409 that keeps the compiler's sentence; it was a 400. Nothing is stored.
+#[tokio::test]
+async fn a_rule_over_the_expansion_ceiling_is_a_coded_409() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let warehouse: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("warehouse");
+    // The fixture tag is on `orders.email`; 500 more columns make 501.
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) SELECT t.id, $2, 'sales', 'wide', 'c' || gs::text \
+         FROM tags t, generate_series(1, 500) gs WHERE t.key = $1",
+    )
+    .bind(&f.tag_key)
+    .bind(warehouse)
+    .execute(&f.db.pool)
+    .await
+    .expect("500 more columns");
+    let name = unique("f1-hash");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(json!({
+                    "name": name,
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    sqlx::query(
+        "DELETE FROM catalog_tag_assignments a USING tags t \
+          WHERE t.id = a.tag_id AND t.key = $1 AND a.table_name = 'wide'",
+    )
+    .bind(&f.tag_key)
+    .execute(&f.db.pool)
+    .await
+    .expect("clean up");
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["code"], "expansion_ceiling", "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("over the ceiling of 500"),
+        "body: {body}"
+    );
+    assert_eq!(
+        rules_named(&f, &name).await,
+        0,
+        "a refused rule is not stored"
+    );
+}
+
 /// `POST /compile/{service_id}` brings a profile back in line with the model
 /// after something outside the model made it drift. Proven by deleting the
 /// compiled policy row directly — the one thing no endpoint does — and

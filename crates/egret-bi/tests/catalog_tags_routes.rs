@@ -594,3 +594,137 @@ async fn an_unknown_warehouse_or_classification_is_a_coded_404() {
     .unwrap();
     assert_eq!(stored, 0, "a refused write stores nothing");
 }
+
+/// Live check F1 (D2, U3): an assignment that would push a classification's
+/// StarRocks clearance over its expansion ceiling is the steward's own write
+/// refused, not a failing engine: a coded 409 whose `error` is the compiler's
+/// sentence (it names the counts), and nothing is stored. It was a 502.
+#[tokio::test]
+async fn an_assignment_over_the_starrocks_clearance_ceiling_is_a_coded_409() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = seed_user(&db, true).await;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let token = session_for(&st.sessions.clone(), admin).await;
+    let app = egret_bi::resource_tags_router().with_state(st);
+    let wh = egret_test_db::seed_warehouse(&db.pool).await;
+
+    // A StarRocks profile with an engine attached to a catalog over `wh`.
+    let policy = egret_policy::PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let svc = policy
+        .create_service(
+            &format!("f1-sr-{suffix}"),
+            "starrocks",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("profile");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret', \
+                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) \
+         RETURNING id",
+    )
+    .bind(format!("f1-eng-{suffix}"))
+    .bind(svc.id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("engine");
+    let catalog: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(format!("f1_cat_{suffix}"))
+    .bind(wh)
+    .fetch_one(&db.pool)
+    .await
+    .expect("catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine)
+    .bind(catalog)
+    .execute(&db.pool)
+    .await
+    .expect("attach");
+
+    // A gated classification already on 500 columns: one more is over.
+    let tag = TagRepo::new(db.clone())
+        .create(
+            &format!("f1-k-{suffix}"),
+            &format!("F1-N-{suffix}"),
+            "",
+            "",
+            Some(admin),
+        )
+        .await
+        .expect("create tag");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY['f1-role'], '{}')",
+    )
+    .bind(tag.id)
+    .execute(&db.pool)
+    .await
+    .expect("gate");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) SELECT $1, $2, 'sales', 'wide', 'c' || gs::text FROM generate_series(1, 500) gs",
+    )
+    .bind(tag.id)
+    .bind(wh)
+    .execute(&db.pool)
+    .await
+    .expect("500 columns");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/control-plane/warehouses/{wh}/resource-tags"))
+                .header("Cookie", format!("egret_session={token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "schema": "sales", "table": "wide", "column": "c501", "tag_id": tag.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = body_string(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(json["code"], "expansion_ceiling", "{json}");
+    let error = json["error"].as_str().expect("error");
+    assert!(
+        error.contains("over the ceiling of 500") && error.contains("501"),
+        "{error}"
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalog_tag_assignments WHERE tag_id = $1 AND column_name = 'c501'",
+    )
+    .bind(tag.id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count");
+    assert_eq!(stored, 0, "a refused assignment is not stored");
+}
