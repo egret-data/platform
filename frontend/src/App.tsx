@@ -498,19 +498,23 @@ const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "permissions", perm: "role:read" },
 ];
 
+// Every target is absolute: this also renders for the catch-all, and a relative
+// target resolves against the unmatched URL, so `/control-plane/config` went to
+// `/control-plane/config/workspaces`, matched the catch-all again and looped
+// (KI-016; see `exploreRedirectTo`).
 function ControlPlaneIndex() {
   const { me } = useAuth();
-  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="workspaces" replace />;
+  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="/control-plane/workspaces" replace />;
   const perms = me?.permissions ?? [];
   const first = FIRST_SECTION_BY_PERM.find((s) => perms.includes(s.perm));
-  if (first) return <Navigate to={first.path} replace />;
+  if (first) return <Navigate to={`/control-plane/${first.path}`} replace />;
   // `RequireControlPlaneAccess` admits anyone holding a Control Plane read
   // permission (see `CONTROL_PLANE_PERMS`), but not every one of those unlocks
   // a section above (e.g. `workspace:read` alone) — so a non-admin can land
   // here matching nothing and 403 on the platform_admin-only "workspaces"
   // fallback. If they can also enter Governance, send them there instead.
   if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
-  return <Navigate to="workspaces" replace />;
+  return <Navigate to="/control-plane/workspaces" replace />;
 }
 
 function ControlPlaneRoutes() {

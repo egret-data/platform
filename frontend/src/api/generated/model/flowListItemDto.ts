@@ -39,4 +39,10 @@ export interface FlowListItemDto {
   latest_version?: number | null;
   created_at: string;
   updated_at: string;
+  /**
+     * When the flow was moved to the trash; null for a flow that is not in
+     * it (KI-119: `GET /flows?trashed=true` lists only these).
+     * @nullable
+     */
+  deleted_at?: string | null;
 }

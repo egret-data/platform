@@ -312,6 +312,9 @@ pub async fn publish_gated(
     report
         .errors
         .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
+    report
+        .warnings
+        .extend(crate::spec::property_warnings(&draft.source));
     if !report.errors.is_empty() {
         return Err(Error::InvalidInput(crate::spec::describe(&report.errors)));
     }

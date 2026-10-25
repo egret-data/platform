@@ -742,7 +742,7 @@ export function ScheduleEditor({
         >
           <ConfigTable valueClassName="w-52 lg:w-80">
             <ConfigTableRow
-              label="Database"
+              label="Connection"
               htmlFor="sched-db"
               details="Which connection the query runs against."
             >

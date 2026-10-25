@@ -107,7 +107,7 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
             </p>
             <div className="space-y-4 pt-1">
               <div className="space-y-1.5">
-                <Label>Database</Label>
+                <Label>Connection</Label>
                 <Select value={dbId} onValueChange={(v) => { setDbId(v); setCatalog(""); setSchema(""); setTable(""); }}>
                   <SelectTrigger className="w-full"><SelectValue placeholder="Choose a connection" /></SelectTrigger>
                   <SelectContent>{(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}</SelectContent>

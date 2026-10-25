@@ -223,6 +223,26 @@ describe("GrantDialog — the preview result is shown before the write (D2)", ()
     await waitFor(() => expect(saveBtn).toBeEnabled());
   });
 
+  test("brings the preview result into view once it arrives (KI-132)", async () => {
+    // jsdom has no layout: record what asks to be scrolled into view.
+    const scrolled: Element[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this);
+    };
+    try {
+      const user = userEvent.setup();
+      renderDialog({ existing: EXISTING });
+      await user.click(screen.getByRole("button", { name: "Preview" }));
+      await screen.findByText(/Would recompile trino-prod/);
+      await waitFor(() => expect(scrolled.some((el) => /Would recompile trino-prod/.test(el.textContent ?? ""))).toBe(true));
+      // The panel, not the whole dialog: the form above it stays where it was.
+      expect(scrolled.every((el) => !/Who can do what with data/.test(el.textContent ?? ""))).toBe(true);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
   test("changing the form after a preview marks it stale and re-blocks Save", async () => {
     const user = userEvent.setup();
     renderDialog({ existing: EXISTING });

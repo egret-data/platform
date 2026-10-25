@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -140,6 +140,16 @@ function GrantForm({
 
   const previewStale = previewedFor !== bodySnapshot;
 
+  // KI-132: the dialog is taller than a 900 px viewport, so its body scrolls and
+  // the preview panel sits below the fold. Once an answer (result or error)
+  // arrives, bring the panel into view: the reader pressed Preview to read it.
+  // `start`, not `nearest`: the footer (Create) follows the panel, and the body
+  // scrolls as far as it can, so the result and the button both end up on screen.
+  const previewPanelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (preview || previewError) previewPanelRef.current?.scrollIntoView({ block: "start" });
+  }, [preview, previewError]);
+
   function toggleAction(a: Action, checked: boolean) {
     setActions((prev) => (checked ? [...prev, a] : prev.filter((x) => x !== a)));
   }
@@ -256,7 +266,7 @@ function GrantForm({
             </Alert>
           )}
 
-          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+          <div ref={previewPanelRef} className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-medium">
                 Preview: {formatActions(actions)} on {noCatalog ? "…" : formatScope(scope, catalogName(scope.catalog_id))}

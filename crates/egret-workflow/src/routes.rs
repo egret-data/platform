@@ -392,6 +392,9 @@ pub struct FlowListItemDto {
     pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When the flow was moved to the trash; null for a flow that is not in
+    /// it (KI-119: `GET /flows?trashed=true` lists only these).
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl From<FlowRow> for FlowListItemDto {
@@ -408,6 +411,7 @@ impl From<FlowRow> for FlowListItemDto {
             latest_version: r.latest_version,
             created_at: r.created_at,
             updated_at: r.updated_at,
+            deleted_at: r.deleted_at,
         }
     }
 }
@@ -453,6 +457,10 @@ pub struct ListFlowsQuery {
     pub folder_id: Option<Uuid>,
     pub namespace: Option<String>,
     pub state: Option<String>,
+    /// `true` lists the trash instead (KI-119): only the flows moved there,
+    /// never mixed with the others.
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 /// `POST /flows` body.
@@ -520,6 +528,9 @@ fn draft_dto(row: FlowRow, can_manage: bool, worker_enabled: bool) -> EgretResul
     report
         .errors
         .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
+    report
+        .warnings
+        .extend(crate::spec::property_warnings(&row.source));
     Ok(FlowDto {
         id: row.id,
         folder_id: row.folder_id,
@@ -619,6 +630,7 @@ async fn scoped_folder(st: &WorkflowState, ws: Uuid, folder: Uuid) -> EgretResul
         ("folder_id" = Option<Uuid>, Query, description = "List only flows in this folder"),
         ("namespace" = Option<String>, Query, description = "List only flows in this namespace"),
         ("state" = Option<String>, Query, description = "List only flows in this state (draft, live, disabled)"),
+        ("trashed" = Option<bool>, Query, description = "`true` lists only the flows in the trash; absent or `false`, only the others"),
     ),
     responses(
         (status = 200, description = "Flow drafts in the workspace, newest first", body = Vec<FlowListItemDto>),
@@ -637,7 +649,7 @@ async fn list_flows(
         folder_id: q.folder_id,
         namespace: q.namespace,
         state: q.state,
-        trashed: false,
+        trashed: q.trashed,
     };
     let rows = st.repo.list(ctx.workspace_id.0, &filter).await?;
     Ok(Json(rows.into_iter().map(FlowListItemDto::from).collect()))
@@ -874,6 +886,97 @@ async fn delete_flow(
     Ok(Json(Ack::ok()))
 }
 
+// ---------- Trash (KI-119) ----------
+//
+// `DELETE /flows/{id}` above moves a flow to the trash. These two are the ways
+// out of it: back to the flow list, or gone for good, which frees the
+// `(namespace, flow_id)` the trashed row still holds. Both gate on
+// `workflow:manage`, as delete does, and both are audited, as delete is.
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/flows/{id}/restore",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Flow id"),
+    ),
+    responses(
+        (status = 200, description = "Flow restored from the trash, with its source, state and versions; its schedules start at their next tick", body = FlowDto),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The flow is not in the trash", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn restore_flow(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<Json<FlowDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let restored = st.repo.restore(ctx.workspace_id.0, id).await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_flow:restore",
+        "workflow_flow",
+        Some(id.to_string()),
+        serde_json::json!({
+            "namespace": restored.namespace,
+            "flow_id": restored.flow_id,
+        }),
+    ));
+    // The caller just passed `workflow:manage` to get here.
+    Ok(Json(draft_dto(
+        restored,
+        true,
+        st.trigger_flags.worker_enabled,
+    )?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/flows/{id}/permanent",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Flow id"),
+    ),
+    responses(
+        (status = 200, description = "A flow in the trash deleted permanently, with its versions and trigger state; its namespace and id are free again. Its executions are kept", body = Ack),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The flow is not in the trash; move it there first", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn purge_flow(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<Json<Ack>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let gone = st.repo.purge(ctx.workspace_id.0, id).await?;
+    // The names go in the detail: the row is gone, and the trail is the only
+    // record left of which flow this id was.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_flow:purge",
+        "workflow_flow",
+        Some(id.to_string()),
+        serde_json::json!({
+            "namespace": gone.namespace,
+            "flow_id": gone.flow_id,
+            "deleted_at": gone.deleted_at,
+        }),
+    ));
+    Ok(Json(Ack::ok()))
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/workflows/flows/{id}/validate",
@@ -911,13 +1014,17 @@ async fn validate_flow(
 /// The report both validate routes answer for `source`: parse (a YAML that
 /// does not parse is a 400 whose message carries the line and column), then
 /// [`validate`], plus [`crate::spec::unrunnable`] against this deployment's
-/// served set. Writes nothing.
+/// served set and the properties egret drops ([`crate::spec::property_warnings`],
+/// KI-121). Writes nothing.
 fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
     let flow = parse_unsaved(source)?;
     let mut report = validate(&flow);
     report
         .errors
         .extend(crate::spec::unrunnable(&flow, crate::runtime::served()));
+    report
+        .warnings
+        .extend(crate::spec::property_warnings(source));
     Ok(ValidationReportDto::from(&report))
 }
 
@@ -1440,11 +1547,11 @@ async fn get_execution_graph(
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExecutionListItemDto {
     pub id: Uuid,
-    /// The draft this execution came from, and `NULL` only if something
-    /// outside this crate issued a real `DELETE` — **trashing a flow does not
-    /// clear it**, because `FlowRepo`'s delete is soft and nothing in
-    /// `egret-workflow/src` issues a `DELETE FROM`. A trashed flow's
-    /// executions are still listed, and still findable by `flow_id`.
+    /// The draft this execution came from, and `NULL` once that flow was
+    /// deleted permanently from the trash (`FlowRepo::purge`, KI-119) —
+    /// **trashing a flow does not clear it**, because `FlowRepo`'s delete is
+    /// soft. A trashed flow's executions are still listed, and still findable
+    /// by `flow_id`.
     pub flow_id: Option<Uuid>,
     pub namespace: String,
     /// The YAML's own `id`; `flow_id` is taken by the draft's uuid above.
@@ -2961,11 +3068,10 @@ async fn replay_execution(
     // row is deliberately discarded.
     //
     // An execution whose `flow_id` is NULL names no flow, so neither door can
-    // be asked. `executions_flow_id_fkey` is `ON DELETE SET NULL` and nothing
-    // in this crate issues that DELETE (`ExecutionRow::flow_id`'s own doc
-    // measures it: `DELETE FROM` over this crate's `src` returns 0, control
-    // `UPDATE workflow.` returns 10), so this arm is unreachable on the
-    // product's path — and it refuses rather than running, because a flow that
+    // be asked. `executions_flow_id_fkey` is `ON DELETE SET NULL`, and
+    // `FlowRepo::purge` (deleting a trashed flow permanently, KI-119) issues
+    // that DELETE, so this arm is reached by replaying an execution of a
+    // purged flow — and it refuses rather than running, because a flow that
     // has been hard-deleted is a stronger "this is gone" than a trashed one,
     // not a weaker one.
     let flow_id = source
@@ -3498,6 +3604,14 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_flow).put(update_flow).delete(delete_flow),
         )
         .route(
+            "/ws/{workspace}/workflows/flows/{id}/restore",
+            post(restore_flow),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/{id}/permanent",
+            axum::routing::delete(purge_flow),
+        )
+        .route(
             "/ws/{workspace}/workflows/flows/{id}/validate",
             post(validate_flow),
         )
@@ -3711,6 +3825,8 @@ pub fn management_router() -> Router<WorkflowState> {
         get_flow,
         update_flow,
         delete_flow,
+        restore_flow,
+        purge_flow,
         validate_flow,
         validate_unsaved_flow,
         get_flow_schema,

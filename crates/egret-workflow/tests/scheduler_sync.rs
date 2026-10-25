@@ -471,7 +471,7 @@ async fn a_webhook_or_flow_trigger_gets_no_row() {
 
 /// Every statement that writes `workflow.flows` must sit in a function that
 /// calls `scheduler::sync`, or be on [`EXEMPT`] with a reason. The guard
-/// against a fifth writer that forgets (spec §3.3).
+/// against a new writer that forgets (spec §3.3).
 ///
 /// **What the scanner cannot see** (final review M5). It reads Rust source
 /// text under `crates/*/src` with one regex, so a writer is invisible to it
@@ -492,10 +492,17 @@ async fn a_webhook_or_flow_trigger_gets_no_row() {
 /// a helper it calls, or whose body carries `scheduler::sync(` only in a
 /// trailing `//` comment or a string, is judged by that text, not by what
 /// runs.
-const EXEMPT: &[(&str, &str)] = &[(
-    "set_live",
-    "changes neither source nor deleted_at; state is read at fire time",
-)];
+const EXEMPT: &[(&str, &str)] = &[
+    (
+        "set_live",
+        "changes neither source nor deleted_at; state is read at fire time",
+    ),
+    (
+        "purge",
+        "deletes a row already in the trash, whose trigger state the soft delete's \
+         sync removed; the foreign keys' ON DELETE CASCADE takes whatever is left (KI-119)",
+    ),
+];
 
 #[test]
 fn every_flows_writer_calls_sync() {
@@ -571,8 +578,15 @@ fn every_flows_writer_calls_sync() {
     found.sort();
     assert_eq!(
         found,
-        vec!["create", "set_live", "soft_delete", "update"],
-        "positive control: the scanner must find exactly today's four writers"
+        vec![
+            "create",
+            "purge",
+            "restore",
+            "set_live",
+            "soft_delete",
+            "update"
+        ],
+        "positive control: the scanner must find exactly today's six writers"
     );
     assert!(
         offenders.is_empty(),

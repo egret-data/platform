@@ -2742,7 +2742,112 @@ export function useWorkflowGetFlowGraph<TData = Awaited<ReturnType<typeof workfl
 
 
 
-export type workflowPublishFlowResponse200 = {
+export type workflowPurgeFlowResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type workflowPurgeFlowResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPurgeFlowResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPurgeFlowResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowPurgeFlowResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowPurgeFlowResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPurgeFlowResponseSuccess = (workflowPurgeFlowResponse200) & {
+  headers: Headers;
+};
+export type workflowPurgeFlowResponseError = (workflowPurgeFlowResponse401 | workflowPurgeFlowResponse403 | workflowPurgeFlowResponse404 | workflowPurgeFlowResponse409 | workflowPurgeFlowResponse500) & {
+  headers: Headers;
+};
+
+export type workflowPurgeFlowResponse = (workflowPurgeFlowResponseSuccess | workflowPurgeFlowResponseError)
+
+export const getWorkflowPurgeFlowUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/permanent`
+}
+
+export const workflowPurgeFlow = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowPurgeFlowResponse> => {
+
+  return customInstance<workflowPurgeFlowResponse>(getWorkflowPurgeFlowUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowPurgeFlowMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPurgeFlow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowPurgeFlow>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workflowPurgeFlow'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowPurgeFlow>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workflowPurgeFlow(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowPurgeFlowMutationResult = NonNullable<Awaited<ReturnType<typeof workflowPurgeFlow>>>
+
+    export type WorkflowPurgeFlowMutationError = ErrorBody
+
+    export const useWorkflowPurgeFlow = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPurgeFlow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowPurgeFlow>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowPurgeFlowMutationOptions(options), queryClient);
+    }
+    export type workflowPublishFlowResponse200 = {
   data: FlowVersionDto
   status: 200
 }
@@ -2847,6 +2952,111 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getWorkflowPublishFlowMutationOptions(options), queryClient);
+    }
+    export type workflowRestoreFlowResponse200 = {
+  data: FlowDto
+  status: 200
+}
+
+export type workflowRestoreFlowResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowRestoreFlowResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowRestoreFlowResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowRestoreFlowResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowRestoreFlowResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowRestoreFlowResponseSuccess = (workflowRestoreFlowResponse200) & {
+  headers: Headers;
+};
+export type workflowRestoreFlowResponseError = (workflowRestoreFlowResponse401 | workflowRestoreFlowResponse403 | workflowRestoreFlowResponse404 | workflowRestoreFlowResponse409 | workflowRestoreFlowResponse500) & {
+  headers: Headers;
+};
+
+export type workflowRestoreFlowResponse = (workflowRestoreFlowResponseSuccess | workflowRestoreFlowResponseError)
+
+export const getWorkflowRestoreFlowUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/restore`
+}
+
+export const workflowRestoreFlow = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowRestoreFlowResponse> => {
+
+  return customInstance<workflowRestoreFlowResponse>(getWorkflowRestoreFlowUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowRestoreFlowMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestoreFlow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowRestoreFlow>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workflowRestoreFlow'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowRestoreFlow>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workflowRestoreFlow(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowRestoreFlowMutationResult = NonNullable<Awaited<ReturnType<typeof workflowRestoreFlow>>>
+
+    export type WorkflowRestoreFlowMutationError = ErrorBody
+
+    export const useWorkflowRestoreFlow = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestoreFlow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowRestoreFlow>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowRestoreFlowMutationOptions(options), queryClient);
     }
     export type workflowListFlowTriggersResponse200 = {
   data: FlowTriggersDto

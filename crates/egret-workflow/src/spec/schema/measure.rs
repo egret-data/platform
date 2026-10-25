@@ -64,10 +64,15 @@ use crate::models::{self, Flow, TriggerKind};
 use crate::spec::{parse, registry, validate};
 use crate::worker::handlers as h;
 
-/// Properties egret reads and that, by Kestra's own definition, do nothing:
-/// the script tasks' `warningOnStdErr` ("Not used anymore, will be removed
-/// soon"; W5a Task 1 measured no effect with `true`, `false` or unset).
-const NO_EFFECT: &[&str] = &["warningOnStdErr"];
+/// Properties egret reads and that do nothing in egret:
+/// - the script tasks' `warningOnStdErr`, which does nothing by Kestra's own
+///   definition ("Not used anymore, will be removed soon"; W5a Task 1
+///   measured no effect with `true`, `false` or unset);
+/// - a retry's `warningOnRetry` (KI-121): `models::RetryCommon` keeps it and
+///   `executor::retry` copies it into the plan's policy, but nothing reads it
+///   there -- a task that succeeds after a retry ends `SUCCESS`, never the
+///   `WARNING` Kestra gives it.
+const NO_EFFECT: &[&str] = &["warningOnStdErr", "warningOnRetry"];
 
 /// Validation error codes that refuse a property by NAME, whatever its value,
 /// so a read property drawing one at its own path is `refused` rather than a

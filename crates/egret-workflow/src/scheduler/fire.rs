@@ -592,17 +592,21 @@ async fn resync(conn: &mut PgConnection, flow_id: Uuid) -> Result<()> {
 /// render context. A value carrying template syntax would run with the
 /// literal text where Kestra would have rendered it, so it is refused.
 pub(crate) fn refuse_templated(inputs: &BTreeMap<String, serde_json::Value>) -> Option<String> {
-    fn templated(v: &serde_json::Value) -> bool {
-        match v {
-            serde_json::Value::String(s) => s.contains("{{") || s.contains("{%"),
-            serde_json::Value::Array(a) => a.iter().any(templated),
-            serde_json::Value::Object(o) => o.values().any(templated),
-            _ => false,
-        }
-    }
     inputs.iter().find(|(_, v)| templated(v)).map(|(k, _)| {
         format!("inputs.{k} contains template syntax, which a scheduled execution cannot render")
     })
+}
+
+/// Whether a schedule input value carries template syntax anywhere: what
+/// [`refuse_templated`] refuses at fire time, and `spec::validate` warns
+/// about at save (KI-122).
+pub(crate) fn templated(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::String(s) => s.contains("{{") || s.contains("{%"),
+        serde_json::Value::Array(a) => a.iter().any(templated),
+        serde_json::Value::Object(o) => o.values().any(templated),
+        _ => false,
+    }
 }
 
 /// Kestra's `putAll`: `schedule` overlaid by `backfill`, key by key.

@@ -67,6 +67,31 @@ describe("VersionsDialog", () => {
     await waitFor(() => expect(restoreMutateAsync).toHaveBeenCalledWith({ versionId: "v1" }));
   });
 
+  it("names the publisher, and the shortened id only when the server has no name (KI-027)", () => {
+    useAppVersionsMock.mockReturnValue({
+      data: [
+        v({ id: "v2", version_no: 2, published_by_name: "admin@egret.local" }),
+        v({ id: "v1", version_no: 1, published_by_name: null }),
+      ],
+    });
+    renderDialog();
+    expect(screen.getByText(/by admin@egret\.local/)).toBeTruthy();
+    expect(screen.getByText(/by 11111111/)).toBeTruthy();
+  });
+
+  it("names the version a restore republished (KI-184)", () => {
+    useAppVersionsMock.mockReturnValue({
+      data: [
+        v({ id: "v3", version_no: 3, from_revision: null, restored_from: "v1" }),
+        v({ id: "v2", version_no: 2 }),
+        v({ id: "v1", version_no: 1 }),
+      ],
+    });
+    renderDialog();
+    expect(screen.getByText(/restored from v1/)).toBeTruthy();
+    expect(screen.queryByText(/an earlier version/)).toBeNull();
+  });
+
   it("shows a toast naming the new version number on success", async () => {
     useAppVersionsMock.mockReturnValue({ data: [v({ id: "v1", version_no: 1 })] });
     restoreMutateAsync.mockResolvedValue({ version_no: 5 });

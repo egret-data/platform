@@ -19,4 +19,8 @@ namespace?: string;
  * List only flows in this state (draft, live, disabled)
  */
 state?: string;
+/**
+ * `true` lists only the flows in the trash; absent or `false`, only the others
+ */
+trashed?: boolean;
 };

@@ -21,5 +21,11 @@ export interface AppVersionSummary {
   restored_from?: string | null;
   /** @nullable */
   published_by?: string | null;
+  /**
+     * The publisher's display name: the profile name, else the email. Null when
+     * `published_by` is null or the user no longer exists.
+     * @nullable
+     */
+  published_by_name?: string | null;
   published_at: string;
 }

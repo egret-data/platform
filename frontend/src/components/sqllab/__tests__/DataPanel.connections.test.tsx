@@ -54,7 +54,7 @@ test("says no connection is granted instead of an empty picker", async () => {
 
   const note = await screen.findByRole("status");
   expect(note).toHaveTextContent("No connection is granted to this workspace. Ask a workspace admin.");
-  expect(screen.queryByText("Select a database to browse its schema.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Select a connection to browse its schema.")).not.toBeInTheDocument();
 });
 
 test("a refused listing says so, not an empty picker", async () => {

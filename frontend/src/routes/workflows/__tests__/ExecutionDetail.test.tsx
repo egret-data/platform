@@ -384,7 +384,7 @@ describe("ExecutionDetail: Resume", () => {
     renderPage();
     await screen.findByRole("heading", { level: 1, name: EXEC });
     expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Replay" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Kill" })).toBeInTheDocument();
   });
 
   it("is enabled for every pause, an unbounded one included, and says what it does", async () => {
@@ -475,13 +475,12 @@ describe("ExecutionDetail: Resume", () => {
 });
 
 describe("ExecutionDetail: Replay", () => {
-  it("is disabled with its reason while the execution has not finished", async () => {
+  it("is not offered while the execution runs, so no reason wraps under the actions (KI-193)", async () => {
     new Server(ok(execution("RUNNING")));
     renderPage();
-    const button = await screen.findByRole("button", { name: "Replay" });
-    expect(button).toBeDisabled();
-    expect(screen.getByText("Replay is available when the execution has finished")).toBeVisible();
-    expect(button).toHaveAccessibleDescription("Replay is available when the execution has finished");
+    expect(await screen.findByRole("button", { name: "Kill" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Replay" })).toBeNull();
+    expect(screen.queryByText(/Replay is available/)).toBeNull();
   });
 
   it("asks first, naming the frozen source and the inputs, and on 201 opens the new execution", async () => {

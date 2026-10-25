@@ -15,8 +15,8 @@ vi.mock("@/api/client", async (importActual) => {
   };
 });
 
-import { useAppCapabilities, useApps, useAppMutations } from "../apps";
-import { getAppsGetOneQueryKey, getAppsListQueryKey } from "../generated/apps/apps";
+import { useAppCapabilities, useApps, useAppMutations, usePublishApp } from "../apps";
+import { getAppsGetOneQueryKey, getAppsListQueryKey, getAppsVersionsQueryKey } from "../generated/apps/apps";
 
 function setup() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -144,5 +144,21 @@ describe("useAppMutations", () => {
 
   it("the list key is a prefix of the trashed list's key, so one invalidation reaches both", () => {
     expect(getAppsListQueryKey("w", { trashed: true }).slice(0, 1)).toEqual([...getAppsListQueryKey("w")]);
+  });
+});
+
+describe("usePublishApp", () => {
+  it("invalidates the version list, so an open Versions dialog shows the new version (KI-176)", async () => {
+    // Arrange
+    apiFetch.mockImplementation(async () => json(201, { id: "v1", version_no: 1, published_at: "2026-10-01T00:00:00Z" }));
+    const { invalidate, wrapper } = setup();
+    const { result } = renderHook(() => usePublishApp("w", "a1"), { wrapper });
+
+    // Act
+    await act(async () => { await result.current.mutateAsync({ expectedRevision: 2 }); });
+
+    // Assert
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: getAppsVersionsQueryKey("w", "a1") });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: getAppsGetOneQueryKey("w", "a1") });
   });
 });

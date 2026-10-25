@@ -154,7 +154,7 @@ describe("EndpointCreate — the governed-database warning", () => {
   });
 
   async function pick(name: string) {
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: new RegExp(name) }));
   }
 

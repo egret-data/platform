@@ -25,16 +25,16 @@ export type TlsMode = SmtpConfigDto["tls_mode"];
 /**
  * The workspace's SMTP settings, or `undefined` when none are stored.
  *
- * A 404 here is the ordinary starting state of every workspace, not a failure,
- * so callers should render an empty form rather than an error. `retry: false`
- * keeps that answer immediate instead of three round-trips slow.
+ * "None stored" is the ordinary starting state of every workspace, not a
+ * failure: the server answers 204 (it was a 404, which the browser logged as an
+ * error on every visit, KI-212), and callers render an empty form.
  */
 export function useSmtpConfig(ws: string) {
-  return useAlertsSmtpGet<SmtpConfig, ApiError>(ws, {
+  return useAlertsSmtpGet<SmtpConfig | undefined, ApiError>(ws, {
     query: {
       enabled: Boolean(ws),
       retry: false,
-      select: (r) => r.data as SmtpConfig,
+      select: (r) => (r.status === 200 ? r.data : undefined),
     },
   });
 }
@@ -66,14 +66,14 @@ export type SlackConfig = SlackConfigDto;
  * The workspace's Slack app, or `undefined` when none is stored.
  *
  * One bot token for every channel the workspace posts to — a destination names
- * a channel and nothing else. A 404 is the ordinary starting state, like SMTP's.
+ * a channel and nothing else. A 204 is the ordinary starting state, like SMTP's.
  */
 export function useSlackConfig(ws: string) {
-  return useAlertsSlackGet<SlackConfig, ApiError>(ws, {
+  return useAlertsSlackGet<SlackConfig | undefined, ApiError>(ws, {
     query: {
       enabled: Boolean(ws),
       retry: false,
-      select: (r) => r.data as SlackConfig,
+      select: (r) => (r.status === 200 ? r.data : undefined),
     },
   });
 }

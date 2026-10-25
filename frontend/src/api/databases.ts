@@ -133,8 +133,17 @@ export function useDeleteDatabase(ws: string) {
   });
 }
 
+/**
+ * The server stores a saved connection's test outcome as its `status`, so the
+ * list is read again after every test: the Status column and the counts follow
+ * the result (KI-011).
+ */
 export function useTestDatabase(ws: string) {
+  const queryClient = useQueryClient();
   return useMutation<TestOutcome, ApiError, string>({
     mutationFn: async (id) => (await databasesTestSaved(ws, id)).data as TestOutcome,
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: getDatabasesListQueryKey(ws) });
+    },
   });
 }

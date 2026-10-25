@@ -589,6 +589,19 @@ describe("Clients — a revoked client is not encoded by strikethrough", () => {
     expect(within(row).getByText("Expired")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Actions for stale-etl" })).toBeInTheDocument();
   });
+
+  it("words a past expiry as past: \"expired … ago\", not \"expires … ago\" (KI-025)", async () => {
+    mockClients({
+      data: {
+        status: 200,
+        data: [makeClient({ name: "stale-etl", expires_at: "2020-01-01T00:00:00Z" })],
+      },
+    });
+    renderClients();
+    const row = await screen.findByRole("row", { name: /stale-etl/ });
+    expect(within(row).getByText(/^expired/)).toBeInTheDocument();
+    expect(within(row).queryByText(/^expires/)).not.toBeInTheDocument();
+  });
 });
 
 /**

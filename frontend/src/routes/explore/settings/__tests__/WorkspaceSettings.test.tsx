@@ -178,7 +178,7 @@ describe("WorkspaceSettings has no Collapse of its own", () => {
 
 // KI-231: a section the reader cannot open is left out, on the server's word.
 describe("WorkspaceSettings sections follow the reader's permissions", () => {
-  const ADMIN_ONLY = ["Members", "Roles & permissions", "Access requests", "Shared objects", "Engines", "Notifications"];
+  const ADMIN_ONLY = ["Members", "Roles & permissions", "Access requests", "Shared objects", "Connections", "Notifications"];
 
   it("a member without workspace:manage_members sees General only, and lands on it", async () => {
     serveWorkspaces([]);

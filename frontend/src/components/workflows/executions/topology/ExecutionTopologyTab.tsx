@@ -171,7 +171,7 @@ export default function ExecutionTopologyTab({
     } else {
       // No run and no iterations: not run yet, a body task no iteration has reached, or a Loop's
       // own `errors:` handler that has not run (it runs in this execution, not in an iteration).
-      note = `${name} has not run in this execution.`;
+      note = terminal ? `${name} has not run in this execution.` : `${name} has not started yet in this execution.`;
     }
   }
 
@@ -192,6 +192,7 @@ export default function ExecutionTopologyTab({
         <TopologyView
           graph={graph}
           states={states}
+          running={!terminal}
           selectedUid={selected}
           onSelect={select}
           onExpandSubflow={onExpandSubflow}

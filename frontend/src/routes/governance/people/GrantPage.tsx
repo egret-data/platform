@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -21,7 +21,8 @@ import {
 import { GrantSentenceText, PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { TabError } from "@/routes/governance/tabParts";
-import { Detail, ItemHeader, ItemMissing } from "@/routes/governance/people/itemParts";
+import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governance/people/itemParts";
+import { dataBackFrom } from "@/routes/governance/data/objectPath";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { StatusBadge } from "@/components/ui/status-badge";
 
@@ -96,10 +97,21 @@ export default function GrantPage() {
   );
 }
 
+/**
+ * The way back `?from=data:` names (the Data page's Permissions tab opens a
+ * grant so, KI-131), as on the rule page; else People & groups.
+ */
+function useGrantBack(): ItemBack | undefined {
+  const [search] = useSearchParams();
+  const from = search.get("from");
+  return from?.startsWith("data:") ? (dataBackFrom(from.slice("data:".length)) ?? undefined) : undefined;
+}
+
 function ItemFrame({ title, children }: { title: string; children: ReactNode }) {
+  const back = useGrantBack();
   return (
     <PageContainer className="space-y-6">
-      <ItemHeader kind="Grant" title={title} />
+      <ItemHeader kind="Grant" title={title} back={back} />
       {children}
     </PageContainer>
   );
@@ -122,6 +134,7 @@ function GrantBody({
   const link = scopeToDataLink(g.scope, catalogNameById, "permissions");
   const patterns = patternLevels(g.scope);
   const sentence = grantSentence(g, workspaceName);
+  const back = useGrantBack();
 
   let actions: ReactNode;
   if (assignment !== null) {
@@ -149,6 +162,7 @@ function GrantBody({
         kind="Grant"
         title={<GrantSentenceText grant={g} workspaceName={workspaceName} />}
         actions={actions}
+        back={back}
       />
       <div className="flex flex-wrap items-center gap-2">
         {g.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}

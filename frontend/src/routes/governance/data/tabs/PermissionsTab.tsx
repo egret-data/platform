@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Pencil, Trash2 } from "lucide-react";
+import { ExternalLink, KeyRound, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { getPermListGrantsQueryKey, usePermDeleteGrant, usePermListGrants } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView } from "@/api/generated/model";
@@ -18,9 +19,9 @@ import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policy
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
-import type { ObjectPath } from "@/routes/governance/data/objectPath";
+import { dataGrantUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { ACTIONS_CELL, HandWrittenPointer, Section, TabError } from "@/routes/governance/tabParts";
+import { HandWrittenPointer, LABELLED_ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { TERM } from "@/routes/governance/glossary";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -237,6 +238,8 @@ function GrantTable({
   onEdit: (g: GrantView) => void;
   onDelete: (g: GrantView) => void;
 }) {
+  const location = useLocation();
+  const back = location.pathname + location.search;
   return (
     <Table aria-label={label}>
       <TableHeader>
@@ -244,11 +247,9 @@ function GrantTable({
           <TableHead>Grant</TableHead>
           {extra ? <TableHead>{extra.head}</TableHead> : null}
           <TableHead>Effect</TableHead>
-          {canWrite ? (
-            <TableHead className={ACTIONS_CELL}>
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          ) : null}
+          <TableHead className={LABELLED_ACTIONS_CELL}>
+            <span className="sr-only">Actions</span>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -270,26 +271,42 @@ function GrantTable({
               <TableCell>
                 {g.effect === "deny" ? <StatusBadge tone="destructive">Deny</StatusBadge> : <StatusBadge tone="success">Allow</StatusBadge>}
               </TableCell>
-              {canWrite ? (
-                <TableCell className={`${ACTIONS_CELL} text-right`}>
-                  {g.origin.type === "explicit" ? (
-                    <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="icon" aria-label={`Edit ${sentence}`} onClick={() => onEdit(g)}>
+              <TableCell className={`${LABELLED_ACTIONS_CELL} text-right`}>
+                {/* The sentence holds the principals' links, so the grant's own page is an
+                    action of its own, for every reader (KI-131). */}
+                <div className="flex justify-end gap-1">
+                  <Button variant="ghost" size="sm" className="text-muted-foreground" asChild>
+                    <Link to={dataGrantUrl(g.id, back)} aria-label={`Open ${sentence}`}>
+                      <ExternalLink aria-hidden className="size-4" />
+                      <span className="max-lg:sr-only">Open</span>
+                    </Link>
+                  </Button>
+                  {canWrite && g.origin.type === "explicit" ? (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground"
+                        aria-label={`Edit ${sentence}`}
+                        onClick={() => onEdit(g)}
+                      >
                         <Pencil aria-hidden className="size-4" />
+                        <span className="max-lg:sr-only">Edit</span>
                       </Button>
                       <Button
                         variant="ghost"
-                        size="icon"
+                        size="sm"
                         className="text-muted-foreground hover:text-destructive"
                         aria-label={`Delete ${sentence}`}
                         onClick={() => onDelete(g)}
                       >
                         <Trash2 aria-hidden className="size-4" />
+                        <span className="max-lg:sr-only">Delete</span>
                       </Button>
-                    </div>
+                    </>
                   ) : null}
-                </TableCell>
-              ) : null}
+                </div>
+              </TableCell>
             </TableRow>
           );
         })}
