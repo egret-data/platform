@@ -97,7 +97,7 @@ function TrendDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
   );
   return (
     <div className="space-y-2.5">
-      {row("ss-switch", "Switch positive / negative colours",
+      {row("ss-switch", "Switch positive / negative colors",
         "For a metric where less is better — cost, churn, time to resolve.", "switchPositiveNegative")}
       {row("ss-compact", "Compact number", "36,513 becomes 36.5k.", "compact")}
     </div>
@@ -155,8 +155,8 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
-        <Label className="text-sm font-normal">Colour</Label>
-        <ColorPicker label="Colour" value={color}
+        <Label className="text-sm font-normal">Color</Label>
+        <ColorPicker label="Color" value={color}
           onChange={(next) => onChange({ color: next } as Partial<Cfg>)} />
       </div>
       <div className="space-y-1">
@@ -216,10 +216,22 @@ const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display",
  */
 function FunnelStepsControl({ config, onChange, resultColumns, rows, columnSettings }: VizControlProps<Cfg>) {
   const dim = typeof config.dimension === "string" ? config.dimension : undefined;
-  const di = dim ? resultColumns.findIndex((c) => c.name === dim) : -1;
-  if (di < 0) return null;
-  const names = [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
-  if (names.length === 0) return null;
+  if (!dim) return null;
+  const di = resultColumns.findIndex((c) => c.name === dim);
+  const names = di < 0 ? [] : [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
+  // Before the first run there is nothing to list, and the list used to vanish without a word
+  // (KI-056): say that it is coming, and what orders the stages until it, or a sort, does.
+  if (names.length === 0) {
+    return (
+      <div className="space-y-1.5">
+        <div className="text-xs text-muted-foreground">Steps</div>
+        <p className="text-xs text-muted-foreground">
+          The steps appear here after the first run, to reorder or hide. Until they are ordered
+          here or by a sort, the funnel shows them in the order the database returns them.
+        </p>
+      </div>
+    );
+  }
   const dimType = resultColumns[di]?.type ?? "varchar";
   const dimFormat = dim ? columnSettings[dim] : undefined;
   const labels = Object.fromEntries(names.map((n) => [n, formatDimensionValue(n, dimType, dimFormat)]));

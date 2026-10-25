@@ -79,3 +79,14 @@ describe("DrillMenu — stays inside the viewport", () => {
     spy.mockRestore();
   });
 });
+
+// KI-050: the drill menu names the column by its display name, like the axis it was clicked on.
+describe("DrillMenu — display names", () => {
+  it("says Filter by <display name>, and filters on the machine name", () => {
+    const onFilterBy = vi.fn();
+    render(<DrillMenu ctx={{ dims: [{ col: "orderpriority", value: "1-URGENT" }] }} labels={{ orderpriority: "Order priority" }}
+      x={0} y={0} onFilterBy={onFilterBy} onSeeRecords={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByText("Filter by Order priority is 1-URGENT"));
+    expect(onFilterBy).toHaveBeenCalledWith([{ col: "orderpriority", op: "eq", value: "1-URGENT" }]);
+  });
+});

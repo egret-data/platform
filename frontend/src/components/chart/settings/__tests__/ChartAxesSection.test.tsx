@@ -184,3 +184,18 @@ describe("xTicksChoiceOf / xTicksPatch", () => {
     expect(xTicksChoiceOf({})).toBe("show");
   });
 });
+
+/** KI-054: the waterfall and box plot name these rows the way every other chart's Axes tab does —
+ *  "X label" / "Y label" over each title, "Y scale" over the scale — not "Show label" and "Scale". */
+describe("ChartAxesSection — row names match the other charts' Axes tab", () => {
+  it("titles each axis' label row with its letter and the scale row with Y", () => {
+    render(<ChartAxesSection config={cfg()} onChange={() => {}} />);
+    const x = screen.getByRole("group", { name: "X-axis" });
+    const y = screen.getByRole("group", { name: "Y-axis" });
+    expect(within(x).getByText("X label", { selector: "label" })).toBeInTheDocument();
+    expect(within(y).getByText("Y label", { selector: "label" })).toBeInTheDocument();
+    expect(within(y).getByText("Y scale", { selector: "label" })).toBeInTheDocument();
+    expect(screen.queryByText("Show label")).toBeNull();
+    expect(screen.queryByText("Scale", { selector: "label" })).toBeNull();
+  });
+});

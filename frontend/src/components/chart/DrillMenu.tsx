@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { ChartFilter } from "@/api/charts";
 import { drillFilters, type DrillContext, type DrillDim } from "./drill";
 import { isExtractUnit, temporalLabel } from "./temporal-units";
+import { displayName, type FieldLabels } from "./config/field-names";
 
 /**
  * What one "Filter by" entry will actually do.
@@ -11,11 +12,13 @@ import { isExtractUnit, temporalLabel } from "./temporal-units";
  * that stayed on screen — the chart filter — was the one that under-reported. The label follows:
  * "is 2026-01-01" under a column grouped by month names a day nobody asked about.
  */
-function describe(d: DrillDim, filters: ChartFilter[]): string {
+function describe(d: DrillDim, filters: ChartFilter[], labels?: FieldLabels): string {
+  // The column by its display name, as the axis it was clicked on names it (KI-050).
+  const col = displayName(d.col, labels);
   if (filters.length === 2 && "value" in filters[0] && "value" in filters[1]) {
-    return `${d.col} ≥ ${String(filters[0].value)} and < ${String(filters[1].value)}`;
+    return `${col} ≥ ${String(filters[0].value)} and < ${String(filters[1].value)}`;
   }
-  return `${d.col} is ${isExtractUnit(d.unit) ? temporalLabel(d.unit, d.value) : String(d.value)}`;
+  return `${col} is ${isExtractUnit(d.unit) ? temporalLabel(d.unit, d.value) : String(d.value)}`;
 }
 
 /** Gap kept between the menu and the viewport edge. */
@@ -31,9 +34,11 @@ export function clampMenuPosition(x: number, y: number, w: number, h: number, vw
 }
 
 export function DrillMenu({
-  ctx, x, y, onFilterBy, onSeeRecords, onClose,
+  ctx, x, y, labels, onFilterBy, onSeeRecords, onClose,
 }: {
   ctx: DrillContext; x: number; y: number;
+  /** Display names by column; a column without one is named as it is. */
+  labels?: FieldLabels;
   /** An array, not one filter: a bucketed dimension needs both ends of its range. */
   onFilterBy: (filters: ChartFilter[]) => void;
   onSeeRecords: (filters: ChartFilter[]) => void;
@@ -69,7 +74,7 @@ export function DrillMenu({
               className="block w-full rounded px-2 py-1.5 text-left hover:bg-muted"
               onClick={() => { onFilterBy(filters); onClose(); }}
             >
-              Filter by {describe(d, filters)}
+              Filter by {describe(d, filters, labels)}
             </button>
           );
         })}
