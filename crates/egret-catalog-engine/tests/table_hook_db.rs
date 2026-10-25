@@ -968,3 +968,72 @@ async fn a_register_that_would_cross_the_ceiling_is_refused_and_does_not_wedge()
     );
     assert!(env.has_table_deny(tag, "wide").await);
 }
+
+// ── D2 review fix 3: the dry run locks every profile first ──
+
+impl Env {
+    /// A second StarRocks profile with an engine attached to the same catalog.
+    async fn second_profile(&self) -> i64 {
+        let policy = PolicyStore::new(self.db.clone());
+        let profile = policy
+            .create_service(&unique("sr_th2"), "starrocks", &json!({}))
+            .await
+            .expect("profile");
+        let engine: Uuid = sqlx::query_scalar(
+            "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+             VALUES ($1,'starrocks','egret', \
+                     '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) \
+             RETURNING id",
+        )
+        .bind(unique("th-eng2"))
+        .bind(profile.id)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("engine");
+        sqlx::query(
+            "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) \
+             SELECT $1, id FROM registry.catalogs WHERE name = $2",
+        )
+        .bind(engine)
+        .bind(&self.catalog)
+        .execute(&self.db.pool)
+        .await
+        .expect("attach");
+        profile.id
+    }
+}
+
+/// Review finding 4: with two bound StarRocks profiles, the dry run takes
+/// both profile locks before any `users` row (one `recompile_services_in_tx`),
+/// and the change reaches both profiles.
+#[tokio::test]
+async fn a_column_add_reaches_every_bound_starrocks_profile() {
+    let Some(env) = env().await else { return };
+    let second = env.second_profile().await;
+    env.create_table("orders", &[(1, "id")]).await;
+    let tag = env.classify_table("orders").await;
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/orders",
+            Some(schema_commit(schema(1, &[(1, "id"), (2, "phone")]))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for profile in [env.profile_id, second] {
+        let masks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE $2",
+        )
+        .bind(profile)
+        .bind(format!(
+            "{}{tag}-mask-{}.sales.orders.%",
+            egret_policy::COMPILER_CLEARANCE_PREFIX,
+            env.catalog
+        ))
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("masks");
+        assert_eq!(masks, 2, "profile {profile}");
+    }
+}

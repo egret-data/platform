@@ -433,18 +433,19 @@ impl TableHook {
             .execute(&mut *tx)
             .await
             .map_err(|e| internal(&e))?;
-        for &service_id in profiles {
-            if let Err(e) = egret_perm_compile::recompile_service_in_tx(&mut tx, service_id).await {
-                return Err(if compile_is_lock_timeout(&e) {
-                    Refusal(
-                        "egret could not dry-run the recompile in time, because other permission \
-                         changes were being written; retry"
-                            .to_string(),
-                    )
-                } else {
-                    Refusal(e.to_string())
-                });
-            }
+        // Every profile locked first, in ascending order, then one pre-mint:
+        // the compiler's lock order (profiles, then `users` rows). A loop of
+        // `recompile_service_in_tx` would interleave them (review finding 4).
+        if let Err(e) = egret_perm_compile::recompile_services_in_tx(&mut tx, profiles).await {
+            return Err(if compile_is_lock_timeout(&e) {
+                Refusal(
+                    "egret could not dry-run the recompile in time, because other permission \
+                     changes were being written; retry"
+                        .to_string(),
+                )
+            } else {
+                Refusal(e.to_string())
+            });
         }
         tx.rollback().await.map_err(|e| internal(&e))?;
         Ok(())

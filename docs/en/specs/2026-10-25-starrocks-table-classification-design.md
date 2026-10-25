@@ -605,3 +605,8 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   wedged (U5 holds). Between the commit and the drop the table is registered with the deny alone (milliseconds). If
   the drop itself fails, the failure is logged and recorded as a failed compile and the 2xx passes (the old,
   wedging outcome, now only on a second failure).
+- **Dry-run lock order (review finding 4).** The dry run calls `recompile_services_in_tx(&mut tx, &profiles)` (every
+  profile locked ascending, then one pre-mint) instead of `recompile_service_in_tx` per profile. No deterministic red
+  test was built for the interleaving (it needs a concurrent writer holding the second profile and wanting a minted
+  `users` row); `a_column_add_reaches_every_bound_starrocks_profile` covers the two-profile path and passes before and
+  after.
