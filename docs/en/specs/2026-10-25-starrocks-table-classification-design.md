@@ -393,3 +393,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   (under `en_US.utf8`, `orders` sorts before `Orders`). A table with one spelling is unaffected.
 - The rule mask expansion goes through the same grouping, so one tag on two spellings of one column now compiles one
   rule mask (it compiled two agreeing ones before).
+
+### Task 2
+
+- `mv_deny_inputs` takes one cleared set per gated tag that reaches the profile (either level), not the pending
+  masks; the harness wrapper `starrocks_mv_denies` keeps its signature and maps to it.
+- The per-tag ceiling already counts a table-level table as 1 here; Task 6 adds its column masks to the count.
+- `starrocks_deny` (one body per column or `*`) is factored out of the loop for Task 14's harness.

@@ -14,7 +14,7 @@ use egret_policy::admin::access_to_ranger_json;
 use egret_ranger_eval::eval::PluginVersion;
 
 use crate::clearance::mv_deny_inputs;
-use crate::clearance_mask::{clearance_mask_name, fold_clearance_mask, PendingMask};
+use crate::clearance_mask::{clearance_mask_name, fold_clearance_mask};
 use crate::rules::{stamp_service_type, TaggedColumn};
 
 /// The StarRocks clearance mask body for `column`, folded over `others`.
@@ -41,16 +41,8 @@ pub fn starrocks_clearance_mask(
 /// pairs, stamped as `compile_clearance` stamps them: at most one, on
 /// `default_catalog`/`*` (A3 revised 2026-10-14).
 pub fn starrocks_mv_denies(service: &str, pending: &[(TaggedColumn, Vec<String>)]) -> Vec<Value> {
-    let pending: Vec<PendingMask> = pending
-        .iter()
-        .map(|(column, cleared)| PendingMask {
-            tag_id: Uuid::nil(),
-            column: column.clone(),
-            cleared: cleared.clone(),
-            catalog_spelled: false,
-        })
-        .collect();
-    mv_deny_inputs(&pending, service)
+    let cleared: Vec<Vec<String>> = pending.iter().map(|(_, c)| c.clone()).collect();
+    mv_deny_inputs(&cleared, service)
         .into_iter()
         .map(|(_, input)| stamp_service_type(access_to_ranger_json(&input), EngineType::StarRocks))
         .collect()
