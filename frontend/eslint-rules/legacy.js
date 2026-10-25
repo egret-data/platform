@@ -56,7 +56,6 @@ export const legacy = {
   ],
   "jsx-a11y/label-has-associated-control": [
     "src/components/access/RolesEditor.tsx",
-    "src/components/alerts/DestinationList.tsx",
     "src/components/chart/SortRows.tsx",
     "src/components/chart/dashboard/DashboardFilterBar.tsx",
     "src/components/chart/settings/BoxplotDisplaySection.tsx",

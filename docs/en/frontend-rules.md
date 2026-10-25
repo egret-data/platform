@@ -31,7 +31,7 @@ A tabular list uses `FilterableTable` or `ui/table`. A hand-written `<table>` is
 **Do this:** `frontend/src/components/explore/FilterableTable.tsx`, `frontend/src/components/ui/table.tsx`. **Checked by:** review.
 
 #### FE-PAGE-5 — Settings are `Setting | Details | Value` tables · MUST
-Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection`, in the `Setting | Details | Value` shape. A flat property map is one searchable key/value list, not a bespoke form per field.
+Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection`, in the `Setting | Details | Value` shape. A flat property map is one searchable key/value list, not a bespoke form per field. *Details* is one short line; the rest of the explanation goes in `ConfigTableRow`'s `more`, which opens from an info button.
 **Do this:** `frontend/src/components/config/ConfigTable.tsx` (`ConfigTable`, `ConfigTableRow`), `frontend/src/components/form/ConfigSection.tsx`. **Checked by:** review. **Why:** [ui-conventions §4](ui-conventions.md#4-setting--details--value-tables-and-when-a-card-is-still-right).
 
 #### FE-PAGE-6 — Every page sits in `PageContainer`, at one left edge · MUST
@@ -346,7 +346,7 @@ Each row is a legacy list in `frontend/eslint-rules/legacy.js`: the files that b
 | FE-A11Y-1 | `jsx-a11y/aria-role` | 3 | |
 | FE-A11Y-1 | `jsx-a11y/click-events-have-key-events` | 4 | |
 | FE-A11Y-1 | `jsx-a11y/heading-has-content` | 2 | |
-| FE-A11Y-1, FE-FORM-2 | `jsx-a11y/label-has-associated-control` | 35 | |
+| FE-A11Y-1, FE-FORM-2 | `jsx-a11y/label-has-associated-control` | 34 | |
 | FE-A11Y-1 | `jsx-a11y/no-noninteractive-element-interactions` | 3 | |
 | FE-A11Y-1 | `jsx-a11y/no-noninteractive-tabindex` | 2 | |
 | FE-A11Y-1 | `jsx-a11y/no-static-element-interactions` | 1 | |

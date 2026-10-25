@@ -25,6 +25,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { humanizeCrontab } from "@/lib/humanizeCron";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -48,10 +49,36 @@ export const SECTIONS: { key: SectionKey; label: (type: ScheduleType) => string 
   { key: "schedule", label: () => "Schedule" },
   { key: "notification", label: () => "Notification" },
 ];
+
+/** A section's `?section=` key: its tab label, lower-cased (KI-221). */
+export function sectionParam(key: SectionKey, type: ScheduleType): string {
+  return SECTIONS.find((s) => s.key === key)!.label(type).toLowerCase();
+}
+
+/**
+ * Read a `?section=` key. Keys are the tab labels (`condition`, `contents`,
+ * …). `what` — the key every link carried before KI-221 — still opens the
+ * second tab, and so does the other type's label for it, since a link to
+ * "the condition of this report" means its Contents. A key no tab answers to
+ * comes back as `unknown`, so the page can say it fell back rather than open
+ * General in silence.
+ */
+export function parseSection(
+  raw: string | null,
+  type: ScheduleType,
+): { section: SectionKey; unknown: string | null } {
+  if (!raw) return { section: "general", unknown: null };
+  const key = raw.toLowerCase();
+  if (key === "what" || key === "condition" || key === "contents") {
+    return { section: "what", unknown: null };
+  }
+  const hit = SECTIONS.find((s) => sectionParam(s.key, type) === key);
+  return hit ? { section: hit.key, unknown: null } : { section: "general", unknown: raw };
+}
 import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import { TagCombobox } from "@/components/ui/tag-combobox";
-import { DestinationList } from "./DestinationList";
+import { DestinationRows } from "./DestinationRows";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
 import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
 
@@ -91,6 +118,17 @@ const DATAAPI_METRIC_HELP: Record<string, string> = {
     "Number of calls in the window whose error code matches the value entered below, exactly. An empty window is a real 0.",
 };
 
+/** One line per metric for the Details column; the full text above opens
+ *  from its info button (KI-219). */
+const DATAAPI_METRIC_SUMMARY: Record<string, string> = {
+  [DataapiMetric.error_rate]: "Share of calls that failed (status 400 or higher).",
+  [DataapiMetric.error_count]: "Number of calls that failed (status 400 or higher).",
+  [DataapiMetric.call_count]: "Number of calls, real traffic only.",
+  [DataapiMetric.p50_duration_ms]: "Median response time of successful calls, in ms.",
+  [DataapiMetric.p95_duration_ms]: "95th-percentile response time of successful calls, in ms.",
+  [DataapiMetric.error_code_count]: "Number of calls with the error code below.",
+};
+
 /**
  * The Timezone picker, memoised: it lists every IANA zone (about 400 items),
  * and a `ui/select` renders its items on every render even while closed, so
@@ -108,7 +146,7 @@ const TimezoneSelect = memo(function TimezoneSelect({
   const zones = timezones();
   return (
     <Select value={value} onValueChange={onChange}>
-      <SelectTrigger id={id}>
+      <SelectTrigger id={id} className="w-full">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -123,6 +161,30 @@ const TimezoneSelect = memo(function TimezoneSelect({
     </Select>
   );
 });
+
+/**
+ * "Runs every day at 09:00 (`0 9 * * *`) in UTC." — the editor's preview of a
+ * schedule, through the same formatter as the list and the page header
+ * (KI-038), with the expression beside the words so the two can be compared.
+ * An expression the formatter does not describe is shown once, as itself.
+ */
+function SchedulePreview({ crontab, timezone }: { crontab: string; timezone: string }) {
+  const words = humanizeCrontab(crontab);
+  const described = words !== crontab.trim();
+  return (
+    <>
+      Runs{" "}
+      {described ? (
+        <>
+          {words.charAt(0).toLowerCase() + words.slice(1)} (<code>{crontab}</code>)
+        </>
+      ) : (
+        <code>{crontab}</code>
+      )}{" "}
+      in {timezone}.
+    </>
+  );
+}
 
 /**
  * The fixed item lists of the editor's pickers, built once. A `ui/select`
@@ -608,7 +670,8 @@ export function ScheduleEditor({
               focusing anything. */}
           <ConfigTableRow
             label="Owners"
-            details="The query runs with an owner's permissions. Leave empty and you become the owner; naming several keeps it running when one person leaves."
+            details="The query runs with an owner's permissions."
+            more="Leave empty and you become the owner. Naming several keeps it running when one person leaves."
           >
             {/* A picker, not a `<select multiple>`. The raw control was tolerable
                 while it sat in an Advanced tab nobody opened; in General it is
@@ -666,7 +729,7 @@ export function ScheduleEditor({
               details="Which connection the query runs against."
             >
               <Select value={databaseId || databases?.[0]?.id || ""} onValueChange={setDatabaseId}>
-                <SelectTrigger id="sched-db">
+                <SelectTrigger id="sched-db" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -711,7 +774,7 @@ export function ScheduleEditor({
                   value={validatorType}
                   onValueChange={(v) => setValidatorType(v as "not_null" | "operator")}
                 >
-                  <SelectTrigger id="sched-validator">
+                  <SelectTrigger id="sched-validator" className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -722,7 +785,7 @@ export function ScheduleEditor({
                 {validatorType === "operator" && (
                   <div className="flex gap-2">
                     <Select value={op} onValueChange={setOp}>
-                      <SelectTrigger aria-label="Operator">
+                      <SelectTrigger aria-label="Operator" className="w-20 shrink-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -750,14 +813,15 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Endpoint"
               htmlFor="sched-dataapi-endpoint"
-              details="Which endpoint's traffic this watches. Whole workspace combines every endpoint's traffic into one measurement — choose it deliberately, not by leaving this blank; every save sends this field either way."
+              details="Which endpoint's traffic this watches."
+              more="Whole workspace adds the traffic of every endpoint into one measurement."
             >
               <div className="space-y-2">
                 <Select
                   value={dataapiEndpointId || WHOLE_WORKSPACE}
                   onValueChange={(v) => setDataapiEndpointId(v === WHOLE_WORKSPACE ? "" : v)}
                 >
-                  <SelectTrigger id="sched-dataapi-endpoint">
+                  <SelectTrigger id="sched-dataapi-endpoint" className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -805,10 +869,11 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Metric"
               htmlFor="sched-dataapi-metric"
-              details={DATAAPI_METRIC_HELP[dataapiMetric]}
+              details={DATAAPI_METRIC_SUMMARY[dataapiMetric]}
+              more={DATAAPI_METRIC_HELP[dataapiMetric]}
             >
               <Select value={dataapiMetric} onValueChange={setDataapiMetric}>
-                <SelectTrigger id="sched-dataapi-metric">
+                <SelectTrigger id="sched-dataapi-metric" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -826,7 +891,8 @@ export function ScheduleEditor({
               <ConfigTableRow
                 label="Error code"
                 htmlFor="sched-dataapi-error-code"
-                details="Matched exactly against the error_code recorded on each call — for example rate_limited. Required for this metric; the schema rejects it set on any other."
+                details="The error code to count, for example rate_limited."
+                more="Matched exactly against the error code recorded on each call."
               >
                 <Input
                   id="sched-dataapi-error-code"
@@ -840,7 +906,8 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Window (seconds)"
               htmlFor="sched-dataapi-window"
-              details="How far back from now each run measures, up to 30 days (2,592,000 seconds). Unlike the Activity page's own range picker, this alert is never shown on a screen — so if the window reaches past this workspace's access-log retention, the measurement is silently truncated to whatever traffic survived instead of being disabled."
+              details="How far back each run measures, up to 30 days (2,592,000 seconds)."
+              more="If the window reaches past this workspace's access-log retention, the run measures only the traffic still kept. Nothing refuses or flags the longer window."
             >
               <Input
                 id="sched-dataapi-window"
@@ -865,7 +932,7 @@ export function ScheduleEditor({
             >
               <div className="flex gap-2">
                 <Select value={op} onValueChange={setOp}>
-                  <SelectTrigger id="sched-dataapi-op">
+                  <SelectTrigger id="sched-dataapi-op" className="w-20 shrink-0">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -908,7 +975,7 @@ export function ScheduleEditor({
                   setTargetId("");
                 }}
               >
-                <SelectTrigger id="sched-target-kind">
+                <SelectTrigger id="sched-target-kind" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -924,7 +991,7 @@ export function ScheduleEditor({
               details="The object this report delivers."
             >
               <Select value={defaultTarget} onValueChange={setTargetId}>
-                <SelectTrigger id="sched-target">
+                <SelectTrigger id="sched-target" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -978,11 +1045,11 @@ export function ScheduleEditor({
               details={
                 extraTargets.length > 0
                   ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
-                  : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."
+                  : "PNG and PDF are rendered; CSV and text come straight from the query."
               }
             >
               <Select value={reportFormat} onValueChange={setReportFormat}>
-                <SelectTrigger id="sched-format">
+                <SelectTrigger id="sched-format" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1045,6 +1112,11 @@ export function ScheduleEditor({
                   onChange={(e) => setCrontab(e.target.value)}
                   placeholder="0 9 * * *"
                 />
+                {humanizeCrontab(crontab) !== crontab.trim() && (
+                  <p className="text-xs text-muted-foreground">
+                    <SchedulePreview crontab={crontab} timezone={timezone} />
+                  </p>
+                )}
                 <div>
                   <Button
                     type="button"
@@ -1215,7 +1287,8 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Timezone"
               htmlFor="sched-tz"
-              details="Runs are scheduled in this zone. It also renders the {{date}}/{{time}} placeholders in the subject — the message body itself has no dates in it."
+              details="Runs are scheduled in this zone."
+              more="It also renders the {{date}} and {{time}} placeholders in the email subject. The message body has no dates in it."
             >
               <TimezoneSelect id="sched-tz" value={timezone} onChange={setTimezone} />
             </ConfigTableRow>
@@ -1226,7 +1299,8 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Grace period (seconds)"
             htmlFor="sched-grace"
-            details="After it fires, stays quiet for this long so a condition that stays true doesn't mail every tick. Any earlier firing counts, not only a repeat of this one — the run still happens, only delivery is skipped. Reports ignore this."
+            details="After it fires, how long it stays quiet. Reports ignore this."
+            more="So a condition that stays true does not mail every tick. Any earlier firing counts, not only a repeat of this one. The run still happens; only delivery is skipped."
           >
             <Input
               id="sched-grace"
@@ -1239,7 +1313,8 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Working timeout (seconds)"
             htmlFor="sched-timeout"
-            details="How long a run can go quiet before it's reclaimed, in case the worker running it died mid-run."
+            details="How long a run can go quiet before it is reclaimed."
+            more="In case the worker running it died mid-run."
           >
             <Input
               id="sched-timeout"
@@ -1271,7 +1346,7 @@ export function ScheduleEditor({
             illegal inside a table body, so it renders below the table. */}
         {!rawCron && (
           <p className="text-xs text-muted-foreground">
-            Runs <code>{toCron(sched)}</code> in {timezone}.{" "}
+            <SchedulePreview crontab={toCron(sched)} timezone={timezone} />{" "}
             <button
               type="button"
               className="underline underline-offset-2"
@@ -1296,10 +1371,10 @@ export function ScheduleEditor({
         {/* Destinations first, content second: "who am I telling" is the
             question a person answers before "what does it say", and the
             content fields below describe the email that the Email
-            destination produces. */}
-        <DestinationList value={destinations} onChange={setDestinations} />
-
+            destination produces. One table for both (KI-220). */}
         <ConfigTable valueClassName="w-52 lg:w-80">
+          <DestinationRows value={destinations} onChange={setDestinations} />
+
           <ConfigTableGroup label="Message" />
 
           <ConfigTableRow
@@ -1412,7 +1487,7 @@ export function ScheduleEditor({
                           setTargetId("");
                         }}
                       >
-                        <SelectTrigger aria-label="Attachment object type">
+                        <SelectTrigger aria-label="Attachment object type" className="w-full">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1421,7 +1496,7 @@ export function ScheduleEditor({
                         </SelectContent>
                       </Select>
                       <Select value={defaultTarget} onValueChange={setTargetId}>
-                        <SelectTrigger aria-label="Attachment object">
+                        <SelectTrigger aria-label="Attachment object" className="w-full">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1433,7 +1508,7 @@ export function ScheduleEditor({
                         </SelectContent>
                       </Select>
                       <Select value={reportFormat} onValueChange={setReportFormat}>
-                        <SelectTrigger aria-label="Attachment format">
+                        <SelectTrigger aria-label="Attachment format" className="w-full">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1454,7 +1529,8 @@ export function ScheduleEditor({
                   <ConfigTableRow
                     label="Image width (px)"
                     htmlFor="sched-width"
-                    details="Overrides the rendered image's default width — only takes effect if height is set too; leave either blank and both fall back to the default size."
+                    details="Width of the rendered image. Needs a height too."
+                    more="Leave either size blank and both fall back to the default size."
                   >
                     <Input
                       id="sched-width"
@@ -1467,7 +1543,8 @@ export function ScheduleEditor({
                   <ConfigTableRow
                     label="Image height (px)"
                     htmlFor="sched-height"
-                    details="Overrides the rendered image's default height — only takes effect if width is set too; leave either blank and both fall back to the default size."
+                    details="Height of the rendered image. Needs a width too."
+                    more="Leave either size blank and both fall back to the default size."
                   >
                     <Input
                       id="sched-height"
@@ -1482,19 +1559,27 @@ export function ScheduleEditor({
             </>
           )}
 
-          <ConfigTableGroup label="Delivery" />
+          {/* Only an alert reads this (KI-039): a report always has its
+              contents to deliver, and a Data API alert with nothing to report
+              already records noop from the measured value alone. A stored
+              value on another type is still sent back unchanged. */}
+          {isAlert && (
+            <>
+              <ConfigTableGroup label="Delivery" />
 
-          <ConfigTableRow
-            label="Don't send when there are no rows"
-            htmlFor="sched-skip-empty"
-            details="The run still happens and is recorded as noop — only the notification is skipped. Reports and Data API alerts don't read this setting; a Data API alert with nothing to report already records noop on its own, from the measured value alone."
-          >
-            <Checkbox
-              id="sched-skip-empty"
-              checked={skipIfEmpty}
-              onCheckedChange={(v) => setSkipIfEmpty(v === true)}
-            />
-          </ConfigTableRow>
+              <ConfigTableRow
+                label="Don't send when there are no rows"
+                htmlFor="sched-skip-empty"
+                details="The run is still recorded, as noop; only the notification is skipped."
+              >
+                <Checkbox
+                  id="sched-skip-empty"
+                  checked={skipIfEmpty}
+                  onCheckedChange={(v) => setSkipIfEmpty(v === true)}
+                />
+              </ConfigTableRow>
+            </>
+          )}
         </ConfigTable>
 
         {/* What the message always carries, not a field itself — it has no
