@@ -1,6 +1,13 @@
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { parseFormat } from "@/components/dataset/FormatPicker";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
+import type { AnyChartParams } from "@/api/charts";
+import { shellSettings, withShellColumnSettings } from "@/components/chart/viz/renderConfig";
+
+/** What `datasetColumnDefaults` reads of a column and a metric. The print page gets only these
+ *  from the render payload, not a whole `DatasetDetail`. */
+type ColumnSemantics = Pick<DatasetColumn, "column_name" | "verbose_name" | "format" | "semantic_type">;
+type MetricSemantics = Pick<DatasetMetric, "metric_name" | "verbose_name" | "format">;
 
 /**
  * The dataset's semantic layer as per-column render defaults, keyed by column (or metric) NAME:
@@ -12,7 +19,7 @@ import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
  * renaming a column in the dataset stays live in every chart, and a chart's own column title wins.
  * The data stays keyed by the column name.
  */
-export function datasetColumnDefaults(columns: DatasetColumn[], metrics: DatasetMetric[] = []): Record<string, ColumnFormat> {
+export function datasetColumnDefaults(columns: ColumnSemantics[], metrics: MetricSemantics[] = []): Record<string, ColumnFormat> {
   const m: Record<string, ColumnFormat> = {};
   for (const c of columns) {
     const cf: ColumnFormat = { ...parseFormat(c.format) };
@@ -52,4 +59,13 @@ export function withDatasetDefaults(
     if (title && !own?.column_title) out[name] = { ...own, column_title: title };
   }
   return out;
+}
+
+/**
+ * A chart's params with the dataset's defaults layered under its own column settings
+ * (`withDatasetDefaults`): what a dashboard card (KI-290, KI-251) and the print page of a report
+ * (KI-301) draw, so the two cannot name a column differently.
+ */
+export function paramsWithDatasetDefaults(params: AnyChartParams, defaults: Record<string, ColumnFormat>): AnyChartParams {
+  return withShellColumnSettings(params, withDatasetDefaults(defaults, shellSettings(params).columnSettings));
 }

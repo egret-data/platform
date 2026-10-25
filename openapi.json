@@ -52454,7 +52454,8 @@
           "title",
           "viz_type",
           "params",
-          "param_mappings"
+          "param_mappings",
+          "dataset"
         ],
         "properties": {
           "chart_id": {
@@ -52469,6 +52470,10 @@
           "params": {},
           "param_mappings": {
             "description": "`dashboard_cards.options.paramMappings`: parameter id -> the column on\nTHIS card it filters. A parameter with no mapping here does not apply to\nthis card, which is why the mapping travels per card rather than once\nfor the dashboard."
+          },
+          "dataset": {
+            "$ref": "#/components/schemas/RenderDataset",
+            "description": "The chart's dataset's semantic layer: each column's and metric's\ndisplay name and format. The print page layers it under the chart's own\nsettings with the SAME functions the dashboard and the chart page use\n(`datasetColumnDefaults` / `withDatasetDefaults`), so a report says\n**Revenue** where they do rather than `revenue` (KI-301). Raw rows, not\na server-built format map: building that map here would be a second\nimplementation of those rules. Empty when the dataset is not in the\ngrant's workspace."
           }
         }
       },
@@ -52524,6 +52529,70 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "RenderDataset": {
+        "type": "object",
+        "description": "What the print page needs of a card's dataset to name and format its\ncolumns as the dashboard does — nothing about its source or SQL.",
+        "required": [
+          "columns",
+          "metrics"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderDatasetColumn"
+            }
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderDatasetMetric"
+            }
+          }
+        }
+      },
+      "RenderDatasetColumn": {
+        "type": "object",
+        "required": [
+          "column_name",
+          "verbose_name",
+          "format",
+          "semantic_type"
+        ],
+        "properties": {
+          "column_name": {
+            "type": "string"
+          },
+          "verbose_name": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "semantic_type": {
+            "type": "string"
+          }
+        }
+      },
+      "RenderDatasetMetric": {
+        "type": "object",
+        "required": [
+          "metric_name",
+          "verbose_name",
+          "format"
+        ],
+        "properties": {
+          "metric_name": {
+            "type": "string"
+          },
+          "verbose_name": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
           }
         }
       },
