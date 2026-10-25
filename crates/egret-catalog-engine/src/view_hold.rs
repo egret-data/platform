@@ -374,7 +374,7 @@ fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
 
 /// Percent-decode one path segment. `None` for a malformed escape or invalid
 /// UTF-8, which lakekeeper refuses too.
-fn decode_segment(seg: &str) -> Option<String> {
+pub(crate) fn decode_segment(seg: &str) -> Option<String> {
     let bytes = seg.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -393,7 +393,7 @@ fn decode_segment(seg: &str) -> Option<String> {
 
 /// A lakekeeper multi-level namespace (`\u{1f}`-separated). Trino sends
 /// single-level namespaces, and the Ranger resource has one schema level.
-fn is_multi_level(ns: &str) -> bool {
+pub(crate) fn is_multi_level(ns: &str) -> bool {
     ns.contains('\u{1f}')
 }
 
@@ -667,8 +667,9 @@ pub(crate) fn current_definition(metadata: &Value) -> Result<Definition, String>
 
 /// `{source, destination}` of a rename, each `(namespace, name)`, the
 /// namespace's levels joined with `\u{1f}`. `None` for a body of another
-/// shape, which lakekeeper refuses.
-fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
+/// shape, which lakekeeper refuses. A table rename has the same body
+/// ([`crate::table_hook`]).
+pub(crate) fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
     let side = |k: &str| -> Option<(String, String)> {
         let v = body.get(k)?;
         let parts: Vec<&str> = v
@@ -686,8 +687,9 @@ fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
 }
 
 /// The egret warehouse a lakekeeper prefix belongs to, and its registry
-/// catalog name (the name the engines and the lineage use).
-async fn resolve(
+/// catalog name (the name the engines and the lineage use). Shared with
+/// [`crate::table_hook`].
+pub(crate) async fn resolve(
     conn: &mut sqlx::PgConnection,
     prefix: &str,
 ) -> Result<Option<(Uuid, Option<String>)>, sqlx::Error> {

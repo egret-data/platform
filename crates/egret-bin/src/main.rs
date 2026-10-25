@@ -2205,6 +2205,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             engine_state,
             Some(guard),
             Some(view_hold),
+            Some(std::sync::Arc::new(egret_catalog_engine::TableHook::new(
+                db.clone(),
+            ))),
         ))
     } else {
         None

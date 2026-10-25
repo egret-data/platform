@@ -470,3 +470,20 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   assertion was mutation-checked instead (dropping the skip fails it).
 - A compile that reaches a whole-table attachment queries `lakekeeper.*`; a database without that schema (some test
   databases) fails such a compile. Production always has it (embedded catalog). Tests that need it install the stub.
+
+### Task 7
+
+- The hook is installed by `mount_catalog_engine` (new `table_hook` parameter) through `table_hook::layer`, around
+  lakekeeper's router and inside the view hold and the guard; `front_catalog_router`'s signature is unchanged, so tests
+  compose `front_catalog_router(table_hook::layer(inner, hook), …)`.
+- The affected-profile query is `affected_starrocks_profiles_for_tables(conn, warehouse_id, &[(schema, Option<table>)])`
+  (plural: a rename names two tables; `None` is every table of a dropped namespace).
+- The prefix resolution, segment decoding, multi-level check and rename body parsing are the view hold's, made
+  `pub(crate)` and reused.
+- The after-commit recompile runs in a spawned task the handler awaits (as the view hold's after-commit steps), one
+  transaction per profile with `lock_timeout` = `DEFAULT_LOCK_WAIT` (10 s). A failure is logged and recorded with
+  `record_compile_failure`.
+- A failure to look up the affected profiles BEFORE forwarding refuses the request with a 409 ("retry") rather than
+  passing it unrecompiled.
+- The red evidence for the DB tests is the same tests run with the layer removed (3 of 5 fail; the "runs no compile"
+  test was mutation-checked by widening the affected-profile filter).

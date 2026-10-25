@@ -1603,6 +1603,48 @@ pub(crate) async fn record_failure_logged(
 // rule write back. Grant mutations and path-rule mutations are narrow; tag-rule
 // mutations are installation-wide.
 
+/// D2 (spec §5.5, C12): the StarRocks profiles bound to `warehouse_id` whose
+/// compile a schema change of `tables` can change: those where one of the
+/// tables (folded) carries a WHOLE-TABLE attachment of a classification with a
+/// role-bearing clearance, whose NULL masks follow the table's columns.
+/// `tables` is `(schema, Some(table))`, or `(schema, None)` for every table in
+/// the schema (a namespace drop). Row filters need no entry: they do not
+/// depend on columns. Ascending, each id once.
+pub async fn affected_starrocks_profiles_for_tables(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    tables: &[(String, Option<String>)],
+) -> Result<Vec<i64>, CompileError> {
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let schemas: Vec<String> = tables.iter().map(|(s, _)| s.clone()).collect();
+    let names: Vec<Option<String>> = tables.iter().map(|(_, t)| t.clone()).collect();
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id \
+           FROM registry.catalogs c \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE c.warehouse_id = $1 AND e.type = 'starrocks' \
+            AND e.authz_service_id IS NOT NULL \
+            AND EXISTS ( \
+                SELECT 1 FROM catalog_tag_assignments a \
+                  JOIN classification_policies cp ON cp.tag_id = a.tag_id \
+                  JOIN unnest($2::text[], $3::text[]) AS q(schema_name, table_name) \
+                    ON lower(a.schema_name) = lower(q.schema_name) \
+                   AND (q.table_name IS NULL OR lower(a.table_name) = lower(q.table_name)) \
+                 WHERE a.warehouse_id = $1 AND a.column_name = '' \
+                   AND cardinality(cp.required_roles) > 0) \
+          ORDER BY 1",
+    )
+    .bind(warehouse_id)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
 /// The services a create/delete of `g` can change the compiled output of —
 /// the profiles bound to the grant's own catalog. See this module's Task 9
 /// section for the derivation.
