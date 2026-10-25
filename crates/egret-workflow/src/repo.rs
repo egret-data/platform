@@ -97,16 +97,14 @@ fn conflict(namespace: &str, flow_id: &str) -> Error {
 /// so the author is told why, rather than reading an opaque 500 that gives
 /// no hint the name is burned by a row they cannot see on any list.
 ///
-/// Unlike `egret-dataapi`'s `trashed_conflict` (its model for this
-/// function), this does NOT tell the author to "restore it" or "delete it
-/// permanently" -- W1's nine routes (spec §10) include neither a restore
-/// nor a hard-delete for a trashed flow, so promising either would name an
-/// action this API cannot yet perform. Restated as fact, not instruction.
+/// Names both ways out, as `egret-dataapi`'s `trashed_conflict` does: the
+/// trash can be listed (`GET /flows?trashed=true`), and a trashed flow can be
+/// restored (`POST /flows/{id}/restore`) or deleted permanently
+/// (`DELETE /flows/{id}/permanent`), which frees the name (KI-119).
 fn trashed_conflict(namespace: &str, flow_id: &str) -> Error {
     Error::Conflict(format!(
-        "a trashed flow still holds {namespace}/{flow_id} in this workspace \
-         (soft-deleted, not currently restorable or permanently removable \
-         through this API)"
+        "a flow in the trash still holds {namespace}/{flow_id} in this workspace; \
+         restore it, or delete it permanently to free the name"
     ))
 }
 
@@ -717,6 +715,79 @@ impl FlowRepo {
         Ok(())
     }
 
+    /// Bring a flow back from the trash (KI-119): `deleted_at = NULL`, and the
+    /// draft keeps its source, state and versions.
+    ///
+    /// `scheduler::sync` runs in the same transaction, as on every write that
+    /// changes what the scheduler reads: the soft delete removed the trigger
+    /// rows, so the restore recreates them from the source, each schedule
+    /// starting at its next tick after now -- the time in the trash is not
+    /// replayed.
+    ///
+    /// `deleted_at IS NOT NULL` is in the `WHERE`: restoring a live flow is a
+    /// 409, never a silent no-op, and an absent or foreign id is a 404 first.
+    pub async fn restore(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let restored: Option<FlowRow> = sqlx::query_as(with_flow_names!(
+            concat!(
+                "UPDATE workflow.flows SET deleted_at = NULL, updated_at = now() \
+                 WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NOT NULL \
+                 RETURNING ",
+                flow_cols!()
+            ),
+            ""
+        ))
+        .bind(id)
+        .bind(ws)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some(row) = restored else {
+            drop(tx);
+            self.get(ws, id).await?;
+            return Err(Error::Conflict(
+                "the flow is not in the trash; there is nothing to restore".into(),
+            ));
+        };
+        crate::scheduler::sync(&mut tx, &row, false).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(row)
+    }
+
+    /// Delete a trashed flow for good (KI-119), which frees its
+    /// `(namespace, flow_id)`. Only a flow already in the trash: a live one is
+    /// a 409, so this can never be the first step that takes a flow away.
+    ///
+    /// What goes with it, by the foreign keys: its versions, trigger rows,
+    /// listeners, runtime switches and backfills (`ON DELETE CASCADE`). What
+    /// stays: its executions, whose `flow_id` becomes `NULL`
+    /// (`ON DELETE SET NULL`, migration 0134) and which keep their frozen
+    /// source, namespace and flow key -- the record of what ran outlives the
+    /// flow it ran from.
+    pub async fn purge(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
+        let gone: Option<FlowRow> = sqlx::query_as(concat!(
+            "DELETE FROM workflow.flows \
+             WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NOT NULL \
+             RETURNING ",
+            flow_cols!()
+        ))
+        .bind(id)
+        .bind(ws)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        match gone {
+            Some(row) => Ok(row),
+            None => {
+                self.get(ws, id).await?;
+                Err(Error::Conflict(
+                    "the flow is not in the trash; move it to the trash before deleting it permanently"
+                        .into(),
+                ))
+            }
+        }
+    }
+
     /// Freeze a new immutable version.
     ///
     /// The version number is computed in the SAME statement as the insert --
@@ -974,20 +1045,12 @@ pub struct ExecutionRow {
     pub workspace_id: Uuid,
     /// The draft this execution came from.
     ///
-    /// **In practice this is NOT NULL for a trashed flow, and an earlier
-    /// version of this comment said the opposite.** `executions_flow_id_fkey`
-    /// is `ON DELETE SET NULL` (migration 0134), but nothing in this crate
-    /// ever issues the `DELETE` that would fire it: [`FlowRepo::soft_delete`]
-    /// sets `deleted_at = now()`, and a grep for `DELETE FROM` over
-    /// `crates/egret-workflow/src` returns **0** (control: `UPDATE workflow.`
-    /// returns 10). So on the product's path a trashed flow keeps its id here,
-    /// and filtering by [`ExecutionFilter::flow_id`] DOES still return a
-    /// trashed flow's executions.
-    ///
-    /// `Option` stays, because the column is genuinely nullable and the
-    /// cascade is genuinely armed: a `DELETE` issued by a migration, by an
-    /// operator, or by a future hard-delete route would set it. The record of
-    /// what ran outlives the flow it ran from -- that part was always true.
+    /// A trashed flow keeps its id here: [`FlowRepo::soft_delete`] only sets
+    /// `deleted_at`, so filtering by [`ExecutionFilter::flow_id`] still
+    /// returns a trashed flow's executions. `executions_flow_id_fkey` is
+    /// `ON DELETE SET NULL` (migration 0134), and [`FlowRepo::purge`] --
+    /// deleting a trashed flow permanently (KI-119) -- is the `DELETE` that
+    /// sets it. The record of what ran outlives the flow it ran from.
     pub flow_id: Option<Uuid>,
     pub namespace: String,
     /// The YAML's `id`; `flow_id` is taken by the FK above.
