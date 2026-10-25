@@ -1,8 +1,9 @@
 import { Fragment, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Users } from "lucide-react";
-import type { ExplainPrincipalResponse, ExplainProfile, ExplainResponse, MemberVerdict } from "@/api/generated/model";
+import type { ExplainPrincipalResponse, ExplainResponse, MemberVerdict } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
-import { decisionLabel, ExplainResultView, maskDecisionText, NothingEnforcing } from "@/components/perm/ExplainResult";
+import { EffectLine } from "@/components/perm/EffectLine";
+import { ExplainResultView, NothingEnforcing } from "@/components/perm/ExplainResult";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -60,20 +61,6 @@ function anyMasked(r: ExplainResponse): boolean {
 }
 
 /**
- * One profile's answer in a line, from the fields the full answer
- * (`ExplainResultView`'s profile block) renders: each access verdict, the
- * mask verdict, and StarRocks skipping the access check on a MASK_NULL column
- * (`masked_read_skips_access`). Live check D3: built from `accesses` alone,
- * a read decided by a mask read "no access asked".
- */
-export function profileVerdictText(p: ExplainProfile): string {
-  const parts = p.accesses.map((a) => `${a.access_type} ${decisionLabel(a.decision)}`);
-  if (p.masked_read_skips_access) parts.push("not access-checked: the mask is MASK_NULL");
-  if (p.mask) parts.push(`mask on ${p.mask.access_type}: ${maskDecisionText(p.mask.decision)}`);
-  return parts.join(", ") || "no access type was evaluated";
-}
-
-/**
  * When the server stopped at its limit: how many were evaluated, of how many,
  * and how many more were not asked because of the limit (`membersTotal −
  * evaluated − notEvaluated`; the members with no username are listed apart).
@@ -88,9 +75,10 @@ export function truncatedText(r: ExplainPrincipalResponse): string {
  * `POST /perm/explain/principal`. Four counts of members — allowed by every
  * profile, refused by at least one, undecidable on at least one, read masked
  * on at least one — a row per evaluated
- * member with each profile's verdicts and mask (`profileVerdictText`), a "Refused only" filter, and
+ * member with that member's first effect line per profile (the server's
+ * sentence, spec §5.10), a "Refused only" filter, and
  * the member's full `ExplainResultView` on expand. When no profile serves the
- * catalog, the user answer's "nothing is enforcing" state (`NothingEnforcing`)
+ * catalog, the user answer's "not enforced" state (`NothingEnforcing`)
  * replaces the counts; when no member could be asked, a sentence does (four
  * zeros would read as an answer). There is no overall verdict
  * and nothing here makes one up: one member allowed and another refused is
@@ -139,7 +127,7 @@ export function MembersExplainView({ response, kind }: { response: ExplainPrinci
   return (
     <div data-testid="members-explain" className="space-y-4 rounded-lg border border-border p-4 md:p-6">
       {nothingEnforcing ? (
-        <NothingEnforcing />
+        <NothingEnforcing line={evaluated[0].result.effect_line} />
       ) : evaluated.length === 0 ? (
         <p className="text-sm text-muted-foreground">{NOBODY_ASKED}</p>
       ) : (
@@ -231,22 +219,34 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
   return (
     <Fragment>
       <TableRow>
-        <TableCell className="whitespace-normal">
-          <p className="text-sm">{member.label}</p>
-          <p className="font-mono text-xs text-muted-foreground break-all">{member.username}</p>
+        <TableCell className="min-w-24 whitespace-normal">
+          <p className="text-sm break-words">{member.label}</p>
+          <p className="font-mono text-xs text-muted-foreground break-words">{member.username}</p>
         </TableCell>
         <TableCell className="whitespace-normal">
           {r.outcome === "no_profile_serves_the_catalog" ? (
-            <p className="text-sm">Nothing is enforced: no engine with a policy profile serves this catalog.</p>
+            r.effect_line ? (
+              <EffectLine line={r.effect_line} />
+            ) : (
+              <p className="text-sm">Not enforced: no engine with a policy profile serves this catalog.</p>
+            )
           ) : (
-            <ul role="list" className="space-y-0.5 text-sm">
-              {r.profiles.map((p) => (
-                <li key={p.service_id}>
-                  <span className="font-medium">{p.service_name}</span>
-                  {": "}
-                  {profileVerdictText(p)}
-                </li>
-              ))}
+            <ul role="list" className="space-y-1 text-sm">
+              {r.profiles.map((p) => {
+                // The first line answers the question asked (the column, the
+                // table, or a write); the rows line is in the full answer.
+                const first = p.effect_lines.at(0);
+                return (
+                  <li key={p.service_id}>
+                    <p className="font-medium">{p.service_name}</p>
+                    {first ? (
+                      <EffectLine line={first} />
+                    ) : (
+                      <p className="text-muted-foreground">No answer line was sent for this profile.</p>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </TableCell>

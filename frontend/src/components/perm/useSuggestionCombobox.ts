@@ -36,6 +36,8 @@ export function useDebounced<T>(value: T): T {
  *   is released and its click has landed (live check D1): a list in the flow
  *   collapsing on the blur moved the control under the pointer before mouseup,
  *   and the click reached nothing.
+ * - The enclosing form submitting (Enter in the field, or its submit button)
+ *   closes the list: the question has been asked.
  * - `aria-controls` names the listbox only while it is rendered: the caller
  *   renders `<ul role="listbox" id={listId}>` whenever `open`, even with no
  *   option, and keeps status text outside it.
@@ -119,6 +121,20 @@ export function useSuggestionCombobox({
       closeOnRelease.current = false;
     };
   }, [open, boxRef]);
+
+  // The form around the field submitted (Enter in the field, or its submit
+  // button): the question is asked, so the list closes instead of hanging
+  // under the answer (live check). Focus may stay in the field.
+  useEffect(() => {
+    const form = inputRef.current?.form;
+    if (!open || !form) return;
+    const onSubmit = () => {
+      setOpen(false);
+      setActive(-1);
+    };
+    form.addEventListener("submit", onSubmit);
+    return () => form.removeEventListener("submit", onSubmit);
+  }, [open, inputRef]);
 
   const pick = (index: number) => {
     onPick(index);

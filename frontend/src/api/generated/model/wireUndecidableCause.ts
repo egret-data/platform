@@ -11,6 +11,7 @@ import type { WireServiceDefIssue } from './wireServiceDefIssue';
 import type { WireTagAttachmentProblem } from './wireTagAttachmentProblem';
 import type { WireTagNormalisationProblem } from './wireTagNormalisationProblem';
 import type { WireTagResourceProblem } from './wireTagResourceProblem';
+import type { WireTiedOutcome } from './wireTiedOutcome';
 import type { WireUnmodelled } from './wireUnmodelled';
 
 /**
@@ -74,6 +75,7 @@ export type WireUndecidableCause = {
 } | {
   policy_ids: (number | null)[];
   policy_names: string[];
+  outcomes?: WireTiedOutcome[];
   kind: 'eval_order_ambiguous';
 } | {
   kind: 'tags_unresolved';

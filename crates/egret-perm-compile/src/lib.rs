@@ -51,6 +51,8 @@ pub mod attribution;
 // see that module's own doc comment for why they are hand-written and not
 // derived on the source types.
 pub mod explain_wire;
+// Verify a mask per user: explain's one sentence per person and engine.
+pub mod explain_effect;
 // SP4c Task 2: compiling a classification's clearance into a tag-service DENY
 // — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
 // argument is in that module's own doc comment, at the site.

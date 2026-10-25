@@ -1292,7 +1292,8 @@ pub(crate) async fn explain_capability(
         resolved_tags,
     };
     let decision = egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-    let attribution = super::attribution_for(&mut *conn, &decision).await?;
+    let attribution =
+        super::attribution_for(&mut *conn, &mut super::ExplainCache::default(), &decision).await?;
     let policy_name = match &decision {
         egret_ranger_eval::eval::Decision::Allowed { policy_name, .. }
         | egret_ranger_eval::eval::Decision::Denied { policy_name, .. } => {

@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
-    EngineType, MaskDecision, PluginVersion, RowFilterDecision, UndecidableCause,
+    EngineType, MaskDecision, PluginVersion, RowFilterDecision, TiedOutcome, UndecidableCause,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
@@ -888,6 +888,102 @@ fn a_same_priority_mask_tie_is_undecidable_when_the_masks_are_identical() {
             .any(|c| matches!(c, UndecidableCause::EvalOrderAmbiguous { .. })),
         "an AGREEING tie must refuse too — the winner's policy id is still unknown: {:?}",
         d
+    );
+}
+
+/// The tied policies' own outcomes travel on the refusal, in `policy_names`
+/// order, so a caller can say "both rules hash" without re-deriving a yield
+/// the evaluator already computed. The decision itself stays `Undecidable`.
+#[track_caller]
+fn tied(why: &[UndecidableCause]) -> (&[String], &[TiedOutcome]) {
+    match why {
+        [UndecidableCause::EvalOrderAmbiguous {
+            policy_names,
+            outcomes,
+            ..
+        }] => (policy_names, outcomes),
+        other => panic!("expected one EvalOrderAmbiguous: {other:?}"),
+    }
+}
+
+fn hash_outcome(mask_type: &str) -> TiedOutcome {
+    TiedOutcome::Mask {
+        mask_type: Some(mask_type.to_string()),
+        masked_value: None,
+        mask_condition: None,
+    }
+}
+
+#[test]
+fn an_agreeing_resource_mask_tie_reports_both_outcomes() {
+    let set = policies(json!([
+        mask_policy(
+            1,
+            "a",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK_HASH"}))])
+        ),
+        mask_policy(
+            2,
+            "b",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK_HASH"}))])
+        ),
+    ]));
+    let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
+    let (names, outcomes) = tied(mask_causes(&d));
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(
+        outcomes,
+        [hash_outcome("MASK_HASH"), hash_outcome("MASK_HASH")]
+    );
+}
+
+#[test]
+fn a_conflicting_tie_reports_each_outcome() {
+    let set = policies(json!([
+        mask_policy(
+            1,
+            "a",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK_HASH"}))])
+        ),
+        mask_policy(
+            2,
+            "b",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK"}))])
+        ),
+    ]));
+    let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
+    let (names, outcomes) = tied(mask_causes(&d));
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(outcomes, [hash_outcome("MASK_HASH"), hash_outcome("MASK")]);
+}
+
+#[test]
+fn a_row_filter_tie_reports_each_outcome() {
+    let set = policies(json!([
+        row_filter_policy(
+            1,
+            "a",
+            json!([filter_item("alice", json!("region = 'us'"))])
+        ),
+        row_filter_policy(
+            2,
+            "b",
+            json!([filter_item("alice", json!("region = 'eu'"))])
+        ),
+    ]));
+    let d = evaluate_row_filter(&set, &trino_table_request("alice"), &trino_def(), &engine());
+    let (names, outcomes) = tied(filter_causes(&d));
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(
+        outcomes,
+        [
+            TiedOutcome::RowFilter {
+                filter_expr: "region = 'us'".to_string()
+            },
+            TiedOutcome::RowFilter {
+                filter_expr: "region = 'eu'".to_string()
+            },
+        ]
     );
 }
 

@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAttribution } from './explainAttribution';
+import type { ExplainExemption } from './explainExemption';
+import type { ExplainReplay } from './explainReplay';
 import type { WireMaskDecision } from './wireMaskDecision';
 
 /**
@@ -17,4 +19,6 @@ export interface ExplainMask {
   access_type: string;
   decision: WireMaskDecision;
   attribution?: null | ExplainAttribution;
+  exemption?: null | ExplainExemption;
+  replayed?: null | ExplainReplay;
 }

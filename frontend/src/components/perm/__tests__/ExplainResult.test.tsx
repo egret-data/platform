@@ -28,6 +28,15 @@ vi.mock("@/api/generated/policy-admin/policy-admin");
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
 import type { ExplainResponse } from "@/api/generated/model";
 import { ExplainResultView, SubjectUserField } from "@/components/perm/ExplainResult";
+import {
+  code,
+  effectLine,
+  rule,
+  ruleMaskLine,
+  strong,
+  subject,
+  text,
+} from "@/components/perm/__tests__/effectLineFixtures";
 
 /**
  * Two profiles serving one catalog — the ordinary case on a cluster running
@@ -44,6 +53,7 @@ const TWO_PROFILES: ExplainResponse = {
       engine: "trino",
       tags: [{ name: "pii", attached_at_column: true }],
       tag_policies_in_download: 1,
+      effect_lines: [],
       accesses: [
         {
           access_type: "select",
@@ -62,6 +72,7 @@ const TWO_PROFILES: ExplainResponse = {
       engine: "starrocks",
       tags: [{ name: "pii", attached_at_column: true }],
       tag_policies_in_download: 1,
+      effect_lines: [],
       accesses: [
         {
           access_type: "insert",
@@ -182,12 +193,12 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
 
     const result = await screen.findByTestId("explain-result");
     const state = within(result).getByTestId("no-profile-state");
-    expect(state).toHaveTextContent(/nothing is enforcing/i);
-    // C12: the state's own sentence is the short one ("this is not a refusal");
-    // the long "not a denial" paragraph moved, unchanged, under the folded
-    // internals of the limits block. Both still say it is not a refusal.
+    // Package 2 (spec §5.7): the glossary's "Not enforced". With no effect line
+    // on the answer, the state says the general sentence itself, and the folded
+    // internals do not say it a second time.
+    expect(state).toHaveTextContent("Not enforced");
     expect(state).toHaveTextContent(/not a refusal/i);
-    expect(within(result).getByTestId("honest-limits")).toHaveTextContent(/not a denial/i);
+    expect(within(result).getByTestId("honest-limits")).not.toHaveTextContent(/not a refusal/i);
 
     // It must not borrow a denial's vocabulary or its colour.
     expect(screen.queryAllByTestId("explain-profile")).toHaveLength(0);
@@ -213,6 +224,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -281,6 +293,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 0,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -325,6 +338,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -365,6 +379,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -412,6 +427,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -495,6 +511,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "starrocks",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -556,6 +573,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -610,6 +628,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -669,6 +688,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -730,6 +750,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -833,6 +854,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
               engine: "trino",
               tags: [],
               tag_policies_in_download: 1,
+              effect_lines: [],
               accesses: [
                 {
                   access_type: "select",
@@ -906,6 +928,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -973,6 +996,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1024,6 +1048,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1102,6 +1127,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1241,6 +1267,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1375,6 +1402,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1479,6 +1507,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
           { name: "pii", attached_at_column: true },
         ],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1572,6 +1601,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [],
             tag_policies_in_download: 1,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1619,17 +1649,22 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     const result = await screen.findByTestId("explain-result");
     const limits = within(result).getByTestId("honest-limits");
 
-    // Task 12, M-5: the limit names what IS shown (the StarRocks mask), so it
-    // no longer contradicts the mask line above it.
-    expect(limits).toHaveTextContent(/answers about access only/i);
-    expect(limits).toHaveTextContent(/On a StarRocks profile, a read of a column also shows the mask/i);
-    expect(limits).not.toHaveTextContent(/ACCESS only\. A column the engine masks/);
+    // Package 2 (spec §5.10): masks are asked on both engines and row filters
+    // per table, so the limit says what is asked; the "access only" and "not
+    // reported" claims are false now and gone.
+    expect(limits).toHaveTextContent(
+      /A read of a column also shows the mask each engine applies to it, on Trino and on StarRocks/,
+    );
+    expect(limits).toHaveTextContent(/a read of a table or a column shows the table’s row filter/);
+    expect(limits).not.toHaveTextContent(/answers about access only/i);
+    expect(limits).not.toHaveTextContent(/not reported/i);
+    expect(limits).not.toHaveTextContent(/Masks on Trino and row filters are not shown/);
     // ⚠ No dated promise, in either direction: not this package, not a successor.
     expect(limits).not.toHaveTextContent(/arrive with/i);
     expect(limits).not.toHaveTextContent(/SP4d/i);
     expect(limits).not.toHaveTextContent(/\bsp\d/i);
-    // And what replaces it is the consequence a steward can act on.
-    expect(limits).toHaveTextContent(/can still return masked values/i);
+    // And what is left is the one thing explain cannot predict.
+    expect(limits).toHaveTextContent(/an error from a mask the engine cannot apply/i);
   });
 
   /**
@@ -1673,7 +1708,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     const limits = within(result).getByTestId("honest-limits");
     expect(limits).not.toHaveTextContent(/each profile’s tag list/i);
     expect(limits).not.toHaveTextContent(/those sets are for the resource/i);
-    expect(limits).toHaveTextContent(/answers about access only/i);
+    expect(limits).toHaveTextContent(/an error from a mask the engine cannot apply/i);
   });
 
   /**
@@ -1699,6 +1734,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "trino",
             tags: [{ name: "pii", attached_at_column: true }],
             tag_policies_in_download: 2,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1713,6 +1749,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
             engine: "starrocks",
             tags: [],
             tag_policies_in_download: 0,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -1760,6 +1797,7 @@ describe("ExplainResultView — the StarRocks mask and the materialized-view rul
         engine: "starrocks",
         tags: [],
         tag_policies_in_download: 0,
+        effect_lines: [],
         accesses: [],
         masked_read_skips_access: true,
         mask: {
@@ -2060,6 +2098,7 @@ describe("ExplainResultView — an engine grant (F11)", () => {
             engine: "trino",
             tags: [],
             tag_policies_in_download: 0,
+            effect_lines: [],
             accesses: [
               {
                 access_type: "select",
@@ -2086,15 +2125,17 @@ describe("ExplainResultView — an engine grant (F11)", () => {
 describe("ExplainResultView — verdict first, internals folded (C12)", () => {
   test("leads with the verdict, keeps one visible limit line, and folds the rest", () => {
     wrap(<ExplainResultView result={TWO_PROFILES} />);
-    const line = screen.getByText(/Masks on Trino and row filters are not shown here/);
+    // Package 2 (spec §5.10): the "Masks on Trino and row filters are not
+    // shown here" clause is gone (both are asked now). A Denied verdict's
+    // caveat stays visible, and says what the folded roles paragraph says: a
+    // manual role/group policy matches nobody, here OR on the engines — never
+    // "may still be allowed", which would be false.
+    const line = screen.getByText(/A manual policy that names a role or a group other than/);
     expect(line).toBeVisible();
-    expect(line).toHaveTextContent(/so Allowed can still return masked values or filtered rows/);
-    // A Denied verdict's caveat is visible too, and says what the folded roles
-    // paragraph says: a manual role/group policy matches nobody, here OR on the
-    // engines — never "may still be allowed", which would be false.
     expect(line).toHaveTextContent(
-      /a manual policy that names a role or a group other than public matches nobody, here or on the engines\./,
+      "A manual policy that names a role or a group other than public matches nobody, here or on the engines.",
     );
+    expect(screen.getByTestId("honest-limits")).not.toHaveTextContent(/Masks on Trino/);
     expect(line).not.toHaveTextContent(/may still be allowed/i);
     // The verdicts precede the limits block in document order.
     const result = screen.getByTestId("explain-result");
@@ -2122,13 +2163,163 @@ describe("ExplainResultView — verdict first, internals folded (C12)", () => {
         "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
       ),
     ).toBeVisible();
+    // Said once: with no effect line the state carries the sentence, and the
+    // folded internals do not repeat it.
+    expect(screen.getAllByText(/nothing is enforced here/)).toHaveLength(1);
+    // There are no verdicts, so there is no visible limit line: no "Allowed",
+    // no role/group caveat about a verdict that does not exist.
+    expect(screen.queryByText(/A manual policy that names a role/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Masks on Trino/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Package 2 (spec §5.10): the answer leads with the server's sentences, one
+ * per person and engine, and the verdicts they were built from fold under
+ * "Which policies decided this". The client renders the parts and never
+ * parses the text (C1).
+ */
+describe("ExplainResultView — the effect lines first (Package 2)", () => {
+  const RULE_ID = "5d0a7c1e-0000-4000-8000-00000000000a";
+  const MASKED: ExplainResponse = {
+    outcome: "per_profile",
+    profiles: [
+      {
+        service_id: 21,
+        service_name: "egret-trino-prod",
+        engine: "trino",
+        tags: [{ name: "pii", attached_at_column: true }],
+        tag_policies_in_download: 2,
+        accesses: [
+          {
+            access_type: "select",
+            decision: { kind: "allowed", policy_id: 7, policy_name: "perm-grant-1" },
+            attribution: { kind: "grant", grant_id: "grant-1" },
+          },
+        ],
+        mask: {
+          access_type: "select",
+          decision: {
+            kind: "masked",
+            result: { policy_id: 51, policy_name: `perm-rule-${RULE_ID}`, mask_type: "MASK_HASH" },
+          },
+          attribution: { kind: "rule", rule_id: RULE_ID, locator: null, name: "Hash personal data" },
+        },
+        row_filter: {
+          access_type: "select",
+          decision: {
+            kind: "filtered",
+            result: { policy_id: 52, policy_name: "perm-rule-r2", filter_expr: "region = 'us'" },
+          },
+          attribution: { kind: "rule", rule_id: "r-2", locator: null, name: "US rows only" },
+        },
+        effect_lines: [
+          ruleMaskLine("member-sso", "email", "hashed", "Hash personal data", RULE_ID),
+          effectLine("rows", "filtered", [
+            subject("member-sso"),
+            text(" sees "),
+            strong("rows where"),
+            text(" "),
+            code("region = 'us'"),
+            text(" (rule "),
+            rule("US rows only", "r-2"),
+            text(")"),
+          ]),
+        ],
+      },
+    ],
+  };
+
+  test("a profile shows its lines before a closed disclosure holding the access rows", () => {
+    wrap(<ExplainResultView result={MASKED} />);
+    const profile = screen.getByTestId("explain-profile");
+    const lines = within(profile).getAllByTestId("effect-line");
+    expect(lines.map((l) => l.textContent)).toEqual([
+      "member-sso reads email as hashed (rule Hash personal data)",
+      "member-sso sees rows where region = 'us' (rule US rows only)",
+    ]);
+    lines.forEach((l) => expect(l).toBeVisible());
+    expect(within(lines[0]).getByRole("link", { name: "Hash personal data" })).toHaveAttribute(
+      "href",
+      `/governance/rules/${RULE_ID}`,
+    );
+
+    const details = within(profile).getByText("Which policies decided this").closest("details") as HTMLElement;
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    // The verdicts, the mask, the row filter and the tags are all folded.
+    const access = within(details).getByTestId("explain-access");
+    expect(access).not.toBeVisible();
+    expect(within(details).getByTestId("explain-mask")).toHaveTextContent(
+      `Mask on select: masked to MASK_HASH by Ranger policy perm-rule-${RULE_ID}`,
+    );
+    expect(within(details).getByTestId("explain-row-filter")).toHaveTextContent(
+      "Row filter on select: rows where region = 'us', by Ranger policy perm-rule-r2",
+    );
+    expect(within(details).getByText("Tags that could decide here")).toBeInTheDocument();
+    // The lines come first in document order.
+    expect(lines[1].compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(details.contains(lines[0])).toBe(false);
+  });
+
+  test("opening the disclosure shows the verdicts", async () => {
+    wrap(<ExplainResultView result={MASKED} />);
+    await userEvent.click(screen.getByText("Which policies decided this"));
+    expect(screen.getByTestId("explain-access")).toBeVisible();
+  });
+
+  test("the deciding rule is named by its name, and by its id when the rule row is gone", () => {
+    wrap(<ExplainResultView result={MASKED} />);
+    const maskBy = screen.getByTestId("explain-mask-decided-by");
+    expect(within(maskBy).getByRole("link", { name: "View rule Hash personal data" })).toHaveAttribute(
+      "href",
+      `/governance/rules/${RULE_ID}`,
+    );
+    const filterBy = screen.getByTestId("explain-row-filter-decided-by");
+    expect(within(filterBy).getByRole("link", { name: "View rule US rows only" })).toBeInTheDocument();
+    // TWO_PROFILES' rule attribution carries no name.
+    expect(TWO_PROFILES.profiles[1].accesses[0].attribution).not.toHaveProperty("name");
+  });
+
+  test("a catalog nothing serves leads with the server's Not enforced line and badge", () => {
+    wrap(
+      <ExplainResultView
+        result={{
+          outcome: "no_profile_serves_the_catalog",
+          profiles: [],
+          effect_line: effectLine("access", "not_enforced", [
+            text("Not enforced: "),
+            { kind: "catalog", text: "demo_warehouse", catalog_id: "c-demo" },
+            text(" has no engine."),
+          ]),
+        }}
+      />,
+    );
+    const state = screen.getByTestId("no-profile-state");
+    expect(within(state).getByText("Not enforced")).toBeVisible();
+    expect(within(state).getByTestId("effect-line")).toHaveTextContent("Not enforced: demo_warehouse has no engine.");
+    expect(state).not.toHaveTextContent(/nothing is enforced here/);
+    // The general sentence stays, folded.
     const details = screen.getByText("How this answer was worked out").closest("details") as HTMLElement;
-    expect(within(details).getByText(/no policy set egret compiles\s+covers it/)).toBeInTheDocument();
-    // There are no verdicts, so the visible limit names none: no "Allowed", no
-    // role/group caveat about a verdict that does not exist.
-    const line = screen.getByText("Masks on Trino and row filters are not shown here.");
-    expect(line).toBeVisible();
-    expect(line.closest("details")).toBeNull();
-    expect(screen.queryByText(/Allowed/)).not.toBeVisible();
+    expect(within(details).getByText(/nothing is enforced here \(this is not a refusal\)/)).not.toBeVisible();
+  });
+
+  test("an undecidable row filter names its causes in the folded evidence", () => {
+    const undecided: ExplainResponse = {
+      ...MASKED,
+      profiles: [
+        {
+          ...MASKED.profiles[0],
+          row_filter: {
+            access_type: "select",
+            decision: { kind: "undecidable", why: [{ kind: "super_users_unknown" }] },
+          },
+        },
+      ],
+    };
+    wrap(<ExplainResultView result={undecided} />);
+    expect(screen.getByTestId("explain-row-filter")).toHaveTextContent("Row filter on select: undecidable");
+    expect(screen.getByText(/The engine's super-user list is unknown/)).toBeInTheDocument();
+    expect(screen.queryByTestId("explain-row-filter-decided-by")).not.toBeInTheDocument();
   });
 });
