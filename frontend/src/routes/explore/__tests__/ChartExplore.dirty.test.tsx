@@ -4,6 +4,7 @@ import { MemoryRouter, Routes, Route, useNavigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QuerySpec } from "@/api/charts";
+import ChartExplore from "../ChartExplore";
 
 /**
  * THE UNSAVED-CHANGES GUARD, TESTED AT THE SEAM WHERE THE DIRTY FLAG IS ACTUALLY DECIDED.
@@ -177,7 +178,6 @@ function GoTo({ id }: { id: string }) {
 }
 
 async function mountChart(id: string, alsoOffer?: string) {
-  const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
@@ -198,9 +198,7 @@ describe("ChartExplore unsaved-changes guard", () => {
   // Back to "the result is already there" for every test that does not ask otherwise.
   afterEach(() => { ctl.lateResult = false; ctl.failed = false; });
 
-  // The first test pays for the cold import of the whole route (measured 5.5 s alone), the same
-  // reason `ChartExplore.mount.test.tsx` gives its first test 15 s.
-  it("leaves a freshly loaded chart clean, so nothing cancels an unload", { timeout: 15_000 }, async () => {
+  it("leaves a freshly loaded chart clean, so nothing cancels an unload", async () => {
     await mountChart("c-bar");
     expect(await screen.findByDisplayValue("1000")).toBeInTheDocument();
     // Let every load-time effect settle before asking — the question is about the state the

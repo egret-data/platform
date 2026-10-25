@@ -414,11 +414,14 @@ describe("Who can read? — one click on Explain runs Explain while the suggesti
     // holds focus, the microtasks after it run, and only then does Explain get
     // its focusin. The dialog's FocusScope watches for removed nodes in those
     // microtasks and, finding <body> focused, pulls focus to its container.
+    // Microtasks only, not `await act(async ...)`: an async act ends on a
+    // macrotask, and a React update landing in it (a query result, the
+    // debounce) makes act wait one more, in which the list's close timer
+    // runs and removes the list while <body> is focused. Tab has no task
+    // between focusout and focusin, so this must not have one either.
     act(() => field.blur());
-    await act(async () => {
-      await new Promise<void>((r) => queueMicrotask(r));
-      await new Promise<void>((r) => queueMicrotask(r));
-    });
+    await new Promise<void>((r) => queueMicrotask(r));
+    await new Promise<void>((r) => queueMicrotask(r));
     expect(document.activeElement).toBe(document.body);
     act(() => explain.focus());
 

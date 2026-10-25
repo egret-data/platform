@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QuerySpec } from "@/api/charts";
+import ChartExplore from "../ChartExplore";
 
 /**
  * KI-050: the editor's Sort menu names a field by the dataset's display name, as the field pickers
@@ -99,7 +100,6 @@ vi.mock("@/api/datasets", () => ({
 }));
 
 async function mountAt(path: string) {
-  const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>

@@ -3550,6 +3550,61 @@ mod tests {
         output: &OutputSpec,
         stmt: &StatementSnapshot,
     ) -> String {
+        capture_logs(|| {
+            assert!(
+                matches!(
+                    shape_rows(out, output, stmt),
+                    Err(ServingError::SchemaDrift)
+                ),
+                "expected a refusal so there is a reason to log"
+            );
+        })
+    }
+
+    /// A global subscriber that is interested in every callsite and records
+    /// nothing, so that a callsite's cached interest never depends on which
+    /// thread met it first.
+    ///
+    /// tracing-core caches each callsite's interest the first time any thread
+    /// reaches it. While a single dispatcher is registered (this capture's
+    /// scoped one, the other tests' captures dropped), it asks the REACHING
+    /// thread's default instead of the registered dispatchers. A parallel test
+    /// with no subscriber that reaches the drift `warn!` first in that window
+    /// caches `never` for it, and the capture on this thread then records
+    /// nothing: `a_drift_is_logged_against_the_statement_that_drifted` failed
+    /// in CI with empty logs. With this one registered for the whole process,
+    /// the registry always holds two dispatchers and this one answers
+    /// `sometimes`, so the event reaches whichever subscriber the emitting
+    /// thread has.
+    struct InterestedInEverything;
+
+    impl tracing::Subscriber for InterestedInEverything {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// What `f` logs on this thread at DEBUG and above, as plain text.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        static INTERESTED: std::sync::Once = std::sync::Once::new();
+        INTERESTED.call_once(|| {
+            tracing::subscriber::set_global_default(InterestedInEverything)
+                .expect("nothing else in this test binary sets a global subscriber");
+        });
         let cap = LogCapture::default();
         let sub = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -3562,13 +3617,7 @@ mod tests {
             .finish();
         {
             let _guard = tracing::subscriber::set_default(sub);
-            assert!(
-                matches!(
-                    shape_rows(out, output, stmt),
-                    Err(ServingError::SchemaDrift)
-                ),
-                "expected a refusal so there is a reason to log"
-            );
+            f();
         }
         let bytes = cap.0.lock().expect("log lock").clone();
         String::from_utf8(bytes).expect("log output is utf-8")
