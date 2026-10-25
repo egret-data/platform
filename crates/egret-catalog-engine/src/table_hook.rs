@@ -127,7 +127,7 @@ pub fn layer(inner: axum::Router, hook: Arc<TableHook>) -> axum::Router {
 enum Target {
     Create { ns: String },
     Register { ns: String },
-    Update { ns: String, table: String },
+    TableCommit { ns: String, table: String },
     Transaction,
     Rename,
     Drop { ns: String, table: String },
@@ -165,7 +165,7 @@ fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
         }
         [prefix, "namespaces", ns, "tables", table] => Some((
             d(prefix)?,
-            Target::Update {
+            Target::TableCommit {
                 ns: d(ns)?,
                 table: d(table)?,
             },
@@ -214,7 +214,7 @@ fn tables_of(target: &Target, body: &Value) -> Vec<(String, Option<String>)> {
         Target::Create { ns } | Target::Register { ns } => name(body)
             .map(|t| vec![(ns.clone(), Some(t))])
             .unwrap_or_default(),
-        Target::Update { ns, table } => {
+        Target::TableCommit { ns, table } => {
             if changes_schema(body.get("updates")) {
                 vec![(ns.clone(), Some(table.clone()))]
             } else {
@@ -360,7 +360,7 @@ impl TableHook {
                     }
                 }
             }
-            Target::Update { ns, table } => {
+            Target::TableCommit { ns, table } => {
                 if let Some(cols) =
                     new_current_columns(&mut conn, warehouse_id, ns, table, body.get("updates"))
                         .await?
@@ -574,7 +574,7 @@ mod tests {
             post("/wh/namespaces/sales/tables/orders"),
             Some((
                 p.into(),
-                Target::Update {
+                Target::TableCommit {
                     ns: "sales".into(),
                     table: "orders".into()
                 }
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn an_update_counts_only_when_it_changes_the_schema() {
-        let update = Target::Update {
+        let update = Target::TableCommit {
             ns: "sales".into(),
             table: "orders".into(),
         };
