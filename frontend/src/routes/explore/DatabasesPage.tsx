@@ -212,15 +212,17 @@ export default function DatabasesPage() {
           <div className="flex items-center justify-end gap-1">
             {result && (
               <span
-                className={`mr-1 inline-flex items-center gap-1 text-xs ${
+                // A failure's detail can be a sentence (KI-001): it wraps in a
+                // bounded column instead of pushing the row's buttons off-screen.
+                className={`mr-1 inline-flex max-w-xs items-start gap-1 whitespace-normal text-left text-xs ${
                   result.ok ? "text-success" : "text-destructive"
                 }`}
                 role="status"
               >
                 {result.ok ? (
-                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" />
                 ) : (
-                  <XCircle className="h-3.5 w-3.5" />
+                  <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
                 )}
                 {result.ok ? "OK" : (result.message ?? "Failed")}
               </span>
