@@ -7,12 +7,10 @@
  */
 
 /**
- * A classification row-filter rule that filters nothing on a profile for the
- * target's table. Trino (spec §5.8, D3, E14): the classification is on a
+ * A classification row-filter rule that filters nothing on a Trino profile
+ * for the target's table (spec §5.8, D3, E14): the classification is on a
  * column of the table and not on the table, and a Trino tag row filter fires
- * only for a table-level attachment. StarRocks (live check finding 2): the
- * classification is on the table and on none of its columns, and StarRocks
- * expands the rule over tagged columns, so nothing compiles.
+ * only for a table-level attachment.
  */
 export interface ExplainRowFilterGap {
   rule_id: string;

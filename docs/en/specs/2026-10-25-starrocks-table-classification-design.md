@@ -548,3 +548,16 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   not changed here).
 - `a_starrocks_row_filter_on_a_table_classification_filters_rows` now also asserts no `starrocksTableOnly` in the
   preview and no `row_filter_not_applied` on the StarRocks profile; its red was seen on the Task 10 code.
+
+### Task 12
+
+- `openapi.json` changes only by the Task 10/11 shapes: `StarRocksTableOnly`, `ExplainClearanceGap`,
+  `RuleEffect.starrocksTableOnly` and `ExplainProfile.clearance_not_enforced` out; `ExplainClearanceMaskGap`,
+  `ClearanceMaskGapReason` and `ExplainProfile.clearance_masks_missing` in.
+- `npm run gen:api` (orval 8.24) neither deletes the model files of removed schemas nor their lines in
+  `model/index.ts`; both were removed by hand and `npm run gen:api` re-run, so the committed tree is what a fresh
+  emit gives (the second run re-added nothing). The digest covers 817 files.
+- `egret-server`: `committed_openapi_json_is_current` and `generated_client_was_emitted_from_the_committed_spec` pass.
+- `npx tsc -b` errors left for Task 13, both its removals: `RuleDialog.tsx` (`effect.starrocksTableOnly`) and
+  `RulePreview.tsx` (the `StarRocksTableOnly` import).
+- The worktree had no `frontend/node_modules`; `npm ci` installed it (untracked, ignored).

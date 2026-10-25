@@ -6,7 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAccess } from './explainAccess';
-import type { ExplainClearanceGap } from './explainClearanceGap';
+import type { ExplainClearanceMaskGap } from './explainClearanceMaskGap';
 import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainMask } from './explainMask';
 import type { ExplainResolvedTag } from './explainResolvedTag';
@@ -99,16 +99,18 @@ export interface ExplainProfile {
   row_filter?: null | ExplainRowFilter;
   /**
      * StarRocks only, for a column read: the gated classifications that reach
-     * the column only from its table and so compile no clearance here
-     * ([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the
-     * column as an `ANCESTOR`.
+     * the column (from the column or from its whole table) while the served
+     * artifact holds no clearance NULL mask for it
+     * ([`ExplainClearanceMaskGap`]). The direct read is still refused by the
+     * classification's deny; a view over the table shows the values until the
+     * masks exist (live spike, spec §14).
      */
-  clearance_not_enforced?: ExplainClearanceGap[];
+  clearance_masks_missing?: ExplainClearanceMaskGap[];
   /**
-     * For a read naming a table: the classification row filters that filter
-     * nothing here ([`ExplainRowFilterGap`]). On Trino (when the download has
-     * tag policies), those whose classification is on columns of the table
-     * only; on StarRocks, those whose classification is on the table only.
+     * For a read naming a table, Trino only (when the download has tag
+     * policies): the classification row filters that filter nothing here
+     * because their classification is on columns of the table only
+     * ([`ExplainRowFilterGap`]).
      */
   row_filter_not_applied?: ExplainRowFilterGap[];
   /**
