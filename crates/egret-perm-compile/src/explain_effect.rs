@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::effect::NotEnforced;
 use crate::explain_wire::{
-    WireDecision, WireDenyReason, WireEngineType, WireMaskDecision, WireMaskResult,
-    WireRowFilterDecision, WireTiedOutcome, WireUndecidableCause,
+    WireDecision, WireDenyReason, WireMaskDecision, WireMaskResult, WireRowFilterDecision,
+    WireTiedOutcome, WireUndecidableCause,
 };
 use crate::routes::{
     ClearanceMaskGapReason, ExplainAccess, ExplainAttribution, ExplainExemption, ExplainProfile,
@@ -961,14 +961,10 @@ impl Builder<'_> {
         l.code(filter_expr);
     }
 
-    /// D3 and its StarRocks mirror: ": rule *X* does not filter on Trino here,
-    /// because *PII* is on a column, not on the table" (StarRocks: "on the
-    /// table, not on a column").
+    /// D3: ": rule *X* does not filter on Trino here, because *PII* is on a
+    /// column, not on the table". Only Trino profiles carry these gaps.
     fn append_row_filter_gaps(&self, l: &mut Line, gaps: &[ExplainRowFilterGap]) {
-        let (engine, here, there) = match self.input.profile.engine {
-            WireEngineType::Trino => ("Trino", "a column", "the table"),
-            WireEngineType::StarRocks => ("StarRocks", "the table", "a column"),
-        };
+        let (engine, here, there) = ("Trino", "a column", "the table");
         match gaps {
             [] => {}
             [gap] => {
@@ -1044,7 +1040,7 @@ mod tests {
     //! that `text` is the parts' texts joined.
 
     use super::*;
-    use crate::explain_wire::{WireMaskResult, WireRowFilterResult};
+    use crate::explain_wire::{WireEngineType, WireMaskResult, WireRowFilterResult};
     use crate::routes::{
         ExemptVia, ExplainAccess, ExplainClearanceMaskGap, ExplainMask, ExplainReplay,
         ExplainRowFilter,

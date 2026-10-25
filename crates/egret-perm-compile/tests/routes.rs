@@ -10043,19 +10043,12 @@ async fn a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption() {
 
 /// Live check finding 2, the mirror of D3, fixed by the D2 StarRocks package
 /// (spec 2026-10-25, C8): a classification row filter on a table-level
-/// classification now compiles on StarRocks, and Explain evaluates it there.
-/// The gap statements Package 2 added (`starrocksTableOnly`, the StarRocks
-/// entry in `row_filter_not_applied`) are removed by that package's Task 11,
-/// which completes this test's inversion.
+/// classification compiles on StarRocks, Explain evaluates it there and lists
+/// no gap, and the rule preview no longer counts StarRocks tables it misses.
 #[tokio::test]
 async fn a_starrocks_row_filter_on_a_table_classification_filters_rows() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
-    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
-        .bind(f.catalog_id)
-        .fetch_one(&f.db.pool)
-        .await
-        .expect("catalog name");
     let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
     let _lock = exclusive(&f).await;
     let (status, out) = into_json(
@@ -10078,9 +10071,8 @@ async fn a_starrocks_row_filter_on_a_table_classification_filters_rows() {
     );
     let (status, preview) = preview_rule(&f, &token, rule.clone()).await;
     assert_eq!(status, StatusCode::OK, "{preview}");
-    assert_eq!(
-        preview["effect"]["starrocksTableOnly"],
-        json!({"catalogs": [name], "tables": 1}),
+    assert!(
+        preview["effect"].get("starrocksTableOnly").is_none(),
         "{preview}"
     );
     let rule_name = rule["name"].as_str().unwrap().to_string();
@@ -10097,6 +10089,7 @@ async fn a_starrocks_row_filter_on_a_table_classification_filters_rows() {
         json!(rule_id),
         "body: {body}"
     );
+    assert!(sr.get("row_filter_not_applied").is_none(), "body: {body}");
     assert_eq!(
         sr["effect_lines"][1]["text"],
         json!(format!(

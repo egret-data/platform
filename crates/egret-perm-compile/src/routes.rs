@@ -318,7 +318,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
         crate::effect::TrinoColumnOnly,
-        crate::effect::StarRocksTableOnly,
         crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
@@ -784,10 +783,10 @@ pub struct ExplainProfile {
     /// masks exist (live spike, spec §14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clearance_masks_missing: Vec<ExplainClearanceMaskGap>,
-    /// For a read naming a table: the classification row filters that filter
-    /// nothing here ([`ExplainRowFilterGap`]). On Trino (when the download has
-    /// tag policies), those whose classification is on columns of the table
-    /// only; on StarRocks, those whose classification is on the table only.
+    /// For a read naming a table, Trino only (when the download has tag
+    /// policies): the classification row filters that filter nothing here
+    /// because their classification is on columns of the table only
+    /// ([`ExplainRowFilterGap`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_filter_not_applied: Vec<ExplainRowFilterGap>,
     /// The answer in words (spec §5.1, C1): for a `read`, the column (or
@@ -916,12 +915,10 @@ pub enum ClearanceMaskGapReason {
     NotCompiled,
 }
 
-/// A classification row-filter rule that filters nothing on a profile for the
-/// target's table. Trino (spec §5.8, D3, E14): the classification is on a
+/// A classification row-filter rule that filters nothing on a Trino profile
+/// for the target's table (spec §5.8, D3, E14): the classification is on a
 /// column of the table and not on the table, and a Trino tag row filter fires
-/// only for a table-level attachment. StarRocks (live check finding 2): the
-/// classification is on the table and on none of its columns, and StarRocks
-/// expands the rule over tagged columns, so nothing compiles.
+/// only for a table-level attachment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExplainRowFilterGap {
     pub rule_id: Uuid,
@@ -2603,12 +2600,9 @@ pub(crate) async fn explain_users(
     // Asked of the catalog at most once, and only for a column a StarRocks
     // artifact serves no clearance mask on.
     let mut gap_reason: Option<ClearanceMaskGapReason> = None;
-    let (trino_row_filter_gaps, starrocks_row_filter_gaps) = match &table_scope {
-        Some(scope) => (
-            row_filters_not_applied(&mut *conn, scope, ROW_FILTER_GAPS_COLUMN_ONLY).await?,
-            row_filters_not_applied(&mut *conn, scope, ROW_FILTER_GAPS_TABLE_ONLY).await?,
-        ),
-        None => (Vec::new(), Vec::new()),
+    let trino_row_filter_gaps = match &table_scope {
+        Some(scope) => row_filters_not_applied(&mut *conn, scope).await?,
+        None => Vec::new(),
     };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
@@ -2924,7 +2918,6 @@ pub(crate) async fn explain_users(
                     EngineType::Trino if tag_policies_in_download > 0 => {
                         trino_row_filter_gaps.clone()
                     }
-                    EngineType::StarRocks => starrocks_row_filter_gaps.clone(),
                     _ => Vec::new(),
                 },
                 masked_read_skips_access,
@@ -3883,38 +3876,14 @@ const ROW_FILTER_GAPS_COLUMN_ONLY: &str = "SELECT r.id, r.name, t.name \
                            AND a.column_name = '') \
       ORDER BY r.name, r.id";
 
-/// The classification row-filter rules on a classification that is on the
-/// target table and on NONE of its columns: they compile nothing on StarRocks,
-/// which expands a classification row filter over the tagged columns (live
-/// check finding 2; the compiler fix is the D2 StarRocks package).
-const ROW_FILTER_GAPS_TABLE_ONLY: &str = "SELECT r.id, r.name, t.name \
-       FROM perm.rules r \
-       JOIN tags t ON t.key = r.tag_key \
-      WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
-        AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                     WHERE c.id = $1 AND a.tag_id = t.id \
-                       AND lower(a.schema_name) = lower($2) \
-                       AND lower(a.table_name) = lower($3) \
-                       AND a.column_name = '') \
-        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                         WHERE c.id = $1 AND a.tag_id = t.id \
-                           AND lower(a.schema_name) = lower($2) \
-                           AND lower(a.table_name) = lower($3) \
-                           AND a.column_name <> '') \
-      ORDER BY r.name, r.id";
-
-/// The classification row-filter rules that filter nothing for `table`'s rows
-/// ([`ExplainRowFilterGap`]); `query` is one of [`ROW_FILTER_GAPS_COLUMN_ONLY`]
-/// (Trino) and [`ROW_FILTER_GAPS_TABLE_ONLY`] (StarRocks). Levels compare
-/// case-folded, as the tag resolution does.
+/// The classification row-filter rules that filter nothing on Trino for
+/// `table`'s rows ([`ExplainRowFilterGap`], [`ROW_FILTER_GAPS_COLUMN_ONLY`]).
+/// Levels compare case-folded, as the tag resolution does.
 async fn row_filters_not_applied(
     conn: &mut sqlx::PgConnection,
     table: &Scope,
-    query: &'static str,
 ) -> Result<Vec<ExplainRowFilterGap>, PermHttpError> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(query)
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(ROW_FILTER_GAPS_COLUMN_ONLY)
         .bind(table.catalog_id)
         .bind(table.schema.as_deref())
         .bind(table.table.as_deref())

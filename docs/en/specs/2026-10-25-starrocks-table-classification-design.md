@@ -535,3 +535,16 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
 - A StarRocks explain of such a column now queries `lakekeeper.*`; `tests/routes.rs`'s `setup` installs the stub.
 - The API shape changed (one field and two schemas out, one field and two schemas in): `openapi.json` and the client
   are regenerated in Task 12, so the egret-server drift test fails between Tasks 10 and 12.
+
+### Task 11
+
+- Removed: `RuleEffect.starrocks_table_only`, `StarRocksTableOnly` (and its OpenAPI registration), `TABLE_ONLY_TABLES`,
+  `ROW_FILTER_GAPS_TABLE_ONLY`, the StarRocks arm of `row_filter_not_applied` and the StarRocks tuple of
+  `append_row_filter_gaps`. `row_filter_gap_tables` and `row_filters_not_applied` lost their query parameter (only the
+  Trino query is left). The clearance half went in Task 10; the store doc "masks a COLUMN, never a whole table" went
+  with `tagged_columns_for_service` in Task 1.
+- `effect::tag_reach` already counts a table-level table for a row filter (`count(DISTINCT (catalog, schema,
+  table))` over both levels); it counts exact-case, so `Orders` and `orders` count twice there (preview count only;
+  not changed here).
+- `a_starrocks_row_filter_on_a_table_classification_filters_rows` now also asserts no `starrocksTableOnly` in the
+  preview and no `row_filter_not_applied` on the StarRocks profile; its red was seen on the Task 10 code.
