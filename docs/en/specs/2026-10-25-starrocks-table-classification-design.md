@@ -356,6 +356,16 @@ message grows.
 4. Masks alone expose `_file`/`_pos` (the object-store path) on `SELECT *` (Step 0 live spike, §14). Today's
    column-level clearance on a table where EVERY column is classified probably has the same exposure: pre-existing,
    unmeasured.
+5. A table-commit recompile that fails AFTER the commit (a lock wait past `DEFAULT_LOCK_WAIT`, 10 s, while other
+   permission writes hold the profile; or a register whose compensating drop fails) is logged and recorded in
+   `perm.compile_runs` (the Overview's `compile_failed` shows it) and retried only by the next recompile of that
+   profile (any grant, rule, classification or table write bound to it) or the next boot. Until then a column added by
+   that commit has no NULL mask: the `*` deny still refuses its direct read, a view over it reads the real value
+   (review finding 5; not mitigated).
+6. A classification or rule write that commits between a table change's dry run and its commit can still make the
+   after-commit recompile refuse (the per-profile lock serializes table changes only, not every permission write):
+   the window is the dry run's end to the lakekeeper commit (milliseconds); the result is item 5's failed-recompile
+   state, and the profile stays refused until a steward narrows the classification.
 
 ## 12. Non-goals
 
@@ -625,3 +635,12 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   run removed). New DB tests drive a multi-table `transactions/commit`, a staged create's committing update and a
   recursive namespace drop through the hook (each fails with the layer removed). They pass on the code as it was:
   they are coverage, not reds.
+- **Concurrent schema changes (review finding 3).** The hook now takes a session-level advisory lock per affected
+  profile (ascending, on a connection detached from the pool, `COMMIT_LOCK_WAIT` = 30 s, timeout → 409 "retry") before
+  the dry run and holds it through the lakekeeper commit and the after-commit recompile; `TableHook::undrop` takes
+  the same locks. Two schema changes over one profile therefore run one after the other, and the second dry-runs
+  against the first's committed columns
+  (`concurrent_column_adds_that_cross_the_ceiling_together_do_not_wedge`, red before). Not covered: a classification
+  or rule write between a dry run and its commit (§11 item 6).
+- **After-commit failures (review finding 5): not mitigated.** Recorded in §11 item 5 with the window. The module doc
+  and C10's "the boot pass retries it" now read "the next recompile of the profile, or the next boot".

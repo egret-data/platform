@@ -814,7 +814,7 @@ fn db_refusal(limit: Duration, e: sqlx::Error) -> Refusal {
     }
 }
 
-fn is_lock_timeout(e: &sqlx::Error) -> bool {
+pub(crate) fn is_lock_timeout(e: &sqlx::Error) -> bool {
     e.as_database_error()
         .and_then(|d| d.code())
         .is_some_and(|c| c == "55P03")

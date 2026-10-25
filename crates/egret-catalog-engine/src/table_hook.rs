@@ -59,7 +59,8 @@
 //!    bounded by `lock_timeout`, before the response is returned. The
 //!    Iceberg commit has happened and cannot be refused any more (C10): a
 //!    failure is logged and recorded in `perm.compile_runs` (the Governance
-//!    Overview shows it), the boot pass retries it, and the 2xx passes. Until
+//!    Overview shows it), the next recompile of the profile (or the next boot)
+//!    retries it, and the 2xx passes. Until
 //!    the recompile lands, the `*` deny refuses an uncleared direct read of a
 //!    new column; only its view protection waits.
 //!
@@ -473,7 +474,7 @@ impl TableHook {
                     service_id,
                     error = %e,
                     "a table change committed, but recompiling the StarRocks profile failed; \
-                     the boot pass retries it"
+                     the next recompile of the profile, or the next boot, retries it"
                 );
                 if let Err(w) = egret_perm_compile::compile_runs::record_compile_failure(
                     &self.db.pool,
@@ -506,27 +507,32 @@ impl TableHook {
         kind: crate::recovery::TabularKindName,
         id: Uuid,
     ) -> Result<(), crate::CatalogEngineError> {
-        let profiles = match kind {
-            crate::recovery::TabularKindName::Table => {
-                let (profiles, pending) = self
-                    .undrop_dry_run_inputs(prefix, id)
-                    .await
-                    .map_err(crate::CatalogEngineError::Internal)?;
-                if !profiles.is_empty() {
-                    self.dry_run(&profiles, &pending).await.map_err(|r| {
-                        crate::CatalogEngineError::Conflict(format!(
-                            "egret refused the undrop: {}",
-                            r.0
-                        ))
-                    })?;
-                }
-                profiles
-            }
-            crate::recovery::TabularKindName::View => Vec::new(),
+        let (profiles, pending) = match kind {
+            crate::recovery::TabularKindName::Table => self
+                .undrop_dry_run_inputs(prefix, id)
+                .await
+                .map_err(crate::CatalogEngineError::Internal)?,
+            crate::recovery::TabularKindName::View => (Vec::new(), Vec::new()),
         };
-        crate::recovery::undrop_tabular(engine_state, system_user, prefix, kind, id).await?;
-        self.recompile(&profiles).await;
-        Ok(())
+        if profiles.is_empty() {
+            return crate::recovery::undrop_tabular(engine_state, system_user, prefix, kind, id)
+                .await;
+        }
+        let refused = |r: Refusal| {
+            crate::CatalogEngineError::Conflict(format!("egret refused the undrop: {}", r.0))
+        };
+        let locks = self.lock_profiles(&profiles).await.map_err(refused)?;
+        if let Err(r) = self.dry_run(&profiles, &pending).await {
+            locks.release().await;
+            return Err(refused(r));
+        }
+        let undropped =
+            crate::recovery::undrop_tabular(engine_state, system_user, prefix, kind, id).await;
+        if undropped.is_ok() {
+            self.recompile(&profiles).await;
+        }
+        locks.release().await;
+        undropped
     }
 
     /// The affected profiles and the overlay of undropping table `id`.
@@ -598,6 +604,68 @@ impl TableHook {
                     "could not record a failed compile in perm.compile_runs");
             }
         }
+    }
+}
+
+/// How long a table change waits for another schema change of the same
+/// profiles (its dry run, its commit and its recompile) to finish.
+pub const COMMIT_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// Session-level advisory locks, one per affected profile, on a connection
+/// detached from the pool: closing it releases them whatever happens.
+pub(crate) struct ProfileLocks(sqlx::PgConnection);
+
+impl ProfileLocks {
+    async fn release(self) {
+        use sqlx::Connection as _;
+        let mut conn = self.0;
+        let _ = sqlx::query("SELECT pg_advisory_unlock_all()")
+            .execute(&mut conn)
+            .await;
+        let _ = conn.close().await;
+    }
+}
+
+impl TableHook {
+    /// Take the per-profile schema-change locks, ascending (one order, so two
+    /// changes over overlapping profiles cannot deadlock), waiting at most
+    /// [`COMMIT_LOCK_WAIT`].
+    async fn lock_profiles(&self, profiles: &[i64]) -> Result<ProfileLocks, Refusal> {
+        let busy = || {
+            Refusal(
+                "another change to a table these classifications cover is being committed; retry"
+                    .to_string(),
+            )
+        };
+        let internal =
+            |e: sqlx::Error| Refusal(format!("egret could not lock the change ({e}); retry"));
+        let mut conn = self.db.pool.acquire().await.map_err(internal)?.detach();
+        sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+            .bind(format!("{}ms", COMMIT_LOCK_WAIT.as_millis()))
+            .execute(&mut conn)
+            .await
+            .map_err(internal)?;
+        let mut ids = profiles.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            if let Err(e) = sqlx::query(
+                "SELECT pg_advisory_lock(hashtextextended('egret-table-hook\u{1e}' || $1, 0))",
+            )
+            .bind(id.to_string())
+            .execute(&mut conn)
+            .await
+            {
+                let refusal = if crate::view_hold::is_lock_timeout(&e) {
+                    busy()
+                } else {
+                    internal(e)
+                };
+                ProfileLocks(conn).release().await;
+                return Err(refusal);
+            }
+        }
+        Ok(ProfileLocks(conn))
     }
 }
 
@@ -685,12 +753,22 @@ pub async fn hook_table_commits(
         Ok(_) => return next.run(req).await,
         Err(e) => return refuse_check(e),
     };
+    // Held from the dry run to the recompile, so a concurrent schema change of
+    // these profiles dry-runs against this one's columns (review finding 3).
+    let locks = match hook.lock_profiles(&profiles).await {
+        Ok(l) => l,
+        Err(refusal) => return refusal.into_response(),
+    };
     let pending = match hook.pending(warehouse_id, &target, &body).await {
         Ok(p) => p,
-        Err(e) => return refuse_check(e),
+        Err(e) => {
+            ProfileLocks::release(locks).await;
+            return refuse_check(e);
+        }
     };
     if !pending.is_empty() {
         if let Err(refusal) = hook.dry_run(&profiles, &pending).await {
+            ProfileLocks::release(locks).await;
             return refusal.into_response();
         }
     }
@@ -712,26 +790,28 @@ pub async fn hook_table_commits(
     // client has gone (as the view hold's after-commit steps).
     let work = async move {
         let response = next.run(req).await;
-        if !response.status().is_success() {
-            return response;
-        }
-        let Some((drop_path, metadata)) = register_drop else {
+        let response = if !response.status().is_success() {
+            response
+        } else if let Some((drop_path, metadata)) = register_drop {
+            match hook.recompile_or_refuse(&profiles).await {
+                Ok(()) => response,
+                Err(e) => match drop_registered(&loader, drop_path, metadata).await {
+                    Ok(()) => Refusal(format!("{e}; the table was not registered")).into_response(),
+                    Err(why) => {
+                        tracing::warn!(error = %why,
+                            "a refused register could not be dropped again; the profile is \
+                             wedged until the table or its classification is removed");
+                        hook.record_failure(&profiles, &e).await;
+                        response
+                    }
+                },
+            }
+        } else {
             hook.recompile(&profiles).await;
-            return response;
+            response
         };
-        match hook.recompile_or_refuse(&profiles).await {
-            Ok(()) => response,
-            Err(e) => match drop_registered(&loader, drop_path, metadata).await {
-                Ok(()) => Refusal(format!("{e}; the table was not registered")).into_response(),
-                Err(why) => {
-                    tracing::warn!(error = %why,
-                        "a refused register could not be dropped again; the profile is wedged \
-                         until the table or its classification is removed");
-                    hook.record_failure(&profiles, &e).await;
-                    response
-                }
-            },
-        }
+        ProfileLocks::release(locks).await;
+        response
     };
     match tokio::spawn(work.in_current_span()).await {
         Ok(response) => response,

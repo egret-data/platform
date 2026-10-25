@@ -66,8 +66,14 @@ struct Env {
     profile_id: i64,
     on_commit: OnCommit,
     on_reach: OnReach,
+    stall: Stall,
     hook: Arc<TableHook>,
 }
+
+/// Armed with `(METHOD /path, signal)`: [`observe`] signals when that request
+/// reaches lakekeeper, then holds it for [`STALL`] before forwarding it.
+type Stall = Arc<Mutex<Option<(String, Arc<tokio::sync::Notify>)>>>;
+const STALL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What the profile looked like when a request reached lakekeeper: armed with
 /// `(METHOD /path, profile id, None)`, [`observe`] fills in its policies and
@@ -82,11 +88,22 @@ type OnCommit = Arc<Mutex<Option<(String, &'static str, Uuid)>>>;
 /// Runs the armed [`OnCommit`] write after lakekeeper commits — a change the
 /// hook's pre-commit work cannot have seen.
 async fn observe(
-    State((on_commit, on_reach, db)): State<(OnCommit, OnReach, Db)>,
+    State((on_commit, on_reach, stall, db)): State<(OnCommit, OnReach, Stall, Db)>,
     req: Request,
     next: Next,
 ) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
+    let stalled = {
+        let mut slot = stall.lock().unwrap();
+        match slot.as_ref() {
+            Some((w, _)) if *w == what => slot.take().map(|(_, signal)| signal),
+            _ => None,
+        }
+    };
+    if let Some(signal) = stalled {
+        signal.notify_one();
+        tokio::time::sleep(STALL).await;
+    }
     let probe = on_reach
         .lock()
         .unwrap()
@@ -214,8 +231,14 @@ async fn env() -> Option<Env> {
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let on_commit: OnCommit = Arc::default();
     let on_reach: OnReach = Arc::default();
+    let stall: Stall = Arc::default();
     let inner = catalog_engine_router(state.clone()).layer(axum::middleware::from_fn_with_state(
-        (on_commit.clone(), on_reach.clone(), db.clone()),
+        (
+            on_commit.clone(),
+            on_reach.clone(),
+            stall.clone(),
+            db.clone(),
+        ),
         observe,
     ));
     let hook = Arc::new(TableHook::new(db.clone()));
@@ -231,6 +254,7 @@ async fn env() -> Option<Env> {
         profile_id: profile.id,
         on_commit,
         on_reach,
+        stall,
         hook,
     };
     let (status, body) = env
@@ -1183,4 +1207,67 @@ async fn a_namespace_drop_reaps_the_masks_of_its_tables() {
     assert!(status.is_success(), "drop namespace: {status} {body}");
     assert!(env.masked_columns(tag, "orders").await.is_empty());
     assert!(env.has_table_deny(tag, "orders").await);
+}
+
+// ── D2 review fix 6: concurrent schema changes are serialized per profile ──
+
+/// Review finding 3: two column adds on two tables of one classification,
+/// each within the ceiling alone and over it together. Without serialization
+/// both dry runs pass against the stored schema, both commit, and the profile
+/// is wedged. The hook holds a per-profile lock from the dry run to the
+/// recompile, so the second waits, dry-runs against the first's columns, and
+/// is refused.
+#[tokio::test]
+async fn concurrent_column_adds_that_cross_the_ceiling_together_do_not_wedge() {
+    let Some(env) = env().await else { return };
+    let env = Arc::new(env);
+    // Tag on `a` and `b`, 1 + 240 each: 482. Each add of 10 alone: 492.
+    let a = fields(240);
+    env.create_table("a", &refs(&a)).await;
+    env.create_table("b", &refs(&a)).await;
+    let tag = env.classify_table("a").await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales','b','')",
+    )
+    .bind(tag)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign b");
+    env.recompile().await;
+    let grown = fields(250);
+
+    // A reaches lakekeeper (after its dry run) and is held there while B runs.
+    let reached = Arc::new(tokio::sync::Notify::new());
+    *env.stall.lock().unwrap() = Some((
+        format!("POST /{}/namespaces/sales/tables/a", env.prefix),
+        reached.clone(),
+    ));
+    let first = {
+        let env = env.clone();
+        let body = schema_commit(schema(1, &refs(&grown)));
+        tokio::spawn(async move {
+            env.call("POST", "namespaces/sales/tables/a", Some(body))
+                .await
+        })
+    };
+    reached.notified().await;
+    let (status_b, body_b) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/b",
+            Some(schema_commit(schema(1, &refs(&grown)))),
+        )
+        .await;
+    let (status_a, body_a) = first.await.expect("A");
+
+    assert_eq!(status_a, StatusCode::OK, "A: {body_a}");
+    assert_eq!(status_b, StatusCode::CONFLICT, "B: {body_b}");
+    assert_eq!(env.loaded("b").await.len(), 240, "B did not commit");
+    assert_eq!(
+        env.last_compile().await.map(|(o, _)| o).as_deref(),
+        Some("ok"),
+        "the profile is not wedged"
+    );
 }
