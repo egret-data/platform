@@ -36,11 +36,10 @@ const TAG_LIST_NEEDS_TAG_READ = "Reading the classification list needs the tag:r
 
 /**
  * Spec C5: what a classification on a whole table does, shown when no mask is known to select it.
- * Package 2 (D2): StarRocks compiles a clearance only for a classification on a column, so the
- * whole-table clearance holds on Trino alone.
+ * Both engines enforce the clearance on every column of the table (D2, 2026-10-25).
  */
 const TABLE_LEVEL_NOTE =
-  "On a whole table, this classification counts for clearance on every column on Trino. StarRocks applies a clearance only where the classification is on a column. A rule that masks by classification needs it on columns, not on the table.";
+  "On a whole table, this classification counts for clearance on every column. A rule that masks by classification needs it on columns, not on the table.";
 
 /** The table or column a tag is added to. */
 export type TagTarget = {

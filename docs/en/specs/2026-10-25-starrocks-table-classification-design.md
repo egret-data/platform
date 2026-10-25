@@ -561,3 +561,16 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
 - `npx tsc -b` errors left for Task 13, both its removals: `RuleDialog.tsx` (`effect.starrocksTableOnly`) and
   `RulePreview.tsx` (the `StarRocksTableOnly` import).
 - The worktree had no `frontend/node_modules`; `npm ci` installed it (untracked, ignored).
+
+### Task 13
+
+- Removed `StarRocksTableOnlyNotice`, `starrocksTickReason` and their RuleDialog wiring (`starrocksWarnId`, its
+  `aria-describedby` entry); `needsTick = (secondMask || trinoColumnOnly !== null) && !ticked`.
+- Copy as §5.8: `TRINO_ROW_FILTER_HINT`, `TABLE_LEVEL_NOTE`, `COMPILES_TO`.
+- The "never shows a StarRocks warning" test feeds a preview that still carries the removed `starrocksTableOnly`
+  (an older server), so it was red on the old code.
+- Not changed: the Clearance tab's ceiling sentence ("if more than 500 of this tag's columns are visible to one
+  StarRocks profile…"); with whole-table attachments the count is 1 + columns per table, which the server's refusal
+  now names.
+- Not verified in a browser (FE-TEST-2); `npm run build` and the bundle tests were not run (the coordinator runs the
+  gate).

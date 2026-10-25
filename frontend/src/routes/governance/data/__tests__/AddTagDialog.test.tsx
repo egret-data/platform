@@ -122,14 +122,13 @@ describe("Add classification on a whole table", () => {
     serve({ "/tags": ok([PII]), "/perm/rules": ok([{ ...HASH, kind: { type: "row_filter", filter_expr: "1=1" } }]) });
     open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
     await pick("PII");
-    // Spec §5.8 (D2): the note says the whole-table clearance holds on Trino only,
-    // and no longer claims it counts on every column everywhere.
+    // D2 (2026-10-25): both engines enforce a whole-table clearance on every column.
     expect(
       await screen.findByText(
-        "On a whole table, this classification counts for clearance on every column on Trino. StarRocks applies a clearance only where the classification is on a column. A rule that masks by classification needs it on columns, not on the table.",
+        "On a whole table, this classification counts for clearance on every column. A rule that masks by classification needs it on columns, not on the table.",
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/counts for clearance on every column\. /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/StarRocks applies a clearance only/)).not.toBeInTheDocument();
     expect(screen.queryByText(/unreadable/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add classification" })).not.toHaveAttribute("aria-disabled");
   });

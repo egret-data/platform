@@ -41,7 +41,7 @@ const READS_ONLY = /this clearance withholds reads only, on trino and on starroc
 const VIEWS = /trino views in egret.s catalogs carry the classification/i;
 const CEILING = /if more than 500 of this tag.s columns are visible to one starrocks profile, that profile.s recompile fails outright rather than truncating the clearance/i;
 const COMPILES =
-  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. On StarRocks, a classification on a whole table compiles no clearance. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
+  "Compiles to one deny tag policy in each Trino profile's tag service. On StarRocks it compiles to a select deny and a NULL mask per tagged column, or, on a whole table, one select deny on the table and a NULL mask per column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL in a classified column rather than being refused, unless the classification is on the whole table.";
 
 async function pickAndAdd(user: ReturnType<typeof userEvent.setup>, type: "Role" | "Group", label: string) {
   if (type === "Group") {

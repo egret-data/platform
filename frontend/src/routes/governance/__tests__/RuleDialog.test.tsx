@@ -1299,8 +1299,7 @@ describe("RuleDialog — live walkthrough fixes (Task 13)", () => {
  * where it is on columns only, warns with the count and asks for the tick.
  */
 describe("RuleDialog — a classification row filter that filters nothing on Trino (D3)", () => {
-  const HINT =
-    "On Trino, a row filter by classification applies only where the classification is on the whole table; on StarRocks, only where it is on a column.";
+  const HINT = "On Trino, a row filter by classification applies only where the classification is on the whole table.";
 
   async function filterRows(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
@@ -1379,25 +1378,21 @@ describe("RuleDialog — a classification row filter that filters nothing on Tri
     );
   });
 
-  test("a preview counting table-only tables warns about StarRocks, and Create waits for the tick", async () => {
+  // D2 (2026-10-25): StarRocks filters a table the classification is on at either level.
+  test("a row filter preview never shows a StarRocks table-only warning, and Create needs no tick for it", async () => {
     const user = userEvent.setup();
+    // An older server may still send the removed count; it is not shown.
     const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: null, starrocksTableOnly: { catalogs: ["wh"], tables: 2 } };
     previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
     renderDialog({ entry: CLASSIFICATION_ENTRY });
     await filterRows(user);
     await user.click(screen.getByRole("button", { name: "Preview" }));
+    await screen.findByText(/Filters rows of/);
 
-    const warning = await screen.findByTestId("starrocks-table-only");
-    expect(warning).toHaveTextContent(
-      "On StarRocks this row filter filters nothing on 2 tables in wh: PII Data is on the table, not on their columns. Trino filters them. Attach PII Data to a column of each table to filter on StarRocks.",
-    );
-    const create = screen.getByRole("button", { name: "Create" });
-    expect(create).toHaveAttribute("aria-disabled", "true");
-    expect(create).toHaveAccessibleDescription(
-      expect.stringContaining("Tick 'Create anyway' to create a row filter that filters nothing on StarRocks on these tables."),
-    );
-    await user.click(screen.getByRole("checkbox", { name: "Create anyway: I understand this row filter filters nothing on StarRocks on these tables" }));
-    expect(create).toHaveAttribute("aria-disabled", "false");
+    expect(screen.queryByTestId("starrocks-table-only")).not.toBeInTheDocument();
+    expect(screen.queryByText(/filters nothing on StarRocks/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
   });
 
   test("without the count there is no warning and no tick", async () => {
