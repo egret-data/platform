@@ -39,6 +39,8 @@ use egret_perm::PermStore;
 // `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`.
 use egret_perm_compile::routes::{confine_rule_selector, confine_to_overlay_workspace};
 
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
 #[path = "support/pausing.rs"]
 mod pausing;
 use egret_perm_compile::{perm_router, PermHttpError, PermState};
@@ -5009,6 +5011,72 @@ async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
 // ---------------------------------------------------------------------------
 // compile (the manual repair trigger)
 // ---------------------------------------------------------------------------
+
+/// D2 (U4): a whole-table classification on a table the catalog does not have
+/// compiles its deny and no masks, and `POST /perm/compile`'s `skipped` list
+/// says so, naming the table, while the call succeeds.
+#[tokio::test]
+async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire() {
+    let Some(f) = setup().await else { return };
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("warehouse");
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    lakekeeper_stub::link_warehouse(&f.db, warehouse_id).await;
+    let tag = assign_tag(&f, f.catalog_id, "sales", "ghost", "").await;
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&tag.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], '{}')",
+    )
+    .bind(tag_id)
+    .bind(unique("d2-role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                &format!("/perm/compile/{}", f.service_id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    lift_gate(&f, tag_id).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let skips: Vec<&Value> = body["skipped"]
+        .as_array()
+        .expect("skipped")
+        .iter()
+        .filter(|s| s["id"] == json!(tag_id.to_string()))
+        .collect();
+    assert_eq!(skips.len(), 1, "body: {body}");
+    assert_eq!(skips[0]["source_kind"], "clearance", "body: {body}");
+    let reason = skips[0]["reason"].as_str().expect("reason");
+    assert!(
+        reason.contains(&format!("{catalog}.sales.ghost")),
+        "{reason}"
+    );
+    assert!(reason.contains("not protected"), "{reason}");
+}
 
 /// `POST /compile/{service_id}` brings a profile back in line with the model
 /// after something outside the model made it drift. Proven by deleting the

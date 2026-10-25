@@ -154,7 +154,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 use uuid::Uuid;
 
-use egret_perm::{engine_accesses, Action, CompileError, EngineType};
+use egret_perm::{engine_accesses, Action, CompileError, EngineType, TableCount};
 use egret_policy::admin::{
     access_to_ranger_json, tag_access_to_ranger_json, AccessItemInput, AccessPolicyInput,
     ResourceLevel,
@@ -205,6 +205,9 @@ pub(crate) struct Clearances {
     /// once the whole desired set is known — the fold reads the profile's other
     /// masks, which this function cannot see. Empty on Trino.
     pub(crate) masks: Vec<PendingMask>,
+    /// StarRocks only (D2): the largest tables classified as a whole, for the
+    /// profile ceiling's refusal to name (each costs a mask per column).
+    pub(crate) whole_tables: Vec<TableCount>,
 }
 
 /// Compile every gated tag into a clearance deny for one profile.
@@ -247,6 +250,7 @@ pub(crate) async fn compile_clearance(
         policies: Vec::new(),
         skipped: Vec::new(),
         masks: Vec::new(),
+        whole_tables: Vec::new(),
     };
     if gates.is_empty() {
         return Ok(out);
@@ -438,12 +442,30 @@ async fn compile_starrocks_gates(
     };
 
     let mut mv_cleared = Vec::new();
+    let mut whole_tables: BTreeMap<String, usize> = BTreeMap::new();
     for g in gates {
-        let count: usize = g
-            .targets
-            .iter()
-            .map(|t| if t.table_level { 1 } else { t.columns.len() })
-            .sum();
+        // C9: a whole-table attachment costs its `*` deny and one mask per
+        // known column; a column-level one its per-column denies (column
+        // masks stay uncounted per tag, as before D2).
+        let mut per_column_denies = 0;
+        let mut tables: Vec<TableCount> = Vec::new();
+        for t in &g.targets {
+            if t.table_level {
+                let (schema, table, columns) = match catalog_of(t) {
+                    Some(c) => (c.schema.as_str(), c.table.as_str(), c.columns.len()),
+                    None => (t.schema.as_str(), t.table.as_str(), 0),
+                };
+                let name = format!("{}.{schema}.{table}", t.catalog);
+                whole_tables.insert(name.clone(), columns);
+                tables.push(TableCount {
+                    table: name,
+                    columns,
+                });
+            } else {
+                per_column_denies += t.columns.len();
+            }
+        }
+        let count = per_column_denies + tables.iter().map(|t| 1 + t.columns).sum::<usize>();
         // **Refuse, never truncate.** A truncated clearance withholds SOME of
         // the columns it claims to, and the ones silently dropped are readable
         // by exactly the people the classification exists to keep out. The
@@ -455,6 +477,8 @@ async fn compile_starrocks_gates(
                 tag: g.gate.tag_name.clone(),
                 count,
                 ceiling: DEFAULT_EXPANSION_CEILING,
+                tables: largest(tables),
+                per_column_denies,
             });
         }
         for t in &g.targets {
@@ -481,10 +505,25 @@ async fn compile_starrocks_gates(
                     accesses,
                     g.cleared.clone(),
                 ));
-                if let Some(cat) = catalog {
-                    for c in &cat.columns {
-                        columns.push((TaggedColumn::new(&t.catalog, schema, table, c)?, true));
+                match catalog {
+                    Some(cat) => {
+                        for c in &cat.columns {
+                            columns.push((TaggedColumn::new(&t.catalog, schema, table, c)?, true));
+                        }
                     }
+                    // U4: the deny needs no column list and is compiled; the
+                    // masks do. The live spike measured that the deny alone
+                    // lets a view read real values, so the skip says so.
+                    None => out.skipped.push(skip(
+                        g.gate,
+                        format!(
+                            "{}.{schema}.{table} is not a table in the catalog (unknown, a view, \
+                             or not yet created): its whole-table select deny is compiled, its \
+                             NULL masks are not, so a view over it is not protected until the \
+                             table exists",
+                            t.catalog
+                        ),
+                    )),
                 }
             } else {
                 for (col, _) in &columns {
@@ -515,7 +554,24 @@ async fn compile_starrocks_gates(
             mv_cleared.push(g.cleared.clone());
         }
     }
+    out.whole_tables = largest(
+        whole_tables
+            .into_iter()
+            .map(|(table, columns)| TableCount { table, columns })
+            .collect(),
+    );
     Ok(mv_cleared)
+}
+
+/// The five tables with the most columns, most first, for a ceiling refusal.
+fn largest(mut tables: Vec<TableCount>) -> Vec<TableCount> {
+    tables.sort_by(|a, b| {
+        b.columns
+            .cmp(&a.columns)
+            .then_with(|| a.table.cmp(&b.table))
+    });
+    tables.truncate(5);
+    tables
 }
 
 /// The `column` value of a whole-table clearance deny (U1): every column of

@@ -456,3 +456,17 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   compiled, so it is renamed `…_filters_rows` here and asserts the filtered decision and the "sees rows where" line.
   Its preview `starrocksTableOnly` assertion stays, and `row_filter_not_applied` (which still, wrongly, lists the
   StarRocks rule) is no longer asserted: both go in Task 11, which completes the inversion.
+
+### Task 6
+
+- `ClearanceExpansionCeiling` gained `tables: Vec<TableCount>` (the five largest whole-table tables) and
+  `per_column_denies`; with no whole-table table its message is unchanged. `ProfileExpansionCeiling` gained
+  `largest: Vec<TableCount>` (the profile's five largest whole-table tables, from the clearance compile), appended to
+  its message. `TableCount { table, columns }` lives in `egret_perm`.
+- The U4 skip reason names `catalog.schema.table` and says a view over it is not protected until the table exists
+  (the live spike measured that the deny alone lets a view read real values).
+- The wire test drives `POST /perm/compile/{id}` (same `CompileResponse.skipped`) rather than a rule write:
+  `routes.rs::compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire`. Written after the fix; its
+  assertion was mutation-checked instead (dropping the skip fails it).
+- A compile that reaches a whole-table attachment queries `lakekeeper.*`; a database without that schema (some test
+  databases) fails such a compile. Production always has it (embedded catalog). Tests that need it install the stub.

@@ -121,6 +121,63 @@ pub fn modelled_ranger_plugins_sentence() -> String {
 /// express *correctly* — every variant here exists because a silent
 /// alternative would compile a policy that grants something other than what
 /// the model states, with nothing anywhere to show it.
+/// One whole-table classified table in a ceiling refusal: its
+/// `catalog.schema.table` and how many columns it has (each one a StarRocks
+/// NULL mask).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCount {
+    pub table: String,
+    pub columns: usize,
+}
+
+fn clearance_ceiling_message(
+    tag: &str,
+    count: usize,
+    ceiling: usize,
+    tables: &[TableCount],
+    per_column_denies: usize,
+) -> String {
+    if tables.is_empty() {
+        return format!(
+            "compiling the clearance on tag {tag:?} would expand to {count} per-column denies, \
+             over the ceiling of {ceiling}"
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for (i, t) in tables.iter().enumerate() {
+        parts.push(if i == 0 {
+            format!("{} (1 deny + {} column masks)", t.table, t.columns)
+        } else {
+            format!("{} (1 + {})", t.table, t.columns)
+        });
+    }
+    let rest = if per_column_denies > 0 {
+        format!(", and {per_column_denies} per-column denies")
+    } else {
+        String::new()
+    };
+    format!(
+        "compiling the clearance on tag {tag:?} would expand to {count} policies on StarRocks, \
+         over the ceiling of {ceiling}: whole-table on {}{rest}. Attach {tag} to fewer tables, \
+         or to columns",
+        parts.join(", ")
+    )
+}
+
+fn largest_tables_clause(largest: &[TableCount]) -> String {
+    if largest.is_empty() {
+        return String::new();
+    }
+    let tables: Vec<String> = largest
+        .iter()
+        .map(|t| format!("{} ({} columns)", t.table, t.columns))
+        .collect();
+    format!(
+        "; the largest tables classified as a whole, each a NULL mask per column on StarRocks: {}",
+        tables.join(", ")
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
     /// `UnsupportedAction` is unreachable today — SP4a ships exactly `read`
@@ -151,14 +208,18 @@ pub enum CompileError {
     /// "compiling rule X" would go looking through the rule list for something
     /// that is not there. The clearance's input is
     /// `classification_policies.tag_id`, and that is what this names.
-    #[error(
-        "compiling the clearance on tag {tag:?} would expand to {count} per-column denies, over \
-         the ceiling of {ceiling}"
-    )]
+    ///
+    /// D2 (2026-10-25): a whole-table attachment counts 1 deny plus one mask
+    /// per column of the table, and `tables` names the largest such tables
+    /// (at most five) with their column counts; `per_column_denies` is the
+    /// rest of `count`.
+    #[error("{}", clearance_ceiling_message(tag, *count, *ceiling, tables, *per_column_denies))]
     ClearanceExpansionCeiling {
         tag: String,
         count: usize,
         ceiling: usize,
+        tables: Vec<TableCount>,
+        per_column_denies: usize,
     },
     /// The StarRocks clearance MASK (view governance A2) for `column` cannot
     /// be folded for the cleared user `user`: `egret-ranger-eval` is
@@ -183,14 +244,20 @@ pub enum CompileError {
     /// chasing "which rule is over its cap" when every rule sits under its
     /// own cap and the profile's SUM is what is over would find nothing —
     /// this refusal has to point at the profile itself.
+    ///
+    /// `largest` (D2): the largest whole-table classified tables of the
+    /// profile (at most five) with their column counts, each of which costs
+    /// one NULL mask per column on StarRocks.
     #[error(
         "recompiling profile {profile:?} would total {total} compiler-owned policies, over the \
-         profile-total ceiling of {ceiling}"
+         profile-total ceiling of {ceiling}{}",
+        largest_tables_clause(largest)
     )]
     ProfileExpansionCeiling {
         profile: String,
         total: usize,
         ceiling: usize,
+        largest: Vec<TableCount>,
     },
     /// **The compiled set would be served with two mask (or two row-filter)
     /// policies that arbitrate the same request and arbitrate it differently**

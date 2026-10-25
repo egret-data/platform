@@ -2061,3 +2061,141 @@ async fn a_tag_row_filter_filters_every_table_the_classification_is_on() {
         }
     }
 }
+
+// ── D2 Task 6: unknown table report and ceiling messages (U3, U4, C9) ──
+
+/// `n` synthetic column names `c1..cn`.
+fn many_columns(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("c{i}")).collect()
+}
+
+/// U4: a whole-table classification on a table the catalog does not have
+/// keeps its `*` deny (it needs no column list), compiles no mask, and the
+/// compile result says so, naming the table and that a view over it is not
+/// protected.
+#[tokio::test]
+async fn an_unknown_table_keeps_its_deny_and_reports_the_missing_masks() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "ghost").await;
+    cleared_pair(&db, tag_id).await;
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("an unknown table must not refuse the compile");
+
+    let denies: Vec<String> = clearance_policies(&db, f.service_id, tag_id)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(
+        denies,
+        vec![format!(
+            "{COMPILER_CLEARANCE_PREFIX}{tag_id}-{}.sales.ghost.*",
+            f.catalog_name
+        )]
+    );
+    assert!(clearance_masks(&db, f.service_id, tag_id).await.is_empty());
+    let skips: Vec<&egret_perm_compile::SkippedItem> =
+        summary.skipped.iter().filter(|s| s.id == tag_id).collect();
+    assert_eq!(skips.len(), 1, "{:?}", summary.skipped);
+    assert_eq!(
+        skips[0].source_kind,
+        egret_perm_compile::SourceKind::Clearance
+    );
+    let reason = &skips[0].reason;
+    assert!(
+        reason.contains(&format!("{}.sales.ghost", f.catalog_name)),
+        "{reason}"
+    );
+    assert!(reason.contains("view"), "{reason}");
+}
+
+/// U3/C9: a whole-table clearance counts 1 deny + one mask per column of the
+/// table. 1 + 520 is over the per-clearance ceiling of 500 and is refused,
+/// naming the table and its column count; 1 + 400 is accepted.
+#[tokio::test]
+async fn a_wide_table_level_clearance_is_refused_with_its_tables() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let wide = many_columns(520);
+    let wide: Vec<&str> = wide.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "wide", &wide).await;
+    let ok = many_columns(400);
+    let ok: Vec<&str> = ok.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "narrow", &ok).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "wide").await;
+    cleared_pair(&db, tag_id).await;
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("1 + 520 is over the ceiling");
+    match &err {
+        egret_perm::CompileError::ClearanceExpansionCeiling { count, tables, .. } => {
+            assert_eq!(*count, 521);
+            assert_eq!(tables.len(), 1, "{tables:?}");
+            assert_eq!(tables[0].columns, 520);
+        }
+        other => panic!("{other:?}"),
+    }
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("{}.sales.wide", f.catalog_name)),
+        "{message}"
+    );
+    assert!(message.contains("520"), "{message}");
+
+    sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = $1")
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .expect("untag");
+    tag_table(&db, tag_id, f.warehouse_id, "narrow").await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("1 + 400 is under the ceiling");
+    assert_eq!(clearance_masks(&db, f.service_id, tag_id).await.len(), 400);
+}
+
+/// U3: a profile that grows over its total ceiling through whole-table masks
+/// is refused with a message naming the largest whole-table tables.
+#[tokio::test]
+async fn the_profile_ceiling_names_the_largest_tables() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let cols = many_columns(400);
+    let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
+    for (i, table) in ["big_a", "big_b", "big_c"].iter().enumerate() {
+        lakekeeper_stub::add_table(&db, lk, &["sales"], table, &cols).await;
+        let (tag_id, _) = new_tag(&db).await;
+        tag_table(&db, tag_id, f.warehouse_id, table).await;
+        let role = unique(&format!("d2-profile-{i}"));
+        new_role(&db, &role).await;
+        gate(&db, tag_id, &[&role]).await;
+    }
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("3 × (1 + 400) + the MV deny is over 1000");
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::ProfileExpansionCeiling { .. }
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    for table in ["big_a", "big_b", "big_c"] {
+        assert!(
+            message.contains(&format!("{}.sales.{table}", f.catalog_name)),
+            "{message}"
+        );
+    }
+    assert!(message.contains("400"), "{message}");
+}

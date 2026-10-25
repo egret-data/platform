@@ -577,6 +577,7 @@ async fn compile_desired(
     )
     .await?;
     skipped.extend(clearances.skipped);
+    let whole_tables = clearances.whole_tables;
     for (name, body) in clearances.policies {
         let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
         desired.insert(
@@ -677,6 +678,7 @@ async fn compile_desired(
         skipped,
         sweep,
         profile_name: svc.name,
+        largest: whole_tables,
     }))
 }
 
@@ -780,6 +782,8 @@ struct Compiled {
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
     profile_name: String,
+    /// The largest whole-table classified tables (D2), for the same refusal.
+    largest: Vec<egret_perm::TableCount>,
 }
 
 /// Fold one priority-1 clearance mask per classified column into `desired`
@@ -1077,6 +1081,7 @@ async fn apply_diff_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     profile_service_id: i64,
     profile_name: &str,
+    largest: &[egret_perm::TableCount],
     sweep: &[i64],
     desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
@@ -1167,6 +1172,7 @@ async fn apply_diff_in_tx(
             profile: profile_name.to_string(),
             total: new_total,
             ceiling: PROFILE_EXPANSION_CEILING,
+            largest: largest.to_vec(),
         });
     }
 
@@ -1461,6 +1467,7 @@ async fn recompile_locked_service_in_tx(
         tx,
         service_id,
         &compiled.profile_name,
+        &compiled.largest,
         &compiled.sweep,
         compiled.desired,
         compiled.skipped,
