@@ -89,6 +89,9 @@ describe("AppViewPage", () => {
     );
     renderPage();
     expect(await screen.findByText("Nobody has published this app yet")).toBeTruthy();
+    // Our own sentence under the title, not the server's lower-case detail (KI-184).
+    expect(screen.queryByText(/publish it first/)).toBeNull();
+    expect(screen.getByText(/Ask the author to publish one/)).toBeTruthy();
   });
 
   it("shows the generic trashed-app message for any other 409", async () => {

@@ -100,7 +100,8 @@ function serve(live: unknown[], trashed: unknown[] = []) {
 
 const rowOf = (name: string) => screen.getByText(name).closest("tr")!;
 async function openMenu(name: string) {
-  await userEvent.click(within(rowOf(name)).getByRole("button", { name: "Actions" }));
+  // By the row's own name (KI-182): the triggers are icons, so the name is all that tells them apart.
+  await userEvent.click(within(rowOf(name)).getByRole("button", { name: `Actions for ${name}` }));
 }
 const menuItems = () => screen.getAllByRole("menuitem").map((el) => el.textContent);
 
@@ -203,6 +204,15 @@ describe("Apps list — where the name leads", () => {
 });
 
 describe("Apps list — row menu", () => {
+  it("names each row's menu after its app, so the triggers are told apart (KI-182)", () => {
+    serve([app({ id: "a1", name: "Revenue explorer" }), app({ id: "a2", name: "Shipping modes" })]);
+    renderApps();
+    const names = screen
+      .getAllByRole("button", { name: /^Actions/ })
+      .map((b) => b.getAttribute("aria-label"));
+    expect(names).toEqual(["Actions for Revenue explorer", "Actions for Shipping modes"]);
+  });
+
   it("has no per-row Open / Edit buttons any more: they live in the menu", async () => {
     serve([app({ id: "a9", name: "Draft app" })]);
     renderApps();
@@ -432,7 +442,7 @@ describe("Apps list — trash view", () => {
     renderApps();
     await userEvent.click(screen.getByRole("button", { name: "Trash" }));
 
-    expect(within(rowOf("Can do nothing")).queryByRole("button", { name: "Actions" })).toBeNull();
+    expect(within(rowOf("Can do nothing")).queryByRole("button", { name: /^Actions/ })).toBeNull();
 
     await openMenu("Can restore");
     expect(menuItems()).toEqual(["Restore"]);
