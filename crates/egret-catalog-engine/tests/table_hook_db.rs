@@ -65,7 +65,14 @@ struct Env {
     /// The StarRocks profile bound to the catalog.
     profile_id: i64,
     on_commit: OnCommit,
+    on_reach: OnReach,
 }
+
+/// What the profile looked like when a request reached lakekeeper: armed with
+/// `(METHOD /path, profile id, None)`, [`observe`] fills in its policies and
+/// its last compile.
+type Reached = (Value, Option<(String, chrono::DateTime<chrono::Utc>)>);
+type OnReach = Arc<Mutex<Option<(String, i64, Option<Reached>)>>>;
 
 /// A database write [`observe`] runs once lakekeeper has answered a matching
 /// request 2xx, before the hook sees the answer: `(METHOD /path, SQL, tag)`.
@@ -74,11 +81,38 @@ type OnCommit = Arc<Mutex<Option<(String, &'static str, Uuid)>>>;
 /// Runs the armed [`OnCommit`] write after lakekeeper commits — a change the
 /// hook's pre-commit work cannot have seen.
 async fn observe(
-    State((on_commit, db)): State<(OnCommit, Db)>,
+    State((on_commit, on_reach, db)): State<(OnCommit, OnReach, Db)>,
     req: Request,
     next: Next,
 ) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
+    let probe = on_reach
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(w, _, seen)| *w == what && seen.is_none())
+        .map(|(_, profile, _)| *profile);
+    if let Some(profile) = probe {
+        let policies: Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(name, policy_jsonb) ORDER BY name), \
+                    '[]'::jsonb) \
+               FROM policy.authz_policies WHERE service_id = $1",
+        )
+        .bind(profile)
+        .fetch_one(&db.pool)
+        .await
+        .expect("policies at reach");
+        let run: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT outcome, attempted_at FROM perm.compile_runs WHERE service_id = $1",
+        )
+        .bind(profile)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("compile run at reach");
+        if let Some(slot) = on_reach.lock().unwrap().as_mut() {
+            slot.2 = Some((policies, run));
+        }
+    }
     let response = next.run(req).await;
     if response.status().is_success() {
         let armed = {
@@ -178,8 +212,9 @@ async fn env() -> Option<Env> {
 
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let on_commit: OnCommit = Arc::default();
+    let on_reach: OnReach = Arc::default();
     let inner = catalog_engine_router(state.clone()).layer(axum::middleware::from_fn_with_state(
-        (on_commit.clone(), db.clone()),
+        (on_commit.clone(), on_reach.clone(), db.clone()),
         observe,
     ));
     let hook = Arc::new(TableHook::new(db.clone()));
@@ -194,6 +229,7 @@ async fn env() -> Option<Env> {
         catalog,
         profile_id: profile.id,
         on_commit,
+        on_reach,
     };
     let (status, body) = env
         .call_raw("POST", "namespaces", Some(json!({"namespace": ["sales"]})))
@@ -648,4 +684,129 @@ async fn a_failed_recompile_still_returns_the_commit_and_is_recorded() {
             .await
             .expect("error");
     assert!(error.contains("ceiling"), "{error}");
+}
+
+// ── D2 Task 8: the pre-commit dry run (C11, U5) ──
+
+/// `n` fields `(1, "c1") .. (n, "cn")`.
+fn fields(n: i64) -> Vec<(i64, String)> {
+    (1..=n).map(|i| (i, format!("c{i}"))).collect()
+}
+
+fn refs(f: &[(i64, String)]) -> Vec<(i64, &str)> {
+    f.iter().map(|(i, n)| (*i, n.as_str())).collect()
+}
+
+/// U5: a column add that would push a whole-table clearance over its ceiling
+/// is refused BEFORE the commit with a 409 naming the table and the counts,
+/// and the table keeps its schema; the profile is not wedged.
+#[tokio::test]
+async fn a_column_add_that_would_cross_the_ceiling_is_refused_before_commit() {
+    let Some(env) = env().await else { return };
+    // 1 deny + 498 masks = 499, one under the per-clearance ceiling of 500.
+    let f = fields(498);
+    env.create_table("wide", &refs(&f)).await;
+    let tag = env.classify_table("wide").await;
+    assert_eq!(env.masked_columns(tag, "wide").await.len(), 498);
+
+    let grown = fields(500);
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/wide",
+            Some(schema_commit(schema(1, &refs(&grown)))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with("egret refused the table change: "),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{}.sales.wide", env.catalog)),
+        "{message}"
+    );
+    assert!(message.contains("501"), "{message}");
+    assert_eq!(env.loaded("wide").await.len(), 498, "nothing committed");
+    assert_eq!(env.masked_columns(tag, "wide").await.len(), 498);
+}
+
+impl Env {
+    /// Every policy the profile holds, as `[name, body]` pairs by name.
+    async fn policies(&self) -> Value {
+        sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(name, policy_jsonb) ORDER BY name), \
+                    '[]'::jsonb) \
+               FROM policy.authz_policies WHERE service_id = $1",
+        )
+        .bind(self.profile_id)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("policies")
+    }
+}
+
+/// A column add within the ceiling commits, and the dry run before it wrote
+/// nothing: when the request reaches lakekeeper ([`observe`] records the
+/// profile's state then), the profile's policies and its last compile are as
+/// they were; after the response the new column is masked.
+#[tokio::test]
+async fn a_column_add_within_the_ceiling_commits() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let tag = env.classify_table("orders").await;
+    let before = (env.policies().await, env.last_compile().await);
+    *env.on_reach.lock().unwrap() = Some((
+        format!("POST /{}/namespaces/sales/tables/orders", env.prefix),
+        env.profile_id,
+        None,
+    ));
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/orders",
+            Some(schema_commit(schema(
+                1,
+                &[(1, "id"), (2, "email"), (3, "phone")],
+            ))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let at_reach = env
+        .on_reach
+        .lock()
+        .unwrap()
+        .take()
+        .and_then(|(_, _, seen)| seen)
+        .expect("the observer saw the request reach lakekeeper");
+    assert_eq!(at_reach, before, "the dry run left nothing behind");
+    assert_eq!(
+        env.masked_columns(tag, "orders").await,
+        vec!["email", "id", "phone"]
+    );
+}
+
+/// A rename is dry-run with the source's columns under the destination name;
+/// within the ceiling it commits.
+#[tokio::test]
+async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let tag = env.classify_table("orders").await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "orders_v2"},
+            })),
+        )
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    // The classification stays on the old name (spec §11.1): its masks go.
+    assert!(env.masked_columns(tag, "orders").await.is_empty());
+    assert!(env.has_table_deny(tag, "orders").await);
 }

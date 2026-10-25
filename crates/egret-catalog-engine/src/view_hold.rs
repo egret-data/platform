@@ -861,7 +861,7 @@ async fn bump_and_recompile(
 /// carries the database error as text only (`egret_perm`), so this reads the
 /// message Postgres gives SQLSTATE 55P03 ("canceling statement due to lock
 /// timeout"), as sqlx renders it.
-fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
+pub(crate) fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
     matches!(e, egret_perm::CompileError::Db(m) if m.contains("lock timeout"))
 }
 

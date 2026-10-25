@@ -37,8 +37,19 @@
 //!    attachment of a classification with a role-bearing clearance
 //!    ([`egret_perm_compile::affected_starrocks_profiles_for_tables`]). None:
 //!    pass.
-//! 2. Forward to lakekeeper. A non-2xx answer is returned as it is.
-//! 3. After a 2xx, recompile each affected profile in its own transaction,
+//! 2. A schema-GROWING request (a create, a rename, an update or multi-table
+//!    commit that sets a new current schema) is dry-run first (C11, user
+//!    decision U5): the real recompile of the affected profiles, in a
+//!    transaction that is rolled back, with the columns the commit would
+//!    leave overlaid on the column source
+//!    ([`egret_perm_compile::table_columns::PENDING_COLUMNS_SETTING`]). If that
+//!    compile is refused (a ceiling, an undecidable mask fold, a new tie), the
+//!    request is refused with a 409 naming the reason, and nothing commits: a
+//!    profile is never wedged by a schema change. A register is not dry-run
+//!    (its schema is in a metadata file the request only points to), nor is a
+//!    drop, which only shrinks.
+//! 3. Forward to lakekeeper. A non-2xx answer is returned as it is.
+//! 4. After a 2xx, recompile each affected profile in its own transaction,
 //!    bounded by `lock_timeout`, before the response is returned. The
 //!    Iceberg commit has happened and cannot be refused any more (C10): a
 //!    failure is logged and recorded in `perm.compile_runs` (the Governance
@@ -62,7 +73,15 @@ use egret_metastore::Db;
 use serde_json::Value;
 use tracing::Instrument as _;
 
-use crate::view_hold::{decode_segment, is_multi_level, rename_of, resolve};
+use egret_perm_compile::table_columns::{
+    current_columns_via, stored_schema_columns_via, top_level_columns, PendingColumns,
+    PENDING_COLUMNS_SETTING,
+};
+use uuid::Uuid;
+
+use crate::view_hold::{
+    compile_is_lock_timeout, decode_segment, is_multi_level, rename_of, resolve,
+};
 
 /// Largest table request body the hook reads.
 const MAX_BODY: usize = 16 << 20;
@@ -219,6 +238,59 @@ fn tables_of(target: &Target, body: &Value) -> Vec<(String, Option<String>)> {
     }
 }
 
+/// The top-level columns a table commit's `updates` leave current, replayed
+/// as the table builder applies them: `set-current-schema -1` is the schema
+/// added last before it, an explicit id an added schema of that id or else a
+/// stored one. `None` when the commit leaves the current schema alone, or
+/// names one that does not exist (lakekeeper refuses that).
+async fn new_current_columns(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    ns: &str,
+    table: &str,
+    updates: Option<&Value>,
+) -> Result<Option<Vec<String>>, String> {
+    let mut added: Vec<&Value> = Vec::new();
+    let mut current: Option<i64> = None;
+    let mut current_is_last_added: Option<usize> = None;
+    for u in updates.and_then(Value::as_array).into_iter().flatten() {
+        match u.get("action").and_then(Value::as_str) {
+            Some("add-schema") => {
+                if let Some(schema) = u.get("schema") {
+                    added.push(schema);
+                }
+            }
+            Some("set-current-schema") => match u.get("schema-id").and_then(Value::as_i64) {
+                Some(-1) => {
+                    current = None;
+                    current_is_last_added = added.len().checked_sub(1);
+                }
+                Some(id) => {
+                    current = Some(id);
+                    current_is_last_added = None;
+                }
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    if let Some(i) = current_is_last_added {
+        return Ok(Some(top_level_columns(added[i])));
+    }
+    let Some(id) = current else {
+        return Ok(None);
+    };
+    if let Some(schema) = added
+        .iter()
+        .find(|s| s.get("schema-id").and_then(Value::as_i64) == Some(id))
+    {
+        return Ok(Some(top_level_columns(schema)));
+    }
+    stored_schema_columns_via(conn, warehouse_id, ns, table, id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// A refusal before the commit. Every one is the Iceberg `409`.
 struct Refusal(String);
 
@@ -243,20 +315,134 @@ impl TableHook {
         &self,
         prefix: &str,
         tables: &[(String, Option<String>)],
-    ) -> Result<Vec<i64>, String> {
+    ) -> Result<Option<(Uuid, Vec<i64>)>, String> {
         let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
         let Some((warehouse_id, _catalog)) = resolve(&mut conn, prefix)
             .await
             .map_err(|e| e.to_string())?
         else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        egret_perm_compile::affected_starrocks_profiles_for_tables(&mut conn, warehouse_id, tables)
-            .await
-            .map_err(|e| e.to_string())
+        let profiles = egret_perm_compile::affected_starrocks_profiles_for_tables(
+            &mut conn,
+            warehouse_id,
+            tables,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(Some((warehouse_id, profiles)))
     }
 
-    /// Recompile each profile in its own transaction (module doc, step 3). A
+    /// The columns a schema-growing request would leave each table with
+    /// (module doc, step 2); empty for every other request.
+    async fn pending(
+        &self,
+        warehouse_id: Uuid,
+        target: &Target,
+        body: &Value,
+    ) -> Result<Vec<PendingColumns>, String> {
+        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
+        let entry = |ns: &str, table: &str, columns: Option<Vec<String>>| PendingColumns {
+            warehouse_id,
+            schema: ns.to_string(),
+            table: table.to_string(),
+            columns,
+        };
+        let mut out = Vec::new();
+        match target {
+            Target::Create { ns } => {
+                // A staged create is judged at its committing update.
+                if body.get("stage-create").and_then(Value::as_bool) != Some(true) {
+                    if let (Some(name), Some(schema)) =
+                        (body.get("name").and_then(Value::as_str), body.get("schema"))
+                    {
+                        out.push(entry(ns, name, Some(top_level_columns(schema))));
+                    }
+                }
+            }
+            Target::Update { ns, table } => {
+                if let Some(cols) =
+                    new_current_columns(&mut conn, warehouse_id, ns, table, body.get("updates"))
+                        .await?
+                {
+                    out.push(entry(ns, table, Some(cols)));
+                }
+            }
+            Target::Transaction => {
+                for change in body
+                    .get("table-changes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some((ns, table)) = change.get("identifier").and_then(identifier) else {
+                        continue;
+                    };
+                    if let Some(cols) = new_current_columns(
+                        &mut conn,
+                        warehouse_id,
+                        &ns,
+                        &table,
+                        change.get("updates"),
+                    )
+                    .await?
+                    {
+                        out.push(entry(&ns, &table, Some(cols)));
+                    }
+                }
+            }
+            Target::Rename => {
+                if let Some(((src_ns, src), (dst_ns, dst))) = rename_of(body) {
+                    let current = current_columns_via(&mut conn, warehouse_id, &src_ns, &src)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if let Some(c) = current {
+                        out.push(entry(&dst_ns, &dst, Some(c.columns)));
+                        out.push(entry(&src_ns, &src, None));
+                    }
+                }
+            }
+            Target::Register { .. } | Target::Drop { .. } | Target::DropNamespace { .. } => {}
+        }
+        out.retain(|p| !is_multi_level(&p.schema));
+        Ok(out)
+    }
+
+    /// Recompile `profiles` in one transaction with `pending` overlaid, and
+    /// roll it back (module doc, step 2).
+    async fn dry_run(&self, profiles: &[i64], pending: &[PendingColumns]) -> Result<(), Refusal> {
+        let internal = |e: &dyn std::fmt::Display| {
+            Refusal(format!(
+                "egret could not dry-run the recompile the change causes ({e}); retry"
+            ))
+        };
+        let overlay = serde_json::to_string(pending).map_err(|e| internal(&e))?;
+        let mut tx = self.db.pool.begin().await.map_err(|e| internal(&e))?;
+        sqlx::query("SELECT set_config($1, $2, true), set_config('lock_timeout', $3, true)")
+            .bind(PENDING_COLUMNS_SETTING)
+            .bind(overlay)
+            .bind(format!("{}ms", self.lock_wait.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| internal(&e))?;
+        for &service_id in profiles {
+            if let Err(e) = egret_perm_compile::recompile_service_in_tx(&mut tx, service_id).await {
+                return Err(if compile_is_lock_timeout(&e) {
+                    Refusal(
+                        "egret could not dry-run the recompile in time, because other permission \
+                         changes were being written; retry"
+                            .to_string(),
+                    )
+                } else {
+                    Refusal(e.to_string())
+                });
+            }
+        }
+        tx.rollback().await.map_err(|e| internal(&e))?;
+        Ok(())
+    }
+
+    /// Recompile each profile in its own transaction (module doc, step 4). A
     /// failure is logged and recorded, never returned.
     async fn recompile(&self, profiles: &[i64]) {
         for &service_id in profiles {
@@ -305,7 +491,7 @@ pub async fn hook_table_commits(
     let Some((prefix, target)) = classify(req.method(), req.uri().path()) else {
         return next.run(req).await;
     };
-    let (req, tables) = if req.method() == Method::POST {
+    let (req, body) = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
             Ok(b) => b,
@@ -314,14 +500,12 @@ pub async fn hook_table_commits(
             }
         };
         // Not JSON: lakekeeper refuses it, and nothing changes.
-        let tables = serde_json::from_slice::<Value>(&bytes)
-            .map(|json| tables_of(&target, &json))
-            .unwrap_or_default();
-        (Request::from_parts(parts, Body::from(bytes)), tables)
+        let json = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        (Request::from_parts(parts, Body::from(bytes)), json)
     } else {
-        let tables = tables_of(&target, &Value::Null);
-        (req, tables)
+        (req, Value::Null)
     };
+    let tables = tables_of(&target, &body);
     // The Ranger resource has one schema level: a multi-level namespace is
     // never addressed by a compiled policy.
     let tables: Vec<(String, Option<String>)> = tables
@@ -331,17 +515,25 @@ pub async fn hook_table_commits(
     if tables.is_empty() {
         return next.run(req).await;
     }
-    let profiles = match hook.affected(&prefix, &tables).await {
-        Ok(p) => p,
-        Err(e) => {
-            return Refusal(format!(
-                "egret could not check which classifications the table carries ({e}); retry"
-            ))
-            .into_response()
-        }
+    let refuse_check = |e: String| {
+        Refusal(format!(
+            "egret could not check which classifications the table carries ({e}); retry"
+        ))
+        .into_response()
     };
-    if profiles.is_empty() {
-        return next.run(req).await;
+    let (warehouse_id, profiles) = match hook.affected(&prefix, &tables).await {
+        Ok(Some((w, p))) if !p.is_empty() => (w, p),
+        Ok(_) => return next.run(req).await,
+        Err(e) => return refuse_check(e),
+    };
+    let pending = match hook.pending(warehouse_id, &target, &body).await {
+        Ok(p) => p,
+        Err(e) => return refuse_check(e),
+    };
+    if !pending.is_empty() {
+        if let Err(refusal) = hook.dry_run(&profiles, &pending).await {
+            return refusal.into_response();
+        }
     }
     // Uncancellable: a commit lakekeeper made is recompiled even when the
     // client has gone (as the view hold's after-commit steps).

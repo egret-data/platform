@@ -175,3 +175,70 @@ async fn the_batch_answers_in_order_and_per_warehouse() {
         ]
     );
 }
+
+/// C11: the pending columns a table-commit dry run overlays
+/// (`egret.pending_table_columns`, set `LOCAL`) answer for their table inside
+/// that transaction only; another transaction, and the same connection after
+/// it, read the stored columns.
+#[tokio::test]
+async fn the_overlay_is_invisible_outside_the_dry_run() {
+    let Some(db) = test_db().await else { return };
+    let (wh, lk) = warehouse(&db).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id"]).await;
+    let overlay = serde_json::json!([
+        {"warehouse_id": wh, "schema": "sales", "table": "Orders", "columns": ["id", "phone"]},
+        {"warehouse_id": wh, "schema": "sales", "table": "staged", "columns": ["x"]},
+        {"warehouse_id": wh, "schema": "sales", "table": "gone", "columns": null},
+    ]);
+
+    use sqlx::Connection as _;
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let mut tx = conn.begin().await.expect("begin");
+    sqlx::query("SELECT set_config('egret.pending_table_columns', $1, true)")
+        .bind(overlay.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("overlay");
+    let inside = current_columns_via(&mut tx, wh, "SALES", "orders")
+        .await
+        .expect("inside");
+    assert_eq!(
+        inside,
+        Some(TableColumns {
+            schema: "sales".into(),
+            table: "Orders".into(),
+            columns: vec!["id".into(), "phone".into()],
+        }),
+        "the overlay answers for its table, in its spelling"
+    );
+    assert_eq!(
+        current_columns_via(&mut tx, wh, "sales", "staged")
+            .await
+            .expect("staged")
+            .map(|c| c.columns),
+        Some(vec!["x".to_string()]),
+        "a table the commit creates"
+    );
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "gone", &["id"]).await;
+    assert_eq!(
+        current_columns_via(&mut tx, wh, "sales", "gone")
+            .await
+            .expect("gone"),
+        None,
+        "a table the commit renames away"
+    );
+    assert_eq!(
+        columns(&db, wh, "sales", "orders").await.map(|c| c.columns),
+        Some(vec!["id".to_string()]),
+        "another transaction reads the stored columns"
+    );
+    tx.rollback().await.expect("rollback");
+    assert_eq!(
+        current_columns_via(&mut conn, wh, "sales", "orders")
+            .await
+            .expect("after")
+            .map(|c| c.columns),
+        Some(vec!["id".to_string()]),
+        "the same connection after the dry run reads the stored columns"
+    );
+}

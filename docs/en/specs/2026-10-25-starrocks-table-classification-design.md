@@ -487,3 +487,19 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   passing it unrecompiled.
 - The red evidence for the DB tests is the same tests run with the layer removed (3 of 5 fail; the "runs no compile"
   test was mutation-checked by widening the affected-profile filter).
+
+### Task 8
+
+- The overlay setting is `table_columns::PENDING_COLUMNS_SETTING` (`egret.pending_table_columns`), a JSON array of
+  `PendingColumns { warehouse_id, schema, table, columns | null }`; an empty string (what a custom setting reads after
+  its transaction ended in the same session) is no overlay.
+- What is dry-run: a create (not a staged create, which is judged at its committing update), an update or a
+  multi-table commit whose `set-current-schema` picks a new schema (`-1` = the schema added last; an explicit id = an
+  added schema of that id, else the STORED schema read by the new `stored_schema_columns_via`), and a rename (the
+  source's current columns under the destination, `null` under the source). A **register is not dry-run**: its schema
+  is in the metadata file the request points to, which the hook does not read; its after-commit recompile still runs.
+  An `add-schema` without a new current schema changes no columns and is not dry-run.
+- All affected profiles are dry-run in ONE rolled-back transaction (`lock_timeout` = the hook's lock wait). A refusal
+  is a 409 `"egret refused the table change: <compile error>"`; a lock timeout is a 409 asking to retry.
+- The red evidence for the ceiling test is the Task 7 hook (HEAD) run against the new test (the commit went through);
+  the "dry run leaves nothing" assertion was mutation-checked by committing the dry run.
