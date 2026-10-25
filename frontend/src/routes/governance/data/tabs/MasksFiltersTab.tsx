@@ -405,7 +405,7 @@ function RuleTable({
                     onClick={() => onEdit(rule)}
                   >
                     <Pencil aria-hidden className="size-4" />
-                    Edit
+                    <span className="max-lg:sr-only">Edit</span>
                   </Button>
                   <Button
                     variant="ghost"
@@ -415,7 +415,7 @@ function RuleTable({
                     onClick={() => onDelete(rule)}
                   >
                     <Trash2 aria-hidden className="size-4" />
-                    Delete
+                    <span className="max-lg:sr-only">Delete</span>
                   </Button>
                 </div>
               </TableCell>

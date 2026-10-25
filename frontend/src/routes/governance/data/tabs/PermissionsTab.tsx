@@ -278,7 +278,7 @@ function GrantTable({
                   <Button variant="ghost" size="sm" className="text-muted-foreground" asChild>
                     <Link to={dataGrantUrl(g.id, back)} aria-label={`Open ${sentence}`}>
                       <ExternalLink aria-hidden className="size-4" />
-                      Open
+                      <span className="max-lg:sr-only">Open</span>
                     </Link>
                   </Button>
                   {canWrite && g.origin.type === "explicit" ? (
@@ -291,7 +291,7 @@ function GrantTable({
                         onClick={() => onEdit(g)}
                       >
                         <Pencil aria-hidden className="size-4" />
-                        Edit
+                        <span className="max-lg:sr-only">Edit</span>
                       </Button>
                       <Button
                         variant="ghost"
@@ -301,7 +301,7 @@ function GrantTable({
                         onClick={() => onDelete(g)}
                       >
                         <Trash2 aria-hidden className="size-4" />
-                        Delete
+                        <span className="max-lg:sr-only">Delete</span>
                       </Button>
                     </>
                   ) : null}

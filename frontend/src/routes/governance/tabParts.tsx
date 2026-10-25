@@ -67,6 +67,8 @@ export const ACTIONS_CELL = "sticky right-0 w-24 bg-background";
 /**
  * {@link ACTIONS_CELL} for actions labelled in words (Open, Edit, Delete;
  * KI-131): as narrow as its buttons and never wrapped, still pinned right.
+ * Below `lg` the words are for assistive technology only (`max-lg:sr-only`),
+ * so the pinned column does not cover the row it acts on.
  */
 export const LABELLED_ACTIONS_CELL = "sticky right-0 w-px whitespace-nowrap bg-background";
 
