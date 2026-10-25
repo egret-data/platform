@@ -47,6 +47,7 @@ pub fn starrocks_mv_denies(service: &str, pending: &[(TaggedColumn, Vec<String>)
             tag_id: Uuid::nil(),
             column: column.clone(),
             cleared: cleared.clone(),
+            catalog_spelled: false,
         })
         .collect();
     mv_deny_inputs(&pending, service)

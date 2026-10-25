@@ -36,6 +36,9 @@
 //! profile. Every assertion is therefore keyed to the `(service_id, name)` pairs
 //! this test's own tag produces, never to a count of everything in the table.
 
+#[path = "support/engine_eval.rs"]
+mod engine_eval;
+
 use egret_metastore::Db;
 use egret_perm::PermStore;
 use egret_perm_compile::{recompile_service, DEFAULT_EXPANSION_CEILING};
@@ -65,7 +68,7 @@ struct Fixture {
 }
 
 /// A StarRocks profile with one engine bound to it and one registry catalog
-/// attached to that engine — the chain `tagged_columns_for_service_via` walks to
+/// attached to that engine — the chain `tag_assignments_for_service_via` walks to
 /// decide which tagged columns this profile's plugin can be served a policy for.
 /// No `perm.rules` row and no grant: a clearance comes from
 /// `classification_policies`, not from the perm model, and a fixture carrying a
@@ -1498,5 +1501,136 @@ async fn a_generated_profile_without_a_compiled_clearance_mask_still_refolds_on_
         status,
         axum::http::StatusCode::CONFLICT,
         "a generated profile refolds on a mask write, so the refused recompile refuses it: {body}"
+    );
+}
+
+// ── D2 (2026-10-25): one expansion for both levels, folded once ──
+
+/// Every clearance policy name and body under `service_id` for `tags`, ordered
+/// by name: the served state a recompile must leave byte-identical.
+async fn clearance_state(db: &Db, service_id: i64, tags: &[Uuid]) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for t in tags {
+        out.extend(
+            sqlx::query_as::<_, (String, Value)>(
+                "SELECT name, policy_jsonb FROM policy.authz_policies \
+                 WHERE service_id = $1 AND name LIKE $2 || '%' ORDER BY name",
+            )
+            .bind(service_id)
+            .bind(format!("{COMPILER_CLEARANCE_PREFIX}{t}-"))
+            .fetch_all(&db.pool)
+            .await
+            .expect("policy read"),
+        );
+    }
+    out
+}
+
+/// Ranger matches every StarRocks level case-insensitively (spec E6), so
+/// `Orders.Email` and `orders.email` are ONE column. Two gated classifications
+/// on its two spellings must compile ONE clearance mask (cleared = the
+/// intersection), not two priority-1 masks that tie and refuse the compile.
+#[tokio::test]
+async fn a_column_tagged_in_two_spellings_compiles_one_clearance_mask() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_a, _) = new_tag(&db).await;
+    let (tag_b, _) = new_tag(&db).await;
+    tag_column(&db, tag_a, f.warehouse_id, "Orders", "Email").await;
+    tag_column(&db, tag_b, f.warehouse_id, "orders", "email").await;
+    let (ann, bob) = cleared_pair(&db, tag_a).await;
+    // Only ann is cleared for B: the merged mask clears ann alone.
+    let ann_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&ann)
+        .fetch_one(&db.pool)
+        .await
+        .expect("ann");
+    let role_b = unique("d2-clear-b");
+    let role_b_id = new_role(&db, &role_b).await;
+    grant_role(&db, ann_id, role_b_id).await;
+    gate(&db, tag_b, &[&role_b]).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("two spellings of one column must not refuse the compile");
+
+    let mut masks = clearance_masks(&db, f.service_id, tag_a).await;
+    masks.extend(clearance_masks(&db, f.service_id, tag_b).await);
+    assert_eq!(
+        masks.len(),
+        1,
+        "one clearance mask for one column: {:?}",
+        masks.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let col = [
+        ("catalog", f.catalog_name.as_str()),
+        ("database", "sales"),
+        ("table", "orders"),
+        ("column", "email"),
+    ];
+    use engine_eval::{mask_type, starrocks_mask};
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &ann, &col).await).as_deref(),
+        Some("MASK_NONE"),
+        "ann is cleared for both"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &col).await).as_deref(),
+        Some("MASK_NULL"),
+        "bob is cleared for A only"
+    );
+}
+
+/// C5's no-churn rule: a table tagged in ONE spelling keeps today's names
+/// (the stored spelling, not a folded one) and a second recompile writes
+/// nothing.
+#[tokio::test]
+async fn a_column_only_table_keeps_its_policy_names() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "Orders", "Email").await;
+    tag_column(&db, tag_id, f.warehouse_id, "Orders", "SSN").await;
+    cleared_pair(&db, tag_id).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let names: Vec<String> = clearance_state(&db, f.service_id, &[tag_id])
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let c = &f.catalog_name;
+    let p = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}");
+    assert_eq!(
+        names,
+        vec![
+            format!("{p}-{c}.sales.Orders.Email"),
+            format!("{p}-{c}.sales.Orders.SSN"),
+            format!("{p}-mask-{c}.sales.Orders.Email"),
+            format!("{p}-mask-{c}.sales.Orders.SSN"),
+        ]
+    );
+    let before = clearance_state(&db, f.service_id, &[tag_id]).await;
+    let version_before: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("version");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile again");
+    assert_eq!(clearance_state(&db, f.service_id, &[tag_id]).await, before);
+    let version_after: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("version");
+    assert_eq!(
+        version_after, version_before,
+        "an unchanged recompile writes nothing"
     );
 }

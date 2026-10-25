@@ -1187,7 +1187,7 @@ impl PolicyStore {
     /// `egret_catalog_registry::tag_version`'s `bump_bound_tag_versions` and
     /// `services_bound_to_warehouse` key it by WAREHOUSE rather than by
     /// catalog. The one that does ask the same question is
-    /// [`tagged_columns_for_service_via`] — deliberately left alone here
+    /// [`tag_assignments_for_service_via`] — deliberately left alone here
     /// because it feeds the rule compiler's StarRocks expansion rather than the
     /// tag download, so changing its row set would change compiled artifacts,
     /// which is not this task's subject. It is the next candidate.
@@ -1223,20 +1223,6 @@ impl PolicyStore {
     ) -> Result<Vec<CatalogRow>, PolicyStoreError> {
         let mut conn = self.db.pool.acquire().await?;
         catalogs_for_service_via(&mut conn, service_id).await
-    }
-
-    /// Columns carrying `tags.key = tag_key`, resolved to their Ranger-facing
-    /// NAMES, restricted to catalogs `service_id`'s engine(s) reach.
-    /// Table-level tags (`column_name = ''`, migration 0081) are excluded —
-    /// this feeds the StarRocks per-column expansion (D5), which masks a
-    /// COLUMN, never a whole table.
-    pub async fn tagged_columns_for_service(
-        &self,
-        service_id: i64,
-        tag_key: &str,
-    ) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
-        let mut conn = self.db.pool.acquire().await?;
-        tagged_columns_for_service_via(&mut conn, service_id, tag_key).await
     }
 
     /// `tags.name` for a `tags.key` — D6: rules select by the stable `key`,
@@ -1847,7 +1833,7 @@ pub async fn resolved_tags_for_resource_via(
 ///
 /// The cost is one row per distinct tagged `(schema, table, column)` in the
 /// catalog's warehouse, once per `explain` request (not per profile). `explain` is
-/// an interactive admin read, and `tagged_columns_for_service_via` already ships
+/// an interactive admin read, and `tag_assignments_for_service_via` already ships
 /// per-column rows on the compile path.
 ///
 /// Scoped exactly as the resolver is — `a.warehouse_id = c.warehouse_id` for
@@ -1927,21 +1913,26 @@ pub async fn clearance_gates_for_tags_via(
     .await?)
 }
 
-/// Connection-generic core of [`PolicyStore::tagged_columns_for_service`] —
-/// same rationale as [`get_service_by_id_via`].
-pub async fn tagged_columns_for_service_via(
+/// Every assignment of `tags.key = tag_key` in a catalog `service_id`'s
+/// engine(s) reach, at BOTH levels: `column_name = ''` is a table-level
+/// attachment (migration 0081). Names are the stored spellings, verbatim; the
+/// StarRocks compiler folds and groups them (`egret_perm_compile::rules`), and
+/// must never turn an empty `column_name` into a column resource (Ranger drops
+/// an empty value, and the level becomes match-any).
+pub async fn tag_assignments_for_service_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
     tag_key: &str,
-) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
-    Ok(sqlx::query_as::<_, TaggedColumnRow>(
-        r#"SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name
+) -> Result<Vec<ServiceTagAssignmentRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, ServiceTagAssignmentRow>(
+        r#"SELECT DISTINCT c.name AS catalog, a.warehouse_id, a.schema_name, a.table_name,
+                  a.column_name
            FROM catalog_tag_assignments a
            JOIN tags t ON t.id = a.tag_id
            JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
            JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
            JOIN engine_mgmt.engines e ON e.id = ea.engine_id
-           WHERE e.authz_service_id = $1 AND t.key = $2 AND a.column_name <> ''
+           WHERE e.authz_service_id = $1 AND t.key = $2
            ORDER BY c.name, a.schema_name, a.table_name, a.column_name"#,
     )
     .bind(service_id)
@@ -2337,10 +2328,13 @@ pub struct CatalogRow {
     pub name: String,
 }
 
-/// One tagged column, Ranger-facing names only (see `tagged_columns_for_service`).
+/// One tag assignment a profile reaches (see [`tag_assignments_for_service_via`]):
+/// the registry catalog's name, the egret warehouse, and the stored
+/// coordinates. `column_name` is `''` for a table-level attachment.
 #[derive(Debug, sqlx::FromRow)]
-pub struct TaggedColumnRow {
+pub struct ServiceTagAssignmentRow {
     pub catalog: String,
+    pub warehouse_id: uuid::Uuid,
     pub schema_name: String,
     pub table_name: String,
     pub column_name: String,

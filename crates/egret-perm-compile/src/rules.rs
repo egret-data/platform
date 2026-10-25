@@ -114,6 +114,107 @@ pub struct TaggedColumn {
     pub column: String,
 }
 
+impl TaggedColumn {
+    /// A column with every level named. An empty level is refused
+    /// ([`CompileError::EmptyScopeLevel`]): `resources_object` keeps a `""`
+    /// value and Ranger drops it, so the level would become match-any (spec
+    /// E8). A table-level attachment's `column_name` is `''`, which is why the
+    /// StarRocks expansion builds its columns through here.
+    pub fn new(
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<Self, CompileError> {
+        for (level, value) in [
+            ("catalog", catalog),
+            ("schema", schema),
+            ("table", table),
+            ("column", column),
+        ] {
+            if value.is_empty() {
+                return Err(CompileError::EmptyScopeLevel { level });
+            }
+        }
+        Ok(Self {
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+        })
+    }
+}
+
+/// One table a tag reaches on a StarRocks profile, at either level (spec
+/// §5.1). Ranger matches every StarRocks level case-insensitively, so the
+/// assignments are grouped under the FOLDED `(catalog, schema, table)`
+/// ([`egret_ranger_eval::resource::fold_identifier`]) and each name keeps the
+/// first spelling in the expansion's order: a table tagged in one spelling
+/// compiles exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableTarget {
+    pub catalog: String,
+    /// The egret warehouse (`catalog.warehouses.id`) the table lives in.
+    pub warehouse_id: uuid::Uuid,
+    pub schema: String,
+    pub table: String,
+    /// The tag is attached to the whole table (`column_name = ''`).
+    pub table_level: bool,
+    /// The columns the tag is attached to, one per folded name.
+    pub columns: Vec<String>,
+}
+
+impl TableTarget {
+    /// The column-level attachments as fully named columns.
+    pub fn tagged_columns(&self) -> Result<Vec<TaggedColumn>, CompileError> {
+        self.columns
+            .iter()
+            .map(|c| TaggedColumn::new(&self.catalog, &self.schema, &self.table, c))
+            .collect()
+    }
+}
+
+/// Group a tag's assignments (both levels, as
+/// `egret_policy::tag_assignments_for_service_via` returns them) into one
+/// [`TableTarget`] per folded table, in first-seen order.
+pub fn group_by_table(
+    rows: impl IntoIterator<Item = egret_policy::ServiceTagAssignmentRow>,
+) -> Vec<TableTarget> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
+    let mut out: Vec<TableTarget> = Vec::new();
+    let mut index: std::collections::HashMap<(String, String, String), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let key = (
+            fold(&row.catalog),
+            fold(&row.schema_name),
+            fold(&row.table_name),
+        );
+        let i = *index.entry(key).or_insert_with(|| {
+            out.push(TableTarget {
+                catalog: row.catalog.clone(),
+                warehouse_id: row.warehouse_id,
+                schema: row.schema_name.clone(),
+                table: row.table_name.clone(),
+                table_level: false,
+                columns: Vec::new(),
+            });
+            out.len() - 1
+        });
+        let target = &mut out[i];
+        if row.column_name.is_empty() {
+            target.table_level = true;
+        } else if !target
+            .columns
+            .iter()
+            .any(|c| fold(c) == fold(&row.column_name))
+        {
+            target.columns.push(row.column_name);
+        }
+    }
+    out
+}
+
 /// The engine-facing names `compile_rule` cannot resolve itself (no registry
 /// or tag I/O in this compiler). `catalog_name` is used only for a `Path`
 /// selector (`compile_grant`'s equivalent parameter); `tag_name` is used

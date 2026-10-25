@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 
 use egret_metastore::Db;
 use egret_ranger_eval::eval::{
-    evaluate, AccessRequest, Decision, EngineConfig, EngineType, PluginVersion,
+    evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
+    EngineType, MaskDecision, PluginVersion, RowFilterDecision,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
@@ -95,6 +96,64 @@ async fn decides(
     plugin_version: PluginVersion,
 ) -> Decision {
     let (set, def) = download(db, service_id).await;
+    let (request, config) = request_for(user, access, resource, engine, plugin_version);
+    evaluate(&set, &request, &def, &config)
+}
+
+/// The data mask a StarRocks plugin (Ranger 2.8.0) applies for `user`
+/// selecting the column `resource` names.
+pub async fn starrocks_mask(
+    db: &Db,
+    service_id: i64,
+    user: &str,
+    resource: &[(&str, &str)],
+) -> MaskDecision {
+    let (set, def) = download(db, service_id).await;
+    let (request, config) = request_for(
+        user,
+        "select",
+        resource,
+        EngineType::StarRocks,
+        PluginVersion::Ranger2_8_0,
+    );
+    evaluate_data_mask(&set, &request, &def, &config)
+}
+
+/// The row filter a StarRocks plugin (Ranger 2.8.0) applies for `user`
+/// selecting from the table `resource` names.
+pub async fn starrocks_row_filter(
+    db: &Db,
+    service_id: i64,
+    user: &str,
+    resource: &[(&str, &str)],
+) -> RowFilterDecision {
+    let (set, def) = download(db, service_id).await;
+    let (request, config) = request_for(
+        user,
+        "select",
+        resource,
+        EngineType::StarRocks,
+        PluginVersion::Ranger2_8_0,
+    );
+    evaluate_row_filter(&set, &request, &def, &config)
+}
+
+/// The mask type `d` applies, `None` when no mask decided.
+pub fn mask_type(d: &MaskDecision) -> Option<String> {
+    match d {
+        MaskDecision::Masked(m) => m.mask_type.clone(),
+        MaskDecision::NoMask => None,
+        MaskDecision::Undecidable { why } => panic!("undecidable mask: {why:?}"),
+    }
+}
+
+fn request_for(
+    user: &str,
+    access: &str,
+    resource: &[(&str, &str)],
+    engine: EngineType,
+    plugin_version: PluginVersion,
+) -> (AccessRequest, EngineConfig) {
     let mut res = RequestResource::new();
     for (k, v) in resource {
         res.insert(*k, *v);
@@ -113,7 +172,7 @@ async fn decides(
         plugin_version: Some(plugin_version),
         ..EngineConfig::without_super_users()
     };
-    evaluate(&set, &request, &def, &config)
+    (request, config)
 }
 
 pub fn allowed(d: &Decision) -> bool {

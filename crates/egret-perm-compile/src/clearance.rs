@@ -159,11 +159,13 @@ use egret_policy::admin::{
     access_to_ranger_json, tag_access_to_ranger_json, AccessItemInput, AccessPolicyInput,
     ResourceLevel,
 };
-use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
+use egret_policy::{tag_assignments_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
 use crate::clearance_mask::PendingMask;
 use crate::grants::{level, PolicyTarget};
-use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
+use crate::rules::{
+    column_resources, group_by_table, stamp_service_type, TaggedColumn, PUBLIC_GROUP,
+};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
@@ -178,7 +180,7 @@ struct GateRow {
     /// resolution `crate::rules` uses via `tag_name_for_key_via`.
     tag_name: String,
     /// `tags.key` — the STABLE identifier, needed only on the StarRocks branch:
-    /// `tagged_columns_for_service_via` selects assignments by key, the same
+    /// `tag_assignments_for_service_via` selects assignments by key, the same
     /// lookup `crate::trigger` already does for a tag-selected rule. The Trino
     /// branch never uses it (a tag POLICY matches on the name).
     tag_key: String,
@@ -212,7 +214,7 @@ pub(crate) struct Clearances {
 /// compiles into every Trino profile that has a tag service.
 ///
 /// On **StarRocks** it is service-scoped, because the expansion is: only the
-/// columns reachable from `service_id` (`tagged_columns_for_service_via`) can be
+/// columns reachable from `service_id` (`tag_assignments_for_service_via`) can be
 /// addressed by a policy served to that profile's plugin. A gated tag with no
 /// reachable tagged column compiles to nothing there, and that is NOT a skip —
 /// there is no column to withhold, which is the same answer SP4a's tag masks
@@ -347,18 +349,15 @@ pub(crate) async fn compile_clearance(
             // matched column and NO dedup, because an access deny DOES carry a
             // column resource and collapsing two columns would un-deny one.
             EngineType::StarRocks => {
-                let tagged: Vec<TaggedColumn> =
-                    tagged_columns_for_service_via(conn, service_id, &g.tag_key)
+                let targets = group_by_table(
+                    tag_assignments_for_service_via(conn, service_id, &g.tag_key)
                         .await
-                        .map_err(|e| CompileError::Db(e.to_string()))?
-                        .into_iter()
-                        .map(|row| TaggedColumn {
-                            catalog: row.catalog,
-                            schema: row.schema_name,
-                            table: row.table_name,
-                            column: row.column_name,
-                        })
-                        .collect();
+                        .map_err(|e| CompileError::Db(e.to_string()))?,
+                );
+                let mut tagged: Vec<TaggedColumn> = Vec::new();
+                for t in &targets {
+                    tagged.extend(t.tagged_columns()?);
+                }
                 // **Refuse, never truncate.** A truncated clearance withholds
                 // SOME of the columns it claims to, and the ones silently
                 // dropped are readable by exactly the people the classification
@@ -399,6 +398,7 @@ pub(crate) async fn compile_clearance(
                         tag_id: g.tag_id,
                         column: col.clone(),
                         cleared: cleared.clone(),
+                        catalog_spelled: false,
                     });
                 }
             }
@@ -622,6 +622,7 @@ mod tests {
                 column: "c".into(),
             },
             cleared: cleared.iter().map(|s| s.to_string()).collect(),
+            catalog_spelled: false,
         }
     }
 

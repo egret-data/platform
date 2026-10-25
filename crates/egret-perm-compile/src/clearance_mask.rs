@@ -106,6 +106,9 @@ pub(crate) struct PendingMask {
     pub(crate) tag_id: Uuid,
     pub(crate) column: TaggedColumn,
     pub(crate) cleared: Vec<String>,
+    /// `column` is spelled as the catalog spells it (read from the column
+    /// source), rather than as an assignment was typed.
+    pub(crate) catalog_spelled: bool,
 }
 
 /// One mask per column. A column carrying several gated classifications gets
@@ -115,15 +118,22 @@ pub(crate) struct PendingMask {
 /// column at the same priority with different items would be an
 /// order-ambiguous pair, and either winner would clear a user for a
 /// classification they do not hold. The name carries the lowest tag id.
+///
+/// The key is FOLDED (spec C5): Ranger matches every StarRocks level
+/// case-insensitively, so `Orders.Email` and `orders.email` are one column,
+/// and two masks on it would be that same refused tie. The merged mask keeps
+/// the catalog's spelling when one of its inputs carries it, else the first
+/// spelling in `pending`'s order.
 pub(crate) fn merge_by_column(pending: Vec<PendingMask>) -> Vec<PendingMask> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
     type Key = (String, String, String, String);
     let mut by_col: BTreeMap<Key, PendingMask> = BTreeMap::new();
     for p in pending {
         let key = (
-            p.column.catalog.clone(),
-            p.column.schema.clone(),
-            p.column.table.clone(),
-            p.column.column.clone(),
+            fold(&p.column.catalog),
+            fold(&p.column.schema),
+            fold(&p.column.table),
+            fold(&p.column.column),
         );
         match by_col.get_mut(&key) {
             None => {
@@ -134,6 +144,10 @@ pub(crate) fn merge_by_column(pending: Vec<PendingMask>) -> Vec<PendingMask> {
                 have.cleared.retain(|u| theirs.contains(u));
                 if p.tag_id < have.tag_id {
                     have.tag_id = p.tag_id;
+                }
+                if p.catalog_spelled && !have.catalog_spelled {
+                    have.column = p.column;
+                    have.catalog_spelled = true;
                 }
             }
         }
@@ -747,11 +761,13 @@ mod tests {
                 tag_id: a,
                 column: ssn(),
                 cleared: cleared(&["ann", "bob"]),
+                catalog_spelled: false,
             },
             PendingMask {
                 tag_id: b,
                 column: ssn(),
                 cleared: cleared(&["bob", "cat"]),
+                catalog_spelled: false,
             },
         ]);
         assert_eq!(
@@ -760,8 +776,82 @@ mod tests {
                 tag_id: b,
                 column: ssn(),
                 cleared: cleared(&["bob"]),
+                catalog_spelled: false,
             }]
         );
+    }
+
+    fn col(table: &str, column: &str) -> TaggedColumn {
+        TaggedColumn {
+            catalog: "lake".into(),
+            schema: "sales".into(),
+            table: table.into(),
+            column: column.into(),
+        }
+    }
+
+    /// Ranger matches StarRocks levels case-insensitively, so two spellings
+    /// of one column are one resource: one mask, cleared = the intersection,
+    /// named after the lower tag id, in the first spelling.
+    #[test]
+    fn two_spellings_of_one_column_merge_into_one_mask() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let merged = merge_by_column(vec![
+            PendingMask {
+                tag_id: a,
+                column: col("Orders", "Email"),
+                cleared: cleared(&["ann", "bob"]),
+                catalog_spelled: false,
+            },
+            PendingMask {
+                tag_id: b,
+                column: col("orders", "email"),
+                cleared: cleared(&["bob", "cat"]),
+                catalog_spelled: false,
+            },
+        ]);
+        assert_eq!(
+            merged,
+            vec![PendingMask {
+                tag_id: a,
+                column: col("Orders", "Email"),
+                cleared: cleared(&["bob"]),
+                catalog_spelled: false,
+            }]
+        );
+    }
+
+    /// A mask whose spelling was read from the catalog wins the merge over
+    /// an assignment's spelling, whichever comes first.
+    #[test]
+    fn the_catalog_spelling_wins_the_merge() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let merged = merge_by_column(vec![
+            PendingMask {
+                tag_id: a,
+                column: col("orders", "EMAIL"),
+                cleared: cleared(&["ann"]),
+                catalog_spelled: false,
+            },
+            PendingMask {
+                tag_id: b,
+                column: col("Orders", "Email"),
+                cleared: cleared(&["ann"]),
+                catalog_spelled: true,
+            },
+            PendingMask {
+                tag_id: b,
+                column: col("ORDERS", "email"),
+                cleared: cleared(&["ann"]),
+                catalog_spelled: false,
+            },
+        ]);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].column, col("Orders", "Email"));
+        assert_eq!(merged[0].tag_id, a);
+        assert!(merged[0].catalog_spelled);
     }
 
     fn fold_v(others: &[Value]) -> Folded {

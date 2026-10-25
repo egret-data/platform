@@ -44,7 +44,7 @@
 //!    write happen against the SAME `&mut Transaction`, via
 //!    `egret_perm::{list_grants_via, list_rules_via}` and
 //!    `egret_policy::{get_service_by_id_via, catalogs_for_service_via,
-//!    tagged_columns_for_service_via, tag_name_for_key_via}` (all
+//!    tag_assignments_for_service_via, tag_name_for_key_via}` (all
 //!    connection-generic, added in this fix round for exactly this reason).
 //!    Round 1 read through `PermStore`/`PolicyStore`'s own POOLS — a second
 //!    connection that, under Postgres' default READ COMMITTED isolation,
@@ -113,7 +113,7 @@ use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
+    tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
     COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
@@ -565,7 +565,7 @@ async fn compile_desired(
     // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
     // it compiles identically into every Trino profile with a tag service. A
     // StarRocks clearance expands to one ACCESS deny per tagged column
-    // reachable from THIS service — the same `tagged_columns_for_service_via`
+    // reachable from THIS service — the same `tag_assignments_for_service_via`
     // expansion a tag-selected rule uses above — so `service_id` and the
     // profile's own name both have to reach the compiler.
     let clearances = crate::clearance::compile_clearance(
@@ -914,21 +914,17 @@ async fn compile_one_rule(
                     });
                     return Ok(());
                 };
-                let tagged = if engine == EngineType::StarRocks {
-                    tagged_columns_for_service_via(conn, service_id, key)
-                        .await
-                        .map_err(db_err)?
-                        .into_iter()
-                        .map(|row| TaggedColumn {
-                            catalog: row.catalog,
-                            schema: row.schema_name,
-                            table: row.table_name,
-                            column: row.column_name,
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let mut tagged = Vec::new();
+                if engine == EngineType::StarRocks {
+                    let targets = crate::rules::group_by_table(
+                        tag_assignments_for_service_via(conn, service_id, key)
+                            .await
+                            .map_err(db_err)?,
+                    );
+                    for t in &targets {
+                        tagged.extend(t.tagged_columns()?);
+                    }
+                }
                 (String::new(), Some(name), tagged)
             }
         };

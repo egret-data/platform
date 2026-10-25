@@ -375,3 +375,21 @@ None blocking. Worth the user's eye:
 ## 14. Implementation notes (append-only)
 
 Deviations the code forces are recorded here, per task, as they happen.
+
+### Step 0 (2026-10-25)
+
+- `origin/main` had moved to `ff03d0f0` (#745, alerts frontend and docs only); the branch was rebased onto it. Every
+  Step 0 row still holds; no line drift that matters (E1's filter is at `store.rs:1944`).
+
+### Task 1
+
+- The new row type is `ServiceTagAssignmentRow`, not `TagAssignmentRow`: `egret_policy` already exports a
+  `TagAssignmentRow` (the tag download's row). It carries `warehouse_id` beside the spec's fields.
+- `fold_identifier` is the evaluator's `fold` renamed and made public (no alias kept); behaviour is unchanged.
+- `merge_by_column` folds all four levels (catalog too: Ranger matches it case-insensitively like the others).
+  `PendingMask` gained `catalog_spelled: bool`, which is how "the catalog spelling wins" reaches the merge; every
+  column-level mask sets it `false` until Task 4.
+- `group_by_table` keeps the first spelling in the expansion's `ORDER BY`, which is the database collation's order
+  (under `en_US.utf8`, `orders` sorts before `Orders`). A table with one spelling is unaffected.
+- The rule mask expansion goes through the same grouping, so one tag on two spellings of one column now compiles one
+  rule mask (it compiled two agreeing ones before).
