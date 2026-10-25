@@ -75,6 +75,14 @@ Paths are relative to the repo root. `ST` = `crates/egret-policy/src/store.rs`, 
   write is refused with a message naming the table(s) and column counts. The `*` deny counts 1 per table.
 - **U4. Unknown table or no schema.** The `*` deny still applies; only the per-column masks are skipped, and egret says
   so in the compile result and in Explain. The hook adds the masks when the table appears.
+- **U5. A schema change whose recompile would be refused is refused (confirms C11).** The hook dry-runs the
+  recompile before the commit; if it is refused (ceiling, undecidable fold, new tie) the Iceberg request fails with a
+  409 that names the reason. A profile is never wedged by a schema change.
+- **U6. Rollout refusals show in Governance.** A refusal on the first recompile after upgrade (C14) keeps the
+  profile's previous compile and must surface as the existing Governance Overview `compile_failed` finding
+  (`crates/egret-controlplane/src/governance_overview.rs:256`, fed by `compile_runs::failed_compile_runs_via`), whose
+  sentence names the two rules in conflict and links them. The boot pass records each refused profile as a failed
+  compile run. Release note as in C14.
 
 ## 4. Controller decisions (defaults; the user may revisit)
 
