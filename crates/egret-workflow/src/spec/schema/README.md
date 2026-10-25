@@ -133,10 +133,15 @@ they are `refused` and the editor no longer offers them.
 a value that does not parse or that stage 2 refuses is removed from the served
 enum, and the property's description says so ("**Not accepted by egret:**").
 
-One adjustment: the script tasks' `warningOnStdErr` is read and has no effect
-(Kestra's own "not used anymore"), so it is `ignored`.
+Two adjustments: the script tasks' `warningOnStdErr` is read and has no effect
+(Kestra's own "not used anymore"), and a retry's `warningOnRetry` is read and
+nothing in egret acts on it (KI-121), so both are `ignored`.
 
 `warned` is served because it is not silent: the editor shows the warning.
+`ignored` is not served, and since KI-121 it is not silent either: a draft
+that writes an `ignored` property, or a key its object's row does not list
+at all, gets a warning (`spec::property_warnings`: `ignored_property`,
+`unknown_property`).
 
 ### Passed through unfiltered
 
@@ -161,7 +166,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1512 properties over 91 rows: 1051 honoured, 4 warned, 335 ignored, 122 refused (counted from `property-treatment.json`, 2026-10-17, after kill-and-exit Task 3 added the `Exit` row; the line said 1495 / 1035 / 334 before, while the committed file already held 1041 honoured and 328 ignored).
+1625 properties over 97 rows: 1119 honoured, 4 warned, 380 ignored, 122 refused (counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
@@ -248,9 +253,9 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 | `io.kestra.core.models.flows.sla.types.ExecutionAssertionSLA-2` | 5 | — | — | — |
 | `io.kestra.core.models.flows.sla.types.MaxDurationSLA-2` | 5 | — | — | — |
 | `io.kestra.core.models.tasks.NamespaceFiles` | 6 | — | — | — |
-| `io.kestra.core.models.tasks.retrys.Constant-2` | 6 | — | — | — |
-| `io.kestra.core.models.tasks.retrys.Exponential-2` | 8 | — | — | — |
-| `io.kestra.core.models.tasks.retrys.Random-2` | 7 | — | — | — |
+| `io.kestra.core.models.tasks.retrys.Constant-2` | 5 | — | `warningOnRetry` | — |
+| `io.kestra.core.models.tasks.retrys.Exponential-2` | 7 | — | `warningOnRetry` | — |
+| `io.kestra.core.models.tasks.retrys.Random-2` | 6 | — | `warningOnRetry` | — |
 | `io.kestra.core.models.triggers.Window` | 7 | — | — | — |
 | `io.kestra.plugin.core.flow.Dag-DagTask` | 2 | — | — | — |
 | `io.kestra.plugin.core.flow.LoopUntil-CheckFrequency` | 3 | — | — | — |

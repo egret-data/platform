@@ -368,6 +368,53 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     }
     duplicate_trigger_ids(flow, report);
     secret_findings(flow, report);
+    schedule_findings(flow, report);
+}
+
+/// KI-122: what the scheduler would refuse about a `Schedule`, said at save.
+/// Warnings, not errors: the flow saves and runs by hand as before, and the
+/// trigger row records the same refusal as its `last_error`; the editor now
+/// says it before the first tick instead of after it.
+///
+/// - `schedule_not_resolvable`: [`ScheduleTrigger::resolve`] refuses it -- a
+///   cron that does not parse, an unknown timezone, a `when` or a
+///   `lateMaximumDelay` egret does not support -- so it never fires
+///   (`scheduler::sync` stores the same message). A `cron` left out is the
+///   error `schedule_cron_required` already, so it is not said twice.
+/// - `schedule_input_templated`: an `inputs` value with `{{ }}` or `{% %}`,
+///   which every tick refuses (`scheduler::fire::refuse_templated`): a
+///   scheduled execution has no context to render it in.
+///
+/// [`ScheduleTrigger::resolve`]: crate::trigger::ScheduleTrigger::resolve
+fn schedule_findings(flow: &Flow, report: &mut ValidationReport) {
+    use crate::trigger::{ScheduleError, ScheduleTrigger};
+    for trigger in &flow.triggers {
+        let TriggerKind::Schedule(schedule) = &trigger.kind else {
+            continue;
+        };
+        match ScheduleTrigger::resolve(trigger) {
+            Ok(_) | Err(ScheduleError::MissingCron) => {}
+            Err(e) => report.warnings.push(Finding {
+                code: "schedule_not_resolvable",
+                message: format!("trigger '{}' will never fire: {e}", trigger.id),
+                path: format!("triggers.{}", trigger.id),
+            }),
+        }
+        for (key, value) in schedule.inputs.iter().flatten() {
+            if crate::scheduler::templated(value) {
+                report.warnings.push(Finding {
+                    code: "schedule_input_templated",
+                    message: format!(
+                        "trigger '{}': inputs.{key} contains template syntax, which a \
+                         scheduled execution cannot render; every tick of this schedule \
+                         will be refused",
+                        trigger.id
+                    ),
+                    path: format!("triggers.{}.inputs.{key}", trigger.id),
+                });
+            }
+        }
+    }
 }
 
 /// W7e spec §3.8: a trigger id declared twice makes the switch ambiguous.
@@ -2354,6 +2401,66 @@ mod tests {
                 "{ty}: the nested `Sequential` must be reached by `walk_task`: {r:?}"
             );
         }
+    }
+
+    /// KI-122: what the scheduler would refuse is a warning at save, with the
+    /// scheduler's own words, and the flow still validates without an error.
+    #[test]
+    fn a_schedule_the_scheduler_would_refuse_is_a_warning_at_save() {
+        let schedule = |body: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n\
+                 triggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n{body}"
+            ))
+            .unwrap()
+        };
+        let codes = |r: &super::ValidationReport| -> Vec<(&'static str, String)> {
+            r.warnings
+                .iter()
+                .filter(|w| w.code.starts_with("schedule_"))
+                .map(|w| (w.code, w.path.clone()))
+                .collect()
+        };
+
+        let bad_cron = validate(&schedule("    cron: \"61 * * * *\"\n"));
+        assert!(bad_cron.errors.is_empty(), "{bad_cron:?}");
+        assert_eq!(
+            codes(&bad_cron),
+            vec![("schedule_not_resolvable", "triggers.s".to_string())]
+        );
+        let w = &bad_cron
+            .warnings
+            .iter()
+            .find(|w| w.code == "schedule_not_resolvable")
+            .unwrap()
+            .message;
+        assert!(w.contains("invalid cron"), "{w}");
+
+        let bad_zone = validate(&schedule(
+            "    cron: \"0 * * * *\"\n    timezone: Mars/Olympus\n",
+        ));
+        assert_eq!(
+            codes(&bad_zone),
+            vec![("schedule_not_resolvable", "triggers.s".to_string())]
+        );
+
+        let templated = validate(&schedule(
+            "    cron: \"0 * * * *\"\n    inputs:\n      day: \"{{ trigger.date }}\"\n      plain: x\n",
+        ));
+        assert!(templated.errors.is_empty(), "{templated:?}");
+        assert_eq!(
+            codes(&templated),
+            vec![(
+                "schedule_input_templated",
+                "triggers.s.inputs.day".to_string()
+            )]
+        );
+
+        // Control: a schedule the scheduler takes says nothing.
+        let fine = validate(&schedule(
+            "    cron: \"0 * * * *\"\n    inputs:\n      plain: x\n",
+        ));
+        assert!(codes(&fine).is_empty(), "{fine:?}");
     }
 
     /// kestra: `FlowValidator.findMissingInputsForScheduleTriggers` --
