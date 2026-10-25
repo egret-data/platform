@@ -775,8 +775,8 @@ export function ScheduleEditor({
                 />
                 {(databases ?? []).length === 0 && (
                   <p className="text-xs text-destructive">
-                    This workspace has no database connection yet. Add one under Workspace
-                    settings &rarr; Engines before creating an alert.
+                    This workspace has no connection yet. Add one under Workspace settings
+                    &rarr; Connections before creating an alert.
                   </p>
                 )}
               </div>

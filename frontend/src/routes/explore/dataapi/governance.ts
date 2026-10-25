@@ -55,7 +55,7 @@ export function governedWithoutPerPrincipal(
  * would find out otherwise on the first press.
  */
 export const GOVERNED_BLOCKED_MESSAGE =
-  "This database is governed: its row filters and column masks are applied per user at the engine. " +
+  "This connection is governed: its row filters and column masks are applied per user at the engine. " +
   "A query here would run on the shared service credential, so every consumer would read what that " +
   "account can read. Running and publishing are both refused until the connection has per-user " +
   "delegation (or impersonation) turned on.";
