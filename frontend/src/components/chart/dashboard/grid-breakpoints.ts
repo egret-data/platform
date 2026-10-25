@@ -14,6 +14,9 @@ export const MOBILE_DEFAULT_CARD_HEIGHT = 6;
 
 export type GridBreakpoint = keyof typeof GRID_COLUMNS;
 
+/** The edit panel (340px) and the 16px gap before it: what it takes from the canvas (KI-282). */
+export const EDIT_PANEL_BESIDE_PX = 356;
+
 /** Which breakpoint a container of `width` px is in. Container width, NOT viewport width —
  *  the dashboard canvas is narrowed by the app sidebar and by the edit sidebars, and it is the
  *  canvas that has to fit the cards. */

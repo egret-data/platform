@@ -28,7 +28,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
-import { mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
+import { EDIT_PANEL_BESIDE_PX, mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
@@ -876,6 +876,7 @@ export default function DashboardView() {
             const c = (cards as DraftCard[]).find((x) => x.id === id);
             return c ? vizKeyOf(c) : "";
           }}
+          besidePanelPx={editing && editPanel ? EDIT_PANEL_BESIDE_PX : 0}
           onBreakpointChange={onGridBreakpointChange}
           onLayoutChange={onLayoutChange}
           onResizeStart={() => { interactingRef.current = true; }}
