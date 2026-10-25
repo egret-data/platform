@@ -5,7 +5,8 @@
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::routing::{get, patch, post, put};
-use axum::{Json, Router};
+use axum::response::{IntoResponse, Response};
+use axum::{http::StatusCode, Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
 use egret_workspace::context::WsContext;
@@ -1149,13 +1150,13 @@ pub struct SmtpTestBody {
     responses(
         (status = 200, description = "The workspace's SMTP settings, without the password",
          body = SmtpConfigDto),
-        (status = 404, description = "Not configured"),
+        (status = 204, description = "Not configured"),
     ),
 )]
 async fn smtp_get(
     State(st): State<AutomationState>,
     WsContext(ctx): WsContext,
-) -> Result<Json<SmtpConfigDto>, AutomationApiError> {
+) -> Result<Response, AutomationApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
@@ -1163,10 +1164,15 @@ async fn smtp_get(
         .smtp
         .get(ctx.workspace_id.0)
         .await
-        .map_err(AutomationApiError::from)?
-        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("smtp config".into())))?;
-    // `dto` has no password field at all — see its docs.
-    Ok(Json(smtp_config::dto(&cfg)))
+        .map_err(AutomationApiError::from)?;
+    // Not configured is every workspace's starting state, not a missing
+    // resource: 204, not 404, which the browser logs as an error on every visit
+    // of the settings page (KI-212). `dto` has no password field at all — see
+    // its docs.
+    Ok(match cfg {
+        Some(cfg) => Json(smtp_config::dto(&cfg)).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
 }
 
 #[utoipa::path(
@@ -1290,13 +1296,13 @@ async fn smtp_test(
     params(WorkspacePath),
     responses(
         (status = 200, description = "The workspace's Slack app", body = crate::deliver::slack_config::SlackConfigDto),
-        (status = 404, description = "Not configured"),
+        (status = 204, description = "Not configured"),
     ),
 )]
 async fn slack_get(
     State(st): State<AutomationState>,
     WsContext(ctx): WsContext,
-) -> Result<Json<crate::deliver::slack_config::SlackConfigDto>, AutomationApiError> {
+) -> Result<Response, AutomationApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
@@ -1304,12 +1310,13 @@ async fn slack_get(
         .slack_config
         .get(ctx.workspace_id.0)
         .await
-        .map_err(AutomationApiError::from)?
-        .ok_or_else(|| {
-            AutomationApiError::from(AutomationError::NotFound("slack config".into()))
-        })?;
-    // The DTO has no token field at all — see its docs.
-    Ok(Json(crate::deliver::slack_config::to_dto(&cfg)))
+        .map_err(AutomationApiError::from)?;
+    // 204 when not configured, as SMTP's (KI-212). The DTO has no token field
+    // at all — see its docs.
+    Ok(match cfg {
+        Some(cfg) => Json(crate::deliver::slack_config::to_dto(&cfg)).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
 }
 
 #[utoipa::path(

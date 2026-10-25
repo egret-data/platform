@@ -28114,7 +28114,7 @@
               }
             }
           },
-          "404": {
+          "204": {
             "description": "Not configured"
           }
         }
@@ -28216,7 +28216,7 @@
               }
             }
           },
-          "404": {
+          "204": {
             "description": "Not configured"
           }
         }

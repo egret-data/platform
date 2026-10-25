@@ -1497,19 +1497,17 @@ export const useAlertsTrash = <TError = ErrorBody,
   status: 200
 }
 
-export type alertsSlackGetResponse404 = {
+export type alertsSlackGetResponse204 = {
   data: void
-  status: 404
+  status: 204
 }
 
-export type alertsSlackGetResponseSuccess = (alertsSlackGetResponse200) & {
+export type alertsSlackGetResponseSuccess = (alertsSlackGetResponse200 | alertsSlackGetResponse204) & {
   headers: Headers;
 };
-export type alertsSlackGetResponseError = (alertsSlackGetResponse404) & {
-  headers: Headers;
-};
+;
 
-export type alertsSlackGetResponse = (alertsSlackGetResponseSuccess | alertsSlackGetResponseError)
+export type alertsSlackGetResponse = (alertsSlackGetResponseSuccess)
 
 export const getAlertsSlackGetUrl = (workspace: string,) => {
 
@@ -1552,7 +1550,7 @@ export const getAlertsSlackGetQueryKey = (workspace: string,) => {
     }
 
 
-export const getAlertsSlackGetQueryOptions = <TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = void>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+export const getAlertsSlackGetQueryOptions = <TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
@@ -1571,10 +1569,10 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
 }
 
 export type AlertsSlackGetQueryResult = NonNullable<Awaited<ReturnType<typeof alertsSlackGet>>>
-export type AlertsSlackGetQueryError = void
+export type AlertsSlackGetQueryError = unknown
 
 
-export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = void>(
+export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(
  workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>> & Pick<
         DefinedInitialDataOptions<
           Awaited<ReturnType<typeof alertsSlackGet>>,
@@ -1584,7 +1582,7 @@ export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackG
       >, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = void>(
+export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>> & Pick<
         UndefinedInitialDataOptions<
           Awaited<ReturnType<typeof alertsSlackGet>>,
@@ -1594,7 +1592,7 @@ export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackG
       >, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = void>(
+export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
@@ -1606,7 +1604,7 @@ unaudited read path for any chart or dashboard.
 The workspace's Slack app.
  */
 
-export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = void>(
+export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSlackGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
@@ -1781,19 +1779,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   status: 200
 }
 
-export type alertsSmtpGetResponse404 = {
+export type alertsSmtpGetResponse204 = {
   data: void
-  status: 404
+  status: 204
 }
 
-export type alertsSmtpGetResponseSuccess = (alertsSmtpGetResponse200) & {
+export type alertsSmtpGetResponseSuccess = (alertsSmtpGetResponse200 | alertsSmtpGetResponse204) & {
   headers: Headers;
 };
-export type alertsSmtpGetResponseError = (alertsSmtpGetResponse404) & {
-  headers: Headers;
-};
+;
 
-export type alertsSmtpGetResponse = (alertsSmtpGetResponseSuccess | alertsSmtpGetResponseError)
+export type alertsSmtpGetResponse = (alertsSmtpGetResponseSuccess)
 
 export const getAlertsSmtpGetUrl = (workspace: string,) => {
 
@@ -1825,7 +1821,7 @@ export const getAlertsSmtpGetQueryKey = (workspace: string,) => {
     }
 
 
-export const getAlertsSmtpGetQueryOptions = <TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+export const getAlertsSmtpGetQueryOptions = <TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = unknown>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
@@ -1844,10 +1840,10 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
 }
 
 export type AlertsSmtpGetQueryResult = NonNullable<Awaited<ReturnType<typeof alertsSmtpGet>>>
-export type AlertsSmtpGetQueryError = void
+export type AlertsSmtpGetQueryError = unknown
 
 
-export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = unknown>(
  workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>> & Pick<
         DefinedInitialDataOptions<
           Awaited<ReturnType<typeof alertsSmtpGet>>,
@@ -1857,7 +1853,7 @@ export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet
       >, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>> & Pick<
         UndefinedInitialDataOptions<
           Awaited<ReturnType<typeof alertsSmtpGet>>,
@@ -1867,12 +1863,12 @@ export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet
       >, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 
-export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = unknown>(
  workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
