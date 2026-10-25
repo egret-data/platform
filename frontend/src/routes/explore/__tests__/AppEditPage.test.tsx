@@ -8,6 +8,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 const requestAppTicket = vi.fn();
 const publishMutateAsync = vi.fn();
 const useAppMock = vi.fn();
+const refetchApp = vi.fn();
 const restoreMutateAsync = vi.fn();
 
 vi.mock("@/api/apps", () => ({
@@ -46,7 +47,9 @@ beforeEach(() => {
   toastError.mockReset();
   toastSuccess.mockReset();
   useAppMock.mockReset();
-  useAppMock.mockReturnValue({ data: APP });
+  refetchApp.mockReset();
+  refetchApp.mockResolvedValue({ data: APP });
+  useAppMock.mockReturnValue({ data: APP, refetch: refetchApp });
 });
 
 describe("AppEditPage", () => {
@@ -137,7 +140,37 @@ describe("AppEditPage", () => {
     await screen.findByTitle("Revenue editor");
     fireEvent.click(screen.getByRole("button", { name: "Publish draft rev 7" }));
     await waitFor(() => expect(publishMutateAsync).toHaveBeenCalledWith({ expectedRevision: 7 }));
-    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Published version 3"));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Published version 3 from draft revision 7"));
+  });
+
+  it("re-reads the revision before publishing, so a save made just before the press is not a conflict (KI-177)", async () => {
+    // Arrange: the label still says rev 7, the author's Ctrl+S has already made it 8.
+    requestAppTicket.mockResolvedValue("https://apps.egret.test/_ticket?t=egt_abc");
+    refetchApp.mockResolvedValue({ data: { ...APP, draft_revision: 8 } });
+    publishMutateAsync.mockResolvedValue({ version_no: 1, from_revision: 8 });
+    renderPage();
+    await screen.findByTitle("Revenue editor");
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "Publish draft rev 7" }));
+
+    // Assert
+    await waitFor(() => expect(publishMutateAsync).toHaveBeenCalledWith({ expectedRevision: 8 }));
+    expect(refetchApp).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Published version 1 from draft revision 8"));
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("says the draft is still the starter when the server refuses to publish it (KI-042)", async () => {
+    requestAppTicket.mockResolvedValue("https://apps.egret.test/_ticket?t=egt_abc");
+    publishMutateAsync.mockRejectedValue(
+      Object.assign(new Error("the draft is still the new-app starter"), { status: 409, code: "starter_draft" }),
+    );
+    renderPage();
+    await screen.findByTitle("Revenue editor");
+    fireEvent.click(screen.getByRole("button", { name: /Publish draft rev/ }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(String(toastError.mock.calls[0][0])).toMatch(/still the new-app starter/);
   });
 
   it("explains a publish conflict instead of dumping the status", async () => {

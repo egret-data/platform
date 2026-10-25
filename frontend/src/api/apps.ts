@@ -115,7 +115,8 @@ export function useCreateApp(ws: string) {
   });
 }
 
-/** Publish the draft as a new version. `expectedRevision` makes it "publish rev N or fail" (409). */
+/** Publish the draft as a new version. `expectedRevision` makes it "publish rev N or fail" (409).
+ * Invalidates the version list too, so an open Versions dialog shows the new version. */
 export function usePublishApp(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation<AppVersionSummary, ApiError, { expectedRevision?: number }>({
@@ -123,6 +124,7 @@ export function usePublishApp(ws: string, id: string) {
       (await appsPublish(ws, id, expectedRevision == null ? null : { expected_revision: expectedRevision }))
         .data as AppVersionSummary,
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getAppsVersionsQueryKey(ws, id) });
       qc.invalidateQueries({ queryKey: getAppsGetOneQueryKey(ws, id) });
       qc.invalidateQueries({ queryKey: getAppsListQueryKey(ws) });
     },
