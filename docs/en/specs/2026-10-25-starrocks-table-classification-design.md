@@ -353,6 +353,9 @@ message grows.
 2. `recompile_role_referencing_profiles` recompiles every profile in one transaction (E13): one refusing profile rolls
    the whole boot pass back. This package's boot pass is per profile and does not depend on it.
 3. Package 2 live finding 4: a refused preview links the unsaved rule's id. Unchanged.
+4. Masks alone expose `_file`/`_pos` (the object-store path) on `SELECT *` (Step 0 live spike, §14). Today's
+   column-level clearance on a table where EVERY column is classified probably has the same exposure: pre-existing,
+   unmeasured.
 
 ## 12. Non-goals
 
@@ -400,3 +403,19 @@ Deviations the code forces are recorded here, per task, as they happen.
   masks; the harness wrapper `starrocks_mv_denies` keeps its signature and maps to it.
 - The per-tag ceiling already counts a table-level table as 1 here; Task 6 adds its column masks to the count.
 - `starrocks_deny` (one body per column or `*`) is factored out of the loop for Task 14's harness.
+
+### Step 0 live spike (2026-10-25)
+
+Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`); it confirms U1's premise.
+
+- `*` deny + per-column `MASK_NULL` (the compiled shape): an uncleared granted reader gets ERROR 5204 on every direct
+  read. StarRocks checks a column it adds to the scan itself: the first column for named masked columns, `_file` for
+  `SELECT *`, `___count___` for `count(*)`. Through a plain view (native and Iceberg) the reader gets NULL in every
+  column. A cleared user (`denyExceptions` + a `MASK_NONE` item) reads real values directly and through views. A
+  column added after the compile, with no mask yet, is refused for the reader.
+- `*` deny alone (U4's unknown-table state once the table exists without masks): real values LEAK through a view. So
+  the hook filling the masks (U2) is load-bearing, and the compile report and Explain for U4 must say the view path is
+  unprotected until the masks exist.
+- Caveats: a query whose masked predicate folds to false is not refused (0 rows, nothing leaks), so "refused the
+  whole table" holds for reads that scan. `DESC` and `SHOW CREATE TABLE` stay visible. Masks alone expose
+  `_file`/`_pos` on `SELECT *` (§11 item 4).
