@@ -12,6 +12,7 @@ import { paramFiltersForCard, temporalOverridesForCard } from "@/components/char
 import type { AnyChartParams, VizType } from "@/api/charts";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
+import { datasetColumnDefaults, paramsWithDatasetDefaults } from "@/components/dataset/columnDefaults";
 
 declare global {
   interface Window {
@@ -47,20 +48,26 @@ function PrintCard({ card, data, onFinished, onError }: {
   onFinished: () => void;
   onError: () => void;
 }) {
+  // The dataset's display names and formats under the chart's own settings, as the dashboard
+  // draws the card (KI-301). The payload carries them: this page has no session to load the
+  // dataset with. Absent from a payload an older backend built, and then the chart's own.
+  const params = card.dataset
+    ? paramsWithDatasetDefaults(card.params as AnyChartParams, datasetColumnDefaults(card.dataset.columns, card.dataset.metrics))
+    : (card.params as AnyChartParams);
   return (
     <div className="mb-8 break-inside-avoid rounded border border-gray-200 bg-white p-4">
       <h2 className="mb-2 text-base font-medium text-black">{card.title}</h2>
       {/* A chart draws into a fixed 384px box and is clipped to its height. A table's height is
           its rows, so its box grows to them instead: on a page there is nothing to scroll, and a
           fixed box let a 50-row table run past the card's border into the next card (KI-168).
-          Vertical only (`overflow-y: clip`, which leaves x visible): a chart canvas is sized at
-          the renderer's screen width and the PDF shrinks a page that overflows sideways to fit
-          it, and `overflow-hidden` cut the right of every chart off instead. */}
+          Vertical only (`overflow-y: clip`, which leaves x visible): `overflow-hidden` once cut
+          the right of every chart off on the PDF page. The renderer opens this page as wide as
+          the sheet a PDF prints on (KI-283), so a chart is drawn at the width it is printed at. */}
       <div data-print-chart className={GROWS_WITH_ROWS.has(card.viz_type) ? "w-full" : "h-96 w-full overflow-y-clip"}>
         <ChartErrorBoundary onError={onError}>
           <ChartRenderer
             vizType={card.viz_type as VizType}
-            params={card.params as AnyChartParams}
+            params={params}
             columns={data.columns}
             rows={data.rows}
             onFinished={onFinished}

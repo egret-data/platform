@@ -106,6 +106,7 @@ struct Fx {
     render_tokens: RenderTokenRepo,
     ws: Uuid,
     dashboard: Uuid,
+    dataset: Uuid,
     owner: Uuid,
     admin_tok: String,
     seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -349,6 +350,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         render_tokens,
         ws,
         dashboard: dashboard.id,
+        dataset: dataset.id,
         owner,
         admin_tok,
         seen_sql,
@@ -486,6 +488,62 @@ async fn the_payload_describes_the_object_and_the_data_call_returns_its_rows(poo
     assert_eq!(
         v[0]["rows"],
         serde_json::json!([["1-URGENT"], ["2-HIGH"]]),
+        "{body}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_payload_carries_each_cards_dataset_display_names_and_formats(pool: sqlx::PgPool) {
+    // KI-301: the print page drew a card with the chart's own settings only, so
+    // a PNG or PDF report said `order_count` where the dashboard says "Orders".
+    // The page has no session to load the dataset with; the payload is the only
+    // place it can learn the names from.
+    let fx = setup(pool).await;
+    let datasets = DatasetRepo::new(fx.db.clone());
+    datasets
+        .update_column(
+            fx.dataset,
+            "orderpriority",
+            Some("Order priority"),
+            None,
+            None,
+            None,
+            None,
+            Some("{\"decimals\":0}"),
+            Some("category"),
+            None,
+        )
+        .await
+        .unwrap();
+    datasets
+        .add_metric(
+            fx.dataset,
+            "order_count",
+            "count(*)",
+            "bigint",
+            "numeric",
+            "Orders",
+            "",
+            "",
+        )
+        .await
+        .unwrap();
+    let token = fx.mint_for_dashboard().await;
+
+    let (s, body) = get_payload(&fx, &token).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["cards"][0]["dataset"],
+        serde_json::json!({
+            "columns": [{
+                "column_name": "orderpriority",
+                "verbose_name": "Order priority",
+                "format": "{\"decimals\":0}",
+                "semantic_type": "category",
+            }],
+            "metrics": [{"metric_name": "order_count", "verbose_name": "Orders", "format": ""}],
+        }),
         "{body}"
     );
 }

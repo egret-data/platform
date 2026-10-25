@@ -40,6 +40,38 @@ pub struct RenderCard {
     /// this card, which is why the mapping travels per card rather than once
     /// for the dashboard.
     pub param_mappings: serde_json::Value,
+    /// The chart's dataset's semantic layer: each column's and metric's
+    /// display name and format. The print page layers it under the chart's own
+    /// settings with the SAME functions the dashboard and the chart page use
+    /// (`datasetColumnDefaults` / `withDatasetDefaults`), so a report says
+    /// **Revenue** where they do rather than `revenue` (KI-301). Raw rows, not
+    /// a server-built format map: building that map here would be a second
+    /// implementation of those rules. Empty when the dataset is not in the
+    /// grant's workspace.
+    pub dataset: RenderDataset,
+}
+
+/// What the print page needs of a card's dataset to name and format its
+/// columns as the dashboard does — nothing about its source or SQL.
+#[derive(Debug, Clone, Default, Serialize, utoipa::ToSchema)]
+pub struct RenderDataset {
+    pub columns: Vec<RenderDatasetColumn>,
+    pub metrics: Vec<RenderDatasetMetric>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RenderDatasetColumn {
+    pub column_name: String,
+    pub verbose_name: String,
+    pub format: String,
+    pub semantic_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RenderDatasetMetric {
+    pub metric_name: String,
+    pub verbose_name: String,
+    pub format: String,
 }
 
 /// One card's DATA. Step two, once the page has resolved the filters.
@@ -128,7 +160,7 @@ async fn build_chart(
         kind: "chart".into(),
         id: chart.id.to_string(),
         title: chart.name.clone(),
-        cards: vec![card_spec(&chart, serde_json::Value::Null)],
+        cards: vec![card_spec(st, grant, &chart, serde_json::Value::Null).await?],
         // A chart is not on a dashboard, so nothing parameterises it.
         parameters: serde_json::Value::Null,
     })
@@ -164,7 +196,7 @@ async fn build_dashboard(
             .get("paramMappings")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        cards.push(card_spec(&chart, mappings));
+        cards.push(card_spec(st, grant, &chart, mappings).await?);
     }
 
     Ok(RenderPayload {
@@ -176,14 +208,59 @@ async fn build_dashboard(
     })
 }
 
-fn card_spec(chart: &egret_bi::Chart, param_mappings: serde_json::Value) -> RenderCard {
-    RenderCard {
+async fn card_spec(
+    st: &AutomationState,
+    grant: &RenderGrant,
+    chart: &egret_bi::Chart,
+    param_mappings: serde_json::Value,
+) -> Result<RenderCard, AutomationError> {
+    Ok(RenderCard {
         chart_id: chart.id.to_string(),
         title: chart.name.clone(),
         viz_type: chart.viz_type.clone(),
         params: chart.params.clone(),
         param_mappings,
+        dataset: card_dataset(st, grant, chart.dataset_id).await?,
+    })
+}
+
+/// The card's dataset's display names and formats. Read as the render's
+/// owner would see them on the dashboard: the report already runs this
+/// dataset's queries as that owner, so its column names are no more than the
+/// report shows. Scoped to the grant's workspace, the same guard
+/// `compile_chart_sql` applies before running anything.
+async fn card_dataset(
+    st: &AutomationState,
+    grant: &RenderGrant,
+    dataset_id: Uuid,
+) -> Result<RenderDataset, AutomationError> {
+    let Some(ds) = st.datasets.get(dataset_id).await.map_err(bi_err)? else {
+        return Ok(RenderDataset::default());
+    };
+    if ds.workspace_id != grant.workspace_id {
+        return Ok(RenderDataset::default());
     }
+    let columns = st.datasets.columns(ds.id).await.map_err(bi_err)?;
+    let metrics = st.datasets.metrics(ds.id).await.map_err(bi_err)?;
+    Ok(RenderDataset {
+        columns: columns
+            .into_iter()
+            .map(|c| RenderDatasetColumn {
+                column_name: c.column_name,
+                verbose_name: c.verbose_name,
+                format: c.format,
+                semantic_type: c.semantic_type,
+            })
+            .collect(),
+        metrics: metrics
+            .into_iter()
+            .map(|m| RenderDatasetMetric {
+                metric_name: m.metric_name,
+                verbose_name: m.verbose_name,
+                format: m.format,
+            })
+            .collect(),
+    })
 }
 
 /// Step two: run every card the page asks for, with the filters it resolved.

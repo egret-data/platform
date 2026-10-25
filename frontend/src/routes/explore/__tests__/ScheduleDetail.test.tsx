@@ -15,7 +15,7 @@ async function pick(user: ReturnType<typeof userEvent.setup>, label: RegExp, opt
 
 // `vi.hoisted`: the mock factory is lifted above every `const`, so a plain
 // top-level spy is not initialised yet when the factory runs.
-const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
+const { toastSuccess, databasesMock } = vi.hoisted(() => ({ toastSuccess: vi.fn(), databasesMock: vi.fn() }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: vi.fn() } }));
 
 const schedulesMock = vi.fn();
@@ -45,7 +45,7 @@ vi.mock("@/api/alerts", async (orig) => ({
 
 // The editor needs a database picker for alerts; stub the source lists.
 vi.mock("@/api/databases", () => ({
-  useDatabases: () => ({ data: [{ id: "db1", name: "Trino" }] }),
+  useDatabases: () => databasesMock(),
 }));
 vi.mock("@/api/dashboards", () => ({
   // Two, so a multi-target report has a second object to pick.
@@ -239,6 +239,7 @@ async function saveExisting(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  databasesMock.mockReturnValue({ data: [{ id: "db1", name: "Trino" }] });
   schedulesMock.mockReturnValue({ data: [row()], isLoading: false, isError: false });
   runsMock.mockReturnValue({ data: [], isLoading: false });
   scheduleMock.mockReturnValue({ data: undefined, isLoading: false });
@@ -826,6 +827,30 @@ describe("Alerts & Reports editor page", () => {
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
   });
 
+});
+
+// KI-302: the workspace level says Connections since KI-007 (decision D5), and the menu entry
+// is Workspace settings → Connections; the warning still said "database" and "Engines".
+describe("Alert condition in a workspace with no connection (KI-302)", () => {
+  it("points to Workspace settings → Connections, in the Connections vocabulary", async () => {
+    databasesMock.mockReturnValue({ data: [] });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={["/explore/eng/alerts/new"]}>
+            <ScheduleEditor ws="eng" type="alert" scheduleId={null} section="what" onDone={() => {}} />
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByText(
+        "This workspace has no connection yet. Add one under Workspace settings → Connections before creating an alert.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/database connection|→ Engines/)).not.toBeInTheDocument();
+  });
 });
 
 describe("Data API alert condition (Task 6)", () => {

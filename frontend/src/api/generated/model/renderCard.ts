@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { RenderDataset } from './renderDataset';
 
 /**
  * One card's IDENTITY and query shape — no rows.
@@ -25,4 +26,15 @@ export interface RenderCard {
      * for the dashboard.
      */
   param_mappings: unknown;
+  /**
+     * The chart's dataset's semantic layer: each column's and metric's
+     * display name and format. The print page layers it under the chart's own
+     * settings with the SAME functions the dashboard and the chart page use
+     * (`datasetColumnDefaults` / `withDatasetDefaults`), so a report says
+     * **Revenue** where they do rather than `revenue` (KI-301). Raw rows, not
+     * a server-built format map: building that map here would be a second
+     * implementation of those rules. Empty when the dataset is not in the
+     * grant's workspace.
+     */
+  dataset: RenderDataset;
 }

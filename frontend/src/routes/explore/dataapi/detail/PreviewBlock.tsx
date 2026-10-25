@@ -231,10 +231,10 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         >
           Preview runs the {statementName ? <>statement <span className="font-mono">{statementName}</span></> : "SQL"}{" "}
           and parameters as they are on screen right now — including edits you
-          have not saved — against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
+          have not saved — against the connection above, and returns up to {PREVIEW_MAX_ROWS}{" "}
           rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
           Column names come from the engine, not from the published contract — see Response for the names a
-          consumer receives. It runs under the database connection&apos;s own identity — as you only when
+          consumer receives. It runs under the connection&apos;s own identity — as you only when
           that connection delegates or impersonates, otherwise as the shared service account — and it
           authenticates no token, checks no invoke grant and spends no rate limit. Try it is what answers
           whether a consumer can call this endpoint.
