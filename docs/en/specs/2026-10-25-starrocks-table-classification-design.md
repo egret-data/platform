@@ -620,3 +620,8 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   test does not cover. Left as is.
 - **Clearance tab ceiling copy (review finding 7):** now says a whole table costs 1 plus its column count and that the
   write causing the excess is refused.
+- **Hook tests (review finding 7).** `a_rename_of_a_classified_table_is_dry_run_and_commits` now also renames a table
+  onto a classified name that the moved columns push over the ceiling and expects the 409 (fails with the rename dry
+  run removed). New DB tests drive a multi-table `transactions/commit`, a staged create's committing update and a
+  recursive namespace drop through the hook (each fails with the layer removed). They pass on the code as it was:
+  they are coverage, not reds.

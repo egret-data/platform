@@ -790,8 +790,11 @@ async fn a_column_add_within_the_ceiling_commits() {
     );
 }
 
-/// A rename is dry-run with the source's columns under the destination name;
-/// within the ceiling it commits.
+/// A rename is dry-run with the source's columns under the destination name:
+/// within the ceiling it commits; a destination whose whole-table
+/// classification the moved columns would push over the ceiling is refused
+/// before the commit (review finding 7: this test must fail without the dry
+/// run).
 #[tokio::test]
 async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
     let Some(env) = env().await else { return };
@@ -811,6 +814,48 @@ async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
     // The classification stays on the old name (spec §11.1): its masks go.
     assert!(env.masked_columns(tag, "orders").await.is_empty());
     assert!(env.has_table_deny(tag, "orders").await);
+
+    // `big` (1 + 497) and the not-yet-existing `target` (1 + 0) carry tag B:
+    // 499. Renaming `small` (5 columns) onto `target` would make it 504.
+    let big = fields(497);
+    env.create_table("big", &refs(&big)).await;
+    let small = fields(5);
+    env.create_table("small", &refs(&small)).await;
+    let tag_b = env.classify_table("big").await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales','target','')",
+    )
+    .bind(tag_b)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign target");
+    env.recompile().await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "small"},
+                "destination": {"namespace": ["sales"], "name": "target"},
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ceiling"),
+        "{body}"
+    );
+    assert_eq!(
+        env.source("small").await.map(|c| c.len()),
+        Some(5),
+        "not renamed"
+    );
+    env.recompile().await;
 }
 
 // ── D2 review fix 1: an undrop goes through the hook ──
@@ -1036,4 +1081,106 @@ async fn a_column_add_reaches_every_bound_starrocks_profile() {
         .expect("masks");
         assert_eq!(masks, 2, "profile {profile}");
     }
+}
+
+// ── D2 review fix 5: the other table requests through the hook ──
+
+/// A multi-table commit (`POST /transactions/commit`) that adds a column to a
+/// table classified as a whole masks it before the response returns.
+#[tokio::test]
+async fn a_multi_table_commit_adding_a_column_masks_it() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_table("events", &[(1, "id")]).await;
+    let tag = env.classify_table("orders").await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "transactions/commit",
+            Some(json!({"table-changes": [
+                {
+                    "identifier": {"namespace": ["sales"], "name": "orders"},
+                    "requirements": [],
+                    "updates": [
+                        {"action": "add-schema", "schema": schema(1, &[(1, "id"), (2, "phone")])},
+                        {"action": "set-current-schema", "schema-id": -1}
+                    ]
+                },
+                {
+                    "identifier": {"namespace": ["sales"], "name": "events"},
+                    "requirements": [],
+                    "updates": [{"action": "set-properties", "updates": {"k": "v"}}]
+                }
+            ]})),
+        )
+        .await;
+    assert!(status.is_success(), "commit: {status} {body}");
+    assert_eq!(env.masked_columns(tag, "orders").await, vec!["id", "phone"]);
+}
+
+/// A staged create commits nothing until its committing update, which is the
+/// change the hook judges and recompiles for.
+#[tokio::test]
+async fn a_staged_create_is_masked_at_its_committing_update() {
+    let Some(env) = env().await else { return };
+    let tag = env.classify_table("orders").await;
+    let (status, staged) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables",
+            Some(json!({
+                "name": "orders",
+                "schema": schema(0, &[(1, "id"), (2, "email")]),
+                "stage-create": true,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "stage: {staged}");
+    assert!(
+        env.masked_columns(tag, "orders").await.is_empty(),
+        "nothing committed yet"
+    );
+    let metadata = &staged["metadata"];
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/orders",
+            Some(json!({
+                "requirements": [{"type": "assert-create"}],
+                "updates": [
+                    {"action": "assign-uuid", "uuid": metadata["table-uuid"]},
+                    {"action": "upgrade-format-version", "format-version": 2},
+                    {"action": "add-schema", "schema": schema(0, &[(1, "id"), (2, "email")]),
+                     "last-column-id": 2},
+                    {"action": "set-current-schema", "schema-id": -1},
+                    {"action": "add-spec", "spec": {"spec-id": 0, "fields": []}},
+                    {"action": "set-default-spec", "spec-id": -1},
+                    {"action": "add-sort-order", "sort-order": {"order-id": 0, "fields": []}},
+                    {"action": "set-default-sort-order", "sort-order-id": -1},
+                    {"action": "set-location", "location": metadata["location"]}
+                ]
+            })),
+        )
+        .await;
+    assert!(
+        status.is_success(),
+        "commit the staged create: {status} {body}"
+    );
+    assert_eq!(env.masked_columns(tag, "orders").await, vec!["email", "id"]);
+}
+
+/// A namespace drop takes every table in it: their masks are reaped and the
+/// `*` deny stays.
+#[tokio::test]
+async fn a_namespace_drop_reaps_the_masks_of_its_tables() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let tag = env.classify_table("orders").await;
+    assert_eq!(env.masked_columns(tag, "orders").await.len(), 2);
+    let (status, body) = env
+        .call("DELETE", "namespaces/sales?recursive=true", None)
+        .await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    assert!(env.masked_columns(tag, "orders").await.is_empty());
+    assert!(env.has_table_deny(tag, "orders").await);
 }
