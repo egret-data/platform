@@ -503,3 +503,17 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   is a 409 `"egret refused the table change: <compile error>"`; a lock timeout is a 409 asking to retry.
 - The red evidence for the ceiling test is the Task 7 hook (HEAD) run against the new test (the commit went through);
   the "dry run leaves nothing" assertion was mutation-checked by committing the dry run.
+
+### Task 9
+
+- `recompile_table_classified_profiles(pool)` lives in `trigger.rs`; profiles = StarRocks engines' profiles bound to
+  a catalog whose warehouse holds a table-level assignment of a tag with a role-bearing gate or selected by a
+  row-filter rule. One transaction per profile; a refusal is logged and recorded with `record_failure_logged`. It is
+  spawned in `egret-bin` beside `sync_admin_policies`, logging the count.
+- Its tests are in a binary of their own, `tests/table_boot_pass.rs` (not `clearance_triggers.rs`, whose fixture is a
+  Trino profile and whose tests would be recompiled by an installation-wide pass); the two run serially.
+- U6: the Overview's `compile_failed` source links every `perm.rules` row whose name appears in quotes in the recorded
+  error (a refusal labels rules by their unique name; the order-ambiguous refusal labels both rules of the tie), as a
+  sample (`ref: rule`) right after its profile's sample, and its sentence appends "The refusal names rules A and B."
+  No migration: the link is derived from the recorded error and the current rules. Tested through the real handler
+  with a real boot-pass refusal (`governance_attention.rs::a_boot_pass_refusal_names_and_links_the_two_rules`).

@@ -953,15 +953,33 @@ async fn engine_auth_failing(c: &mut PgConnection) -> Result<Option<Finding>, So
     ))
 }
 
+/// The rules a recorded compile error names: a refusal labels each rule by its
+/// (unique) name in quotes, as the order-ambiguous refusal does for the two
+/// rules of a tie (D2, user decision U6). Matched against `perm.rules`, so a
+/// rule deleted since is not linked.
+async fn rules_named_in(
+    c: &mut PgConnection,
+    error: &str,
+) -> Result<Vec<(Uuid, String)>, SourceError> {
+    Ok(sqlx::query_as(
+        "SELECT id, name FROM perm.rules WHERE strpos($1, '\"' || name || '\"') > 0 ORDER BY name",
+    )
+    .bind(error)
+    .fetch_all(&mut *c)
+    .await?)
+}
+
 async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     let runs = egret_perm_compile::compile_runs::failed_compile_runs_via(c).await?;
-    let sample = runs
-        .iter()
-        .map(|r| Sample {
+    let mut sample = Vec::new();
+    let mut named: Vec<String> = Vec::new();
+    for r in &runs {
+        let error = r.error.as_deref().unwrap_or("");
+        sample.push(Sample {
             label: r.service_name.clone(),
             detail: Some(format!(
                 "{} (failed {}; last success {})",
-                first_line(r.error.as_deref().unwrap_or("")),
+                first_line(error),
                 r.attempted_at.format("%Y-%m-%d %H:%M UTC"),
                 r.last_ok_at.map_or_else(
                     || "none recorded".to_string(),
@@ -971,8 +989,22 @@ async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
             r#ref: Some(Ref::Profile {
                 name: r.service_name.clone(),
             }),
-        })
-        .collect::<Vec<_>>();
+        });
+        // Each rule the refusal names, linked, right after its profile.
+        for (id, name) in rules_named_in(c, error).await? {
+            sample.push(Sample {
+                label: name.clone(),
+                detail: Some(format!(
+                    "named by the refusal in profile {}",
+                    r.service_name
+                )),
+                r#ref: Some(Ref::Rule { id }),
+            });
+            if !named.contains(&name) {
+                named.push(name);
+            }
+        }
+    }
     let n = runs.len();
     let r#ref = match runs.as_slice() {
         [one] => Some(Ref::Profile {
@@ -980,12 +1012,22 @@ async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
         }),
         _ => Some(Ref::Profiles),
     };
+    let (subject, verb) = if n == 1 {
+        ("The refusal", "names")
+    } else {
+        ("The refusals", "name")
+    };
+    let names = match named.as_slice() {
+        [] => String::new(),
+        [one] => format!(" {subject} {verb} rule {one}."),
+        [init @ .., last] => format!(" {subject} {verb} rules {} and {last}.", init.join(", ")),
+    };
     Ok(finding(
         "compile_failed",
         Severity::Critical,
         n,
         format!(
-            "The last compile of {} failed; engines keep the previous compile.",
+            "The last compile of {} failed; engines keep the previous compile.{names}",
             plural(n, "profile", "profiles")
         ),
         sample,

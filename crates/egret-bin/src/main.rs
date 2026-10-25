@@ -2399,6 +2399,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // D2: StarRocks whole-table classifications written before this version
+    // compiled nothing there; the first boot compiles them, one profile at a
+    // time, and every boot retries a table-commit recompile that failed. A
+    // refused profile keeps its previous compile and is recorded.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::recompile_table_classified_profiles(&pool).await {
+                Ok(n) => tracing::info!(
+                    profiles = n,
+                    "StarRocks profiles with whole-table classifications compiled at boot"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot compile of StarRocks whole-table classifications did not run"
+                ),
+            }
+        });
+    }
     // Migration 0207 renamed classifications that shared a name; their
     // compiled tag policies still name the old one until this recompiles them
     // (see `TagRepo::recompile_queued_renames`). Off the boot path: until it

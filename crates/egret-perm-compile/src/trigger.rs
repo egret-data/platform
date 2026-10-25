@@ -1645,6 +1645,64 @@ pub async fn affected_starrocks_profiles_for_tables(
     .map_err(db_err)
 }
 
+/// D2 (spec §5.6, C13): the boot pass. Recompiles every StarRocks profile
+/// that reaches a whole-table attachment of a classification with a
+/// role-bearing clearance, or of one a row-filter rule selects, so the first
+/// compile after an upgrade does not wait for an unrelated write, and a
+/// table-commit hook recompile that failed is retried.
+///
+/// One transaction per profile, so one refusal (a ceiling, or a row-filter tie
+/// a newly reached table creates, C14) does not block the others: a refused
+/// profile keeps its previous compile, and the refusal is logged and recorded
+/// in `perm.compile_runs`, where the Governance Overview's `compile_failed`
+/// finding shows it (user decision U6). Idempotent: an unchanged profile
+/// writes nothing. Returns how many profiles compiled.
+pub async fn recompile_table_classified_profiles(
+    pool: &sqlx::PgPool,
+) -> Result<usize, CompileError> {
+    let profiles: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id \
+           FROM catalog_tag_assignments a \
+           JOIN tags t ON t.id = a.tag_id \
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE a.column_name = '' AND e.type = 'starrocks' \
+            AND e.authz_service_id IS NOT NULL \
+            AND (EXISTS (SELECT 1 FROM classification_policies cp \
+                          WHERE cp.tag_id = a.tag_id AND cardinality(cp.required_roles) > 0) \
+                 OR EXISTS (SELECT 1 FROM perm.rules r \
+                             WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                               AND r.kind = 'row_filter')) \
+          ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut compiled = 0;
+    for service_id in profiles {
+        let result = async {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            recompile_service_in_tx(&mut tx, service_id).await?;
+            tx.commit().await.map_err(db_err)
+        }
+        .await;
+        match result {
+            Ok(()) => compiled += 1,
+            Err(e) => {
+                tracing::warn!(
+                    service_id,
+                    error = %e,
+                    "the boot recompile of a StarRocks profile with whole-table \
+                     classifications was refused; it keeps its previous compile"
+                );
+                record_failure_logged(pool, service_id, &e).await;
+            }
+        }
+    }
+    Ok(compiled)
+}
+
 /// The services a create/delete of `g` can change the compiled output of —
 /// the profiles bound to the grant's own catalog. See this module's Task 9
 /// section for the derivation.
