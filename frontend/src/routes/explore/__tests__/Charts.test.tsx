@@ -345,6 +345,15 @@ describe("Charts Trash summary", () => {
     expect(screen.queryByText("folder")).toBeNull();
     expect(screen.queryByText("folders")).toBeNull();
   });
+
+  // KI-291: nothing is created in the Trash, as on Dashboards (KI-074) and Datasets.
+  it("offers + Chart on the list and not in the Trash", async () => {
+    renderAt();
+    expect(screen.getByRole("link", { name: "+ Chart" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByRole("heading", { name: "Trash" });
+    expect(screen.queryByRole("link", { name: "+ Chart" })).toBeNull();
+  });
 });
 
 // KI-281: the Charts list trashed rows and deleted folders at once, while the Dashboards list asks

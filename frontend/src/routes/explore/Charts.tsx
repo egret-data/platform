@@ -243,7 +243,8 @@ export default function Charts() {
           )}
         </>
       }
-      action={<Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
+      // Nothing is created in the Trash (KI-291), as on Dashboards and Datasets.
+      action={showTrash ? null : <Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
     >
       <ListStates
         isLoading={isLoading}
