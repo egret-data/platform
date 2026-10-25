@@ -659,3 +659,9 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   - A genuine engine failure keeps 502 (`BiError::Engine`), a database failure 500.
   The frontend already shows a write's `error` sentence (`ApiError.message`); `AddTagDialog` gained a test pinning
   it for the 409. No API schema changed.
+- **F7 (cleared reader on a table not in the catalog): not changed.** Explain reads "cleared" from the served
+  clearance MASK (the reader is named in its items). With no mask served (U4), an allowed `select` does not say why:
+  the reader may be excepted by the whole-table deny (cleared) or, for a column whose deny was not compiled yet
+  (`not_compiled`), simply not denied. Saying "(cleared for X)" there would need a second evaluation of the deny's
+  exceptions, so the line keeps "reads email as the real value" plus the masks-missing sentence, which stays true
+  for that profile (a view over the table shows the values to the uncleared).
