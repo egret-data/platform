@@ -18,6 +18,7 @@ const removeMutate = vi.fn().mockResolvedValue(undefined);
 const runNowMutate = vi.fn().mockResolvedValue({ id: "r1", state: "success" });
 const setActiveMutate = vi.fn().mockResolvedValue({ id: "s1", active: false });
 const trashMutate = vi.fn().mockResolvedValue(undefined);
+const folderRemoveMock = vi.fn().mockResolvedValue(undefined);
 // Read inside the folders mock factory's closure, never at module scope, so a
 // test can swap the folder list between renders.
 let folders: { id: string; name: string }[] = [];
@@ -48,7 +49,7 @@ vi.mock("@/api/folders", () => ({
   useFolderMutations: () => ({
     create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
     rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
-    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    remove: { mutateAsync: folderRemoveMock },
   }),
 }));
 
@@ -347,6 +348,7 @@ describe("Alerts — bulk select only reaches rows on screen", () => {
     expect(screen.queryByLabelText("Select Hidden alert")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
     // by trashing exactly the wrong schedule, which is the whole defect.
@@ -373,6 +375,7 @@ describe("Alerts — bulk select only reaches rows on screen", () => {
     expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     await waitFor(() => expect(trashMutate).toHaveBeenCalledWith("s-shown"));
     expect(trashMutate).not.toHaveBeenCalledWith("s-hidden");
@@ -612,5 +615,50 @@ describe("Alerts — no folders, no folderless header", () => {
     await user.click(screen.getByRole("button", { name: "Bulk select" }));
     await user.click(screen.getByLabelText("Select all"));
     expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
+  });
+});
+
+
+// KI-281: the Alerts list trashed rows and deleted folders at once, while the Dashboards list asks
+// first (KI-075).
+describe("Alerts asks before trashing or deleting a folder (KI-281)", () => {
+  it("a row's Move to Trash asks first, names the schedule, and trashes only on confirm", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Actions for Orders dropped" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Move to Trash" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(trashMutate).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('"Orders dropped" moves to the Trash');
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await waitFor(() => expect(trashMutate).toHaveBeenCalledWith("s1"));
+  });
+
+  it("the bulk Move n to Trash asks first and counts the alerts", async () => {
+    schedulesMock.mockReturnValue({ data: [row(), row({ id: "s2", name: "Signups flat" })], isLoading: false, isError: false });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+    await user.click(screen.getByRole("button", { name: "Move 2 to Trash" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(trashMutate).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("2 alerts move to the Trash");
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await waitFor(() => expect(trashMutate).toHaveBeenCalledTimes(2));
+  });
+
+  it("a folder's Delete asks first and deletes only on confirm", async () => {
+    schedulesMock.mockReturnValue({ data: [row({ folder_id: "f1" })], isLoading: false, isError: false });
+    folders = [{ id: "f1", name: "F1" }];
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Folder F1 actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(folderRemoveMock).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("Everything in it moves to Uncategorized; nothing is deleted.");
+    await user.click(within(dialog).getByRole("button", { name: "Delete folder" }));
+    await waitFor(() => expect(folderRemoveMock).toHaveBeenCalledWith("f1"));
   });
 });

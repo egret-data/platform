@@ -29,6 +29,7 @@ import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNC
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { ConfirmFolderDeleteDialog, ConfirmTrashDialog } from "@/components/explore/ConfirmActionDialog";
 import { ScheduleActionsMenu } from "@/components/alerts/ScheduleActionsMenu";
 import { RunLogDrawer } from "@/components/alerts/RunLogDrawer";
 import { humanizeCrontab } from "@/lib/humanizeCron";
@@ -144,6 +145,10 @@ export default function Alerts() {
 
   const [runLogFor, setRunLogFor] = useState<ScheduleSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummary | null>(null);
+  // Moving to the Trash and deleting a folder are confirmed first, as on Dashboards (KI-281):
+  // what is being trashed — one row, or the bulk selection — and which folder is being deleted.
+  const [pendingTrash, setPendingTrash] = useState<ScheduleSummary | "bulk" | null>(null);
+  const [pendingFolderDelete, setPendingFolderDelete] = useState<{ id: string; name: string } | null>(null);
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [query, setQuery] = useState("");
   const [stateFilter, setStateFilter] = useState(FACET_ALL);
@@ -441,12 +446,7 @@ export default function Alerts() {
           folders={folders}
           onRunLog={setRunLogFor}
           onEdit={(x) => nav(`/explore/${ws}/alerts/${x.id}`)}
-          onTrash={(x) =>
-            trash
-              .mutateAsync(x.id)
-              .then(() => toast.success("Moved to Trash"))
-              .catch((e) => toast.error(String(e)))
-          }
+          onTrash={setPendingTrash}
           onRestore={(x) => guard(restore.mutateAsync(x.id))}
           onDeletePermanent={setPendingDelete}
           onMove={(x, fid) => guard(setFolder.mutateAsync({ id: x.id, folder_id: fid }))}
@@ -588,7 +588,7 @@ export default function Alerts() {
                   onMove={doBulkMoveTo}
                   onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
                 />
-                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                <Button variant="destructive" size="sm" onClick={() => setPendingTrash("bulk")}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
@@ -684,11 +684,7 @@ export default function Alerts() {
                           }
                           onDelete={
                             group.folder && canManage
-                              ? () =>
-                                  removeFolder
-                                    .mutateAsync(group.folder!.id)
-                                    .then(() => toast.success("Folder deleted"))
-                                    .catch((e) => toast.error(String(e)))
+                              ? () => setPendingFolderDelete(group.folder!)
                               : undefined
                           }
                           onDropItem={(id) =>
@@ -750,6 +746,30 @@ export default function Alerts() {
       {runLogFor && (
         <RunLogDrawer ws={ws} schedule={runLogFor} onClose={() => setRunLogFor(null)} />
       )}
+
+      <ConfirmTrashDialog
+        pending={pendingTrash === "bulk" ? { count: bulk.selectedIds.length } : pendingTrash}
+        noun={{ singular: typeLabel, plural: `${typeLabel}s` }}
+        onCancel={() => setPendingTrash(null)}
+        onConfirm={() => {
+          const target = pendingTrash;
+          setPendingTrash(null);
+          if (target === "bulk") void doBulkTrash();
+          else if (target) guard(trash.mutateAsync(target.id).then(() => toast.success("Moved to Trash")));
+        }}
+      />
+
+      {/* No count: a folder holds alerts and reports, and this list shows one type per tab. */}
+      <ConfirmFolderDeleteDialog
+        folder={pendingFolderDelete}
+        noun={{ singular: typeLabel, plural: `${typeLabel}s` }}
+        onCancel={() => setPendingFolderDelete(null)}
+        onConfirm={() => {
+          const target = pendingFolderDelete;
+          setPendingFolderDelete(null);
+          if (target) guard(removeFolder.mutateAsync(target.id).then(() => toast.success("Folder deleted")));
+        }}
+      />
 
       <ConfirmDeleteDialog
         open={pendingDelete !== null}

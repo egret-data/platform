@@ -16,6 +16,7 @@ const m = {
   removeBookmark: vi.fn(),
 };
 const setFolderMock = vi.fn();
+const folderRemoveMock = vi.fn();
 const capsMock = vi.fn();
 let folders: { id: string; name: string }[] = [];
 
@@ -39,7 +40,7 @@ vi.mock("@/api/folders", () => ({
   useFolderMutations: () => ({
     create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f-new", name: "New" }) },
     rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
-    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    remove: { mutateAsync: folderRemoveMock },
   }),
 }));
 // The real dialog talks to the shares API; what this page owns is WHICH object it is opened on.
@@ -111,6 +112,7 @@ beforeEach(() => {
   createMutateAsync.mockReset();
   for (const fn of Object.values(m)) fn.mockReset().mockResolvedValue(undefined);
   setFolderMock.mockReset().mockResolvedValue({});
+  folderRemoveMock.mockReset().mockResolvedValue(undefined);
   // An author by default; the workspace-level tests override it.
   capsMock.mockReset().mockReturnValue({ data: { can_create: true } });
   folders = [];
@@ -260,6 +262,7 @@ describe("Apps list — row menu", () => {
     renderApps();
     await openMenu("Two");
     await userEvent.click(screen.getByRole("menuitem", { name: "Move to Trash" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
     await waitFor(() => expect(m.trash).toHaveBeenCalledWith("a2"));
     expect(m.trash).toHaveBeenCalledTimes(1);
     expect(m.remove).not.toHaveBeenCalled();
@@ -491,6 +494,7 @@ describe("Apps list — bulk select over mixed-permission rows", () => {
     expect(screen.getByLabelText("Select all")).toHaveAttribute("aria-checked", "true");
 
     await userEvent.click(screen.getByRole("button", { name: "Move 2 to Trash" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     // The ids, not merely the count: trashing the wrong two would satisfy a call count.
     await waitFor(() => expect(m.trash).toHaveBeenCalledTimes(2));
@@ -589,6 +593,7 @@ describe("Apps list — bulk select over mixed-permission rows", () => {
     await userEvent.click(screen.getByRole("button", { name: "Bulk select" }));
     await userEvent.click(screen.getByLabelText("Select Writable one"));
     await userEvent.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("forbidden"));
     expect(toast.success).not.toHaveBeenCalled();
   });
@@ -613,6 +618,7 @@ describe("Apps list — bulk select over mixed-permission rows", () => {
     await userEvent.click(screen.getByRole("button", { name: "Bulk select" }));
     await userEvent.click(screen.getByLabelText("Select all"));
     await userEvent.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     await waitFor(() => expect(m.trash).toHaveBeenCalledWith("shown"));
     expect(m.trash).toHaveBeenCalledTimes(1);
@@ -758,5 +764,48 @@ describe("Apps list — folders and the summary strip", () => {
     expect(screen.getByText("app")).toBeTruthy();
     expect(screen.getByText("folder")).toBeTruthy();
     expect(screen.queryByText("apps")).toBeNull();
+  });
+});
+
+
+// KI-281: the Apps list trashed rows and deleted folders at once, while the Dashboards list asks
+// first (KI-075).
+describe("Apps asks before trashing or deleting a folder (KI-281)", () => {
+  it("a row's Move to Trash asks first, names the app, and trashes only on confirm", async () => {
+    serve([app({ id: "a1", name: "One" })]);
+    renderApps();
+    await openMenu("One");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Move to Trash" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(m.trash).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('"One" moves to the Trash');
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await waitFor(() => expect(m.trash).toHaveBeenCalledWith("a1"));
+  });
+
+  it("the bulk Move n to Trash asks first and counts the apps", async () => {
+    serve([app({ id: "a1", name: "One" }), app({ id: "a2", name: "Two" })]);
+    renderApps();
+    await userEvent.click(screen.getByRole("button", { name: "Bulk select" }));
+    await userEvent.click(screen.getByLabelText("Select all"));
+    await userEvent.click(screen.getByRole("button", { name: "Move 2 to Trash" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(m.trash).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("2 apps move to the Trash");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await waitFor(() => expect(m.trash).toHaveBeenCalledTimes(2));
+  });
+
+  it("a folder's Delete asks first, says where its apps go, and deletes only on confirm", async () => {
+    serve([app({ id: "a1", name: "One", folder_id: "f1" }), app({ id: "a2", name: "Two", folder_id: "f1" })]);
+    folders = [{ id: "f1", name: "F1" }];
+    renderApps();
+    await userEvent.click(screen.getByRole("button", { name: "Folder F1 actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(folderRemoveMock).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("The 2 apps in it move to Uncategorized");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete folder" }));
+    await waitFor(() => expect(folderRemoveMock).toHaveBeenCalledWith("f1"));
   });
 });

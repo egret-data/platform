@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import { ConfirmActionDialog } from "@/components/explore/ConfirmActionDialog";
+import { ConfirmFolderDeleteDialog, ConfirmTrashDialog } from "@/components/explore/ConfirmActionDialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
@@ -28,6 +28,7 @@ import { EntityLink } from "@/components/ui/entity-link";
 import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "card_count" | "updated_at";
+const DASHBOARD_NOUN = { singular: "dashboard", plural: "dashboards" };
 
 export default function Dashboards() {
   const ws = useParams().workspace!;
@@ -407,14 +408,10 @@ export default function Dashboards() {
         }}
       />
 
-      <ConfirmActionDialog
-        open={pendingTrash !== null}
-        onOpenChange={(o) => { if (!o) setPendingTrash(null); }}
-        title="Move to Trash?"
-        description={pendingTrash === "bulk"
-          ? `${bulk.selectedIds.length === 1 ? "1 dashboard moves" : `${bulk.selectedIds.length} dashboards move`} to the Trash. You can restore them from there.`
-          : `"${pendingTrash?.name ?? ""}" moves to the Trash. You can restore it from there.`}
-        confirmLabel="Move to Trash"
+      <ConfirmTrashDialog
+        pending={pendingTrash === "bulk" ? { count: bulk.selectedIds.length } : pendingTrash}
+        noun={DASHBOARD_NOUN}
+        onCancel={() => setPendingTrash(null)}
         onConfirm={() => {
           const target = pendingTrash;
           setPendingTrash(null);
@@ -423,16 +420,11 @@ export default function Dashboards() {
         }}
       />
 
-      <ConfirmActionDialog
-        open={pendingFolderDelete !== null}
-        onOpenChange={(o) => { if (!o) setPendingFolderDelete(null); }}
-        title="Delete folder?"
-        description={(() => {
-          const n = (data ?? []).filter((d) => d.folder_id === pendingFolderDelete?.id).length;
-          const what = n === 0 ? "It is empty." : `The ${n === 1 ? "dashboard in it moves" : `${n} dashboards in it move`} to Uncategorized; none is deleted.`;
-          return `Delete the folder "${pendingFolderDelete?.name ?? ""}"? ${what}`;
-        })()}
-        confirmLabel="Delete folder"
+      <ConfirmFolderDeleteDialog
+        folder={pendingFolderDelete}
+        itemCount={(data ?? []).filter((d) => d.folder_id === pendingFolderDelete?.id).length}
+        noun={DASHBOARD_NOUN}
+        onCancel={() => setPendingFolderDelete(null)}
         onConfirm={() => {
           const target = pendingFolderDelete;
           setPendingFolderDelete(null);
