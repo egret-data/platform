@@ -1279,12 +1279,6 @@ async fn smtp_test(
     Ok(Json(serde_json::json!({ "ok": true, "sent_to": to })))
 }
 
-// ── Report rendering (P4) ────────────────────────────────────────────────────
-
-/// The print page's ONE request. Deliberately token-only: there is no
-/// `WsContext` extractor here, so an ordinary session cookie authenticates
-/// nothing on this route — widening it to sessions would make it a second,
-/// unaudited read path for any chart or dashboard.
 /// The workspace's Slack app.
 ///
 /// Gated on `SMTP_MANAGE` — the same permission as the relay, and for the same
@@ -1359,6 +1353,14 @@ async fn slack_delete(
     Ok(Json(egret_core::Ack { ok: true }))
 }
 
+// ── Report rendering (P4) ────────────────────────────────────────────────────
+
+/// The print page's ONE request.
+///
+/// Deliberately token-only: there is no `WsContext` extractor here, so an
+/// ordinary session cookie authenticates nothing on this route — widening it
+/// to sessions would make it a second, unaudited read path for any chart or
+/// dashboard.
 #[utoipa::path(
     get, path = "/api/render/payload", tag = "alerts",
     responses(
