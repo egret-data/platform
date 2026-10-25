@@ -4,8 +4,8 @@
 //! would silently escape the module gate.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::{get, patch, post, put};
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, patch, post, put};
 use axum::{http::StatusCode, Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;

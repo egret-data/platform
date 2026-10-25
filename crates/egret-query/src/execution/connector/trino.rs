@@ -1310,10 +1310,7 @@ mod tests {
         srv.abort();
         match r {
             Attempt::Done(Err(EngineError::Engine(msg))) => {
-                assert!(
-                    msg.contains("http-server.process-forwarded=true"),
-                    "{msg}"
-                );
+                assert!(msg.contains("http-server.process-forwarded=true"), "{msg}");
                 assert!(msg.contains("X-Forwarded-Proto"), "{msg}");
             }
             _ => panic!("406 must be an engine error naming the setting"),
