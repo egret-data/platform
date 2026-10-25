@@ -13,7 +13,7 @@ use egret_perm::{CompileError, EngineType};
 use egret_policy::admin::access_to_ranger_json;
 use egret_ranger_eval::eval::PluginVersion;
 
-use crate::clearance::mv_deny_inputs;
+use crate::clearance::{mv_deny_inputs, starrocks_deny, withheld_accesses, WHOLE_TABLE_COLUMN};
 use crate::clearance_mask::{clearance_mask_name, fold_clearance_mask};
 use crate::rules::{stamp_service_type, TaggedColumn};
 
@@ -46,4 +46,26 @@ pub fn starrocks_mv_denies(service: &str, pending: &[(TaggedColumn, Vec<String>)
         .into_iter()
         .map(|(_, input)| stamp_service_type(access_to_ranger_json(&input), EngineType::StarRocks))
         .collect()
+}
+
+/// The whole-table clearance deny (D2, user decision U1) on
+/// `{catalog}.{schema}.{table}`, excepting `cleared`, as `compile_clearance`
+/// builds it: `select` denied to `{public}` on `column: *`.
+pub fn starrocks_table_clearance_deny(
+    service: &str,
+    tag_id: Uuid,
+    catalog: &str,
+    schema: &str,
+    table: &str,
+    cleared: &[String],
+) -> Result<Value, CompileError> {
+    let all = TaggedColumn::new(catalog, schema, table, WHOLE_TABLE_COLUMN)?;
+    let (_, body) = starrocks_deny(
+        tag_id,
+        service,
+        &all,
+        &withheld_accesses(EngineType::StarRocks)?,
+        cleared.to_vec(),
+    );
+    Ok(body)
 }

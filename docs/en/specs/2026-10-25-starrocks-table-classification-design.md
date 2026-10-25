@@ -574,3 +574,13 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   now names.
 - Not verified in a browser (FE-TEST-2); `npm run build` and the bundle tests were not run (the coordinator runs the
   gate).
+
+### Task 14
+
+- `harness_support::starrocks_table_clearance_deny` builds the body with the compiler's own `starrocks_deny`,
+  `WHOLE_TABLE_COLUMN` and `withheld_accesses` (made `pub(crate)`).
+- `differential::a_whole_table_clearance_deny_decides_as_designed_on_the_real_jars`: on 2.8.0 and 2.9.0, with a
+  `select` grant on `wh.*.*.*`, the jars and the evaluator agree on all 18 probes, as designed: the uncleared reader
+  is denied a classified column, the column-less TABLE request (what Explain's `other_columns_access` asks),
+  `_file` and `___count___`; the cleared reader is allowed each; another table is unaffected.
+- `just test-ranger-gates`: exit 0, every line green (the new test runs in its third line).

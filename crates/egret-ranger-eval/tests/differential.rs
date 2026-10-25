@@ -9069,6 +9069,140 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+// ── D2 (2026-10-25): the whole-table clearance deny on the real jars ─────────
+//
+// A classification on a whole StarRocks table compiles one access deny of
+// `select` to `{public}` on `{catalog, database, table, column: *}`, the cleared
+// users excepted (user decision U1). The live spike measured that StarRocks
+// refuses an uncleared reader by checking a column it adds to the scan (`_file`
+// for `SELECT *`, `___count___` for `count(*)`), and Explain's table-level
+// `select` verdict asks a column-less TABLE request. This pins that the jars and
+// the evaluator decide every one of those requests alike, and as designed.
+#[test]
+fn a_whole_table_clearance_deny_decides_as_designed_on_the_real_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the whole-table clearance differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let (mut asked, mut errors) = (0usize, 0usize);
+    let cleared = vec!["ann".to_string()];
+
+    for profile in [starrocks(), starrocks_2_9_0()] {
+        let service_type = profile.engine.service_def_name();
+        let (def_json, def, engine) = load_engine(&profile);
+        let mut deny = egret_perm_compile::harness_support::starrocks_table_clearance_deny(
+            profile.service_name,
+            Uuid::from_u128(VG_TAG),
+            "wh",
+            "sales",
+            "orders",
+            &cleared,
+        )
+        .expect("the deny builds");
+        assert_eq!(
+            deny["resources"]["column"]["values"],
+            json!(["*"]),
+            "{deny}"
+        );
+        deny["id"] = json!(30);
+        // The grant both readers hold: `select` on every column of `wh`.
+        let grant = json!({
+            "id": 31, "name": "grant-all", "service": profile.service_name, "policyType": 0,
+            "isEnabled": true, "policyPriority": 0,
+            "resources": lv_resources(&profile, &[(0, "wh"), (1, "*"), (2, "*"), (3, "*")]),
+            "policyItems": [mig_item(&["ann", VG_UNCLEARED], &[], &["select"])],
+        });
+        let set_json = mig_envelope(&profile, &def_json, &tag_def_json, vec![deny, grant], None);
+        let set: ServicePolicySet = serde_json::from_value(set_json.clone()).expect("parse set");
+
+        // (label, request levels, user, designed isAllowed)
+        let mut probes: Vec<(String, AccessRequest, bool)> = Vec::new();
+        for (what, levels) in [
+            (
+                "a classified column",
+                vec!["wh", "sales", "orders", "email"],
+            ),
+            ("the table, no column", vec!["wh", "sales", "orders"]),
+            ("the hidden _file", vec!["wh", "sales", "orders", "_file"]),
+            ("count(*)", vec!["wh", "sales", "orders", "___count___"]),
+        ] {
+            for (user, want) in [(VG_UNCLEARED, false), ("ann", true)] {
+                probes.push((
+                    format!("{user} selects {what}"),
+                    vg_request(&profile, user, "select", &levels),
+                    want,
+                ));
+            }
+        }
+        probes.push((
+            format!("{VG_UNCLEARED} selects a column of another table"),
+            vg_request(
+                &profile,
+                VG_UNCLEARED,
+                "select",
+                &["wh", "sales", "customers", "email"],
+            ),
+            true,
+        ));
+
+        let payload: Vec<Value> = probes
+            .iter()
+            .enumerate()
+            .map(|(i, (_, request, _))| {
+                lv_case(format!("wt-{i}"), 0, set_json.clone(), request.clone())
+                    .to_json(service_type)
+            })
+            .collect();
+        let sent = payload.len();
+        let version = profile.ranger_version;
+        let verdicts = ask_ranger_json(payload, version, &format!("wt-{service_type}"));
+        assert_eq!(verdicts.len(), sent);
+        for ((label, request, want), v) in probes.iter().zip(&verdicts) {
+            asked += 1;
+            if !v["error"].is_null() {
+                errors += 1;
+                failures.push(format!(
+                    "[{service_type} @ {version}] ranger threw on `{label}`: {}",
+                    v["error"]
+                ));
+                continue;
+            }
+            let java = java_outcome(0, v);
+            let mine = match evaluate(&set, request, &def, &engine) {
+                Decision::Allowed { .. } => Outcome::Access { allowed: true },
+                Decision::Denied { .. } => Outcome::Access { allowed: false },
+                Decision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+            };
+            if java != mine {
+                failures.push(format!(
+                    "CRITICAL [{service_type} @ {version}] `{label}`: java {java:?}, evaluator {mine:?}"
+                ));
+            }
+            if java != (Outcome::Access { allowed: *want }) {
+                failures.push(format!(
+                    "[{service_type} @ {version}] `{label}`: java {java:?}, designed allowed={want}"
+                ));
+            }
+        }
+        eprintln!("whole-table clearance [{service_type} @ ranger {version}]: {sent} probes");
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!(
+        "whole-table clearance differential: {asked} probes, {errors} errors, {} failures, \
+         {elapsed:.2} s",
+        failures.len()
+    );
+    assert_eq!(asked, 18, "every probe was asked: {asked}");
+    assert!(
+        elapsed > 1.0,
+        "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // F11 Task 9: engine capability policies on the real jars.
 // ---------------------------------------------------------------------------

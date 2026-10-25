@@ -782,7 +782,7 @@ fn skip(g: &GateRow, reason: String) -> SkippedItem {
 /// **The consequence is real on BOTH engines: a user without clearance can still
 /// overwrite a column they cannot read.** SP4c Task 5/7 says exactly that in the
 /// UI.
-fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
+pub(crate) fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
     let actions: &[Action] = match engine {
         EngineType::Trino => &[Action::Read, Action::Write],
         EngineType::StarRocks => &[Action::Read],
