@@ -435,11 +435,25 @@ export default function Query() {
           lines, i.e. the exact problem this redesign exists to fix. Collapsed,
           the editor gets 295px and the preview 241px. The summary still names
           what is inside, including how many parameters, so nothing is hidden —
-          it is one click, and the tab's purpose is writing SQL. */}
+          it is one click, and the tab's purpose is writing SQL.
+          The summary names the database and the parameters themselves, not
+          only how many there are (KI-031): closed, the strip still answers
+          "what does this run against, and what can a caller pass". */}
       <details className="group shrink-0">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-sm text-muted-foreground hover:text-foreground">
-          <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden="true" />
-          Database and parameters ({form.params.length})
+          <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open:rotate-90" aria-hidden="true" />
+          <span className="shrink-0">Database and parameters ({form.params.length})</span>
+          <span className="min-w-0 truncate text-foreground" data-testid="query-strip-contents">
+            {[
+              // Nothing while the list loads: "no database" would be a false claim.
+              form.database_id
+                ? (databases ?? []).find((d) => d.id === form.database_id)?.name
+                : "No database chosen",
+              form.params.length === 0 ? "no parameters" : form.params.map((p) => p.name).join(", "),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
         </summary>
         {/* Capped and scrollable: an endpoint with a dozen declarations would
             otherwise push the editor and the preview out of the viewport,

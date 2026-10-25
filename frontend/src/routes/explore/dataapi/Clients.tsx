@@ -451,8 +451,10 @@ function ClientRow({ client: c, onRevoke }: { client: DataApiClientDto; onRevoke
               revoked <RelativeTime iso={c.revoked_at!} />
             </span>
           ) : c.expires_at ? (
+            /* The verb follows the badge: "expires 9 months ago" read as a date
+               still to come. */
             <span className="text-xs text-muted-foreground">
-              expires <RelativeTime iso={c.expires_at} />
+              {expired ? "expired" : "expires"} <RelativeTime iso={c.expires_at} />
             </span>
           ) : null}
         </div>

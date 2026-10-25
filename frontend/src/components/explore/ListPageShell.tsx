@@ -65,7 +65,11 @@ export function ListPageShell({
   return (
     <PageContainer width={width}>
       <header className={`mb-4 flex flex-wrap ${alignClass} justify-between gap-3`}>
-        <div className="min-w-0">
+        {/* `flex-1` with a 20rem basis: a long description shrinks this block
+            instead of filling the row and wrapping the action under it, which
+            put a create page's primary button on the left, below the prose
+            (KI-183). It still wraps once less than 20rem is left. */}
+        <div className="min-w-0 flex-[1_1_20rem]">
           {back}
           <PageTitle>{title}</PageTitle>
           {description ? (
