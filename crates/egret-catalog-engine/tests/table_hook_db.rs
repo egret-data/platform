@@ -909,3 +909,62 @@ async fn an_undrop_that_would_cross_the_ceiling_is_refused() {
     // Not wedged: the profile still compiles.
     env.recompile().await;
 }
+
+// ── D2 review fix 2: a register is checked like a create ──
+
+/// U5 for a register: its schema is in the metadata file it points to, so a
+/// register that would push a whole-table classification over its ceiling is
+/// answered 409 with the compile's refusal, the table is not left registered,
+/// and the profile still compiles.
+#[tokio::test]
+async fn a_register_that_would_cross_the_ceiling_is_refused_and_does_not_wedge() {
+    let Some(env) = env().await else { return };
+    // A metadata file with 520 columns: a table created and dropped (not
+    // purged) past the hook.
+    let f = fields(520);
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales/tables",
+            Some(json!({"name": "wide", "schema": schema(0, &refs(&f))})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create: {body}");
+    let location = body["metadata-location"]
+        .as_str()
+        .expect("location")
+        .to_string();
+    let (status, body) = env
+        .call_raw(
+            "DELETE",
+            "namespaces/sales/tables/wide?purgeRequested=false",
+            None,
+        )
+        .await;
+    assert!(status.is_success(), "drop: {status} {body}");
+    // The classification is on `wide` before it exists (U4: deny only).
+    let tag = env.classify_table("wide").await;
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/register",
+            Some(json!({"name": "wide", "metadata-location": location})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("ceiling"), "{message}");
+    assert_eq!(
+        env.source("wide").await,
+        None,
+        "the table is not left registered"
+    );
+    // Not wedged: the profile compiles, and its last compile is not a failure.
+    env.recompile().await;
+    assert_eq!(
+        env.last_compile().await.map(|(o, _)| o).as_deref(),
+        Some("ok")
+    );
+    assert!(env.has_table_deny(tag, "wide").await);
+}

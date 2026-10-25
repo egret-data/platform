@@ -2086,7 +2086,7 @@ where
 }
 
 /// The commit's request metadata (the guard put it there), or an internal one.
-fn request_metadata(req: &Request) -> lakekeeper::api::RequestMetadata {
+pub(crate) fn request_metadata(req: &Request) -> lakekeeper::api::RequestMetadata {
     req.extensions()
         .get::<lakekeeper::api::RequestMetadata>()
         .cloned()

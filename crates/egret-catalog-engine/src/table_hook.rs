@@ -48,9 +48,12 @@
 //!    ([`egret_perm_compile::table_columns::PENDING_COLUMNS_SETTING`]). If that
 //!    compile is refused (a ceiling, an undecidable mask fold, a new tie), the
 //!    request is refused with a 409 naming the reason, and nothing commits: a
-//!    profile is never wedged by a schema change. A register is not dry-run
-//!    (its schema is in a metadata file the request only points to), nor is a
-//!    drop, which only shrinks.
+//!    profile is never wedged by a schema change. A drop, which only shrinks,
+//!    is not dry-run. A register's schema is in the metadata file it points
+//!    to, which the hook does not read, so it is checked right AFTER its
+//!    commit instead: its recompile runs in one transaction, and if that is
+//!    refused the table is dropped again (files kept) and the request is
+//!    answered 409 with the refusal.
 //! 3. Forward to lakekeeper. A non-2xx answer is returned as it is.
 //! 4. After a 2xx, recompile each affected profile in its own transaction,
 //!    bounded by `lock_timeout`, before the response is returned. The
@@ -83,7 +86,7 @@ use egret_perm_compile::table_columns::{
 use uuid::Uuid;
 
 use crate::view_hold::{
-    compile_is_lock_timeout, decode_segment, is_multi_level, rename_of, resolve,
+    compile_is_lock_timeout, decode_segment, is_multi_level, rename_of, request_metadata, resolve,
 };
 
 /// Largest table request body the hook reads.
@@ -117,10 +120,12 @@ impl TableHook {
     }
 }
 
-/// `inner` with the hook in front of it.
+/// `inner` with the hook in front of it. The hook drops a refused register
+/// through `inner` itself, with no hook in front of it.
 pub fn layer(inner: axum::Router, hook: Arc<TableHook>) -> axum::Router {
+    let loader = inner.clone();
     inner.layer(axum::middleware::from_fn_with_state(
-        hook,
+        (hook, loader),
         hook_table_commits,
     ))
 }
@@ -563,10 +568,81 @@ impl TableHook {
     }
 }
 
+impl TableHook {
+    /// Recompile `profiles` in ONE transaction (the profiles locked in
+    /// ascending order first), committing only if every one compiles.
+    async fn recompile_or_refuse(&self, profiles: &[i64]) -> Result<(), egret_perm::CompileError> {
+        let db = |e: sqlx::Error| egret_perm::CompileError::Db(e.to_string());
+        let mut tx = self.db.pool.begin().await.map_err(db)?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", self.lock_wait.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        egret_perm_compile::recompile_services_in_tx(&mut tx, profiles).await?;
+        tx.commit().await.map_err(db)
+    }
+
+    /// Record `error` as each profile's failed compile (`perm.compile_runs`).
+    async fn record_failure(&self, profiles: &[i64], error: &egret_perm::CompileError) {
+        for &service_id in profiles {
+            if let Err(w) = egret_perm_compile::compile_runs::record_compile_failure(
+                &self.db.pool,
+                service_id,
+                &error.to_string(),
+            )
+            .await
+            {
+                tracing::warn!(service_id, error = %w,
+                    "could not record a failed compile in perm.compile_runs");
+            }
+        }
+    }
+}
+
+/// Drop a table just registered, through lakekeeper with no hook in front,
+/// keeping its files (`purgeRequested=false`: they are the client's).
+async fn drop_registered(
+    loader: &axum::Router,
+    path: String,
+    metadata: lakekeeper::api::RequestMetadata,
+) -> Result<(), String> {
+    use tower::ServiceExt as _;
+    let mut req = Request::builder()
+        .method(Method::DELETE)
+        .uri(path)
+        .body(Body::empty())
+        .map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(metadata);
+    let response = loader
+        .clone()
+        .oneshot(req)
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("the catalog answered {}", response.status()))
+    }
+}
+
+/// Percent-encode one path segment (everything but RFC 3986 unreserved).
+fn encode_segment(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// The axum middleware (module doc). Every request it does not handle passes
 /// through unchanged.
 pub async fn hook_table_commits(
-    State(hook): State<Arc<TableHook>>,
+    State((hook, loader)): State<(Arc<TableHook>, axum::Router)>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -617,14 +693,44 @@ pub async fn hook_table_commits(
             return refusal.into_response();
         }
     }
+    // A register's schema is in the metadata file it points to, which the
+    // hook does not read: it is checked right after the commit instead, and a
+    // refused one is dropped again (review finding 2, U5).
+    let register_drop = match (&target, &tables[..]) {
+        (Target::Register { .. }, [(_, Some(name))]) => Some((
+            format!(
+                "{}/tables/{}?purgeRequested=false",
+                req.uri().path().trim_end_matches("/register"),
+                encode_segment(name)
+            ),
+            request_metadata(&req),
+        )),
+        _ => None,
+    };
     // Uncancellable: a commit lakekeeper made is recompiled even when the
     // client has gone (as the view hold's after-commit steps).
     let work = async move {
         let response = next.run(req).await;
-        if response.status().is_success() {
-            hook.recompile(&profiles).await;
+        if !response.status().is_success() {
+            return response;
         }
-        response
+        let Some((drop_path, metadata)) = register_drop else {
+            hook.recompile(&profiles).await;
+            return response;
+        };
+        match hook.recompile_or_refuse(&profiles).await {
+            Ok(()) => response,
+            Err(e) => match drop_registered(&loader, drop_path, metadata).await {
+                Ok(()) => Refusal(format!("{e}; the table was not registered")).into_response(),
+                Err(why) => {
+                    tracing::warn!(error = %why,
+                        "a refused register could not be dropped again; the profile is wedged \
+                         until the table or its classification is removed");
+                    hook.record_failure(&profiles, &e).await;
+                    response
+                }
+            },
+        }
     };
     match tokio::spawn(work.in_current_span()).await {
         Ok(response) => response,

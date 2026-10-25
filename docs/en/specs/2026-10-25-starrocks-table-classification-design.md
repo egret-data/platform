@@ -596,3 +596,12 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   by tabular id), the recompile is dry-run with the table's columns overlaid, a refusal is a 409 (`Conflict`, "egret
   refused the undrop: …") and nothing is undropped (U5 applies to undrop like to a column add). After the undrop the
   profiles are recompiled before the call returns. A view's undrop is unchanged.
+- **Register (review finding 2).** A register is still not dry-run before its commit: its schema is in the
+  metadata file the body points to, and reading it needs lakekeeper's storage profile and secrets, which the hook does
+  not hold. Instead it is checked right AFTER its commit, inside the same request: the affected profiles are
+  recompiled in ONE transaction (`recompile_services_in_tx`); if that is refused, the hook drops the table again
+  through lakekeeper's own router (`purgeRequested=false`, the files are the client's) and answers 409 "egret refused
+  the table change: <refusal>; the table was not registered". The profile's stored compile never changed, so it is not
+  wedged (U5 holds). Between the commit and the drop the table is registered with the deny alone (milliseconds). If
+  the drop itself fails, the failure is logged and recorded as a failed compile and the 2xx passes (the old,
+  wedging outcome, now only on a second failure).
