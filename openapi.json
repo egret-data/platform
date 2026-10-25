@@ -15754,6 +15754,8 @@
         "tags": [
           "alerts"
         ],
+        "summary": "The print page's ONE request.",
+        "description": "Deliberately token-only: there is no `WsContext` extractor here, so an\nordinary session cookie authenticates nothing on this route — widening it\nto sessions would make it a second, unaudited read path for any chart or\ndashboard.",
         "operationId": "render_payload",
         "responses": {
           "200": {
@@ -28089,7 +28091,7 @@
         "tags": [
           "alerts"
         ],
-        "summary": "The print page's ONE request. Deliberately token-only: there is no\n`WsContext` extractor here, so an ordinary session cookie authenticates\nnothing on this route — widening it to sessions would make it a second,\nunaudited read path for any chart or dashboard.\nThe workspace's Slack app.",
+        "summary": "The workspace's Slack app.",
         "description": "Gated on `SMTP_MANAGE` — the same permission as the relay, and for the same\nreason: a bot token is workspace administration, not alert authoring. An\neditor who may write a schedule still may not swap the credential every\nschedule posts with.",
         "operationId": "slack_get",
         "parameters": [
@@ -38364,6 +38366,13 @@
             ],
             "format": "uuid",
             "description": "Non-null ⇒ a Try-it run by this person, not consumer traffic."
+          },
+          "actor_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The actor's profile name, else email; null for consumer traffic or a deleted user.\nResolved here because the user list is admin-only, so an editor's browser could not\n(KI-296)."
           }
         }
       },
@@ -42781,6 +42790,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The publisher's profile name, else email; null for a deleted user. Resolved here\nbecause the user list is admin-only, so an editor's browser could not (KI-296), as\nthe Apps versions' `published_by_name` (KI-027)."
           },
           "created_at": {
             "type": "string",

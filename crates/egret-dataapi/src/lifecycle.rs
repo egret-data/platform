@@ -5714,6 +5714,10 @@ pub struct DataApiEndpointVersionDto {
     /// True for the version `endpoints.live_version_id` points at.
     pub is_live: bool,
     pub created_by: Option<Uuid>,
+    /// The publisher's profile name, else email; null for a deleted user. Resolved here
+    /// because the user list is admin-only, so an editor's browser could not (KI-296), as
+    /// the Apps versions' `published_by_name` (KI-027).
+    pub created_by_name: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// The frozen definition. **This is the only thing P4 may read to decide what
     /// a request returns** — see the module comment.
@@ -6698,6 +6702,7 @@ impl EndpointStore {
             String,
             bool,
             Option<Uuid>,
+            Option<String>,
             chrono::DateTime<chrono::Utc>,
             serde_json::Value,
             Option<serde_json::Value>,
@@ -6709,10 +6714,12 @@ impl EndpointStore {
         // baseline stops being read at all.
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT v.id, v.version, v.note, COALESCE(e.live_version_id = v.id, false), \
-                    v.created_by, v.created_at, v.snapshot, v.breaking_changes, b.version \
+                    v.created_by, COALESCE(NULLIF(u.name, ''), u.email::text), \
+                    v.created_at, v.snapshot, v.breaking_changes, b.version \
                FROM dataapi.endpoint_versions v \
                JOIN dataapi.endpoints e ON e.id = v.endpoint_id \
                LEFT JOIN dataapi.endpoint_versions b ON b.id = v.compared_against \
+               LEFT JOIN users u ON u.id = v.created_by \
               WHERE v.endpoint_id = $1 AND e.workspace_id = $2 \
               ORDER BY v.version DESC",
         )
@@ -6729,6 +6736,7 @@ impl EndpointStore {
                     note,
                     is_live,
                     created_by,
+                    created_by_name,
                     created_at,
                     snapshot,
                     breaking,
@@ -6740,6 +6748,7 @@ impl EndpointStore {
                         note,
                         is_live,
                         created_by,
+                        created_by_name,
                         created_at,
                         compared_against_version,
                         // Same rule as the snapshot one line down: a stored

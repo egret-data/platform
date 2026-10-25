@@ -153,15 +153,12 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
   },
 }));
 
-// No msw in this repo — mock the API module directly. `@/api/access` is
-// needed only by the Publish/shared-dirty-flag block below (`Versions`
-// resolves a version's `created_by` via `listUsers`), and
-// `@/lib/useUnsavedChangesWarning` only by the dirtiness block — both mocked
-// here anyway since `vi.mock` must be module-scope, not per-describe.
+// No msw in this repo — mock the API module directly. `@/lib/useUnsavedChangesWarning`
+// is needed only by the dirtiness block, mocked here anyway since `vi.mock` must be
+// module-scope, not per-describe.
 vi.mock("@/api/generated/data-api/data-api");
 vi.mock("@/api/databases");
 vi.mock("@/api/dataApi");
-vi.mock("@/api/access");
 
 // Spy on the real hook rather than replace it with a no-op — see the
 // equivalent mock in `EndpointDetail.test.tsx` for why (needs every call's
@@ -174,7 +171,6 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 import * as api from "@/api/generated/data-api/data-api";
 import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
-import * as accessApi from "@/api/access";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type ParamSpec } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
@@ -1415,7 +1411,6 @@ describe("Query section — Publish and the shared dirty flag", () => {
     } as never);
     vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
     vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
-    vi.mocked(accessApi.listUsers).mockResolvedValue([]);
 
     publishAsync.mockReset();
     publishAsync.mockResolvedValue({

@@ -5,11 +5,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // There is no msw in this repo — tests mock the API module directly (see
-// Endpoints.test.tsx). Versions resolves a version's `created_by` to an email
-// via `listUsers` (see Activity.test.tsx's equivalent mock for
-// ActivityCallList's trial-actor column), so that module needs a mock.
+// Endpoints.test.tsx).
 vi.mock("@/api/generated/data-api/data-api");
-vi.mock("@/api/access");
 
 // Spy on the real hook rather than replace it with a no-op: the test needs to
 // see every call's argument, in order, to tell "armed once, on a real edit"
@@ -20,7 +17,6 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 }));
 
 import * as api from "@/api/generated/data-api/data-api";
-import * as accessApi from "@/api/access";
 import type {
   ColumnSpec,
   DataApiEndpointDto,
@@ -103,10 +99,6 @@ beforeEach(() => {
     { data: { status: 200, data: [] }, isLoading: false, isError: false, error: null } as unknown as
       ReturnType<typeof api.useDataApiListEndpointVersions>,
   );
-
-  // Default: resolves with nobody, so the Who column falls back to a
-  // truncated id everywhere that doesn't set up its own fixture.
-  vi.mocked(accessApi.listUsers).mockResolvedValue([]);
 
   vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
     { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
@@ -1546,22 +1538,16 @@ describe("VersionsSection", () => {
     expectChipTone(within(row).getByText("Live"), "success", "Versions: Live");
   });
 
-  // The defect this whole section exists to fix: on the live cluster the Who
-  // column showed a raw user UUID (`5513767f-8cdd-4e48-9cf3-c493a74b683e`),
-  // exactly the class of bug the Roles page was fixed for once already. The
-  // DTO only ever carries the bare id (see `DataApiEndpointVersionDto`), so
-  // resolving it to a name is a client-side lookup, the same shape
-  // `ActivityCallList.tsx` uses for its trial-actor column.
-  it("resolves created_by to the publisher's email, not the raw user id", async () => {
+  // On the live cluster the Who column showed a raw user UUID, and then (KI-296) a shortened id to
+  // anyone who may not list the platform's users, which is everyone but a platform admin. The
+  // server sends the publisher's name with the version now, as the Apps versions do.
+  it("names the publisher from the version, for a user who may not list users (KI-296)", async () => {
     const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
-    vi.mocked(accessApi.listUsers).mockResolvedValue([
-      { id: PUBLISHER_ID, email: "priya@egret.local", name: "Priya" },
-    ] as unknown as accessApi.AccessUser[]);
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
         data: {
           status: 200,
-          data: [makeVersion({ id: "v-1", version: 1, is_live: true, created_by: PUBLISHER_ID })],
+          data: [makeVersion({ id: "v-1", version: 1, is_live: true, created_by: PUBLISHER_ID, created_by_name: "Priya" })],
         },
         isLoading: false,
         isError: false,
@@ -1569,8 +1555,8 @@ describe("VersionsSection", () => {
     );
     renderVersions();
 
-    expect(await screen.findByText("priya@egret.local")).toBeInTheDocument();
-    expect(screen.queryByText(PUBLISHER_ID)).not.toBeInTheDocument();
+    expect(await screen.findByText("Priya")).toBeInTheDocument();
+    expect(screen.queryByText(PUBLISHER_ID.slice(0, 8))).not.toBeInTheDocument();
   });
 
   /**
@@ -1589,15 +1575,12 @@ describe("VersionsSection", () => {
   it("keeps a route to an address the narrow regime still clips", async () => {
     const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
     const LONG = "priyanka.venkataraman@egret.local";
-    vi.mocked(accessApi.listUsers).mockResolvedValue([
-      { id: PUBLISHER_ID, email: LONG, name: "P V" },
-    ] as unknown as accessApi.AccessUser[]);
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
         data: {
           status: 200,
           data: [
-            makeVersion({ id: "v-2", version: 2, is_live: true, created_by: PUBLISHER_ID }),
+            makeVersion({ id: "v-2", version: 2, is_live: true, created_by: PUBLISHER_ID, created_by_name: LONG }),
             // A note, so the row's only em-dash is the one this test is about
             // — `Note` renders the same placeholder and `getByText` cannot
             // tell two of them apart.
@@ -1628,13 +1611,10 @@ describe("VersionsSection", () => {
     expect(unattributed.closest("td")).not.toHaveAttribute("title");
   });
 
-  // A viewer-level operator may not be permitted `listUsers` (it's a
-  // platform-level call — see the component's comment). That failure must
-  // degrade this ONE column to a truncated id, not take down a page that
-  // otherwise has everything it needs to render.
-  it("falls back to a truncated id, not blank or a page error, when the users lookup fails", async () => {
+  // A publisher whose user was deleted has no name to send: the column degrades to a truncated
+  // id, not blank.
+  it("falls back to a truncated id, not blank, when the server sends no name", async () => {
     const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
-    vi.mocked(accessApi.listUsers).mockRejectedValue(new Error("forbidden"));
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
         data: {
