@@ -6286,6 +6286,28 @@ mod tests {
         fn releases(&self) -> Vec<(Uuid, usize)> {
             self.releases.lock().unwrap().clone()
         }
+        /// Wait until the handler has started, polling `worker` (the
+        /// `run_one` under test, bounded by its own `timeout`) meanwhile. A
+        /// worker that returns first never ran the handler: it gave the run
+        /// up -- the self-fence, when its first renewal does not succeed
+        /// within `working_timeout`, which a loaded machine can cause -- or
+        /// failed before polling it. The test then fails at once with what
+        /// the worker returned. Waiting on `started` alone hung for ever
+        /// there, because nothing would ever notify it.
+        async fn started_while<F>(&self, worker: std::pin::Pin<&mut F>)
+        where
+            F: std::future::Future,
+            F::Output: std::fmt::Debug,
+        {
+            tokio::select! {
+                biased;
+                () = self.started.notified() => {}
+                out = worker => panic!(
+                    "the worker returned {out:?} before its handler started, so the case \
+                     under test never happened"
+                ),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -6438,17 +6460,19 @@ mod tests {
             kill_poll: std::time::Duration::from_millis(100),
             ..WorkerTiming::default()
         };
-        let worker = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
-        );
-        let killer = async {
-            reg.started.notified().await;
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            plant_kill_of(&pool, ex, c.run_ix).await;
-            tokio::time::Instant::now()
+        let (out, killed_at) = {
+            let mut worker = std::pin::pin!(tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
+            ));
+            reg.started_while(worker.as_mut()).await;
+            let killer = async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                plant_kill_of(&pool, ex, c.run_ix).await;
+                tokio::time::Instant::now()
+            };
+            tokio::join!(worker, killer)
         };
-        let (out, killed_at) = tokio::join!(worker, killer);
         let took = killed_at.elapsed();
         let out = out.expect("the worker returns before its handler would have");
         assert_eq!(out.expect("run_one"), Committed::Yes, "the kill committed");
@@ -6583,17 +6607,23 @@ mod tests {
         let (pool, ws) = kill_fixture().await;
         let (_ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
         let reg = KillSpy::new(Mode::Sleep, false);
+        // A renewal every second finds the moved fence. `working_timeout` is
+        // what the worker's FIRST renewal has to succeed within -- counted from
+        // before `run_one` reads the task's input -- or it gives the run up
+        // before the handler starts (the self-fence): at 600 ms a loaded
+        // machine did that in 2 of 30 runs, and the case under test never
+        // happened.
         let timing = WorkerTiming {
-            working_timeout: std::time::Duration::from_millis(600),
+            working_timeout: std::time::Duration::from_secs(3),
             container_default_timeout: super::super::DEFAULT_CONTAINER_TIMEOUT,
             kill_poll: std::time::Duration::from_millis(100),
         };
-        let worker = tokio::time::timeout(
+        let mut worker = std::pin::pin!(tokio::time::timeout(
             std::time::Duration::from_secs(20),
             run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
-        );
+        ));
+        reg.started_while(worker.as_mut()).await;
         let other = async {
-            reg.started.notified().await;
             // Reaped and claimed again: the row's lease is another worker's.
             sqlx::query(
                 "UPDATE workflow.task_runs SET claimed_at = now() + interval '1 hour' \
