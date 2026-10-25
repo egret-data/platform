@@ -23,7 +23,7 @@ use crate::explain_wire::{
     WireRowFilterDecision, WireTiedOutcome, WireUndecidableCause,
 };
 use crate::routes::{
-    ExplainAccess, ExplainAttribution, ExplainClearanceGap, ExplainExemption, ExplainProfile,
+    ClearanceMaskGapReason, ExplainAccess, ExplainAttribution, ExplainExemption, ExplainProfile,
     ExplainRowFilterGap, ExplainTagDecline, ExplainTargetLevel,
 };
 
@@ -127,6 +127,14 @@ impl EffectPart {
     }
 }
 
+/// A gated classification, by id and `tags.name`: what a clearance mask on the
+/// target column clears for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClearanceRef {
+    pub tag_id: Uuid,
+    pub tag_name: String,
+}
+
 /// What [`effect_lines`] reads besides the profile itself.
 pub(crate) struct EffectInput<'a> {
     pub subject: &'a str,
@@ -142,7 +150,7 @@ pub(crate) struct EffectInput<'a> {
     /// Every gated classification on the target column, by name: what a
     /// StarRocks clearance mask (one per column, the intersection of their
     /// cleared sets) clears a reader for. Empty for a table target.
-    pub cleared_for: &'a [ExplainClearanceGap],
+    pub cleared_for: &'a [ClearanceRef],
 }
 
 /// The lines for one profile: for a `read`, the column (or table) line and
@@ -251,6 +259,13 @@ fn mask_label(mask_type: Option<&str>) -> &str {
     }
 }
 
+/// A clearance deny on a whole table (D2): its locator ends in the `*`
+/// column ([`crate::clearance`]'s whole-table deny).
+fn is_whole_table_clearance(attribution: Option<&ExplainAttribution>) -> bool {
+    matches!(attribution, Some(ExplainAttribution::Clearance { locator: Some(l), .. })
+        if l.ends_with(".*"))
+}
+
 impl Builder<'_> {
     fn subject(&self, l: &mut Line) {
         l.push(EffectPart::Subject {
@@ -338,7 +353,12 @@ impl Builder<'_> {
             (Some(ExplainAttribution::EngineGrant { .. }), _) => {
                 l.text("an engine grant denies it")
             }
-            _ => self.decider(l, attribution, *policy_id, policy_name),
+            _ => {
+                self.decider(l, attribution, *policy_id, policy_name);
+                if is_whole_table_clearance(attribution) {
+                    l.text(", on the whole table");
+                }
+            }
         }
         l.text(")");
     }
@@ -583,7 +603,7 @@ impl Builder<'_> {
             }
             Some(WireDecision::Undecidable { why }) => {
                 let line = self.undecided(why, EffectAbout::Column);
-                return self.with_clearance_gaps(line);
+                return self.with_masks_missing(line);
             }
             // Not asked: StarRocks under a MASK_NULL. The mask decides only if the
             // query may read the table's other columns at all.
@@ -601,10 +621,15 @@ impl Builder<'_> {
                     l.text(" ");
                     l.code(column);
                     self.deny_reason(&mut l, &a.decision, a.attribution.as_ref());
-                    l.text(
+                    // A whole-table clearance deny refuses every direct read
+                    // (measured: StarRocks checks a column it adds to the scan);
+                    // the column's NULL mask is what a view reads.
+                    l.text(if is_whole_table_clearance(a.attribution.as_ref()) {
+                        "; through a view it reads NULL"
+                    } else {
                         ": StarRocks masks it to NULL, and the query still needs SELECT on the \
-                         other columns it reads",
-                    );
+                         other columns it reads"
+                    });
                     (l, EffectAbout::Column, EffectOutcome::Refused)
                 }
                 Some(ExplainAccess {
@@ -612,20 +637,20 @@ impl Builder<'_> {
                     ..
                 }) => {
                     let line = self.undecided(why, EffectAbout::Column);
-                    return self.with_clearance_gaps(line);
+                    return self.with_masks_missing(line);
                 }
                 _ => match self.mask_line(column) {
                     Ok(parts) => parts,
-                    Err(done) => return self.with_clearance_gaps(done),
+                    Err(done) => return self.with_masks_missing(done),
                 },
             },
             // Allowed: the mask decides.
             _ => match self.mask_line(column) {
                 Ok(parts) => parts,
-                Err(done) => return self.with_clearance_gaps(done),
+                Err(done) => return self.with_masks_missing(done),
             },
         };
-        self.append_clearance_gaps(&mut line.0);
+        self.append_masks_missing(&mut line.0);
         line.0.finish(line.1, line.2)
     }
 
@@ -806,26 +831,31 @@ impl Builder<'_> {
         }
     }
 
-    /// D2: ". Clearance *PII* is **not enforced** here: …", once per gap.
-    fn append_clearance_gaps(&self, l: &mut Line) {
-        for gap in &self.input.profile.clearance_not_enforced {
-            l.text(". Clearance ");
+    /// D2: ". No NULL mask for clearance *PII* is served here: …", once per
+    /// classification on the column with no clearance mask served.
+    fn append_masks_missing(&self, l: &mut Line) {
+        for gap in &self.input.profile.clearance_masks_missing {
+            l.text(". No NULL mask for clearance ");
             l.push(EffectPart::Clearance {
                 text: gap.tag_name.clone(),
                 tag_id: gap.tag_id,
             });
-            l.text(" is ");
-            l.strong("not enforced");
-            l.text(
-                " here: it is on the whole table, and StarRocks applies a clearance only where \
-                 it is on a column.",
-            );
+            l.text(" is served here: ");
+            l.text(match gap.reason {
+                ClearanceMaskGapReason::TableNotInCatalog => {
+                    format!("egret found no table {} in the catalog", self.table_label())
+                }
+                ClearanceMaskGapReason::NotCompiled => {
+                    "the profile has not been recompiled since this column appeared".to_string()
+                }
+            });
+            l.text(", so a view over it shows the values");
         }
     }
 
-    fn with_clearance_gaps(&self, line: ExplainEffectLine) -> ExplainEffectLine {
+    fn with_masks_missing(&self, line: ExplainEffectLine) -> ExplainEffectLine {
         let mut l = Line { parts: line.parts };
-        self.append_clearance_gaps(&mut l);
+        self.append_masks_missing(&mut l);
         l.finish(line.about, line.outcome)
     }
 
@@ -1015,7 +1045,10 @@ mod tests {
 
     use super::*;
     use crate::explain_wire::{WireMaskResult, WireRowFilterResult};
-    use crate::routes::{ExemptVia, ExplainAccess, ExplainMask, ExplainReplay, ExplainRowFilter};
+    use crate::routes::{
+        ExemptVia, ExplainAccess, ExplainClearanceMaskGap, ExplainMask, ExplainReplay,
+        ExplainRowFilter,
+    };
 
     const RULE: Uuid = Uuid::from_u128(1);
     const RULE_B: Uuid = Uuid::from_u128(2);
@@ -1041,7 +1074,7 @@ mod tests {
             tag_policies_in_download: 0,
             mask: None,
             row_filter: None,
-            clearance_not_enforced: Vec::new(),
+            clearance_masks_missing: Vec::new(),
             row_filter_not_applied: Vec::new(),
             masked_read_skips_access: false,
             other_columns_access: None,
@@ -1090,6 +1123,15 @@ mod tests {
             tag: Some("pii_key".into()),
             required_roles: Some(vec!["r".into()]),
             locator: Some("mask-c.sales.orders.email".into()),
+        })
+    }
+
+    fn whole_table_clearance() -> Option<ExplainAttribution> {
+        Some(ExplainAttribution::Clearance {
+            tag_id: TAG,
+            tag: Some("pii_key".into()),
+            required_roles: Some(vec!["r".into()]),
+            locator: Some("c.sales.orders.*".into()),
         })
     }
 
@@ -1283,8 +1325,26 @@ mod tests {
                 "u: undecided (classification rules at different priorities decide this, which egret does not model)"),
             col("other undecidable", with(t(), |p| p.mask = mask(WireMaskDecision::Undecidable { why: vec![WireUndecidableCause::SuperUsersUnknown] }, None)),
                 "u: undecided (egret does not model this policy set (super_users_unknown))"),
-            col("D2 gap", with(sr(), |p| p.clearance_not_enforced = vec![ExplainClearanceGap { tag_id: TAG, tag_name: "PII".into() }]),
-                "u reads email as the real value. Clearance PII is not enforced here: it is on the whole table, and StarRocks applies a clearance only where it is on a column."),
+            col("StarRocks whole-table clearance, uncleared", with(sr(), |p| {
+                p.accesses = Vec::new();
+                p.masked_read_skips_access = true;
+                p.mask = mask(masked("MASK_NULL"), clearance());
+                p.other_columns_access = Some(denied(WireDenyReason::DenyPolicyItem, "perm-clearance-x", whole_table_clearance()));
+            }), "u is refused email (clearance PII, on the whole table); through a view it reads NULL"),
+            col("StarRocks masked, another denier", with(sr(), |p| {
+                p.accesses = Vec::new();
+                p.masked_read_skips_access = true;
+                p.mask = mask(masked("MASK_NULL"), clearance());
+                p.other_columns_access = Some(denied(WireDenyReason::NoPolicyMatched, "", None));
+            }), "u is refused email (no policy allows it): StarRocks masks it to NULL, and the query still needs SELECT on the other columns it reads"),
+            col("StarRocks whole table, no mask: not in the catalog", with(sr(), |p| {
+                p.accesses = vec![denied(WireDenyReason::DenyPolicyItem, "perm-clearance-x", whole_table_clearance())];
+                p.clearance_masks_missing = vec![ExplainClearanceMaskGap { tag_id: TAG, tag_name: "PII".into(), reason: ClearanceMaskGapReason::TableNotInCatalog }];
+            }), "u is refused email (clearance PII, on the whole table). No NULL mask for clearance PII is served here: egret found no table sales.orders in the catalog, so a view over it shows the values"),
+            col("StarRocks whole table, no mask: not compiled", with(sr(), |p| {
+                p.accesses = vec![denied(WireDenyReason::DenyPolicyItem, "perm-clearance-x", whole_table_clearance())];
+                p.clearance_masks_missing = vec![ExplainClearanceMaskGap { tag_id: TAG, tag_name: "PII".into(), reason: ClearanceMaskGapReason::NotCompiled }];
+            }), "u is refused email (clearance PII, on the whole table). No NULL mask for clearance PII is served here: the profile has not been recompiled since this column appeared, so a view over it shows the values"),
         ];
         out.push(Case {
             name: "tags unresolved",

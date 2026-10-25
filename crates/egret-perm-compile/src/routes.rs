@@ -76,7 +76,7 @@ use egret_ranger_eval::eval::{
     UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
-use egret_ranger_eval::resource::requests_all_values;
+use egret_ranger_eval::resource::{requests_all_values, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
@@ -777,11 +777,13 @@ pub struct ExplainProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_filter: Option<ExplainRowFilter>,
     /// StarRocks only, for a column read: the gated classifications that reach
-    /// the column only from its table and so compile no clearance here
-    /// ([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the
-    /// column as an `ANCESTOR`.
+    /// the column (from the column or from its whole table) while the served
+    /// artifact holds no clearance NULL mask for it
+    /// ([`ExplainClearanceMaskGap`]). The direct read is still refused by the
+    /// classification's deny; a view over the table shows the values until the
+    /// masks exist (live spike, spec §14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clearance_not_enforced: Vec<ExplainClearanceGap>,
+    pub clearance_masks_missing: Vec<ExplainClearanceMaskGap>,
     /// For a read naming a table: the classification row filters that filter
     /// nothing here ([`ExplainRowFilterGap`]). On Trino (when the download has
     /// tag policies), those whose classification is on columns of the table
@@ -891,14 +893,27 @@ pub struct ExplainReplay {
     pub exemption: Option<ExplainExemption>,
 }
 
-/// A gated classification that StarRocks does not enforce on the target column
-/// (spec §5.8, D2): it reaches the column only from its table, and StarRocks
-/// compiles a clearance only where the classification is on a column (E13).
+/// A gated classification on the target column with no clearance NULL mask
+/// served for the column (D2, spec §5.7). Content-derived: the served artifact
+/// is read, never a timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct ExplainClearanceGap {
+pub struct ExplainClearanceMaskGap {
     pub tag_id: Uuid,
     /// `tags.name`.
     pub tag_name: String,
+    pub reason: ClearanceMaskGapReason,
+}
+
+/// Why a column has no clearance NULL mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearanceMaskGapReason {
+    /// The catalog has no table of that name (unknown, a view, not yet
+    /// created): the compile had no columns to mask (U4).
+    TableNotInCatalog,
+    /// The table exists, and the profile has not been recompiled since the
+    /// column appeared.
+    NotCompiled,
 }
 
 /// A classification row-filter rule that filters nothing on a profile for the
@@ -2579,12 +2594,15 @@ pub(crate) async fn explain_users(
     };
     // D2 (spec §5.8) and the classifications a column's clearance mask clears
     // for: per request, from the column resolution and the gates.
-    let (column_clearances, clearance_gaps) = match (&resolved_tags, &target.column) {
+    let column_clearances = match (&resolved_tags, &target.column) {
         (Some(tags), Some(_)) if action == Action::Read => {
             gated_clearances(&mut *conn, tags).await?
         }
-        _ => (Vec::new(), Vec::new()),
+        _ => Vec::new(),
     };
+    // Asked of the catalog at most once, and only for a column a StarRocks
+    // artifact serves no clearance mask on.
+    let mut gap_reason: Option<ClearanceMaskGapReason> = None;
     let (trino_row_filter_gaps, starrocks_row_filter_gaps) = match &table_scope {
         Some(scope) => (
             row_filters_not_applied(&mut *conn, scope, ROW_FILTER_GAPS_COLUMN_ONLY).await?,
@@ -2689,6 +2707,26 @@ pub(crate) async fn explain_users(
         let tag_policies_in_download = artifact.tag_policies.len();
         // Built on the first cleared reader that needs it (spec §5.5).
         let mut replay_artifact: Option<ServicePolicySet> = None;
+        // D2: the gated classifications on the column with no NULL mask served.
+        let clearance_masks_missing = if engine == EngineType::StarRocks
+            && !column_clearances.is_empty()
+            && !serves_clearance_mask(&artifact, &service_def, &resource)
+        {
+            let reason = match gap_reason {
+                Some(r) => r,
+                None => *gap_reason.insert(mask_gap_reason(&mut *conn, target).await?),
+            };
+            column_clearances
+                .iter()
+                .map(|c| ExplainClearanceMaskGap {
+                    tag_id: c.tag_id,
+                    tag_name: c.tag_name.clone(),
+                    reason,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         for (i, user) in users.iter().enumerate() {
             // The masked-read question, asked only where a mask can be the answer.
             // Asked BEFORE the accesses, because on StarRocks it decides whether
@@ -2881,11 +2919,7 @@ pub(crate) async fn explain_users(
                 tag_policies_in_download,
                 mask,
                 row_filter,
-                clearance_not_enforced: if engine == EngineType::StarRocks {
-                    clearance_gaps.clone()
-                } else {
-                    Vec::new()
-                },
+                clearance_masks_missing: clearance_masks_missing.clone(),
                 row_filter_not_applied: match engine {
                     EngineType::Trino if tag_policies_in_download > 0 => {
                         trino_row_filter_gaps.clone()
@@ -3679,29 +3713,22 @@ fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
     out
 }
 
-/// The resolved tags that carry a gate with a required role, split by where
-/// they reach the target column: `(on_column, table_only)`, each sorted by
-/// name. `table_only` is the D2 gap ([`ExplainClearanceGap`]); `on_column` is
-/// every classification a StarRocks clearance mask on the column clears for
-/// (one merged mask, the intersection of their cleared sets).
+/// The resolved tags that carry a gate with a required role, at either
+/// level, sorted by name: every classification a StarRocks clearance mask on
+/// the column clears for (one merged mask, the intersection of their cleared
+/// sets, D2).
 async fn gated_clearances(
     conn: &mut sqlx::PgConnection,
     tags: &UnenrichedTags,
-) -> Result<(Vec<ExplainClearanceGap>, Vec<ExplainClearanceGap>), PermHttpError> {
-    let display = resolved_tags_for_display(tags);
-    let on_column: BTreeSet<&str> = display
-        .iter()
-        .filter(|t| t.attached_at_column)
-        .map(|t| t.name.as_str())
-        .collect();
-    let names: Vec<String> = display
+) -> Result<Vec<crate::explain_effect::ClearanceRef>, PermHttpError> {
+    let names: Vec<String> = resolved_tags_for_display(tags)
         .iter()
         .map(|t| t.name.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     if names.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Vec::new());
     }
     // `tags.name` is unique (migration 0207), so a name names one tag.
     let rows: Vec<(Uuid, String, String)> =
@@ -3719,8 +3746,59 @@ async fn gated_clearances(
     Ok(rows
         .into_iter()
         .filter(|(_, key, _)| gated.contains(key))
-        .map(|(tag_id, _, tag_name)| ExplainClearanceGap { tag_id, tag_name })
-        .partition(|g| on_column.contains(g.tag_name.as_str())))
+        .map(|(tag_id, _, tag_name)| crate::explain_effect::ClearanceRef { tag_id, tag_name })
+        .collect())
+}
+
+/// Does `artifact` serve a clearance NULL mask on the column `resource`
+/// names? Any clearance mask counts: one mask per column carries every
+/// classification on it, named after the lowest tag id.
+fn serves_clearance_mask(
+    artifact: &ServicePolicySet,
+    service_def: &ServiceDef,
+    resource: &RequestResource,
+) -> bool {
+    use egret_ranger_eval::resource::{match_policy_resources, MatchType};
+    artifact.policies.iter().any(|p| {
+        p.is_enabled
+            && p.policy_type == 1
+            && matches!(
+                attribute_policy_name(&p.name),
+                Some(PolicyAttribution::Clearance { .. })
+            )
+            && match_policy_resources(p, resource, service_def)
+                .iter()
+                .any(|m| matches!(m.match_type, MatchType::Self_))
+    })
+}
+
+/// Why the target column has no clearance mask: the catalog has no such table
+/// (U4), or the profile has not compiled the column yet.
+async fn mask_gap_reason(
+    conn: &mut sqlx::PgConnection,
+    target: &Scope,
+) -> Result<ClearanceMaskGapReason, PermHttpError> {
+    let warehouse: Option<Uuid> =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(target.catalog_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?
+            .flatten();
+    let (Some(warehouse), Some(schema), Some(table)) =
+        (warehouse, target.schema.as_deref(), target.table.as_deref())
+    else {
+        return Ok(ClearanceMaskGapReason::TableNotInCatalog);
+    };
+    Ok(
+        match crate::table_columns::current_columns_via(conn, warehouse, schema, table)
+            .await
+            .map_err(PermHttpError::db)?
+        {
+            Some(_) => ClearanceMaskGapReason::NotCompiled,
+            None => ClearanceMaskGapReason::TableNotInCatalog,
+        },
+    )
 }
 
 /// The names the line builder needs that the profile does not carry: the

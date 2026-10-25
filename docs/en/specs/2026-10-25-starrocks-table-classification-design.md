@@ -517,3 +517,21 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   sample (`ref: rule`) right after its profile's sample, and its sentence appends "The refusal names rules A and B."
   No migration: the link is derived from the recorded error and the current rules. Tested through the real handler
   with a real boot-pass refusal (`governance_attention.rs::a_boot_pass_refusal_names_and_links_the_two_rules`).
+
+### Task 10
+
+- The clearance half of the Package 2 gap goes here, not in Task 11, because the new tests assert its absence:
+  `ExplainProfile.clearance_not_enforced`, the D2 sentence (`append_clearance_gaps`) and the `gated_clearances`
+  partition are removed; `ExplainClearanceGap` became the internal `explain_effect::ClearanceRef`. Task 11 keeps the
+  row-filter half and the rule effect.
+- Wording follows the live spike. A clearance deny whose locator ends in `.*` reads "(clearance *X*, on the whole
+  table)" wherever a denial is attributed (column line, table line). Under `masked_read_skips_access` with the table
+  `select` denied by such a deny, the line is "u is **refused** email (clearance *X*, on the whole table); through a
+  view it reads NULL"; any other denier keeps the "query still needs SELECT on the other columns" tail.
+- `clearance_masks_missing` is set when the profile is StarRocks, the column has a gated classification at either
+  level, and the served artifact holds NO clearance mask matching the column (any clearance mask counts: one merged
+  mask per column, named after the lowest tag id). The reason asks the column source once per request. The sentence
+  ends "…, so a view over it shows the values" for both reasons (the spike measured the deny-only leak).
+- A StarRocks explain of such a column now queries `lakekeeper.*`; `tests/routes.rs`'s `setup` installs the stub.
+- The API shape changed (one field and two schemas out, one field and two schemas in): `openapi.json` and the client
+  are regenerated in Task 12, so the egret-server drift test fails between Tasks 10 and 12.

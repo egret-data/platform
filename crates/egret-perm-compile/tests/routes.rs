@@ -246,6 +246,9 @@ async fn setup() -> Option<Fixture> {
 
     let perm = PermStore::new(pool.clone());
     let policy = PolicyStore::new(db.clone());
+    // The embedded catalog's tables the StarRocks column source reads (D2);
+    // in production they always exist.
+    lakekeeper_stub::install(&db).await;
     egret_policy::seed_starrocks(&policy)
         .await
         .expect("seed starrocks service-def");
@@ -4806,88 +4809,236 @@ async fn delete_rule(f: &Fixture, token: &str, rule_id: &str) {
     assert!(status.is_success(), "delete the rule: {status}");
 }
 
-/// Spec §5.8 (D2, E13): StarRocks compiles a clearance only for a column the
-/// classification is attached to, so a gated classification on the whole TABLE
-/// is not enforced there. Explain lists it on the StarRocks profile; the same
-/// classification also on the column is enforced and not listed.
-#[tokio::test]
-async fn a_table_level_clearance_is_not_enforced_on_starrocks() {
-    let Some(f) = setup().await else { return };
-    let _lock = exclusive(&f).await;
-    let token = admin_session(&f).await;
-    let reader = known_user(&f, unique("vmask-d2")).await;
-    let (status, out) = into_json(
+// ── D2 (2026-10-25): explain a whole-table clearance on StarRocks ──
+
+/// `POST /perm/compile/{service}` as an admin: the recompile a write would do.
+async fn compile_profile(f: &Fixture, token: &str) {
+    let (status, body) = into_json(
         f.app()
             .oneshot(req(
                 "POST",
-                "/perm/grants",
-                &token,
-                Some(grant_body(f.catalog_id, &reader)),
+                &format!("/perm/compile/{}", f.service_id),
+                token,
+                None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {out}");
-    let tag = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
-    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
-        .bind(&tag.key)
-        .fetch_one(&f.db.pool)
-        .await
-        .expect("tag id");
-    sqlx::query(
-        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
-         VALUES ($1, ARRAY[$2], '{}')",
-    )
-    .bind(tag_id)
-    .bind(unique("vmask-d2-role"))
-    .execute(&f.db.pool)
-    .await
-    .expect("gate");
+    assert_eq!(status, StatusCode::OK, "compile: {body}");
+}
 
-    let body = explain_column(&f, &token, &reader).await;
-    let starrocks = profile_for(&body, "starrocks");
-    assert_eq!(
-        starrocks["clearance_not_enforced"],
-        json!([{"tag_id": tag_id, "tag_name": tag.name}]),
-        "body: {body}"
-    );
-    assert_eq!(
-        access_for(starrocks, "select")["decision"]["kind"],
-        "allowed",
-        "nothing compiled refuses the uncleared reader; body: {body}"
-    );
-    assert!(
-        starrocks
-            .get("mask")
-            .is_none_or(|m| m["decision"]["kind"] == "no_mask"),
-        "body: {body}"
-    );
-
-    // The same classification on the column too: enforced, so not listed.
+/// The fixture catalog's warehouse, linked to a fresh stub Lakekeeper
+/// warehouse: `(egret warehouse, lakekeeper warehouse)`.
+async fn stub_catalog(f: &Fixture) -> (Uuid, Uuid) {
     let warehouse: Uuid =
         sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
             .bind(f.catalog_id)
             .fetch_one(&f.db.pool)
             .await
             .expect("warehouse");
+    (
+        warehouse,
+        lakekeeper_stub::link_warehouse(&f.db, warehouse).await,
+    )
+}
+
+async fn attach_whole_table(f: &Fixture, warehouse: Uuid, tag_id: Uuid) {
     sqlx::query(
-        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
-         VALUES ($1,$2,'sales','orders','email')",
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales','orders','')",
     )
     .bind(tag_id)
     .bind(warehouse)
     .execute(&f.db.pool)
     .await
-    .expect("column assignment");
-    let body = explain_column(&f, &token, &reader).await;
-    assert!(
-        profile_for(&body, "starrocks")
-            .get("clearance_not_enforced")
-            .is_none(),
+    .expect("whole-table assignment");
+}
+
+async fn tag_name_of(f: &Fixture, tag_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag name")
+}
+
+/// D2 + the live spike (StarRocks 4.1.4): on a table classified as a whole, an
+/// uncleared reader holding a grant is refused a direct read (the `*` deny
+/// matches the column StarRocks adds to the scan) and reads NULL through a view
+/// (the column's NULL mask). Explain says both, attributed to the clearance on
+/// the whole table, and no longer says the clearance is not enforced.
+#[tokio::test]
+async fn a_table_level_clearance_refuses_an_uncleared_reader_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (warehouse, lk) = stub_catalog(&f).await;
+    lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email", "region"]).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    attach_whole_table(&f, warehouse, tag_id).await;
+    compile_profile(&f, &token).await;
+    let tag = tag_name_of(&f, tag_id).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let sr = profile_for(&body, "starrocks");
+    lift_gate(&f, tag_id).await;
+    assert!(sr.get("clearance_not_enforced").is_none(), "body: {body}");
+    assert!(sr.get("clearance_masks_missing").is_none(), "body: {body}");
+    assert_eq!(
+        sr["effect_lines"][0]["text"],
+        json!(format!(
+            "{uncleared} is refused email (clearance {tag}, on the whole table); through a view \
+             it reads NULL"
+        )),
         "body: {body}"
     );
+    assert_eq!(sr["effect_lines"][0]["outcome"], "refused", "body: {body}");
+}
+
+/// The cleared reader's line names every gated classification the column's
+/// one clearance mask clears for: the one on the column AND the one on the
+/// whole table.
+#[tokio::test]
+async fn a_reader_cleared_for_a_table_and_a_column_classification_is_told_both() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (_, lk) = stub_catalog(&f).await;
+    lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email"]).await;
+    let (column_tag, role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let table = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let table_tag: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&table.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(table_tag)
+    .bind(vec![role])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+    compile_profile(&f, &token).await;
+    let column = tag_name_of(&f, column_tag).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    lift_gate(&f, table_tag).await;
+    lift_gate(&f, column_tag).await;
+    let text = profile_for(&body, "starrocks")["effect_lines"][0]["text"]
+        .as_str()
+        .expect("line")
+        .to_string();
+    let (first, second) = if column < table.name {
+        (column, table.name)
+    } else {
+        (table.name, column)
+    };
+    assert!(
+        text.ends_with(&format!("(cleared for {first} and {second})")),
+        "{text}"
+    );
+}
+
+/// U4 and the live spike: a whole-table classification on a table the catalog
+/// does not have compiles its deny and no mask, so a direct read is refused
+/// and a view over the table would show the values. Explain says so.
+#[tokio::test]
+async fn an_unknown_table_says_its_masks_are_missing() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    stub_catalog(&f).await;
+    let (fixture_tag, role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    lift_gate(&f, fixture_tag).await;
+    let ghost = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&ghost.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(tag_id)
+    .bind(vec![role])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+    compile_profile(&f, &token).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
     lift_gate(&f, tag_id).await;
+    let sr = profile_for(&body, "starrocks");
+    assert_eq!(
+        sr["clearance_masks_missing"],
+        json!([{"tag_id": tag_id, "tag_name": ghost.name, "reason": "table_not_in_catalog"}]),
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["effect_lines"][0]["text"],
+        json!(format!(
+            "{uncleared} is refused email (clearance {0}, on the whole table). No NULL mask for \
+             clearance {0} is served here: egret found no table sales.orders in the catalog, so \
+             a view over it shows the values",
+            ghost.name
+        )),
+        "body: {body}"
+    );
+}
+
+/// A column added to the table since the last compile has no NULL mask yet:
+/// content-derived (the served artifact has none for it, the catalog has the
+/// table), not read from a timestamp.
+#[tokio::test]
+async fn a_column_added_since_the_compile_says_not_compiled() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (_, lk) = stub_catalog(&f).await;
+    let table = lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id"]).await;
+    let (fixture_tag, role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    lift_gate(&f, fixture_tag).await;
+    let whole = assign_tag(&f, f.catalog_id, "sales", "orders", "").await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&whole.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag id");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(tag_id)
+    .bind(vec![role])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate");
+    compile_profile(&f, &token).await;
+    // `email` appears with no recompile.
+    lakekeeper_stub::set_columns(&f.db, lk, table, 1, &["id", "email"]).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    lift_gate(&f, tag_id).await;
+    let sr = profile_for(&body, "starrocks");
+    assert_eq!(
+        sr["clearance_masks_missing"][0]["reason"], "not_compiled",
+        "body: {body}"
+    );
+    assert_eq!(
+        sr["effect_lines"][0]["text"],
+        json!(format!(
+            "{uncleared} is refused email (clearance {0}, on the whole table). No NULL mask for \
+             clearance {0} is served here: the profile has not been recompiled since this column \
+             appeared, so a view over it shows the values",
+            whole.name
+        )),
+        "body: {body}"
+    );
 }
 
 /// Task 12 (C2), the other half: a classified column with a deny and NO mask
