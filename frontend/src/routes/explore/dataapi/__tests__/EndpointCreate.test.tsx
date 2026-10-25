@@ -150,7 +150,7 @@ describe("EndpointCreate", () => {
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
     // Two databases in the picker, so choosing the SECOND proves the value is
     // read from the choice rather than defaulted to the only option available.
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: "lake" }));
     // Method is picked AWAY from its default for the same reason the second
     // database is: asserting `method: "GET"` on a form that defaults to GET
@@ -199,7 +199,7 @@ describe("EndpointCreate", () => {
     await userEvent.type(screen.getByLabelText("Name"), "Daily report");
     await userEvent.type(screen.getByLabelText("Path"), "reports/daily");
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: "warehouse" }));
     await userEvent.click(screen.getByRole("button", { name: /create endpoint/i }));
 
@@ -217,7 +217,7 @@ describe("EndpointCreate", () => {
     await userEvent.type(screen.getByLabelText("Name"), "x");
     await userEvent.type(screen.getByLabelText("Path"), "x");
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: "warehouse" }));
     await userEvent.click(screen.getByRole("button", { name: /create endpoint/i }));
     expect(navigate).toHaveBeenCalledWith("/explore/ws1/data-api/endpoints/e-9");
@@ -232,7 +232,7 @@ describe("EndpointCreate", () => {
     await userEvent.type(screen.getByLabelText("Name"), "Daily report");
     await userEvent.type(screen.getByLabelText("Path"), "reports/daily");
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: "warehouse" }));
     await userEvent.click(screen.getByRole("button", { name: /create endpoint/i }));
 
@@ -288,7 +288,7 @@ describe("EndpointCreate", () => {
     await userEvent.type(screen.getByLabelText("Name"), "Daily report");
     await userEvent.type(screen.getByLabelText("Path"), "reports/daily");
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
-    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Connection" }));
     await userEvent.click(await screen.findByRole("option", { name: "warehouse" }));
     expect(screen.getByRole("button", { name: /create endpoint/i })).toBeEnabled();
 

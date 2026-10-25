@@ -9,7 +9,7 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  * — one explaining that `build_sql` returns a TEMPLATE, one saying what
  * switching modes discards. Both are correct and both are wanted. But that
  * column is `flex-col` inside a `react-resizable-panels` `Panel` sized as a
- * FRACTION of what is left after the `Database and parameters` disclosure, and
+ * FRACTION of what is left after the `Connection and parameters` disclosure, and
  * every line of fixed-height prose in it is subtracted from the one item that
  * takes the remainder: the editor.
  *
@@ -70,7 +70,7 @@ test.describe("Data API — the statement editor keeps a usable height", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_DATAAPI_STATEMENTS=1 with the live dev stack up");
   test.setTimeout(180_000);
 
-  test("neither editor collapses when Database and parameters is expanded", async ({ page }) => {
+  test("neither editor collapses when Connection and parameters is expanded", async ({ page }) => {
     await loginLocalAdmin(page);
     const ws = await firstWorkspace(page.request);
     const h = await csrf(page.context());
@@ -109,7 +109,7 @@ test.describe("Data API — the statement editor keeps a usable height", () => {
 
       // The disclosure is a native `<details>`; opening it is what shrinks the
       // panel the editor lives in.
-      const strip = page.locator("summary", { hasText: "Database and parameters" });
+      const strip = page.locator("summary", { hasText: "Connection and parameters" });
       await expect(strip).toBeVisible();
       await strip.click();
 
@@ -157,7 +157,7 @@ test.describe("Data API — the statement editor keeps a usable height", () => {
           expect(
             m!.editorHeight,
             `${height}px, ${mode}: editor laid out at ${m!.editorHeight}px with the ` +
-              `Database and parameters strip expanded`,
+              `Connection and parameters strip expanded`,
           ).toBeGreaterThanOrEqual(FLOOR);
           expect(
             m!.panelOverflowY,

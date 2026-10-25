@@ -436,19 +436,19 @@ export default function Query() {
           the editor gets 295px and the preview 241px. The summary still names
           what is inside, including how many parameters, so nothing is hidden —
           it is one click, and the tab's purpose is writing SQL.
-          The summary names the database and the parameters themselves, not
+          The summary names the connection and the parameters themselves, not
           only how many there are (KI-031): closed, the strip still answers
           "what does this run against, and what can a caller pass". */}
       <details className="group shrink-0">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-sm text-muted-foreground hover:text-foreground">
           <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open:rotate-90" aria-hidden="true" />
-          <span className="shrink-0">Database and parameters ({form.params.length})</span>
+          <span className="shrink-0">Connection and parameters ({form.params.length})</span>
           <span className="min-w-0 truncate text-foreground" data-testid="query-strip-contents">
             {[
-              // Nothing while the list loads: "no database" would be a false claim.
+              // Nothing while the list loads: "no connection" would be a false claim.
               form.database_id
                 ? (databases ?? []).find((d) => d.id === form.database_id)?.name
-                : "No database chosen",
+                : "No connection chosen",
               form.params.length === 0 ? "no parameters" : form.params.map((p) => p.name).join(", "),
             ]
               .filter(Boolean)
@@ -464,7 +464,7 @@ export default function Query() {
         <div className="max-h-[40vh] space-y-4 overflow-auto pb-3 pt-2">
           <ConfigTable valueClassName="w-64">
             <ConfigTableRow
-              label="Database"
+              label="Connection"
               htmlFor="q-db"
               details="The connection the SQL runs against — for the preview here, and for every request the published endpoint serves."
             >
@@ -472,8 +472,8 @@ export default function Query() {
                 value={form.database_id}
                 onValueChange={(v) => setForm((f) => ({ ...f, database_id: v }))}
               >
-                <SelectTrigger id="q-db" className="w-full" aria-label="Database">
-                  <SelectValue placeholder="Choose a database" />
+                <SelectTrigger id="q-db" className="w-full" aria-label="Connection">
+                  <SelectValue placeholder="Choose a connection" />
                 </SelectTrigger>
                 <SelectContent>
                   {/* Governed connections are still offered — see
@@ -655,7 +655,7 @@ export default function Query() {
                 `min-h-40` on the editor's own box below. This column holds two
                 things: prose that has a fixed natural height, and an editor
                 that takes what is left. The panel above it is a fraction of the
-                page, so expanding `Database and parameters` takes that height
+                page, so expanding `Connection and parameters` takes that height
                 away — and every line of prose here is subtracted from the
                 editor before anything else is.
 

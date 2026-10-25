@@ -336,7 +336,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
 
       <div className="space-y-2 border-b p-2">
         <Select value={dbId ?? ""} onValueChange={(v) => { onDb(v); setFilter(""); }}>
-          <SelectTrigger className="h-8 w-full text-xs"><SelectValue placeholder="Select a database" /></SelectTrigger>
+          <SelectTrigger className="h-8 w-full text-xs"><SelectValue placeholder="Select a connection" /></SelectTrigger>
           <SelectContent>{(databases ?? []).map((d) => (
             <SelectItem key={d.id} value={d.id}>
               <span className="inline-flex items-center gap-1.5">
@@ -377,7 +377,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
         ) : !dbId ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-muted-foreground">
             <Database className="h-5 w-5 opacity-40" />
-            Select a database to browse its schema.
+            Select a connection to browse its schema.
           </div>
         ) : dbsLoading ? (
           <InfoRow depth={0} spinning>Loading…</InfoRow>
