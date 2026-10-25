@@ -584,3 +584,15 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   is denied a classified column, the column-less TABLE request (what Explain's `other_columns_access` asks),
   `_file` and `___count___`; the cleared reader is allowed each; another table is unaffected.
 - `just test-ranger-gates`: exit 0, every line green (the new test runs in its third line).
+
+### Review fixes (2026-10-26)
+
+- `Target::Update` is now `Target::TableCommit`: `egret-workflow`'s `execution_timestamps` guard reads `UPDATE {` in
+  any source file as a SQL write.
+- **Undrop (review finding 1).** §10's "Hook bypass: none known" was wrong: the recovery page's undrop calls
+  lakekeeper's management service in process, past the Iceberg mount. It now goes through
+  `TableHook::undrop` (`egret-bin`'s `LakekeeperBrowser::undrop`; one `TableHook` is shared with the mount). For a
+  table, the affected StarRocks profiles are found from the soft-deleted row (`table_columns::dropped_table_columns_via`,
+  by tabular id), the recompile is dry-run with the table's columns overlaid, a refusal is a 409 (`Conflict`, "egret
+  refused the undrop: …") and nothing is undropped (U5 applies to undrop like to a column add). After the undrop the
+  profiles are recompiled before the call returns. A view's undrop is unchanged.

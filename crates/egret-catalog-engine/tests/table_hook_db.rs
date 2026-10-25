@@ -66,6 +66,7 @@ struct Env {
     profile_id: i64,
     on_commit: OnCommit,
     on_reach: OnReach,
+    hook: Arc<TableHook>,
 }
 
 /// What the profile looked like when a request reached lakekeeper: armed with
@@ -218,7 +219,7 @@ async fn env() -> Option<Env> {
         observe,
     ));
     let hook = Arc::new(TableHook::new(db.clone()));
-    let app = front_catalog_router(table_hook::layer(inner, hook), None, None);
+    let app = front_catalog_router(table_hook::layer(inner, hook.clone()), None, None);
     let env = Env {
         db,
         state,
@@ -230,6 +231,7 @@ async fn env() -> Option<Env> {
         profile_id: profile.id,
         on_commit,
         on_reach,
+        hook,
     };
     let (status, body) = env
         .call_raw("POST", "namespaces", Some(json!({"namespace": ["sales"]})))
@@ -809,4 +811,101 @@ async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
     // The classification stays on the old name (spec §11.1): its masks go.
     assert!(env.masked_columns(tag, "orders").await.is_empty());
     assert!(env.has_table_deny(tag, "orders").await);
+}
+
+// ── D2 review fix 1: an undrop goes through the hook ──
+
+impl Env {
+    /// Drop `sales.{table}` softly (so it can be undropped), returning its
+    /// tabular id.
+    async fn soft_drop(&self, table: &str) -> Uuid {
+        set_delete_profile(self.state.clone(), SYSTEM_USER, &self.prefix, Some(3600))
+            .await
+            .expect("soft delete profile");
+        let (status, body) = self
+            .call("DELETE", &format!("namespaces/sales/tables/{table}"), None)
+            .await;
+        assert!(status.is_success(), "drop {table}: {status} {body}");
+        sqlx::query_scalar(
+            "SELECT tabular_id FROM lakekeeper.tabular \
+              WHERE warehouse_id::text = $1 AND name = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(&self.prefix)
+        .bind(table)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("soft-deleted table")
+    }
+
+    /// The recovery page's undrop, as `egret-bin` wires it.
+    async fn undrop(&self, id: Uuid) -> Result<(), egret_catalog_engine::CatalogEngineError> {
+        self.hook
+            .undrop(
+                self.state.clone(),
+                SYSTEM_USER,
+                &self.prefix,
+                egret_catalog_engine::TabularKindName::Table,
+                id,
+            )
+            .await
+    }
+}
+
+/// Review finding 1: the recovery page undrops a table in process, past the
+/// Iceberg mount. A table classified as a whole must get its NULL masks back
+/// at once: with the deny alone a view over it reads real values (live spike).
+#[tokio::test]
+async fn an_undropped_classified_table_gets_its_masks_back() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let tag = env.classify_table("orders").await;
+    let id = env.soft_drop("orders").await;
+    assert!(
+        env.masked_columns(tag, "orders").await.is_empty(),
+        "the drop reaps them"
+    );
+
+    env.undrop(id).await.expect("undrop");
+    assert_eq!(env.masked_columns(tag, "orders").await, vec!["email", "id"]);
+}
+
+/// U5 for an undrop: a table whose columns would push its classification
+/// over the ceiling is not undropped, and the profile is not wedged.
+#[tokio::test]
+async fn an_undrop_that_would_cross_the_ceiling_is_refused() {
+    let Some(env) = env().await else { return };
+    let f = fields(490);
+    env.create_table("wide", &refs(&f)).await;
+    let small = fields(10);
+    env.create_table("small", &refs(&small)).await;
+    let tag = env.classify_table("wide").await;
+    let id = env.soft_drop("wide").await;
+    // While `wide` is dropped, the tag also goes on `small`: 1 + 0 + 1 + 10.
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales','small','')",
+    )
+    .bind(tag)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign small");
+    env.recompile().await;
+
+    let err = env
+        .undrop(id)
+        .await
+        .expect_err("1 + 490 + 1 + 10 is over 500");
+    let message = err.to_string();
+    assert!(message.contains("ceiling"), "{message}");
+    let still_dropped: bool = sqlx::query_scalar(
+        "SELECT deleted_at IS NOT NULL FROM lakekeeper.tabular WHERE tabular_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&env.db.pool)
+    .await
+    .expect("tabular");
+    assert!(still_dropped, "nothing was undropped");
+    // Not wedged: the profile still compiles.
+    env.recompile().await;
 }

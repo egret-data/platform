@@ -156,6 +156,39 @@ pub async fn current_columns_batch_via(
     Ok(out)
 }
 
+/// The columns a SOFT-DELETED table would come back with if it were undropped:
+/// the catalog's spelling of its single-level schema and name, and its current
+/// columns, by its Lakekeeper `tabular_id`. `None` for anything else (a view, a
+/// live table, a multi-level namespace, an unknown id).
+pub async fn dropped_table_columns_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    tabular_id: Uuid,
+) -> Result<Option<TableColumns>, CompileError> {
+    let row: Option<(String, String, Value)> = sqlx::query_as(
+        "SELECT ti.tabular_namespace_name[1], ti.name, ts.schema \
+           FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+           JOIN lakekeeper.table_current_schema tcs \
+             ON tcs.warehouse_id = ti.warehouse_id AND tcs.table_id = ti.tabular_id \
+           JOIN lakekeeper.table_schema ts \
+             ON ts.warehouse_id = tcs.warehouse_id AND ts.table_id = tcs.table_id \
+            AND ts.schema_id = tcs.schema_id \
+          WHERE w.id = $1 AND ti.tabular_id = $2 AND ti.typ = 'table' \
+            AND ti.deleted_at IS NOT NULL AND cardinality(ti.tabular_namespace_name) = 1",
+    )
+    .bind(warehouse_id)
+    .bind(tabular_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading a dropped table's columns: {e}")))?;
+    Ok(row.map(|(schema, table, iceberg_schema)| TableColumns {
+        schema,
+        table,
+        columns: top_level_columns(&iceberg_schema),
+    }))
+}
+
 /// The overlay of the current transaction, empty outside a dry run. A custom
 /// setting that was set once in a session reads `''` after its transaction,
 /// which is no overlay.

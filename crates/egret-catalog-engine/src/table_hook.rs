@@ -27,6 +27,9 @@
 //! | drop | `DELETE /{prefix}/namespaces/{ns}/tables/{table}` | always |
 //! | drop namespace | `DELETE /{prefix}/namespaces/{ns}` | always |
 //!
+//! An undrop (the recovery page) reaches lakekeeper in process, not through this
+//! layer; it goes through [`TableHook::undrop`] instead.
+//!
 //! Every other request passes untouched, and an update with no schema change
 //! (an append) passes with no database query at all (C12).
 //!
@@ -478,6 +481,85 @@ impl TableHook {
                 }
             }
         }
+    }
+}
+
+impl TableHook {
+    /// Undrop a soft-deleted table or view (the recovery page), which reaches
+    /// lakekeeper in process, past the Iceberg mount and so past this layer
+    /// (review finding 1). A table that comes back carrying a whole-table
+    /// classification grows the profile by its columns, so it is treated like
+    /// a schema-growing commit: dry-run first (a refusal is a 409 and nothing
+    /// is undropped, U5), then undropped, then recompiled at once so its NULL
+    /// masks are back before this returns.
+    pub async fn undrop(
+        &self,
+        engine_state: crate::ApiContext<crate::EngineState>,
+        system_user: &str,
+        prefix: &str,
+        kind: crate::recovery::TabularKindName,
+        id: Uuid,
+    ) -> Result<(), crate::CatalogEngineError> {
+        let profiles = match kind {
+            crate::recovery::TabularKindName::Table => {
+                let (profiles, pending) = self
+                    .undrop_dry_run_inputs(prefix, id)
+                    .await
+                    .map_err(crate::CatalogEngineError::Internal)?;
+                if !profiles.is_empty() {
+                    self.dry_run(&profiles, &pending).await.map_err(|r| {
+                        crate::CatalogEngineError::Conflict(format!(
+                            "egret refused the undrop: {}",
+                            r.0
+                        ))
+                    })?;
+                }
+                profiles
+            }
+            crate::recovery::TabularKindName::View => Vec::new(),
+        };
+        crate::recovery::undrop_tabular(engine_state, system_user, prefix, kind, id).await?;
+        self.recompile(&profiles).await;
+        Ok(())
+    }
+
+    /// The affected profiles and the overlay of undropping table `id`.
+    async fn undrop_dry_run_inputs(
+        &self,
+        prefix: &str,
+        id: Uuid,
+    ) -> Result<(Vec<i64>, Vec<PendingColumns>), String> {
+        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
+        let Some((warehouse_id, _)) = resolve(&mut conn, prefix)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let Some(dropped) = egret_perm_compile::table_columns::dropped_table_columns_via(
+            &mut conn,
+            warehouse_id,
+            id,
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let profiles = egret_perm_compile::affected_starrocks_profiles_for_tables(
+            &mut conn,
+            warehouse_id,
+            &[(dropped.schema.clone(), Some(dropped.table.clone()))],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let pending = vec![PendingColumns {
+            warehouse_id,
+            schema: dropped.schema,
+            table: dropped.table,
+            columns: Some(dropped.columns),
+        }];
+        Ok((profiles, pending))
     }
 }
 
