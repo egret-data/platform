@@ -5,6 +5,9 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QuerySpec } from "@/api/charts";
+// Imported with the file, not inside the first test: the route's cold import took 5-8 s
+// under load, every time inside whichever test mounted first, against a 5 s budget.
+import ChartExplore from "../ChartExplore";
 
 // A saved pie chart in the pre-A2 (v1) shape: a viz still on the bridge, i.e. driven by
 // ChartExplore's inline branches rather than a descriptor.
@@ -176,7 +179,6 @@ vi.mock("@/api/datasets", () => ({
 }));
 
 async function mountChart(id: string, tab?: "data" | "display" | "rules") {
-  const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
@@ -194,12 +196,7 @@ describe("ChartExplore mounts", () => {
   // Regression guard: the run hook sits above the helpers it calls, so any of them written
   // as a `const` arrow puts the shell in a temporal dead zone and the whole route white-
   // screens. Cartesian never noticed (its descriptor answers instead) — a bridge viz did.
-  // 15s, not the 5s default. Measured: this file's 14 tests take ~8.2s of test time
-  // UNLOADED, so this one sits on the limit before any parallel load — it failed 2 of 5
-  // full-suite runs at 5008ms, 5088ms and 5334ms while passing alone every time. The fix
-  // is the budget, not the test: a red CI for a reason unrelated to the change under
-  // review is worse than the flake, because it teaches people to skip past red.
-  it("renders a bridge viz (pie) saved in the v1 shape", { timeout: 15_000 }, async () => {
+  it("renders a bridge viz (pie) saved in the v1 shape", async () => {
     await mountChart("c-pie");
     expect(await screen.findByDisplayValue("Pie v1")).toBeInTheDocument();
     // "Dimensions" plural since chart 05 — a pie takes up to three, drawn as nested rings.
