@@ -118,23 +118,18 @@ try {
     await editor.pressSequentially("1 + 1");
     await editor.press("Control+Enter");
     await frame.locator(".output-area").filter({ hasText: /^\s*2\s*$/ }).first().waitFor({ timeout: 60_000 });
-    // Workaround for a product issue: Publish right after Ctrl+S can return 409, because the editor
-    // header refreshes the draft revision only every 5 s. So wait until the server has a newer
-    // revision AND the button shows it.
+    // Wait until the save has reached the server. Publish re-reads the revision itself, so the
+    // button's (up to 5 s old) label need not have caught up.
     await editor.press("Control+s");
     let rev = before;
     for (let i = 0; i < 30 && rev <= before; i++) { await page.waitForTimeout(1000); rev = await draftRev(); }
     if (rev <= before) throw new Error(`draft not saved (revision still ${before})`);
-    await page.getByRole("button", { name: `Publish draft rev ${rev}`, exact: true }).waitFor({ timeout: 15_000 });
   });
 
   await step("publish", async () => {
     await page.getByRole("button", { name: /^Publish draft rev \d+$/ }).click();
     await page.getByText("Published version 1").waitFor({ timeout: 30_000 });
     await page.getByText("Published v1", { exact: true }).waitFor({ timeout: 15_000 });
-    // Workaround for a product issue: the Versions dialog is not refreshed after a publish
-    // (usePublishApp in frontend/src/api/apps.ts does not invalidate the versions query), so reload.
-    await page.reload();
     await page.getByRole("button", { name: "Versions" }).click();
     await page.getByRole("dialog").getByText("v1", { exact: true }).waitFor({ timeout: 15_000 });
     await page.keyboard.press("Escape");

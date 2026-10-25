@@ -40,13 +40,16 @@ export function AppActionsMenu({ ws, app, trashed, folders, onRename, onDuplicat
   const nav = useNavigate();
   const reasonId = useId();
   const { can_write: canWrite, can_manage: canManage } = app;
+  // Named per row, as the Data API lists do: every row's trigger is the same icon, so a
+  // screen reader can only tell them apart by the name.
+  const label = `Actions for ${app.name}`;
 
   if (trashed) {
     // Restore needs write and Delete permanently needs manage. A caller with neither would get
     // an empty menu — render nothing at all rather than a trigger that opens onto nothing.
     if (!canWrite && !canManage) return null;
     return (
-      <RowActionsMenu>
+      <RowActionsMenu label={label}>
         {canWrite && <DropdownMenuItem onClick={() => onRestore(app)}>Restore</DropdownMenuItem>}
         {canWrite && canManage && <DropdownMenuSeparator />}
         {canManage && (
@@ -60,7 +63,7 @@ export function AppActionsMenu({ ws, app, trashed, folders, onRename, onDuplicat
 
   const published = app.latest_version_no != null;
   return (
-    <RowActionsMenu>
+    <RowActionsMenu label={label}>
       {/* Open is not a mutation, so it stays for everyone: a reader keeps the way in, and loses
           only the actions the server would refuse. */}
       {published ? (

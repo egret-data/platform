@@ -273,6 +273,17 @@ impl Fixture {
         .await
     }
 
+    /// Create an app and save over its starter draft (revision 2), so it can be
+    /// published: the untouched starter is refused (KI-042).
+    async fn edited_app(&self, name: &str) -> String {
+        let id = self.create_app(name).await;
+        let r = self
+            .put_draft(&id, &self.editor, Some("1"), "import marimo\n# edited\n")
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "save: {}", r.body);
+        id
+    }
+
     /// Create an app as the editor; returns its id.
     async fn create_app(&self, name: &str) -> String {
         let r = self
@@ -659,24 +670,24 @@ async fn draft_put_over_one_mib_is_413_and_saves_nothing() {
 #[tokio::test]
 async fn publish_creates_a_version_and_honours_expected_revision() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     let publish = fx.path(&format!("/{id}/publish"));
     let r = fx.call("POST", &publish, &fx.editor, Some(json!({}))).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["version_no"], json!(1));
-    assert_eq!(r.body["from_revision"], json!(1));
+    assert_eq!(r.body["from_revision"], json!(2));
     assert_eq!(r.body["published_by"], json!(fx.editor.id.0));
-    fx.put_draft(&id, &fx.editor, Some("1"), "two").await;
+    fx.put_draft(&id, &fx.editor, Some("2"), "two").await;
     let r = fx
         .call(
             "POST",
             &publish,
             &fx.editor,
-            Some(json!({ "expected_revision": 1 })),
+            Some(json!({ "expected_revision": 2 })),
         )
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
-    assert_eq!(r.body["current_revision"], json!(2));
+    assert_eq!(r.body["current_revision"], json!(3));
     let a = fx.get(&fx.path(&format!("/{id}")), &fx.editor).await;
     assert_eq!(
         a.body["latest_version_no"],
@@ -741,12 +752,87 @@ async fn publish_without_a_body_publishes_the_current_draft() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
 }
 
+/// KI-042: a draft nobody has saved over is the new-app starter, and publishing it
+/// is refused with a code the editor can name, instead of publishing the template.
+#[tokio::test]
+async fn publishing_the_untouched_starter_is_refused() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let publish = fx.path(&format!("/{id}/publish"));
+    let r = fx.call("POST", &publish, &fx.editor, Some(json!({}))).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert_eq!(r.body["code"], json!("starter_draft"));
+    let a = fx.get(&fx.path(&format!("/{id}")), &fx.editor).await;
+    assert_eq!(
+        a.body["latest_version_no"],
+        Value::Null,
+        "nothing was published"
+    );
+    // Any saved change makes it publishable.
+    fx.put_draft(&id, &fx.editor, Some("1"), "import marimo\n# mine\n")
+        .await;
+    let r = fx.call("POST", &publish, &fx.editor, Some(json!({}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+}
+
+/// KI-042: the 428 tells an API client where the revision it must send comes from.
+#[tokio::test]
+async fn a_draft_put_without_if_match_says_where_the_revision_comes_from() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    let r = fx.put_draft(&id, &fx.editor, None, "x").await;
+    assert_eq!(r.status, StatusCode::PRECONDITION_REQUIRED, "{}", r.body);
+    let msg = r.body["error"].as_str().unwrap();
+    assert!(
+        msg.contains("ETag") && msg.contains("GET the draft"),
+        "{msg}"
+    );
+}
+
+/// KI-027: a version names its publisher, so an editor who may not list users
+/// sees who published rather than a shortened id.
+#[tokio::test]
+async fn a_version_names_its_publisher() {
+    let fx = Fixture::new().await;
+    let id = fx.create_app("a").await;
+    fx.put_draft(&id, &fx.editor, Some("1"), "two").await;
+    let r = fx
+        .call(
+            "POST",
+            &fx.path(&format!("/{id}/publish")),
+            &fx.editor,
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["published_by_name"], json!("U"));
+    let v1 = r.body["id"].as_str().unwrap().to_string();
+    let r = fx
+        .get(&fx.path(&format!("/{id}/versions")), &fx.editor)
+        .await;
+    assert_eq!(r.body[0]["published_by_name"], json!("U"), "{}", r.body);
+    let r = fx
+        .get(&fx.path(&format!("/{id}/versions/{v1}")), &fx.editor)
+        .await;
+    assert_eq!(r.body["published_by_name"], json!("U"), "{}", r.body);
+    let r = fx
+        .call(
+            "POST",
+            &fx.path(&format!("/{id}/versions/{v1}/restore")),
+            &fx.editor,
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["published_by_name"], json!("U"));
+}
+
 // 11
 #[tokio::test]
 async fn versions_newest_first_with_source_scoped_to_the_app() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
-    let other = fx.create_app("b").await;
+    let id = fx.edited_app("a").await;
+    let other = fx.edited_app("b").await;
     let pubr = |app: String| {
         let fx = &fx;
         async move {
@@ -763,7 +849,7 @@ async fn versions_newest_first_with_source_scoped_to_the_app() {
         }
     };
     let v1 = pubr(id.clone()).await;
-    fx.put_draft(&id, &fx.editor, Some("1"), "second").await;
+    fx.put_draft(&id, &fx.editor, Some("2"), "second").await;
     let v2 = pubr(id.clone()).await;
     let ov = pubr(other.clone()).await;
     let r = fx
@@ -809,13 +895,13 @@ async fn versions_newest_first_with_source_scoped_to_the_app() {
 #[tokio::test]
 async fn restoring_a_version_republishes_its_source() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     let publish = fx.path(&format!("/{id}/publish"));
     let v1 = fx
         .call("POST", &publish, &fx.editor, Some(json!({})))
         .await
         .body;
-    fx.put_draft(&id, &fx.editor, Some("1"), "second").await;
+    fx.put_draft(&id, &fx.editor, Some("2"), "second").await;
     fx.call("POST", &publish, &fx.editor, Some(json!({}))).await;
     let v1_id = v1["id"].as_str().unwrap();
     let r = fx
@@ -845,7 +931,7 @@ async fn restoring_a_version_republishes_its_source() {
     assert_eq!(v3.body["source"], v1_src.body["source"]);
     // The draft is untouched.
     let d = fx.get(&fx.path(&format!("/{id}/draft")), &fx.editor).await;
-    assert_eq!(d.body, json!({ "source": "second", "revision": 2 }));
+    assert_eq!(d.body, json!({ "source": "second", "revision": 3 }));
 }
 
 // 13
@@ -889,7 +975,7 @@ async fn trash_hides_from_the_list_and_restore_brings_it_back() {
 #[tokio::test]
 async fn a_trashed_app_is_read_only_until_restored() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     let e = &fx.editor;
     let v1 = fx
         .call(
@@ -955,7 +1041,7 @@ async fn a_trashed_app_is_read_only_until_restored() {
             a.body["draft_revision"].clone(),
             a.body["latest_version_no"].clone()
         ),
-        (json!(1), json!(1))
+        (json!(2), json!(1))
     );
 
     // Reads, bookmarks, and un-trashing still work.
@@ -1006,7 +1092,7 @@ async fn a_trashed_app_is_read_only_until_restored() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(r.body["name"], json!("renamed"));
     assert_eq!(
-        fx.put_draft(&id, e, Some("1"), "x").await.status,
+        fx.put_draft(&id, e, Some("2"), "x").await.status,
         StatusCode::OK
     );
 }
@@ -1143,7 +1229,7 @@ async fn create_publish_and_restore_are_audited_once_and_draft_saves_never() {
 #[tokio::test]
 async fn publish_audit_detail_has_version_and_revision_but_no_source() {
     let mut fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     fx.mutations();
     fx.call(
         "POST",
@@ -1170,7 +1256,7 @@ async fn publish_audit_detail_has_version_and_revision_but_no_source() {
     assert_eq!(resource_id.as_deref(), Some(id.as_str()));
     assert_eq!(workspace_id, Some(fx.ws.0));
     assert_eq!(actor, Some(fx.editor.id.0));
-    assert_eq!(detail, json!({ "version_no": 1, "from_revision": 1 }));
+    assert_eq!(detail, json!({ "version_no": 1, "from_revision": 2 }));
 }
 
 // 18
@@ -1309,7 +1395,7 @@ async fn an_author_gets_an_edit_ticket_bound_to_their_login_session_and_the_draf
 #[tokio::test]
 async fn a_viewer_may_open_but_never_edit() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     let r = fx.ticket(&id, &fx.viewer, json!({ "mode": "edit" })).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
 
@@ -1370,8 +1456,8 @@ async fn an_edit_ticket_needs_query_run_as_well_as_app_write() {
 #[tokio::test]
 async fn a_run_ticket_for_a_version_of_another_app_is_not_found() {
     let fx = Fixture::new().await;
-    let a = fx.create_app("a").await;
-    let b = fx.create_app("b").await;
+    let a = fx.edited_app("a").await;
+    let b = fx.edited_app("b").await;
     let b_version = fx.publish_app(&b).await;
     fx.publish_app(&a).await;
     let r = fx
@@ -1387,7 +1473,7 @@ async fn a_run_ticket_for_a_version_of_another_app_is_not_found() {
 #[tokio::test]
 async fn an_edit_ticket_that_names_a_version_is_invalid() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     let v = fx.publish_app(&id).await;
     let r = fx
         .ticket(&id, &fx.editor, json!({ "mode": "edit", "version_id": v }))
@@ -1398,7 +1484,7 @@ async fn an_edit_ticket_that_names_a_version_is_invalid() {
 #[tokio::test]
 async fn a_trashed_app_gets_no_ticket() {
     let fx = Fixture::new().await;
-    let id = fx.create_app("a").await;
+    let id = fx.edited_app("a").await;
     fx.publish_app(&id).await;
     let r = fx
         .call("POST", &fx.path(&format!("/{id}/trash")), &fx.editor, None)

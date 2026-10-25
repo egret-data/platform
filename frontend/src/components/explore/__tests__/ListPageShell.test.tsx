@@ -28,6 +28,19 @@ describe("ListPageShell", () => {
     expect(screen.getByText("body")).toBeInTheDocument();
   });
 
+  it("lets a long description shrink the title block instead of pushing the action under it (KI-183)", () => {
+    // jsdom does no layout, so this pins the rule that keeps the action top-right:
+    // the title block grows and shrinks from a 20rem basis rather than sizing to its
+    // prose (which, with a long description, filled the row and wrapped the action).
+    const { container } = render(
+      <ListPageShell title="New service account" description={"x ".repeat(200)} action={<button type="button">Create</button>}>
+        <p>body</p>
+      </ListPageShell>,
+    );
+    const titleBlock = container.querySelector("header")!.firstElementChild;
+    expect(titleBlock).toHaveClass("flex-[1_1_20rem]", "min-w-0");
+  });
+
   it("wraps the action group, not only the header row", () => {
     // The header's own `flex-wrap` only breaks the title away from the button
     // group. Endpoints puts three controls in that group (bulk toggle,

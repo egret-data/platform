@@ -370,6 +370,7 @@ fn published(o: PublishOutcome) -> egret_apps::store::VersionSummary {
     match o {
         PublishOutcome::Published(v) => v,
         PublishOutcome::Stale { current_revision } => panic!("stale at {current_revision}"),
+        PublishOutcome::Starter => panic!("the draft is the untouched starter"),
     }
 }
 

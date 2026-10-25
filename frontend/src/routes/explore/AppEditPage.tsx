@@ -24,6 +24,9 @@ import { BackLink } from "@/components/layout/DetailHeader";
  * The URL is a one-time ticket that lives for seconds: it is requested once per load, written to
  * the iframe once, and never cached. "Reload editor" asks for a new one.
  */
+/** The `code` of the 409 the server answers when the draft is still the new-app starter. */
+const STARTER_DRAFT_CODE = "starter_draft";
+
 const SANDBOX = "allow-scripts allow-same-origin allow-forms allow-downloads";
 
 type Load =
@@ -35,7 +38,7 @@ export default function AppEditPage() {
   const { workspace, id } = useParams();
   const ws = workspace ?? "";
   const appId = id ?? "";
-  const { data: app } = useApp(ws, appId, { refetchMs: 5000 });
+  const { data: app, refetch: refetchApp } = useApp(ws, appId, { refetchMs: 5000 });
   const publish = usePublishApp(ws, appId);
 
   const [attempt, setAttempt] = useState(0);
@@ -65,14 +68,24 @@ export default function AppEditPage() {
 
   async function doPublish() {
     try {
-      const v = await publish.mutateAsync({ expectedRevision: app?.draft_revision });
-      toast.success(`Published version ${v.version_no}`);
+      // Re-read the revision first. The label beside the button is up to 5 s old, and a
+      // Ctrl+S in the editor lands on the server without telling this page (the editor is
+      // another origin), so publishing the shown revision 409'd right after a save (KI-177).
+      // The fresh revision is what the author just saved; it is still sent as
+      // `expected_revision`, so a save that lands between this read and the publish is a
+      // conflict rather than a silently different version.
+      const fresh = await refetchApp();
+      const revision = fresh.data?.draft_revision ?? app?.draft_revision;
+      const v = await publish.mutateAsync({ expectedRevision: revision });
+      toast.success(`Published version ${v.version_no} from draft revision ${v.from_revision ?? revision}`);
     } catch (e) {
-      const status = (e as { status?: number }).status;
+      const err = e as { status?: number; code?: string };
       toast.error(
-        status === 409
-          ? "The draft changed while you were publishing. Save in the editor, then publish again."
-          : String((e as Error)?.message ?? e),
+        err.code === STARTER_DRAFT_CODE
+          ? "Nothing to publish yet: the draft is still the new-app starter. Change it, save (Ctrl/⌘+S), then publish."
+          : err.status === 409
+            ? "The draft changed while you were publishing. Save in the editor, then publish again."
+            : String((e as Error)?.message ?? e),
       );
     }
   }

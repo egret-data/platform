@@ -20,10 +20,11 @@ export function describeFailure(err: unknown, mode: "edit" | "run" = "edit"): { 
       return { title: "App not found", message: "It may have been deleted, or it belongs to another workspace." };
     case 409:
       // Run-only: the author has never published a version, distinct from a trashed app (both 409).
+      // Our own sentence, not the server's lower-case detail under the title.
       if (mode === "run" && /published version/i.test(detail ?? "")) {
         return {
           title: "Nobody has published this app yet",
-          message: detail || "Ask the author to publish a version before sharing it.",
+          message: "There is no version to open. Ask the author to publish one, then open the app again.",
         };
       }
       return { title: "This app can't be opened right now", message: detail || "It is in the trash." };

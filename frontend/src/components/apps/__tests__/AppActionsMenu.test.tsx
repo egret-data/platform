@@ -56,7 +56,7 @@ function renderMenu(a: AppSummary, trashed: boolean, h = handlers()) {
 }
 
 async function openItems(): Promise<string[]> {
-  await userEvent.click(screen.getByRole("button", { name: "Actions" }));
+  await userEvent.click(screen.getByRole("button", { name: "Actions for Revenue" }));
   return (await screen.findAllByRole("menuitem")).map((el) => el.textContent ?? "");
 }
 
@@ -95,7 +95,7 @@ describe("AppActionsMenu — which items a row gets", () => {
       // Act + Assert
       if (want === null) {
         // Not an empty menu: no trigger, so nothing opens onto nothing.
-        expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "Actions for Revenue" })).toBeNull();
         return;
       }
       expect(await openItems()).toEqual(want);

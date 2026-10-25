@@ -11,10 +11,10 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 
-/** A workspace member id, shortened the same way the backend shortens ids for display elsewhere
- * (there is no name lookup at this layer — a full id is shown on hover via the title attribute). */
-function shortId(id: string | null | undefined): string | null {
-  return id ? id.slice(0, 8) : null;
+/** Who published: the server's name for the user (profile name, else email). The shortened id
+ * is left only for a publisher who no longer exists, where the server has no name to give. */
+function publisher(v: AppVersionSummary): string | null {
+  return v.published_by_name ?? (v.published_by ? v.published_by.slice(0, 8) : null);
 }
 
 export default function VersionsDialog({
@@ -31,6 +31,8 @@ export default function VersionsDialog({
   const { data: versions } = useAppVersions(ws, appId);
   const restore = useRestoreVersion(ws, appId);
   const [confirming, setConfirming] = useState<AppVersionSummary | null>(null);
+  // `restored_from` is a version id; the list holds every version, so it names the number.
+  const numberById = new Map((versions ?? []).map((v) => [v.id, v.version_no]));
 
   async function doRestore(v: AppVersionSummary) {
     try {
@@ -63,8 +65,13 @@ export default function VersionsDialog({
                     <div className="font-medium">v{v.version_no}</div>
                     <div className="text-xs text-muted-foreground">
                       <RelativeTime iso={v.published_at} />
-                      {shortId(v.published_by) && <> &middot; by {shortId(v.published_by)}</>}
-                      {v.restored_from && <> &middot; restored from an earlier version</>}
+                      {publisher(v) && <> &middot; by {publisher(v)}</>}
+                      {v.restored_from && (
+                        <>
+                          {" "}&middot; restored from{" "}
+                          {numberById.has(v.restored_from) ? `v${numberById.get(v.restored_from)}` : "an earlier version"}
+                        </>
+                      )}
                     </div>
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setConfirming(v)}>

@@ -1739,6 +1739,18 @@ describe("Query section — the editor, the split and the preview", () => {
     // there is one declaration in there without opening it.
     expect(summary).toHaveTextContent("Database and parameters (1)");
   });
+
+  it("names the database and the parameters in the closed strip, not only their count (KI-031)", async () => {
+    show(makeEndpoint({
+      params: [
+        { name: "region", type: ParamType.string, location: ParamLocation.query, required: true },
+        { name: "limit", type: ParamType.number, location: ParamLocation.query, required: false },
+      ],
+    }));
+    const contents = await screen.findByTestId("query-strip-contents");
+    expect(contents.closest("summary")).not.toBeNull();
+    expect(contents).toHaveTextContent(/^warehouse · region, limit$/);
+  });
 });
 
 /**
