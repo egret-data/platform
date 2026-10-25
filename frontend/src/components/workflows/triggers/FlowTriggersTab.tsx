@@ -7,8 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import type { Enablement } from "@/components/workflows/draftState";
-import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
+import { ReasonButton } from "@/components/workflows/ReasonButton";
 import { EnableTriggerDialog } from "@/components/workflows/triggers/EnableTriggerDialog";
 
 const BackfillDialog = lazy(() => import("@/components/workflows/triggers/BackfillDialog"));
@@ -16,7 +15,7 @@ import { TriggerBanners } from "@/components/workflows/triggers/TriggerBanners";
 import { TriggerDetailsDrawer } from "@/components/workflows/triggers/TriggerDetailsDrawer";
 import { triggerBlock } from "@/components/workflows/triggers/triggerYaml";
 import { selectionKey, TriggersTable } from "@/components/workflows/triggers/TriggersTable";
-import { anyBackfillRunning, bannersFor, MANAGE_REASON, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
+import { anyBackfillRunning, bannersFor, bulkEnablement, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
 import { useBackfill } from "@/components/workflows/triggers/useBackfill";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 
@@ -111,11 +110,7 @@ export default function FlowTriggersTab({
   const ctx = { flowDisabled: page.flow_disabled, flowDeleted: page.flow_deleted };
   // A trigger id may repeat (`duplicate_id`); the switch is per id, so it is selected once.
   const selected = rows.filter((r, i) => selection.has(selectionKey(r)) && rows.findIndex((o) => o.trigger_id === r.trigger_id) === i);
-  const bulk: Enablement = !manage
-    ? { ok: false, reason: MANAGE_REASON }
-    : selected.length === 0
-      ? { ok: false, reason: "Select triggers first" }
-      : { ok: true };
+  const bulk = bulkEnablement(selected.length);
 
   const detailsHref = (row: TriggerRow) => {
     const next = new URLSearchParams(params);
@@ -138,29 +133,23 @@ export default function FlowTriggersTab({
           <AlertDescription>The triggers could not be refreshed: {readError(query.error)} What is shown is the last answer.</AlertDescription>
         </Alert>
       ) : null}
-      <div className="flex flex-col items-start gap-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, true)}>
+      {/* The bulk actions, for a caller who can select (KI-226); one hint says why they wait,
+          rather than one per button. */}
+      {manage ? (
+        <div className="flex flex-wrap items-center gap-2" data-testid="triggers-bulk-actions">
+          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, true)}>
             <Power aria-hidden />
             Enable
           </ReasonButton>
-          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, false)}>
+          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, false)}>
             <PowerOff aria-hidden />
             Disable
           </ReasonButton>
-          {selected.length > 0 ? (
-            <span className="text-sm text-muted-foreground tabular-nums">
-              {selected.length === 1 ? "1 trigger selected" : `${selected.length} triggers selected`}
-            </span>
-          ) : null}
+          <span id={`${reasonsId}-hint`} className="text-sm text-muted-foreground tabular-nums">
+            {bulk.ok ? (selected.length === 1 ? "1 trigger selected" : `${selected.length} triggers selected`) : bulk.reason}
+          </span>
         </div>
-        <DisabledReasons
-          actions={[
-            { id: `${reasonsId}-enable`, label: "Enable", enablement: bulk },
-            { id: `${reasonsId}-disable`, label: "Disable", enablement: bulk },
-          ]}
-        />
-      </div>
+      ) : null}
       {sw.refusals.length > 0 ? (
         <Alert variant="destructive" data-testid="bulk-refusals">
           <AlertDescription className="grid gap-1">

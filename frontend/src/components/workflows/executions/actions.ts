@@ -10,9 +10,6 @@ import { isTerminalState } from "@/components/workflows/executionState";
  * (FE-ACTION-4).
  */
 
-/** Spec §5.2, verbatim. Also this module's marker in `scripts/assert-workflows-lazy.mjs`. */
-export const REPLAY_NOT_FINISHED_REASON = "Replay is available when the execution has finished";
-
 /**
  * Resume is shown exactly while the execution waits (spec §5.2). The route
  * releases every paused `Pause` at once, whatever its bounds (Kestra's
@@ -23,7 +20,7 @@ export function showsResume(execution: Pick<ExecutionDto, "state">): boolean {
   return execution.state === "PAUSED";
 }
 
-/** Spec §5.2 (fix round 2), verbatim. */
+/** Spec §5.2 (fix round 2), verbatim. Also this module's marker in `scripts/assert-workflows-lazy.mjs`. */
 export const LOOP_WAIT_REASON = "Waiting on a loop condition, not a Pause task";
 
 /**
@@ -46,12 +43,14 @@ export function canResume(execution: Pick<ExecutionDto, "runs">): Enablement {
 }
 
 /**
- * Replay: only a terminal execution (spec §5.2). The server's other refusals
- * (a loop iteration, a disabled or trashed flow) are its own to state; the
- * dialog shows them in its words.
+ * Replay: shown once the execution has finished (spec §5.2), as Kill is shown
+ * until it has (KI-193): a running execution's header holds the actions that
+ * apply to it, not a disabled Replay with a reason wrapping under it. The
+ * server's other refusals (a loop iteration, a disabled or trashed flow) are
+ * its own to state; the dialog shows them in its words.
  */
-export function canReplay(execution: Pick<ExecutionDto, "state">): Enablement {
-  return isTerminalState(execution.state) ? { ok: true } : { ok: false, reason: REPLAY_NOT_FINISHED_REASON };
+export function showsReplay(execution: Pick<ExecutionDto, "state">): boolean {
+  return isTerminalState(execution.state);
 }
 
 /**

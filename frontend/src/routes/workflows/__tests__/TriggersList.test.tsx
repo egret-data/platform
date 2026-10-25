@@ -18,6 +18,7 @@ import { otherEntry, scheduleEntry, webhookEntry } from "@/components/workflows/
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
+import { SELECT_TRIGGERS_HINT } from "@/components/workflows/triggers/triggersModel";
 import TriggersList from "@/routes/workflows/TriggersList";
 
 const WS = "eng";
@@ -707,13 +708,21 @@ describe("TriggersList: switching", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("says why bulk is off with nothing selected", async () => {
+  it("says once, not per button, why bulk waits for a selection (KI-226)", async () => {
+    const user = userEvent.setup();
     renderPage();
     await table();
-    const disable = screen.getByRole("button", { name: "Disable" });
-    expect(disable).toBeDisabled();
-    const describedBy = disable.getAttribute("aria-describedby")!;
-    expect(document.getElementById(describedBy)).toHaveTextContent("Select triggers first");
+    const bar = screen.getByTestId("triggers-bulk-actions");
+    const buttons = ["Enable", "Disable", "Pause backfills", "Resume backfills", "Delete backfills"].map((name) => within(bar).getByRole("button", { name }));
+    for (const b of buttons) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAccessibleDescription(SELECT_TRIGGERS_HINT);
+    }
+    expect(screen.getAllByText(SELECT_TRIGGERS_HINT)).toHaveLength(1);
+    expect(screen.queryByText(/Select triggers first/)).toBeNull();
+    await user.click(screen.getByRole("checkbox", { name: `Select ${who(FLOW_A, "daily")}` }));
+    expect(bar).toHaveTextContent("1 trigger selected");
+    for (const b of buttons) expect(b).toBeEnabled();
   });
 
   it("is read-only for a viewer without workflow:manage, and says why", async () => {
@@ -721,12 +730,8 @@ describe("TriggersList: switching", () => {
     server.rows = ROWS().map((r) => (r.kind === "other" ? r : { ...r, can_toggle: false, toggle_refusal: "forbidden" as const }));
     renderPage();
     await table();
-    for (const name of ["Enable", "Disable"]) {
-      const button = screen.getByRole("button", { name });
-      expect(button).toBeDisabled();
-      // The reason is visible text the button names, not only its `title`.
-      expect(document.getElementById(button.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
-    }
+    // Nothing can be selected, so there are no bulk actions to refuse (KI-226).
+    expect(screen.queryByTestId("triggers-bulk-actions")).toBeNull();
     const all = screen.getByRole("checkbox", { name: "Select all triggers" });
     expect(all).toBeDisabled();
     expect(document.getElementById(all.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
@@ -748,8 +753,7 @@ describe("TriggersList: switching, continued", () => {
     const all = screen.getByRole("checkbox", { name: "Select all triggers" });
     expect(all).toBeDisabled();
     expect(document.getElementById(all.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
-    const disable = screen.getByRole("button", { name: "Disable" });
-    expect(document.getElementById(disable.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
+    expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
   });
 
   it("lets a manager select, whatever the rows say", async () => {

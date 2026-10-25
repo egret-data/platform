@@ -2,7 +2,7 @@ import { lazy, useCallback, useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Milestone, Play, RotateCw, Save, SaveAll, Trash2 } from "lucide-react";
+import { Info, Milestone, Play, RotateCw, Save, SaveAll, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowDeleteFlow,
@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { StateChip } from "@/components/workflows/StateChip";
@@ -32,6 +33,7 @@ import {
   isFlowDisabled,
   latestVersion,
   versionSourceOf,
+  VERSION_HELP,
 } from "@/components/workflows/draftState";
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
 import { DiscardFileDialog, NamespaceChangeDialog, useFilesHost } from "@/components/workflows/editor/fileTabs";
@@ -456,9 +458,25 @@ function FlowWorkspace({
           <div className="flex flex-wrap items-center gap-2">
             <StateChip state={flow.state} kind="flow" />
             {/* The latest version, shown apart from the chip (the user's ruling, 2026-10-10):
-                a snapshot to compare and restore, never what runs. */}
-            <span className="text-sm text-muted-foreground tabular-nums" data-testid="flow-latest-version">
-              Version {flow.latest_version != null ? `v${flow.latest_version}` : "—"}
+                a snapshot to compare and restore, never what runs. A flow with none is a draft
+                only, and says so (KI-123), with what a version is beside it (KI-014). */}
+            <span className="inline-flex items-center gap-1 text-sm text-muted-foreground tabular-nums" data-testid="flow-latest-version">
+              {flow.latest_version != null ? `Version v${flow.latest_version}` : "Draft, no version yet"}
+              {/* Its own provider, as `MetricsTab` has: the header renders wherever the page does. */}
+              <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="What is a version?"
+                    className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Info aria-hidden className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">{VERSION_HELP}</TooltipContent>
+              </Tooltip>
+              </TooltipProvider>
             </span>
             {changesPill && <Badge variant="outline">{changesPill}</Badge>}
             {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
@@ -612,7 +630,7 @@ function FlowWorkspace({
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         title={`Delete ${flowName}?`}
-        description="The flow leaves the flow list and can no longer be run or scheduled. Executions already started are not stopped."
+        description="The flow moves to the trash (Flows, then Trash), where it can be restored or deleted permanently. Until then it cannot be run or scheduled, and its namespace and id stay taken. Executions already started are not stopped."
         onConfirm={() => void runDelete()}
       />
     </div>

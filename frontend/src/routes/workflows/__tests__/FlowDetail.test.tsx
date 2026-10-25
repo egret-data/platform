@@ -11,6 +11,7 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.
 vi.mock("sonner", () => ({ toast }));
 
 import FlowDetail from "@/routes/workflows/FlowDetail";
+import { VERSION_HELP } from "@/components/workflows/draftState";
 import { FakeWorkflowServer, FLOW_ID, flowSource, WS } from "./fakeWorkflowServer";
 import { pressSaveInEditor, resetMonacoStub, stub } from "./monacoStub";
 import { TRIGGERS_SOURCE, webhookEntry } from "@/components/workflows/triggers/__tests__/triggerFixtures";
@@ -577,12 +578,16 @@ describe("FlowDetail: Run", () => {
 });
 
 describe("FlowDetail: the header's state and version", () => {
-  it("shows Active and a dash for a flow with no version", async () => {
+  it("says a flow with no version is a draft only, and what a version is (KI-014, KI-123)", async () => {
     server = new FakeWorkflowServer();
     renderAt();
     await editorBox();
-    expect(screen.getByTestId("flow-latest-version")).toHaveTextContent(/^Version —$/);
+    expect(screen.getByTestId("flow-latest-version")).toHaveTextContent(/^Draft, no version yet$/);
+    // Active stays: it says whether the flow runs, and a draft runs (the user's ruling, 2026-10-10).
     expect(screen.getByText("Active")).toBeInTheDocument();
+    const help = screen.getByRole("button", { name: "What is a version?" });
+    await userEvent.hover(help);
+    expect((await screen.findAllByText(VERSION_HELP)).length).toBeGreaterThan(0);
   });
 
   it("shows the latest version number, and Disabled for a disabled flow", async () => {
