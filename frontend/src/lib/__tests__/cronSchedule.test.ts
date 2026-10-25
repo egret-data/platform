@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { fromCron, toCron, DEFAULT_SCHEDULE } from "@/lib/cronSchedule";
 
 describe("toCron", () => {
+  it("names a period outside the union instead of returning undefined", () => {
+    const bad = { ...DEFAULT_SCHEDULE, period: "" } as unknown as typeof DEFAULT_SCHEDULE;
+    expect(() => toCron(bad)).toThrow('Unknown schedule period: ""');
+  });
+
   it("writes each period's shape", () => {
     expect(toCron({ ...DEFAULT_SCHEDULE, period: "minutes", every: 15 })).toBe("*/15 * * * *");
     expect(toCron({ ...DEFAULT_SCHEDULE, period: "hourly", every: 1, minute: 5 })).toBe(

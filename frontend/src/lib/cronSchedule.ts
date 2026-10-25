@@ -67,6 +67,13 @@ export function toCron(s: StructuredSchedule): string {
       return `${clamp(s.minute, 0, 59)} ${clamp(s.hour, 0, 23)} * * ${clamp(s.weekday, 0, 6)}`;
     case "monthly":
       return `${clamp(s.minute, 0, 59)} ${clamp(s.hour, 0, 23)} ${clamp(s.day, 1, 28)} * *`;
+    default: {
+      // A period outside the union only arrives through a cast (a picker's
+      // `onValueChange(v as ...)`). Name it here rather than return
+      // `undefined` and fail later, unexplained, wherever the cron is read.
+      const unknown: never = s.period;
+      throw new Error(`Unknown schedule period: ${JSON.stringify(unknown)}`);
+    }
   }
 }
 
