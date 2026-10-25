@@ -11,7 +11,7 @@ import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "
 import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { FIELD_LABEL } from "@/components/chart/settings/FieldLabel";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
-import { OPERATORS, PARAM_TYPE_LABELS } from "./operators";
+import { OPERATORS, OPERATOR_LABELS, PARAM_TYPE_LABELS } from "./operators";
 import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 import { linkedFilterState } from "./linkedFilters";
 import { DefaultValueField } from "./DefaultValueField";
@@ -166,7 +166,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], va
           <Select value={param.operator} onValueChange={(v) => onChange({ ...param, operator: v as ParamOperator })}>
             <SelectTrigger id={`${id}-operator`} aria-label="parameter operator" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {OPERATORS[param.type].map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+              {OPERATORS[param.type].map((o) => <SelectItem key={o} value={o}>{OPERATOR_LABELS[o]}</SelectItem>)}
             </SelectContent>
           </Select>
         </Field>

@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@/api/generated/data-api/data-api");
 vi.mock("@/api/dataApi");
-vi.mock("@/api/access", () => ({ listUsers: vi.fn(async () => []) }));
 
 import * as gen from "@/api/generated/data-api/data-api";
 import * as wrapped from "@/api/dataApi";

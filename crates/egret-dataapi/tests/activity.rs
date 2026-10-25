@@ -361,3 +361,36 @@ async fn cacheable_calls_reads_the_versions_own_snapshot_not_the_live_config() {
          call must NOT count just because the endpoint is cache-on NOW"
     );
 }
+
+/// KI-296: a trial row names its actor. The browser used to resolve the id
+/// through the platform's user list, which only a platform admin may read, so
+/// everyone else saw a shortened id.
+#[tokio::test]
+async fn a_trial_row_names_its_actor() {
+    let Some(f) = fixture().await else { return };
+    sqlx::query("UPDATE users SET name = 'Tia Trial' WHERE id = $1")
+        .bind(f.admin)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    f.log_row(200, 10, false, None).await;
+    f.log_row_as_trial(200, 10, f.admin).await;
+
+    let (_, with) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/calls?range=24h&include_trials=true",
+            f.ws_slug
+        ))
+        .await;
+    let rows = with.as_array().unwrap();
+    let trial = rows
+        .iter()
+        .find(|r| !r["actor_user_id"].is_null())
+        .expect("the trial row is present");
+    assert_eq!(trial["actor_name"], "Tia Trial", "{with}");
+    let consumer = rows
+        .iter()
+        .find(|r| r["actor_user_id"].is_null())
+        .expect("the consumer row is present");
+    assert!(consumer["actor_name"].is_null(), "{with}");
+}

@@ -21,6 +21,11 @@ interface Props {
    *  or the card type for text/heading/link. Supplied by the route, which is the only place
    *  that knows the chart behind a card. */
   kindOf: (id: string) => string;
+  /** The width a side panel takes beside the canvas while it is open (the edit panel and its
+   *  gap). The breakpoint is decided as if the canvas had it back: opening the panel on a
+   *  1366px window left a 706px canvas, under 753px, and the cards dropped to the one-column
+   *  layout, where they cannot be moved, while the author was editing them (KI-282). */
+  besidePanelPx?: number;
   /** Fires whenever the live breakpoint changes. The route needs this to refuse to persist
    *  layout and auto-height changes off the desktop breakpoint. */
   onBreakpointChange: (bp: GridBreakpoint) => void;
@@ -42,6 +47,7 @@ export function DashboardGridLayout({
   editing,
   layout,
   kindOf,
+  besidePanelPx = 0,
   onBreakpointChange,
   onLayoutChange,
   onResizeStart,
@@ -75,14 +81,14 @@ export function DashboardGridLayout({
       // auto-height) fires in the SAME delivery batch as this one — so a route that learned
       // the breakpoint only from a re-render would still believe it was on desktop while a
       // card measured itself at a phone width.
-      onBreakpointChange(breakpointFor(w));
+      onBreakpointChange(breakpointFor(w + besidePanelPx));
       setWidth(w);
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [editing, onBreakpointChange]);
+  }, [editing, onBreakpointChange, besidePanelPx]);
 
-  const breakpoint = breakpointFor(width);
+  const breakpoint = breakpointFor(width + besidePanelPx);
   const isMobile = breakpoint === "mobile";
 
   // Tell the route on every change, and on first measurement. The route uses it as a guard,

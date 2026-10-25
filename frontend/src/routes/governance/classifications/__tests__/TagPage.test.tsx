@@ -246,14 +246,14 @@ describe("a classification's page: rename checks (C10)", () => {
     );
   });
 
-  it("labels the colour and states its value as text", async () => {
+  it("labels the color and states its value as text", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok([PII]) });
     openArea(URL_PII, STEWARD);
     await user.click(await screen.findByRole("button", { name: "Edit" }, T));
-    const colour = screen.getByLabelText("Colour");
-    expect(colour).toHaveAttribute("type", "color");
-    expect(colour).toHaveAccessibleDescription("Colour of the swatch shown next to the name. #e11d48");
+    const color = screen.getByLabelText("Color");
+    expect(color).toHaveAttribute("type", "color");
+    expect(color).toHaveAccessibleDescription("Color of the swatch shown next to the name. #e11d48");
   });
 });
 

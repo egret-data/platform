@@ -382,7 +382,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
         ) : dbsLoading ? (
           <InfoRow depth={0} spinning>Loading…</InfoRow>
         ) : !dbMeta ? (
-          <InfoRow depth={0} error>This database is no longer available.</InfoRow>
+          <InfoRow depth={0} error>This connection is no longer available.</InfoRow>
         ) : searchMode ? (
           search.isLoading ? (
             <InfoRow depth={0} spinning>Searching…</InfoRow>

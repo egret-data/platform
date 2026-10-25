@@ -119,11 +119,11 @@ export function NameTaken({ holder }: { holder: { id: string; name: string } }) 
  * line that says what the colour is for and its value as text (spec C10.4),
  * so the value reads without opening the picker.
  */
-export function ColourField({ id, color, onChange }: { id: string; color: string; onChange: (color: string) => void }) {
+export function ColorField({ id, color, onChange }: { id: string; color: string; onChange: (color: string) => void }) {
   const helpId = `${id}-help`;
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id}>Colour</Label>
+      <Label htmlFor={id}>Color</Label>
       <div className="flex items-center gap-2">
         <Input
           id={id}
@@ -134,7 +134,7 @@ export function ColourField({ id, color, onChange }: { id: string; color: string
           onChange={(e) => onChange(e.target.value)}
         />
         <p id={helpId} className="text-xs text-muted-foreground">
-          {"Colour of the swatch shown next to the name. "}
+          {"Color of the swatch shown next to the name. "}
           <span className="inline-flex items-center gap-1 font-mono">
             <TagSwatch color={color} />
             {color}

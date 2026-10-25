@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import {
-  ColourField,
+  ColorField,
   DEFAULT_COLOR,
   NameTaken,
   nameHolder,
@@ -181,7 +181,7 @@ function EditForm({ tag, onDone }: { tag: Tag; onDone: () => void }) {
           </p>
         ) : null}
       </div>
-      <ColourField id={ids.color} color={color} onChange={setColor} />
+      <ColorField id={ids.color} color={color} onChange={setColor} />
       <div className="space-y-1.5">
         <Label htmlFor={ids.description}>Description</Label>
         <Textarea id={ids.description} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />

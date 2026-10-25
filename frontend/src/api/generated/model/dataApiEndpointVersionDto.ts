@@ -19,6 +19,13 @@ export interface DataApiEndpointVersionDto {
   is_live: boolean;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * The publisher's profile name, else email; null for a deleted user. Resolved here
+     * because the user list is admin-only, so an editor's browser could not (KI-296), as
+     * the Apps versions' `published_by_name` (KI-027).
+     * @nullable
+     */
+  created_by_name?: string | null;
   created_at: string;
   /**
      * The frozen definition. **This is the only thing P4 may read to decide what

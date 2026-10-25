@@ -33,6 +33,8 @@ vi.mock("@/api/charts", async (orig) => ({
 }));
 vi.mock("@/api/datasets", () => ({
   useDatasetsFilterOff: () => new Map(),
+  // The card's dataset names `region` "Khu vực" (KI-290).
+  useDatasetDetails: () => new Map([["ds1", { columns: [{ column_name: "region", verbose_name: "Khu vực", data_type: "varchar" }], metrics: [] }]]),
   useDataset: (_ws: string, id: string | null) => ({
     data: id
       ? { columns: [{ column_name: "region", data_type: "varchar" }, { column_name: "revenue", data_type: "double" }] }
@@ -40,8 +42,9 @@ vi.mock("@/api/datasets", () => ({
   }),
 }));
 vi.mock("@/components/chart/dashboard/DashboardCardView", () => ({
-  DashboardCardView: ({ card, onValueClick }: { card: { id: string }; onValueClick?: (ctx: unknown, x: number, y: number) => void }) =>
-    <button data-testid={`cardclick-${card.id}`} onClick={() => onValueClick?.({ dims: [{ col: "region", value: "EU" }] }, 0, 0)} />,
+  DashboardCardView: ({ card, onValueClick, datasetDefaults }: { card: { id: string }; onValueClick?: (ctx: unknown, x: number, y: number) => void; datasetDefaults?: unknown }) =>
+    <button data-testid={`cardclick-${card.id}`} data-defaults={JSON.stringify(datasetDefaults ?? null)}
+      onClick={() => onValueClick?.({ dims: [{ col: "region", value: "EU" }] }, 0, 0)} />,
 }));
 vi.mock("@/components/chart/DrillRecordsDialog", () => ({
   DrillRecordsDialog: ({ open, columns }: { open: boolean; columns: { name: string }[] }) =>
@@ -74,5 +77,19 @@ describe("DashboardView click behaviour", () => {
     fireEvent.click(screen.getByText("See these records"));
     // regression: dialog must receive the dataset's columns, not an empty array
     expect(screen.getByTestId("records-columns")).toHaveTextContent("region,revenue");
+  });
+
+  // KI-290: the card and its drill menu name a column as the chart page does.
+  it("hands each card its dataset's display names", () => {
+    renderAt();
+    const defaults = JSON.parse(screen.getByTestId("cardclick-k2").getAttribute("data-defaults")!);
+    expect(defaults.region.column_title).toBe("Khu vực");
+  });
+
+  it("names the drilled column by its display name in the drill menu", () => {
+    renderAt();
+    fireEvent.click(screen.getByTestId("cardclick-k2"));
+    expect(screen.getByText(/Filter by/).textContent).toContain("Khu vực");
+    expect(screen.getByText(/Filter by/).textContent).not.toContain("region");
   });
 });

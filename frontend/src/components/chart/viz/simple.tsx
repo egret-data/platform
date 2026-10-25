@@ -199,7 +199,7 @@ const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display",
  * families have now had.
  *
  * WHAT THE ROW SAYS is the other half, and it was missing. #423 gave the dimension its own format:
- * `funnelSteps` names each step `formatDimensionValue(raw, type, columnSettings[dimension])`, so a
+ * `funnelSteps` names each step `formatDimensionValue(raw, dimension, type, columnSettings[dimension])`, so a
  * month-bucketed funnel with a Date style drew "January 2026" while this list read `2026-01-01`
  * with nothing on screen connecting them. `labels` carries the drawn name across, computed HERE
  * with the builder's own function rather than restated — a second spelling of a formatting rule is
@@ -234,7 +234,7 @@ function FunnelStepsControl({ config, onChange, resultColumns, rows, columnSetti
   }
   const dimType = resultColumns[di]?.type ?? "varchar";
   const dimFormat = dim ? columnSettings[dim] : undefined;
-  const labels = Object.fromEntries(names.map((n) => [n, formatDimensionValue(n, dimType, dimFormat)]));
+  const labels = Object.fromEntries(names.map((n) => [n, formatDimensionValue(n, dim ?? "", dimType, dimFormat)]));
   return (
     <div className="space-y-1.5">
       <div className="text-xs text-muted-foreground">Steps</div>

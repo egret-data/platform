@@ -64,6 +64,23 @@ describe("FunnelChart", () => {
     expect(screen.getAllByText("cnt")).toHaveLength(1);
   });
 
+  // KI-292: the metric line and the chart's name said `cnt` where the Metric picker shows the
+  // dataset's display name (or the chart's own Column title), which reach here as `column_title`.
+  it("names the metric and the dimension by their titles, not their database names", () => {
+    const { container } = draw({ columnSettings: { cnt: { column_title: "Visitors" }, stage: { column_title: "Stage" } } });
+    expect(screen.getByText("Visitors")).toBeInTheDocument();
+    expect(screen.queryByText("cnt")).toBeNull();
+    const named = container.querySelector("[aria-label^='Funnel chart']")!.getAttribute("aria-label")!;
+    expect(named).toContain("Funnel chart of Visitors by Stage.");
+  });
+
+  it("titles the bar mode's value axis by the metric's title", () => {
+    draw({ type: "bar", columnSettings: { cnt: { column_title: "Visitors" } } });
+    const opt = JSON.parse(screen.getByTestId("echarts").getAttribute("data-option")!);
+    const yAxis = Array.isArray(opt.yAxis) ? opt.yAxis[0] : opt.yAxis;
+    expect(yAxis.name).toBe("Visitors");
+  });
+
   it("shows each later step's share of the first", () => {
     draw();
     expect(screen.getByText("40.00 %")).toBeInTheDocument();

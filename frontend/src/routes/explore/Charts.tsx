@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { ConfirmFolderDeleteDialog, ConfirmTrashDialog } from "@/components/explore/ConfirmActionDialog";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -28,6 +29,7 @@ import { EntityLink } from "@/components/ui/entity-link";
 import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "viz_type" | "updated_at";
+const CHART_NOUN = { singular: "chart", plural: "charts" };
 const vizMeta = (v: string) => CHART_TYPES.find((t) => t.key === v);
 const vizLabel = (v: string) => vizMeta(v)?.name ?? v;
 
@@ -47,6 +49,10 @@ export default function Charts() {
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<Chart | null>(null);
   const [shareTarget, setShareTarget] = useState<Chart | null>(null);
+  // Moving to the Trash and deleting a folder are confirmed first, as on Dashboards (KI-281):
+  // what is being trashed — one row, or the bulk selection — and which folder is being deleted.
+  const [pendingTrash, setPendingTrash] = useState<Chart | "bulk" | null>(null);
+  const [pendingFolderDelete, setPendingFolderDelete] = useState<{ id: string; name: string } | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; chart?: Chart; folder?: { id: string; name: string } } | null>(null);
 
@@ -178,7 +184,7 @@ export default function Charts() {
             onDuplicate={(x) => duplicate.mutateAsync(x.id).then(() => toast.success("Duplicated")).catch((e) => toast.error(String(e)))}
             onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
             onNewFolder={(c) => setFolderDialog({ mode: "move", chart: c })}
-            onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
+            onTrash={setPendingTrash}
             onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
             onDeletePermanent={(x) => setPendingDelete(x)}
             onShare={(x) => setShareTarget(x)} />
@@ -237,7 +243,8 @@ export default function Charts() {
           )}
         </>
       }
-      action={<Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
+      // Nothing is created in the Trash (KI-291), as on Dashboards and Datasets.
+      action={showTrash ? null : <Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
     >
       <ListStates
         isLoading={isLoading}
@@ -284,7 +291,7 @@ export default function Charts() {
                   onMove={doBulkMoveTo}
                   onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
                 />
-                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                <Button variant="destructive" size="sm" onClick={() => setPendingTrash("bulk")}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
@@ -332,7 +339,7 @@ export default function Charts() {
                         onToggle={() => collapse.toggle(key)}
                         onShare={group.folder ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
                         onRename={group.folder ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
-                        onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                        onDelete={group.folder ? () => setPendingFolderDelete(group.folder!) : undefined}
                         onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
                       />
                       {!isCollapsed && group.rows.map(renderRow)}
@@ -359,6 +366,30 @@ export default function Charts() {
           else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.chart!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(String(e)));
           else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e)));
+        }}
+      />
+
+      <ConfirmTrashDialog
+        pending={pendingTrash === "bulk" ? { count: bulk.selectedIds.length } : pendingTrash}
+        noun={CHART_NOUN}
+        onCancel={() => setPendingTrash(null)}
+        onConfirm={() => {
+          const target = pendingTrash;
+          setPendingTrash(null);
+          if (target === "bulk") void doBulkTrash();
+          else if (target) trash.mutateAsync(target.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)));
+        }}
+      />
+
+      <ConfirmFolderDeleteDialog
+        folder={pendingFolderDelete}
+        itemCount={(charts ?? []).filter((c) => c.folder_id === pendingFolderDelete?.id).length}
+        noun={CHART_NOUN}
+        onCancel={() => setPendingFolderDelete(null)}
+        onConfirm={() => {
+          const target = pendingFolderDelete;
+          setPendingFolderDelete(null);
+          if (target) removeFolder.mutateAsync(target.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e)));
         }}
       />
 

@@ -33,7 +33,7 @@ import { DeleteTagDialog } from "@/routes/governance/classifications/DeleteTagDi
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import {
   ClearanceCell,
-  ColourField,
+  ColorField,
   dataCounts,
   DEFAULT_COLOR,
   NameTaken,
@@ -526,7 +526,7 @@ function NewClassificationDialog({
               <code>:</code>.
             </p>
           </div>
-          <ColourField id={ids.color} color={color} onChange={setColor} />
+          <ColorField id={ids.color} color={color} onChange={setColor} />
           <div className="space-y-1.5">
             <Label htmlFor={ids.description}>Description</Label>
             <Textarea

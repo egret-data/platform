@@ -97,6 +97,13 @@ export const getAlertsRenderPayloadUrl = () => {
   return `/api/render/payload`
 }
 
+/**
+ * Deliberately token-only: there is no `WsContext` extractor here, so an
+ * ordinary session cookie authenticates nothing on this route — widening it
+ * to sessions would make it a second, unaudited read path for any chart or
+ * dashboard.
+ * @summary The print page's ONE request.
+ */
 export const alertsRenderPayload = async ( options?: Parameters<typeof customInstance>[1]): Promise<alertsRenderPayloadResponse> => {
 
   return customInstance<alertsRenderPayloadResponse>(getAlertsRenderPayloadUrl(),
@@ -165,6 +172,9 @@ export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsR
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary The print page's ONE request.
+ */
 
 export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
@@ -1522,11 +1532,7 @@ export const getAlertsSlackGetUrl = (workspace: string,) => {
  * reason: a bot token is workspace administration, not alert authoring. An
  * editor who may write a schedule still may not swap the credential every
  * schedule posts with.
- * @summary The print page's ONE request. Deliberately token-only: there is no
-`WsContext` extractor here, so an ordinary session cookie authenticates
-nothing on this route — widening it to sessions would make it a second,
-unaudited read path for any chart or dashboard.
-The workspace's Slack app.
+ * @summary The workspace's Slack app.
  */
 export const alertsSlackGet = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<alertsSlackGetResponse> => {
 
@@ -1597,11 +1603,7 @@ export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackG
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 /**
- * @summary The print page's ONE request. Deliberately token-only: there is no
-`WsContext` extractor here, so an ordinary session cookie authenticates
-nothing on this route — widening it to sessions would make it a second,
-unaudited read path for any chart or dashboard.
-The workspace's Slack app.
+ * @summary The workspace's Slack app.
  */
 
 export function useAlertsSlackGet<TData = Awaited<ReturnType<typeof alertsSlackGet>>, TError = unknown>(

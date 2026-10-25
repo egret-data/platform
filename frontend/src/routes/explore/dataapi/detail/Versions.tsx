@@ -1,7 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { listUsers } from "@/api/access";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { CHIP_TONE } from "../chipTone";
@@ -51,24 +49,6 @@ export default function VersionsSection() {
   // cheaper Validate this way; Publish changes what every deployed consumer
   // receives and has more reason to.
   const { ws, id, dirty, trashed, refetch } = useEndpointDetail();
-
-  // `created_by` on a version is a raw user id, not a name — the same
-  // problem `ActivityCallList.tsx` solves for its trial-actor column
-  // (whose own comment credits `AuditLog.tsx` as the original fix). Same
-  // query key as that call site: both are the exact same unfiltered
-  // `listUsers()` call, so they share the cache rather than each firing
-  // it. `retry: false` matters here specifically — `listUsers` is a
-  // platform-level call a viewer-level operator may not be permitted, and
-  // this column must degrade to a truncated id rather than fail the page.
-  const usersQuery = useQuery({
-    queryKey: ["data-api", "users"],
-    queryFn: listUsers,
-    retry: false,
-  });
-  const userEmailById = useMemo(
-    () => new Map((usersQuery.data ?? []).map((u) => [u.id, u.email])),
-    [usersQuery.data],
-  );
 
   const versionsQuery = useDataApiListEndpointVersions(ws, id, {
     query: { enabled: !!ws && !!id },
@@ -378,7 +358,7 @@ export default function VersionsSection() {
                       tooltip reading "—" is noise. */}
                   {(() => {
                     const who =
-                      (v.created_by && userEmailById.get(v.created_by)) ?? v.created_by?.slice(0, 8) ?? null;
+                      v.created_by_name ?? v.created_by?.slice(0, 8) ?? null;
                     return (
                       <TableCell className="truncate py-2 text-muted-foreground" title={who ?? undefined}>
                         {who ?? "—"}

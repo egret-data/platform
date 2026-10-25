@@ -34,4 +34,11 @@ export interface ActivityCallDto {
      * @nullable
      */
   actor_user_id?: string | null;
+  /**
+     * The actor's profile name, else email; null for consumer traffic or a deleted user.
+     * Resolved here because the user list is admin-only, so an editor's browser could not
+     * (KI-296).
+     * @nullable
+     */
+  actor_name?: string | null;
 }

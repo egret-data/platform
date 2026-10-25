@@ -66,3 +66,10 @@ export function shellSettings(params: AnyChartParams): {
     tableState: params.tableState ?? {},
   };
 }
+
+/** `params` with `columnSettings` as its column formats, in whichever shape `params` is stored. */
+export function withShellColumnSettings(params: AnyChartParams, columnSettings: Record<string, ColumnFormat>): AnyChartParams {
+  return isParamsV2(params)
+    ? { ...params, settings: { ...params.settings, column_settings: columnSettings } }
+    : { ...params, columnSettings };
+}
