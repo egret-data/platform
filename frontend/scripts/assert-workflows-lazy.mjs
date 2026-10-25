@@ -135,8 +135,8 @@ const MARKERS = [
   // gantt, logs and outputs (Tasks 4–6) grow; flagged to stay out of the list's chunk too.
   ["src/routes/workflows/ExecutionDetail.tsx", "Edits made to the flow since it ran are not used.", "editor"],
   ["src/routes/workflows/ExecutionOverview.tsx", "No trigger started this execution, so it has no trigger variables.", "editor"],
-  // `REPLAY_NOT_FINISHED_REASON`.
-  ["src/components/workflows/executions/actions.ts", "Replay is available when the execution has finished", "editor"],
+  // `LOOP_WAIT_REASON`.
+  ["src/components/workflows/executions/actions.ts", "Waiting on a loop condition, not a Pause task", "editor"],
   // The Gantt tab (W7b Task 4), in the execution detail's chunk. `markerReason`'s sentence, the
   // run panel's close label, and the unknown-`?run=` note.
   ["src/components/workflows/executions/gantt/ganttModel.ts", "Cancelled before it started.", "editor"],

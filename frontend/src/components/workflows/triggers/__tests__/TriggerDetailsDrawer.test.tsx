@@ -90,12 +90,9 @@ describe("TriggerDetailsDrawer: per kind", () => {
     const d = await drawer("daily");
     expect(within(d).getByText("0 9 * * *")).toBeInTheDocument();
     expect(within(d).getByText("Asia/Ho_Chi_Minh")).toBeInTheDocument();
-    // 02:00 UTC is 09:00 in Ho Chi Minh City (UTC+7, no DST).
-    // In `fullTimestamp`'s format, whatever the test machine's own zone.
-    expect(within(d).getByText("(the trigger's timezone)").parentElement).toHaveTextContent(
-      /^2026-10-16 09:00:00 \(the trigger's timezone\)$/,
-    );
-    expect(within(d).getByText(/\(your time, /)).toBeInTheDocument();
+    // Switched off, it has no next run (KI-189): the stored date is not shown as one.
+    expect(within(d).getByText("Next run").nextElementSibling).toHaveTextContent("None: the trigger does not fire (see its status)");
+    expect(within(d).queryByText("(the trigger's timezone)")).toBeNull();
     expect(within(d).getByText("the scheduler could not claim the row")).toBeInTheDocument();
     expect(within(d).getByText("Missed ticks").nextElementSibling).toHaveTextContent("4");
     expect(within(d).getByText(/^Switched off/)).toBeInTheDocument();
@@ -109,6 +106,18 @@ describe("TriggerDetailsDrawer: per kind", () => {
     expect(within(d).getByText(/closes in 25 minutes/)).toBeInTheDocument();
     const items = within(within(d).getByRole("list", { name: "Conditions" })).getAllByRole("listitem");
     expect(items.map((li) => li.textContent)).toEqual(["company.team.extract in SUCCESSMet", "company.team.load in SUCCESSNot met"]);
+  });
+
+  it("shows the next run of a schedule that fires, in the trigger's zone and the viewer's", async () => {
+    server.triggers.triggers[0] = { ...server.triggers.triggers[0], runtime_disabled: false, effective_disabled: false };
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=daily` });
+    const d = await drawer("daily");
+    // 02:00 UTC is 09:00 in Ho Chi Minh City (UTC+7, no DST).
+    // In `fullTimestamp`'s format, whatever the test machine's own zone.
+    expect(within(d).getByText("(the trigger's timezone)").parentElement).toHaveTextContent(
+      /^2026-10-16 09:00:00 \(the trigger's timezone\)$/,
+    );
+    expect(within(d).getByText(/\(your time, /)).toBeInTheDocument();
   });
 
   it("says when no window is open", async () => {

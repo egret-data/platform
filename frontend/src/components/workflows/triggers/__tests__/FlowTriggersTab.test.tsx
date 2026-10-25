@@ -70,9 +70,9 @@ describe("FlowTriggersTab: the table", () => {
     expect(typeCell("daily")).toBe("Schedule: Schedule");
     expect(typeCell("upstream")).toBe("Flow: Flow");
     expect(typeCell("poll")).toBe("Other: Trigger");
-    // The last execution: its state chip and a link to its overview.
+    // The last execution: its state chip and a link to its overview, on one line (KI-226).
     expect(within(rowOf("daily")).getByText("Success")).toBeInTheDocument();
-    expect(within(rowOf("daily")).getByRole("link", { name: "aaaaaaaa" })).toHaveAttribute(
+    expect(within(rowOf("daily")).getByRole("link", { name: "Execution aaaaaaaa-0000-4000-8000-000000000009" })).toHaveAttribute(
       "href",
       `/explore/${WS}/workflows/executions/aaaaaaaa-0000-4000-8000-000000000009/overview`,
     );
@@ -80,6 +80,55 @@ describe("FlowTriggersTab: the table", () => {
     const poll = await theSwitch("poll");
     expect(poll).toBeDisabled();
     expect(poll).toHaveAccessibleDescription("Not run by egret");
+  });
+
+  it("shows no next run for a trigger that does not fire (KI-189)", async () => {
+    const PAST = new Date(Date.now() - 6 * 60_000).toISOString();
+    server.triggers = flowTriggers({
+      triggers: [
+        scheduleEntry({ trigger_id: "every_minute", runtime_disabled: true, effective_disabled: true }, { next_evaluation_date: PAST }),
+        scheduleEntry({ trigger_id: "weekly", yaml_disabled: true, effective_disabled: true, can_toggle: false, toggle_refusal: "yaml_disabled" }, { next_evaluation_date: FUTURE }),
+        scheduleEntry({ trigger_id: "hourly" }, { next_evaluation_date: FUTURE }),
+      ],
+    });
+    renderTriggersTab(server);
+    await theSwitch("hourly");
+    const nextRun = (id: string) => within(rowOf(id)).getAllByRole("cell")[3].textContent;
+    expect(nextRun("every_minute")).toBe("—");
+    expect(nextRun("weekly")).toBe("—");
+    expect(nextRun("hourly")).toMatch(/^in /);
+  });
+
+  it("shows no next run for any trigger of a disabled flow (KI-189)", async () => {
+    server.triggers = flowTriggers({ flow_disabled: true, triggers: [scheduleEntry({}, { next_evaluation_date: FUTURE })] });
+    renderTriggersTab(server);
+    await theSwitch("daily");
+    expect(within(rowOf("daily")).getAllByRole("cell")[3].textContent).toBe("—");
+  });
+
+  it("keeps a refused switch's and Backfill's reasons off the row, as their descriptions (KI-190)", async () => {
+    server.triggers = flowTriggers({
+      triggers: [
+        scheduleEntry(
+          { yaml_disabled: true, effective_disabled: true, can_toggle: false, toggle_refusal: "yaml_disabled", can_backfill: false, backfill_refusal: "disabled" },
+          { next_evaluation_date: FUTURE },
+        ),
+      ],
+    });
+    renderTriggersTab(server);
+    const sw = await theSwitch("daily");
+    expect(sw).toHaveAccessibleDescription("Disabled in the flow's YAML");
+    const backfillButton = within(rowOf("daily")).getByRole("button", { name: "Backfill" });
+    expect(backfillButton).toHaveAccessibleDescription("Enable the trigger to backfill it");
+    expect(backfillButton).toHaveAttribute("title", "Enable the trigger to backfill it");
+    // Said once, by the Status column, one line high with the whole text as its title; the
+    // reasons are not visible text in the row.
+    expect(statusOf("daily")).toBe("Disabled in YAML");
+    expect(within(rowOf("daily")).getByTestId("trigger-status")).toHaveAttribute("title", "Disabled in YAML");
+    for (const reason of ["Disabled in the flow's YAML", "Enable the trigger to backfill it"]) {
+      const el = within(rowOf("daily")).getByText(reason);
+      expect(el).toHaveClass("sr-only");
+    }
   });
 
   it("explains Last evaluated in its tooltip", async () => {
@@ -337,11 +386,9 @@ describe("FlowTriggersTab: banners, empty, read-only", () => {
       expect(document.getElementById(box.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
     }
     expect(screen.getByRole("checkbox", { name: "Select all triggers" })).toBeDisabled();
-    for (const name of ["Enable", "Disable"]) {
-      const b = screen.getByRole("button", { name });
-      expect(b).toBeDisabled();
-      expect(b).toHaveAccessibleDescription("You need workflow:manage");
-    }
+    // Nothing can be selected, so no bulk action is shown to be refused (KI-226).
+    expect(screen.queryByRole("button", { name: "Enable" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
     // No fieldset or other ancestor disables them for the harness: each control is disabled itself.
     expect(document.querySelector("fieldset")).toBeNull();
   });

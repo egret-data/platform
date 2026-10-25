@@ -26,11 +26,11 @@ import type { LabelDto } from './labelDto';
 export interface ExecutionListItemDto {
   id: string;
   /**
-     * The draft this execution came from, and `NULL` only if something
-     * outside this crate issued a real `DELETE` — **trashing a flow does not
-     * clear it**, because `FlowRepo`'s delete is soft and nothing in
-     * `egret-workflow/src` issues a `DELETE FROM`. A trashed flow's
-     * executions are still listed, and still findable by `flow_id`.
+     * The draft this execution came from, and `NULL` once that flow was
+     * deleted permanently from the trash (`FlowRepo::purge`, KI-119) —
+     * **trashing a flow does not clear it**, because `FlowRepo`'s delete is
+     * soft. A trashed flow's executions are still listed, and still findable
+     * by `flow_id`.
      * @nullable
      */
   flow_id?: string | null;

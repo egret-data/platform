@@ -9,13 +9,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { StateChip } from "@/components/workflows/StateChip";
-import { cn } from "@/lib/utils";
 import { BackfillCell, BackfillStrip } from "@/components/workflows/triggers/BackfillStrip";
 import {
   FLOW_DISABLED_STATUS,
   kindLabel,
   MANAGE_REASON,
   shortType,
+  firesNext as fires,
   statusText,
   switchEnablement,
   type FlowContext,
@@ -132,8 +132,10 @@ export function TriggersTable({
           <TableHead>ID</TableHead>
           {variant === "global" ? <TableHead>Flow</TableHead> : null}
           <TableHead>Type</TableHead>
-          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>Next run</TableHead>
-          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>
+          {/* One line per header and per row (KI-226): no column wraps its header, and every
+              cell is one line high, its detail in the drawer. */}
+          <TableHead>Next run</TableHead>
+          <TableHead>
             <span className="inline-flex items-center gap-1">
               Last evaluated
               <Tooltip>
@@ -150,7 +152,7 @@ export function TriggersTable({
               </Tooltip>
             </span>
           </TableHead>
-          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>Last execution</TableHead>
+          <TableHead>Last execution</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Enabled</TableHead>
           <TableHead>Backfill</TableHead>
@@ -201,7 +203,7 @@ export function TriggersTable({
                   ) : null}
                 </TableCell>
                 {variant === "global" ? (
-                  <TableCell className="whitespace-nowrap">
+                  <TableCell className="max-w-64 truncate" title={`${row.namespace}.${row.flow_id}`}>
                     <Link
                       className="text-muted-foreground hover:underline"
                       to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
@@ -221,30 +223,35 @@ export function TriggersTable({
                     <span className={variant === "global" ? "hidden 2xl:inline" : undefined}>{shortType(row.type)}</span>
                   </span>
                 </TableCell>
-                <TableCell className={cn("text-muted-foreground", variant === "global" && "whitespace-normal")}>
-                  {row.schedule?.next_evaluation_date ? <RelativeTime iso={row.schedule.next_evaluation_date} /> : "—"}
+                <TableCell className="text-muted-foreground">
+                  {/* A trigger that does not fire has no next run (KI-189): its stored date is
+                      the one it would resume from, in the past once it has been off a while. */}
+                  {row.schedule?.next_evaluation_date && fires(row, ctx) ? <RelativeTime iso={row.schedule.next_evaluation_date} /> : "—"}
                 </TableCell>
-                <TableCell className={cn("text-muted-foreground", variant === "global" && "whitespace-normal")}>
+                <TableCell className="text-muted-foreground">
                   {row.schedule?.evaluated_at ? <RelativeTime iso={row.schedule.evaluated_at} /> : "—"}
                 </TableCell>
-                <TableCell className={variant === "global" ? "whitespace-normal" : undefined}>
+                <TableCell>
                   {row.last_execution ? (
-                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1.5">
                       <StateChip state={row.last_execution.state} kind="execution" />
+                      {/* The time is the link; the execution id is its title and in its name. */}
                       <Link
-                        className="font-mono text-xs hover:underline"
+                        className="text-xs text-muted-foreground hover:underline"
                         to={`${base}/executions/${encodeURIComponent(row.last_execution.id)}/overview`}
                         title={row.last_execution.id}
+                        aria-label={`Execution ${row.last_execution.id}`}
                       >
-                        {row.last_execution.id.slice(0, 8)}
+                        <RelativeTime iso={row.last_execution.created_at} />
                       </Link>
-                      <RelativeTime className="text-xs text-muted-foreground" iso={row.last_execution.created_at} />
                     </span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
                 </TableCell>
-                <TableCell data-testid="trigger-status">{status}</TableCell>
+                <TableCell data-testid="trigger-status" className="max-w-40 truncate" title={status}>
+                  {status}
+                </TableCell>
                 <TableCell>
                   <span className="inline-flex items-center gap-2">
                     <Switch
@@ -268,8 +275,10 @@ export function TriggersTable({
                         </span>
                       </>
                     ) : null}
+                    {/* The reason is the switch's description and its tooltip; the Status column
+                        says it in words already, so it is not repeated beside the switch (KI-190). */}
                     {enablement.ok ? null : (
-                      <span id={reasonId} className="text-xs text-muted-foreground">
+                      <span id={reasonId} className="sr-only">
                         {enablement.reason}
                       </span>
                     )}

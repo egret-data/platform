@@ -32237,6 +32237,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "trashed",
+            "in": "query",
+            "description": "`true` lists only the flows in the trash; absent or `false`, only the others",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -33142,6 +33151,105 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/{id}/permanent": {
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "purge_flow",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A flow in the trash deleted permanently, with its versions and trigger state; its namespace and id are free again. Its executions are kept",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not in the trash; move it there first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}/publish": {
       "post": {
         "tags": [
@@ -33230,6 +33338,105 @@
           },
           "404": {
             "description": "No such flow in this workspace, or a task references an object that does not exist or belongs to another workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/flows/{id}/restore": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "restore_flow",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flow restored from the trash, with its source, state and versions; its schedules start at their next tick",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not in the trash",
             "content": {
               "application/json": {
                 "schema": {
@@ -44917,7 +45124,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The draft this execution came from, and `NULL` only if something\noutside this crate issued a real `DELETE` — **trashing a flow does not\nclear it**, because `FlowRepo`'s delete is soft and nothing in\n`egret-workflow/src` issues a `DELETE FROM`. A trashed flow's\nexecutions are still listed, and still findable by `flow_id`."
+            "description": "The draft this execution came from, and `NULL` once that flow was\ndeleted permanently from the trash (`FlowRepo::purge`, KI-119) —\n**trashing a flow does not clear it**, because `FlowRepo`'s delete is\nsoft. A trashed flow's executions are still listed, and still findable\nby `flow_id`."
           },
           "namespace": {
             "type": "string"
@@ -46319,6 +46526,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the flow was moved to the trash; null for a flow that is not in\nit (KI-119: `GET /flows?trashed=true` lists only these)."
           }
         }
       },

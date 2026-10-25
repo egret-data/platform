@@ -87,6 +87,22 @@ describe("TopologyView nodes", () => {
     expect(card("tasks.check.yes")).not.toHaveAttribute("data-dimmed");
   });
 
+  it("says a task with no run has not started while the execution runs (KI-191)", () => {
+    renderView({ states: STATES, running: true });
+    expect(within(node("tasks.check.yes")).getByText("Not started")).toBeInTheDocument();
+    expect(screen.queryAllByText("Not run")).toHaveLength(0);
+  });
+
+  it("says Not started in the list view too while the execution runs (KI-191)", async () => {
+    const user = userEvent.setup();
+    renderView({ states: STATES, running: true });
+    await user.click(screen.getByRole("button", { name: "List view" }));
+    const grid = screen.getByRole("treegrid", { name: "Tasks of the flow" });
+    const row = within(grid).getAllByRole("row").find((el) => el.getAttribute("data-uid") === "tasks.check.yes")!;
+    expect(within(row).getByText("Not started")).toBeInTheDocument();
+    expect(within(row).queryByText("Not run")).toBeNull();
+  });
+
   it("marks a refused task with the note and its code", () => {
     renderView();
     const bad = card("tasks.bad");

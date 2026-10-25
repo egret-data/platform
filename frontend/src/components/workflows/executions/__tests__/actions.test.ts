@@ -1,27 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
-  canReplay,
   canResume,
   LOOP_WAIT_REASON,
-  REPLAY_NOT_FINISHED_REASON,
   resumeFeedback,
+  showsReplay,
   showsResume,
 } from "@/components/workflows/executions/actions";
 
-describe("showsResume and canReplay", () => {
+describe("showsResume and showsReplay", () => {
   it("shows Resume only while PAUSED", () => {
     expect(showsResume({ state: "PAUSED" })).toBe(true);
     for (const state of ["RUNNING", "CREATED", "SUCCESS", "FAILED"]) expect(showsResume({ state })).toBe(false);
   });
 
-  it("enables Replay on every terminal state and refuses the rest with the spec's reason", () => {
+  it("shows Replay on every terminal state and not before (KI-193)", () => {
     for (const state of ["SUCCESS", "FAILED", "WARNING", "KILLED", "CANCELLED", "RETRIED", "SKIPPED", "RESUBMITTED"]) {
-      expect(canReplay({ state })).toEqual({ ok: true });
+      expect(showsReplay({ state })).toBe(true);
     }
-    for (const state of ["CREATED", "RUNNING", "PAUSED", "RETRYING", "QUEUED"]) {
-      expect(canReplay({ state })).toEqual({ ok: false, reason: REPLAY_NOT_FINISHED_REASON });
+    for (const state of ["CREATED", "RUNNING", "PAUSED", "RETRYING", "QUEUED", "KILLING"]) {
+      expect(showsReplay({ state })).toBe(false);
     }
-    expect(REPLAY_NOT_FINISHED_REASON).toBe("Replay is available when the execution has finished");
   });
 });
 

@@ -15,6 +15,7 @@ import {
   durationText,
   iterationsText,
   nodeFacts,
+  noRunWord,
   shortType,
   typeIcon,
   type NodeFacts,
@@ -37,6 +38,8 @@ import { cn } from "@/lib/utils";
 
 export interface TopologyContextValue {
   states?: Readonly<Record<string, NodeState>>;
+  /** The execution has not finished: a node with no run says "Not started" (KI-191). */
+  running: boolean;
   clusters: readonly Cluster[];
   selectedUid: string | null;
   /** The one node button in the tab order. */
@@ -144,7 +147,7 @@ export function TaskCard({ data }: NodeProps<TopologyFlowNode>) {
   const ctx = useTopology();
   const item = data.item;
   const node = item.node as TaskNode | TriggerNode;
-  const facts = nodeFacts(node, ctx.states, item.expansion);
+  const facts = nodeFacts(node, ctx.states, item.expansion, ctx.running);
   const { icon: Icon, name } = typeIcon(node, node.node === "task" ? clusterKindOf(node.uid, ctx.clusters) : undefined);
   const branch = node.node === "task" ? BRANCH_LOOK[node.branch] : undefined;
   const id = node.node === "task" ? node.task_id : node.trigger_id;
@@ -259,7 +262,7 @@ export function CollapsedCard({ data }: NodeProps<TopologyFlowNode>) {
             <StateChip state={state.state} kind="execution" />
           </span>
         ) : state === null ? (
-          <Line className="mt-1 text-muted-foreground">Not run</Line>
+          <Line className="mt-1 text-muted-foreground">{noRunWord(ctx.running)}</Line>
         ) : null}
       </NodeButton>
       <IconButton

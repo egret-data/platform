@@ -1742,3 +1742,297 @@ async fn every_flow_route_carries_the_latest_version_number() {
     .await;
     assert_eq!(put["latest_version"], 3, "put: {put}");
 }
+
+// ---------- KI-119: the trash -- list, restore, delete permanently ----------
+
+/// A flow with one hourly schedule, so a restore can be seen to recreate the
+/// trigger row the soft delete removed.
+fn scheduled_flow(ns: &str) -> String {
+    format!(
+        "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n\
+         triggers:\n  - id: hourly\n    type: core.schedule\n    cron: \"0 * * * *\"\n"
+    )
+}
+
+async fn trigger_rows(db: &egret_metastore::Db, flow: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.triggers WHERE flow_id = $1::uuid")
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// Create a flow and move it to the trash; its id.
+async fn trashed_flow(
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    source: &str,
+) -> String {
+    let created = common::json(
+        common::post(
+            app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": source }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().expect("created").to_string();
+    let res = common::delete(app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    id
+}
+
+#[tokio::test]
+async fn the_trash_lists_only_trashed_flows_and_a_restore_brings_one_back_with_its_schedule() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let id = trashed_flow(&app, ws, user, &scheduled_flow("a.trash")).await;
+    assert_eq!(
+        trigger_rows(&db, &id).await,
+        0,
+        "the soft delete removes the schedule row"
+    );
+
+    let trash = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows?trashed=true"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    let trash = trash.as_array().unwrap();
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    assert_eq!(trash[0]["id"], id.as_str());
+    assert!(trash[0]["deleted_at"].is_string(), "{:?}", trash[0]);
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/restore"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let restored = common::json(res).await;
+    assert_eq!(restored["id"], id.as_str());
+    assert_eq!(restored["namespace"], "a.trash");
+
+    let list =
+        common::json(common::get(&app, &format!("/api/ws/{ws}/workflows/flows"), user).await).await;
+    assert_eq!(
+        list.as_array().unwrap().len(),
+        1,
+        "back in the flow list: {list}"
+    );
+    assert!(list[0]["deleted_at"].is_null());
+    let trash = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows?trashed=true"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        trash.as_array().unwrap().is_empty(),
+        "and out of the trash: {trash}"
+    );
+    assert_eq!(
+        trigger_rows(&db, &id).await,
+        1,
+        "the restore recreates the schedule row"
+    );
+
+    // A flow not in the trash has nothing to restore.
+    let again = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/restore"),
+        user,
+    )
+    .await;
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+
+    let actions: Vec<String> = common::audit_mutations(&app)
+        .into_iter()
+        .map(|(a, _, _)| a)
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "workflow_flow:restore"),
+        "{actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_trashed_flow_permanently_frees_its_name_and_keeps_its_executions() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = minimal_flow("a.purge");
+    let id = trashed_flow(&app, ws, user, &source).await;
+    let flow_uuid: Uuid = id.parse().unwrap();
+    let execution = common::run_with_labels(&db, ws, flow_uuid, &source, None).await;
+
+    // The trashed row holds the name, and the refusal names both ways out.
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": source }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let msg = common::body_text(res).await;
+    assert!(
+        msg.contains("restore it") && msg.contains("delete it permanently"),
+        "{msg}"
+    );
+
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/permanent"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let gone = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+
+    // The name is free again.
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": source }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // What ran is kept, without the flow it ran from.
+    let exec = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{execution}"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(exec["id"], execution.to_string());
+    assert!(exec["flow_id"].is_null(), "{exec}");
+
+    let actions: Vec<String> = common::audit_mutations(&app)
+        .into_iter()
+        .map(|(a, _, _)| a)
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "workflow_flow:purge"),
+        "{actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn only_a_trashed_flow_of_this_workspace_can_be_deleted_permanently() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let (other_ws, other) = common::seed_workspace(&db).await;
+    common::grant(&db, other_ws, other, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    // A live flow: move it to the trash first.
+    let live = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow("a.live") }),
+        )
+        .await,
+    )
+    .await;
+    let live = live["id"].as_str().unwrap();
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{live}/permanent"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let still = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{live}"), user).await;
+    assert_eq!(still.status(), StatusCode::OK);
+
+    // Another workspace's trashed flow is not found, through either route.
+    let foreign = trashed_flow(&app, other_ws, other, &minimal_flow("b.trash")).await;
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{foreign}/permanent"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{foreign}/restore"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let trash = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{other_ws}/workflows/flows?trashed=true"),
+            other,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(trash.as_array().unwrap().len(), 1, "untouched: {trash}");
+}
+
+#[tokio::test]
+async fn a_reader_can_neither_restore_nor_delete_permanently() {
+    let Some(db) = common::db().await else { return };
+    let (ws, author) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, author, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let id = trashed_flow(&app, ws, author, &minimal_flow("a.reader-trash")).await;
+
+    let (_reader_ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/restore"),
+        reader,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/permanent"),
+        reader,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let trash = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows?trashed=true"),
+            author,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        trash.as_array().unwrap().len(),
+        1,
+        "still in the trash: {trash}"
+    );
+}

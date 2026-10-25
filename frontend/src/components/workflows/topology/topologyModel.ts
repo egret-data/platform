@@ -164,9 +164,17 @@ export function durationText(s: NodeState, now: number): string | null {
   return `${formatDuration(now - start)} so far`;
 }
 
+/**
+ * The word for a task with no run (KI-191): on a finished execution it did not run (a branch not
+ * taken, a task after a failure); on one still running it may yet, so it has not started.
+ */
+export function noRunWord(running: boolean): string {
+  return running ? "Not started" : "Not run";
+}
+
 /** What a task or trigger card holds besides its title, in the order it is drawn. */
 export interface NodeFacts {
-  /** Short words: the branch, "Disabled", "Not run". */
+  /** Short words: the branch, "Disabled", "Not run" (or "Not started" while the execution runs). */
   badges: string[];
   refusal: string | null;
   expansion: string | null;
@@ -180,6 +188,8 @@ export function nodeFacts(
   node: TaskNode | TriggerNode,
   states: Readonly<Record<string, NodeState>> | undefined,
   expansion: ExpansionReason | undefined,
+  /** The execution has not finished: a task with no run has not started yet. */
+  running = false,
 ): NodeFacts {
   const badges: string[] = [];
   const branch = node.node === "task" ? BRANCH_LOOK[node.branch] : undefined;
@@ -187,7 +197,7 @@ export function nodeFacts(
   if (node.disabled) badges.push("Disabled");
   // Triggers have no run of their own on an execution, so they are not "not run".
   const state = states && node.node === "task" ? (states[node.uid] ?? null) : undefined;
-  if (state === null) badges.push("Not run");
+  if (state === null) badges.push(noRunWord(running));
   return {
     badges,
     refusal: node.node === "task" ? (node.refusal ?? null) : null,

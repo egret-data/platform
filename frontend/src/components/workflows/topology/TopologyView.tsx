@@ -84,6 +84,8 @@ export interface TopologyViewProps {
   graph: FlowGraph | null | undefined;
   /** An execution's node states; without them nothing is dimmed for want of a run. */
   states?: Readonly<Record<string, NodeState>>;
+  /** The execution has not finished: a task with no run has not started yet (KI-191). */
+  running?: boolean;
   selectedUid?: string | null;
   onSelect: (uid: string) => void;
   /** A `Subflow` node's Expand: the tab refetches with this uid in `subflows`. */
@@ -180,7 +182,7 @@ export function TopologyView(props: TopologyViewProps) {
   );
 }
 
-function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow, busy, error, stale, viewKey = "" }: TopologyViewProps) {
+function Topology({ graph, states, running = false, selectedUid = null, onSelect, onExpandSubflow, busy, error, stale, viewKey = "" }: TopologyViewProps) {
   const [orientation, setOrientation] = useState<Orientation>(readOrientation);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [listView, setListView] = useState(false);
@@ -238,6 +240,7 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
 
   const ctx: TopologyContextValue = {
     states,
+    running,
     clusters: graph?.clusters ?? [],
     selectedUid,
     tabStop,
@@ -318,6 +321,7 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
         graph={graph}
         order={fullOrder}
         states={states}
+        running={running}
         collapsed={collapsed}
         onToggle={toggleCluster}
         selectedUid={selectedUid}

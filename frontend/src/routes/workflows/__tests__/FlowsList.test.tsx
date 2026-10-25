@@ -202,14 +202,14 @@ describe("FlowsList — the namespace tree", () => {
     expect(members.useWorkspaceMembers).not.toHaveBeenCalled();
   });
 
-  it("shows the latest version as v{n} in its own column, and a dash with none", () => {
+  it("shows the latest version as v{n} in its own column, and Draft with none (KI-123)", () => {
     mockFlows([flow("a", "one", { latest_version: 12 }), flow("a", "two", { latest_version: null })]);
     renderAt();
     expect(screen.getByRole("columnheader", { name: "Version" })).toBeInTheDocument();
     const cells = (name: string) => [...(screen.getByRole("link", { name }).closest("tr") as HTMLElement).querySelectorAll("td")];
     const versionColumn = screen.getAllByRole("columnheader").findIndex((h) => h.textContent === "Version");
     expect(cells("one")[versionColumn]).toHaveTextContent(/^v12$/);
-    expect(cells("two")[versionColumn]).toHaveTextContent(/^—$/);
+    expect(cells("two")[versionColumn]).toHaveTextContent(/^Draft$/);
   });
 
   it("shows a dash, not an id, when the server has no name for the creator", () => {
@@ -408,5 +408,75 @@ describe("FlowsList — filters live in the URL", () => {
     expect(strip).toHaveTextContent("4active");
     expect(strip).toHaveTextContent("0disabled");
     expect(strip).not.toHaveTextContent(/live|draft/);
+  });
+});
+
+describe("FlowsList — the trash (KI-119)", () => {
+  const TRASHED = [flow("company", "old-job", { deleted_at: "2026-10-20T00:00:00Z", latest_version: 2 })];
+
+  function mockTrash(trashed: FlowListItemDto[]) {
+    vi.mocked(api.useWorkflowListFlows).mockImplementation(
+      (_ws, params) =>
+        ({
+          data: { status: 200, data: params?.trashed ? trashed : FLOWS },
+          isLoading: false,
+          isError: false,
+          error: null,
+        }) as unknown as ReturnType<typeof api.useWorkflowListFlows>,
+    );
+  }
+
+  function mockMutations() {
+    const restore = vi.fn().mockResolvedValue({ status: 200, data: {} });
+    const purge = vi.fn().mockResolvedValue({ status: 200, data: { ok: true } });
+    vi.mocked(api.useWorkflowRestoreFlow).mockReturnValue({ mutateAsync: restore } as unknown as ReturnType<typeof api.useWorkflowRestoreFlow>);
+    vi.mocked(api.useWorkflowPurgeFlow).mockReturnValue({ mutateAsync: purge } as unknown as ReturnType<typeof api.useWorkflowPurgeFlow>);
+    return { restore, purge };
+  }
+
+  it("opens from the toolbar into ?view=trash and lists only the trashed flows", async () => {
+    const user = userEvent.setup();
+    mockTrash(TRASHED);
+    mockMutations();
+    renderAt();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    expect(searchParams().get("view")).toBe("trash");
+    expect(screen.getByRole("heading", { level: 1, name: "Trash" })).toBeInTheDocument();
+    const table = screen.getByTestId("flows-trash");
+    expect(within(table).getByText("company.old-job")).toBeInTheDocument();
+    expect(within(table).getByText("v2")).toBeInTheDocument();
+    expect(within(table).queryByText("company.team.sync")).toBeNull();
+    expect(vi.mocked(api.useWorkflowListFlows)).toHaveBeenCalledWith("eng", { trashed: true }, expect.anything());
+  });
+
+  it("restores a flow", async () => {
+    const user = userEvent.setup();
+    mockTrash(TRASHED);
+    const { restore, purge } = mockMutations();
+    renderAt("?view=trash");
+    await user.click(screen.getByRole("button", { name: "Restore company.old-job" }));
+    expect(restore).toHaveBeenCalledWith({ workspace: "eng", id: TRASHED[0].id });
+    expect(purge).not.toHaveBeenCalled();
+  });
+
+  it("deletes a flow permanently only after the confirmation", async () => {
+    const user = userEvent.setup();
+    mockTrash(TRASHED);
+    const { purge } = mockMutations();
+    renderAt("?view=trash");
+    await user.click(screen.getByRole("button", { name: "Delete company.old-job permanently" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("its namespace and id can be used by a new flow");
+    expect(purge).not.toHaveBeenCalled();
+    await user.type(within(dialog).getByRole("textbox"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    expect(purge).toHaveBeenCalledWith({ workspace: "eng", id: TRASHED[0].id });
+  });
+
+  it("says when the trash is empty", () => {
+    mockTrash([]);
+    mockMutations();
+    renderAt("?view=trash");
+    expect(screen.getByText(/The trash is empty/)).toBeInTheDocument();
   });
 });

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, Search, Workflow } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Trash2, Workflow } from "lucide-react";
 import { useWorkflowListFlows } from "@/api/generated/workflow/workflow";
 import type { FlowListItemDto } from "@/api/generated/model";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,8 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListStates } from "@/components/explore/ListStates";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
+import { FlowsTrash } from "@/components/workflows/FlowsTrash";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { useCollapsed } from "@/components/explore/folders";
@@ -94,6 +96,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
   // On a namespace's tab the namespace is fixed; a `namespace` left in the URL is read as absent.
   const nsFilter = pinned ? "" : (params.get("namespace") ?? "");
   const stateFilter = params.get("state") ?? "";
+  const showTrash = !pinned && params.get("view") === "trash";
   const setParam = (key: string, value: string, replace: boolean) =>
     setParams(
       (p) => {
@@ -301,8 +304,9 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                           </td>
                           <td className="tabular-nums text-muted-foreground">
                             {/* The latest version, a snapshot to compare and restore; what
-                                runs is the saved draft whatever this says. */}
-                            {f.latest_version != null ? `v${f.latest_version}` : "—"}
+                                runs is the saved draft whatever this says. None yet: a draft
+                                only, as the flow header says (KI-123). */}
+                            {f.latest_version != null ? `v${f.latest_version}` : "Draft"}
                           </td>
                           <td className="text-muted-foreground">
                             <RelativeTime iso={f.updated_at} />
@@ -330,9 +334,35 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
     return <Forbidden reason={refusalReason(query.error, "Workflows need the workflow:read permission in this workspace.")} />;
   }
 
+  // The trash (KI-119), as `?view=trash` so it can be linked and Back leaves it (FE-PAGE-2). The
+  // switch is not gated on the list having rows: an empty flow list says nothing about the trash.
+  const trashToggle = (
+    <ListToolbarButton
+      icon={Trash2}
+      label="Trash"
+      active={showTrash}
+      filled
+      onClick={() =>
+        setParams((p) => {
+          if (showTrash) p.delete("view");
+          else p.set("view", "trash");
+          return p;
+        })
+      }
+    />
+  );
+  if (showTrash) {
+    return (
+      <ListPageShell title="Trash" toolbar={trashToggle}>
+        <FlowsTrash ws={ws} />
+      </ListPageShell>
+    );
+  }
+
   return (
     <ListPageShell
       title="Flows"
+      toolbar={trashToggle}
       action={
         <Button asChild>
           <Link to={`${base}/flows/new`}>New flow</Link>

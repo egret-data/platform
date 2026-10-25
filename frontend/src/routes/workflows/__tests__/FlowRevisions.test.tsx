@@ -93,7 +93,9 @@ describe("FlowRevisions: the list", () => {
   it("lists every version newest first with its note, author and time, and marks the latest", async () => {
     flowWithVersions([V1, V2, V3], V3);
     renderAt();
-    const table = await screen.findByRole("table");
+    // The file's first render pays for the flow page's lazy chunks: the wait the other flow-page
+    // tests give it (`LONG` in FlowDetail.test.tsx).
+    const table = await screen.findByRole("table", undefined, { timeout: 3000 });
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getByRole("link").textContent)).toEqual(["v3", "v2", "v1"]);
     expect(within(rows[0]).getByText("Latest")).toBeInTheDocument();
