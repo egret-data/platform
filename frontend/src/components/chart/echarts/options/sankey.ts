@@ -281,8 +281,8 @@ export function buildSankeyOption(
   const nodeLabel = (raw: unknown) => {
     const name = String(raw ?? "");
     return hasOutputs.has(name)
-      ? formatDimensionValue(name, srcType, srcFormat)
-      : formatDimensionValue(name, tgtType, tgtFormat);
+      ? formatDimensionValue(name, cfg.source ?? "", srcType, srcFormat)
+      : formatDimensionValue(name, cfg.target ?? "", tgtType, tgtFormat);
   };
 
   const widest = links.reduce((n, l) => Math.max(n, l.value), 0);

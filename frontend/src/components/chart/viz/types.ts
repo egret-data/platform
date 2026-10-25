@@ -64,7 +64,7 @@ export interface VizControlProps<Cfg> {
    * WHY A CONTROL NEEDS IT, which is not obvious and was argued the other way first. A control that
    * lists VALUES of a dimension — the funnel's steps, and the pie's slices after it — is listing
    * things the chart DRAWS through this map. `funnelSteps` names each step
-   * `formatDimensionValue(raw, type, columnSettings[dimension])`, so without this the panel could
+   * `formatDimensionValue(raw, dimension, type, columnSettings[dimension])`, so without this the panel could
    * only ever name a step by its raw cell and a month-bucketed funnel read `2026-01-01` in the list
    * beside "January 2026" on the chart.
    *
