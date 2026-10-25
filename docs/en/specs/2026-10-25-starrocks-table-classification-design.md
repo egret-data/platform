@@ -433,3 +433,13 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   (the row goes), which would leave the `deleted_at IS NULL` predicate untested (measured by mutation).
 - The stub (`tests/support/lakekeeper_stub.rs`) types `typ` as `text` (Lakekeeper's is an enum); the query compares
   it with a literal, which works on both.
+
+### Task 4
+
+- The StarRocks half of `compile_clearance` now runs after every gate is read (`compile_starrocks_gates`), so the
+  column source is asked about every whole-table table of the profile in one query.
+- C5's spelling rule is applied up front, not only in the merge: on a table the column source knows, every policy
+  (the `*` deny, the per-column denies of other tags, every mask) takes the catalog's schema and table spelling, and a
+  column-level column the catalog knows takes its column spelling (`catalog_spelled = true`). A column-level
+  assignment naming a column the catalog does not have keeps its typed column name and compiles as before.
+- A table the column source does not know compiles its `*` deny and no mask; Task 6 adds the skip report.

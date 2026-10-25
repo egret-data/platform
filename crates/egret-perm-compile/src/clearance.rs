@@ -149,7 +149,7 @@
 //! the evaluator once the whole desired set is known. See
 //! `crate::clearance_mask`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -164,8 +164,9 @@ use egret_policy::{tag_assignments_for_service_via, COMPILER_CLEARANCE_PREFIX};
 use crate::clearance_mask::PendingMask;
 use crate::grants::{level, PolicyTarget};
 use crate::rules::{
-    column_resources, group_by_table, stamp_service_type, TaggedColumn, PUBLIC_GROUP,
+    column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
 };
+use crate::table_columns::{current_columns_batch_via, TableColumns, TableKey};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
@@ -266,8 +267,9 @@ pub(crate) async fn compile_clearance(
             .await?;
 
     let accesses = withheld_accesses(engine)?;
-    // StarRocks: the cleared set of each gated tag that reaches the profile.
-    let mut mv_cleared: Vec<Vec<String>> = Vec::new();
+    // StarRocks: compiled once every gate is known, so the column source is
+    // asked about every whole-table attachment in one query.
+    let mut starrocks: Vec<StarRocksGate<'_>> = Vec::new();
 
     for g in &gates {
         // BOTH lists empty is NO gate — an informational tag
@@ -363,66 +365,18 @@ pub(crate) async fn compile_clearance(
                         .await
                         .map_err(|e| CompileError::Db(e.to_string()))?,
                 );
-                let count: usize = targets
-                    .iter()
-                    .map(|t| if t.table_level { 1 } else { t.columns.len() })
-                    .sum();
-                // **Refuse, never truncate.** A truncated clearance withholds
-                // SOME of the columns it claims to, and the ones silently
-                // dropped are readable by exactly the people the classification
-                // exists to keep out. The refusal fails the write that caused it
-                // (`crate::trigger` propagates it, the caller's `?` rolls back)
-                // rather than committing a clearance the UI shows as active.
-                if count > DEFAULT_EXPANSION_CEILING {
-                    return Err(CompileError::ClearanceExpansionCeiling {
-                        tag: g.tag_name.clone(),
-                        count,
-                        ceiling: DEFAULT_EXPANSION_CEILING,
-                    });
-                }
-                for t in &targets {
-                    let columns = t.tagged_columns()?;
-                    let denied = if t.table_level {
-                        vec![TaggedColumn::new(
-                            &t.catalog,
-                            &t.schema,
-                            &t.table,
-                            WHOLE_TABLE_COLUMN,
-                        )?]
-                    } else {
-                        columns.clone()
-                    };
-                    for col in &denied {
-                        out.policies.push(starrocks_deny(
-                            g.tag_id,
-                            service,
-                            col,
-                            &accesses,
-                            cleared.clone(),
-                        ));
-                    }
-                    // The deny withholds a DIRECT read only; a plain view reads
-                    // straight through it. The column's mask (A2) is what holds
-                    // through views — see `crate::clearance_mask`.
-                    for col in columns {
-                        out.masks.push(PendingMask {
-                            tag_id: g.tag_id,
-                            column: col,
-                            cleared: cleared.clone(),
-                            catalog_spelled: false,
-                        });
-                    }
-                }
-                // C7: every gated tag that reaches the profile, at either
-                // level, narrows the materialized-view deny.
-                if !targets.is_empty() {
-                    mv_cleared.push(cleared.clone());
-                }
+                starrocks.push(StarRocksGate {
+                    gate: g,
+                    cleared,
+                    targets,
+                });
             }
         }
     }
 
     if engine == EngineType::StarRocks {
+        let mv_cleared =
+            compile_starrocks_gates(conn, service, &starrocks, &accesses, &mut out).await?;
         for (name, input) in mv_deny_inputs(&mv_cleared, service) {
             out.policies.push((
                 name,
@@ -432,6 +386,136 @@ pub(crate) async fn compile_clearance(
     }
 
     Ok(out)
+}
+
+/// One gated tag with required roles on StarRocks: its cleared users and the
+/// tables it reaches, at either level.
+struct StarRocksGate<'a> {
+    gate: &'a GateRow,
+    cleared: Vec<String>,
+    targets: Vec<TableTarget>,
+}
+
+/// The StarRocks half of [`compile_clearance`]: per gate, the denies and the
+/// pending masks, into `out`. Returns one cleared set per gate that reaches
+/// the profile, for the materialized-view deny (C7).
+///
+/// **Whole-table attachments (D2).** The column source
+/// ([`crate::table_columns`]) is asked once for every table any gate reaches
+/// at table level. A table it knows gets a NULL mask per current column (C1),
+/// and the catalog's spelling of its schema, table and columns for every
+/// policy on it, whichever gate's (C5); spelled as the catalog spells it, two
+/// spellings of one table can never become two policies.
+async fn compile_starrocks_gates(
+    conn: &mut sqlx::PgConnection,
+    service: &str,
+    gates: &[StarRocksGate<'_>],
+    accesses: &[String],
+    out: &mut Clearances,
+) -> Result<Vec<Vec<String>>, CompileError> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
+    type Key = (Uuid, String, String);
+    let key_of = |t: &TableTarget| -> Key { (t.warehouse_id, fold(&t.schema), fold(&t.table)) };
+    let mut keys: Vec<TableKey> = Vec::new();
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    for t in gates
+        .iter()
+        .flat_map(|g| g.targets.iter())
+        .filter(|t| t.table_level)
+    {
+        index.entry(key_of(t)).or_insert_with(|| {
+            keys.push(TableKey {
+                warehouse_id: t.warehouse_id,
+                schema: t.schema.clone(),
+                table: t.table.clone(),
+            });
+            keys.len() - 1
+        });
+    }
+    let found = current_columns_batch_via(conn, &keys).await?;
+    let catalog_of = |t: &TableTarget| -> Option<&TableColumns> {
+        index.get(&key_of(t)).and_then(|&i| found[i].as_ref())
+    };
+
+    let mut mv_cleared = Vec::new();
+    for g in gates {
+        let count: usize = g
+            .targets
+            .iter()
+            .map(|t| if t.table_level { 1 } else { t.columns.len() })
+            .sum();
+        // **Refuse, never truncate.** A truncated clearance withholds SOME of
+        // the columns it claims to, and the ones silently dropped are readable
+        // by exactly the people the classification exists to keep out. The
+        // refusal fails the write that caused it (`crate::trigger` propagates
+        // it, the caller's `?` rolls back) rather than committing a clearance
+        // the UI shows as active.
+        if count > DEFAULT_EXPANSION_CEILING {
+            return Err(CompileError::ClearanceExpansionCeiling {
+                tag: g.gate.tag_name.clone(),
+                count,
+                ceiling: DEFAULT_EXPANSION_CEILING,
+            });
+        }
+        for t in &g.targets {
+            let catalog = catalog_of(t);
+            let (schema, table) = match catalog {
+                Some(c) => (c.schema.as_str(), c.table.as_str()),
+                None => (t.schema.as_str(), t.table.as_str()),
+            };
+            // (column, spelled as the catalog spells it)
+            let mut columns: Vec<(TaggedColumn, bool)> = Vec::new();
+            for c in &t.columns {
+                let known = catalog.and_then(|cat| cat.columns.iter().find(|k| fold(k) == fold(c)));
+                columns.push((
+                    TaggedColumn::new(&t.catalog, schema, table, known.unwrap_or(c))?,
+                    known.is_some(),
+                ));
+            }
+            if t.table_level {
+                let all = TaggedColumn::new(&t.catalog, schema, table, WHOLE_TABLE_COLUMN)?;
+                out.policies.push(starrocks_deny(
+                    g.gate.tag_id,
+                    service,
+                    &all,
+                    accesses,
+                    g.cleared.clone(),
+                ));
+                if let Some(cat) = catalog {
+                    for c in &cat.columns {
+                        columns.push((TaggedColumn::new(&t.catalog, schema, table, c)?, true));
+                    }
+                }
+            } else {
+                for (col, _) in &columns {
+                    out.policies.push(starrocks_deny(
+                        g.gate.tag_id,
+                        service,
+                        col,
+                        accesses,
+                        g.cleared.clone(),
+                    ));
+                }
+            }
+            // The deny withholds a DIRECT read only; a plain view reads
+            // straight through it. The column's mask (A2) is what holds
+            // through views — see `crate::clearance_mask`.
+            for (column, catalog_spelled) in columns {
+                out.masks.push(PendingMask {
+                    tag_id: g.gate.tag_id,
+                    column,
+                    cleared: g.cleared.clone(),
+                    catalog_spelled,
+                });
+            }
+        }
+        // C7: every gated tag that reaches the profile, at either level,
+        // narrows the materialized-view deny.
+        if !g.targets.is_empty() {
+            mv_cleared.push(g.cleared.clone());
+        }
+    }
+    Ok(mv_cleared)
 }
 
 /// The `column` value of a whole-table clearance deny (U1): every column of

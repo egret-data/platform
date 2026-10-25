@@ -38,6 +38,8 @@
 
 #[path = "support/engine_eval.rs"]
 mod engine_eval;
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
 
 use egret_metastore::Db;
 use egret_perm::PermStore;
@@ -1859,4 +1861,133 @@ async fn a_table_only_classification_narrows_the_materialized_view_deny() {
     let mut both = vec![ann, bob];
     both.sort();
     assert_eq!(users_of(&body["denyExceptions"][0]), both);
+}
+
+// ── D2 Task 4: NULL masks for every column of a whole-table classification ──
+
+/// C1: a classification on the whole table `orders(id, email, region)` gets
+/// one priority-1 `MASK_NULL` clearance mask per column of the table's current
+/// schema (read from the catalog), folded like a column-level one: an
+/// uncleared reader is served NULL in every column, a cleared one what the
+/// rule masks give them.
+#[tokio::test]
+async fn a_table_level_clearance_masks_every_column_of_the_table() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email", "region"]).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    let (ann, _bob) = cleared_pair(&db, tag_id).await;
+    f.perm
+        .create_rule(&mask_rule(&f, "email", "MASK", &[]))
+        .await
+        .expect("create rule");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let c = &f.catalog_name;
+    let p = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-mask-{c}.sales.orders");
+    let masks = clearance_masks(&db, f.service_id, tag_id).await;
+    let names: Vec<&String> = masks.iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        vec![
+            &format!("{p}.email"),
+            &format!("{p}.id"),
+            &format!("{p}.region")
+        ]
+    );
+    for (_, body) in &masks {
+        assert_eq!(body["policyPriority"], serde_json::json!(1));
+    }
+
+    use engine_eval::{mask_type, starrocks_mask};
+    let uncleared = unique("nobody");
+    for column in ["id", "email", "region"] {
+        let d = starrocks_mask(
+            &db,
+            f.service_id,
+            &uncleared,
+            &column_of(&f, "orders", column),
+        )
+        .await;
+        assert_eq!(
+            mask_type(&d).as_deref(),
+            Some("MASK_NULL"),
+            "uncleared on {column}"
+        );
+    }
+    let d = starrocks_mask(&db, f.service_id, &ann, &column_of(&f, "orders", "email")).await;
+    assert_eq!(
+        mask_type(&d).as_deref(),
+        Some("MASK"),
+        "cleared on email: the rule mask"
+    );
+    let d = starrocks_mask(&db, f.service_id, &ann, &column_of(&f, "orders", "id")).await;
+    assert_eq!(mask_type(&d).as_deref(), Some("MASK_NONE"), "cleared on id");
+}
+
+/// C1 + C5: tag A on the whole table and tag B on its column `Email` (typed in
+/// another case than the catalog's `email`) give ONE mask on that column, in
+/// the catalog's spelling, cleared for A ∩ B, named after the lower tag id —
+/// and no refused tie.
+#[tokio::test]
+async fn a_column_and_a_table_attachment_give_one_mask_per_column() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email"]).await;
+    let (tag_a, _) = new_tag(&db).await;
+    let (tag_b, _) = new_tag(&db).await;
+    tag_table(&db, tag_a, f.warehouse_id, "orders").await;
+    tag_column(&db, tag_b, f.warehouse_id, "Orders", "Email").await;
+    let (ann, bob) = cleared_pair(&db, tag_a).await;
+    let ann_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&ann)
+        .fetch_one(&db.pool)
+        .await
+        .expect("ann");
+    let role_b = unique("d2-clear-b");
+    let role_b_id = new_role(&db, &role_b).await;
+    grant_role(&db, ann_id, role_b_id).await;
+    gate(&db, tag_b, &[&role_b]).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("a table and a column attachment must not refuse the compile");
+
+    let c = &f.catalog_name;
+    let low = tag_a.min(tag_b);
+    let mut masks = clearance_masks(&db, f.service_id, tag_a).await;
+    masks.extend(clearance_masks(&db, f.service_id, tag_b).await);
+    let mut names: Vec<String> = masks.into_iter().map(|(n, _)| n).collect();
+    names.sort();
+    let mut want = vec![
+        format!("{COMPILER_CLEARANCE_PREFIX}{low}-mask-{c}.sales.orders.email"),
+        format!("{COMPILER_CLEARANCE_PREFIX}{tag_a}-mask-{c}.sales.orders.id"),
+    ];
+    want.sort();
+    assert_eq!(names, want);
+
+    use engine_eval::{mask_type, starrocks_mask};
+    let email = column_of(&f, "orders", "email");
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &ann, &email).await).as_deref(),
+        Some("MASK_NONE"),
+        "ann is cleared for both"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &email).await).as_deref(),
+        Some("MASK_NULL"),
+        "bob is cleared for A only"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &column_of(&f, "orders", "id")).await)
+            .as_deref(),
+        Some("MASK_NONE"),
+        "bob is cleared for A, the only classification on id"
+    );
 }
