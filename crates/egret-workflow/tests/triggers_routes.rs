@@ -1241,6 +1241,17 @@ async fn off_then_on_for_each_kind() {
     )
     .await;
     let app = flagged_app(&db).await;
+    // An hour ahead. The seed dates the schedule at the next minute, so a
+    // minute boundary crossed before the switch back on made it due, and the
+    // re-enable skipped it to the next tick and audited that date: what this
+    // test asserts is null depended on the second the test started at.
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) + interval '1 hour' \
+          WHERE flow_id = $1 AND trigger_id = 'sched'",
+        flow,
+    )
+    .await;
     assert!(!schedule_copy(&db, flow, "sched").await);
     assert!(!listener_copy(&db, flow, "on_done").await);
 
@@ -2005,6 +2016,15 @@ async fn bulk_switching_is_per_entry_and_bounded() {
             ),
         ),
         "draft",
+    )
+    .await;
+    // An hour ahead, so no minute boundary crossed before the bulk switch on
+    // makes `s` due and moves (and audits) its date.
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) + interval '1 hour' \
+          WHERE flow_id = $1 AND trigger_id = 's'",
+        mix,
     )
     .await;
     switch(&app, ws, user, mix, "s", true, false).await;

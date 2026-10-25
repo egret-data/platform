@@ -17,12 +17,12 @@ import { DataPanel } from "@/components/sqllab/DataPanel";
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-function renderPanel() {
+function renderPanel(dbId: string | null = null) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <StrictMode>
       <QueryClientProvider client={qc}>
-        <DataPanel ws="dsl" dbId={null} onDb={vi.fn()} onInsert={vi.fn()} onWords={vi.fn()} onCollapse={vi.fn()} />
+        <DataPanel ws="dsl" dbId={dbId} onDb={vi.fn()} onInsert={vi.fn()} onWords={vi.fn()} onCollapse={vi.fn()} />
       </QueryClientProvider>
     </StrictMode>,
   );
@@ -66,4 +66,12 @@ test("a refused listing says so, not an empty picker", async () => {
     "You can't list this workspace's connections. Ask a workspace admin for a role that can run queries.",
   );
   expect(screen.queryByText(/No connection is granted/)).not.toBeInTheDocument();
+});
+
+// KI-298: the tab's connection was removed or revoked; the panel said "This database".
+test("says the tab's connection is gone, by the word Connection", async () => {
+  fetchMock.mockImplementation(async () => json(200, [{ id: "db-1", name: "trino-demo", engine: "trino", delegated: true }]));
+  renderPanel("db-gone");
+
+  expect(await screen.findByText("This connection is no longer available.")).toBeInTheDocument();
 });

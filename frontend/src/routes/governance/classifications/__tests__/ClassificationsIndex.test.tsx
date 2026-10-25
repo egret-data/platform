@@ -413,13 +413,13 @@ describe("New classification: rules said inline (C10)", () => {
     expect(screen.getByLabelText(/^Key/)).toHaveAccessibleDescription(/may hold lowercase letters, digits, ':' and '-' only/);
   });
 
-  it("labels the colour and states its value as text", async () => {
+  it("labels the color and states its value as text", async () => {
     const user = userEvent.setup();
     serve({ "/tags": ok([]) });
     openArea(INDEX, STEWARD);
     await user.click(await screen.findByRole("button", { name: "New classification" }, T));
-    const colour = screen.getByLabelText("Colour");
-    expect(colour).toHaveAttribute("type", "color");
-    expect(colour).toHaveAccessibleDescription(/Colour of the swatch shown next to the name\. #6366f1/);
+    const color = screen.getByLabelText("Color");
+    expect(color).toHaveAttribute("type", "color");
+    expect(color).toHaveAccessibleDescription(/Color of the swatch shown next to the name\. #6366f1/);
   });
 });

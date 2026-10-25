@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QuerySpec } from "@/api/charts";
+import ChartExplore from "../ChartExplore";
 
 /**
  * The dataset's switches, read by the chart route (B2).
@@ -69,7 +70,6 @@ vi.mock("@/api/datasets", () => ({
 }));
 
 async function mount() {
-  const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>

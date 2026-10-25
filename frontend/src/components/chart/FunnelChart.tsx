@@ -97,6 +97,11 @@ function useMeasuredSize() {
 
 /** One step's contribution to the chart's spoken description, reused as the accessible name of its
  *  own button once the funnel is clickable. */
+/** A column as the chart names it: its title (the dataset's display name, or the chart's own
+ *  Column title), else its database name — what the Metric picker shows (KI-292). */
+const titleOf = (col: string | undefined, columnSettings: FunnelBuildConfig["columnSettings"]) =>
+  col == null ? undefined : (columnSettings?.[col]?.column_title || col);
+
 const stepSpoken = (s: FunnelStep) => `${s.name} ${s.label}${s.share ? `, ${s.share} of the first step` : ""}`;
 
 /**
@@ -174,7 +179,7 @@ export function FunnelChart({
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
   }
 
-  const label = `Funnel chart of ${metric ?? "a metric"} by ${dimension ?? "a dimension"}. ${
+  const label = `Funnel chart of ${titleOf(metric, columnSettings) ?? "a metric"} by ${titleOf(dimension, columnSettings) ?? "a dimension"}. ${
     steps.map(stepSpoken).join("; ")
   }.`;
 
@@ -257,7 +262,7 @@ export function FunnelChart({
           <div data-funnel-value style={{ fontSize: font.startValue }}
             className="truncate font-bold tabular-nums text-foreground">{first.label}</div>
           {metric && <div data-funnel-metric style={{ fontSize: font.startMetric }}
-            className="truncate" title={metric}>{metric}</div>}
+            className="truncate" title={titleOf(metric, columnSettings)}>{titleOf(metric, columnSettings)}</div>}
         </div>
         {/* Invisible twin of the label block the other columns end with, so every band's bottom
             edge starts at the same y. It carries the same font-size as the real one, so the two
@@ -355,7 +360,7 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
         // would alphabetise the funnel into Added to cart → Checkout → Purchased → Visited.
         preserveCategoryOrder: true,
         // The axis is still measuring the one metric, whatever the series are called.
-        yLabel: metric,
+        yLabel: titleOf(metric, columnSettings),
         metricTypes: Object.fromEntries(keys.map((n) => [n, metricType])),
         // The metric's format on every pseudo-metric column, AND the dimension's on the x column —
         // the second is what makes the axis ticks read the same as the trapezoid mode's step names.

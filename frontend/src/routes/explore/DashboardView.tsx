@@ -6,9 +6,11 @@ import { type LayoutItem } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, useDashboardRevisions, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
-import { useDataset, useDatasetsFilterOff } from "@/api/datasets";
+import { useDataset, useDatasetDetails, useDatasetsFilterOff } from "@/api/datasets";
+import { datasetColumnDefaults, withDatasetDefaults } from "@/components/dataset/columnDefaults";
+import { shellSettings } from "@/components/chart/viz/renderConfig";
 import { filterableColumns } from "@/components/dataset/pickableColumns";
-import { columnLabels } from "@/components/chart/config/field-names";
+import { columnLabels, type FieldLabels } from "@/components/chart/config/field-names";
 import { useFolders } from "@/api/folders";
 import { useAuth } from "@/auth/useAuth";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
@@ -26,7 +28,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
-import { mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
+import { EDIT_PANEL_BESIDE_PX, mayPersistLayout, movedSincePress, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
@@ -133,6 +135,14 @@ export default function DashboardView() {
     setCardEmptiness((prev) => (prev[cardId] === empty ? prev : { ...prev, [cardId]: empty }));
   }, []);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
+  // Each card's dataset, so a card draws its columns by the dataset's display names and formats,
+  // as the chart page does (KI-290, KI-251). One request per distinct dataset.
+  const cardDatasets = useDatasetDetails(ws, [...(dash?.cards ?? []), ...(draftCards ?? [])]
+    .map((c) => chartById.get(c.chart_id ?? "")?.dataset_id).filter((x): x is string => !!x));
+  const datasetDefaultsFor = (datasetId: string | undefined) => {
+    const d = datasetId ? cardDatasets.get(datasetId) : undefined;
+    return d ? datasetColumnDefaults(d.columns ?? [], d.metrics ?? []) : undefined;
+  };
   const view = useDashboardViewControls();
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
   const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
@@ -156,7 +166,7 @@ export default function DashboardView() {
   // Drill state — must be declared above the early return (Rules of Hooks).
   /** Where the pointer went down on a card, to tell a click from the end of a drag. */
   const pressRef = useRef<{ x: number; y: number } | null>(null);
-  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
+  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null; labels: FieldLabels } | null>(null);
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
   // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
   const recordsDataset = useDataset(ws, records?.datasetId ?? null);
@@ -344,7 +354,15 @@ export default function DashboardView() {
     // slug loses all but the last while auto-apply is on — react-router hands every functional
     // updater the same current location, so they overwrite instead of accumulating.
     if (r.kind === "crossfilter") { filterDrafts.setValues(Object.fromEntries(r.sets.map((s) => [s.slug, s.value]))); return; }
-    setDrillMenu({ ctx, x, y, datasetId });
+    // The drill menu names columns as the card draws them: dataset display name or the chart's
+    // own column title (KI-290).
+    const chart = chartById.get(card.chart_id ?? "");
+    const labels: FieldLabels = {};
+    if (chart) {
+      const cs = withDatasetDefaults(datasetDefaultsFor(chart.dataset_id) ?? {}, shellSettings(chart.params).columnSettings);
+      for (const [name, fmt] of Object.entries(cs)) if (fmt.column_title) labels[name] = fmt.column_title;
+    }
+    setDrillMenu({ ctx, x, y, datasetId, labels });
   }
 
   function startEdit() {
@@ -858,6 +876,7 @@ export default function DashboardView() {
             const c = (cards as DraftCard[]).find((x) => x.id === id);
             return c ? vizKeyOf(c) : "";
           }}
+          besidePanelPx={editing && editPanel ? EDIT_PANEL_BESIDE_PX : 0}
           onBreakpointChange={onGridBreakpointChange}
           onLayoutChange={onLayoutChange}
           onResizeStart={() => { interactingRef.current = true; }}
@@ -896,7 +915,7 @@ export default function DashboardView() {
                 {c.card_type === "placeholder" ? (
                   <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />
                 ) : (
-                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={filterDrafts.appliedValues} paramFilters={paramFilters} paramTemporal={paramTemporal}
+                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} datasetDefaults={datasetDefaultsFor(baseChart?.dataset_id)} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={filterDrafts.appliedValues} paramFilters={paramFilters} paramTemporal={paramTemporal}
                     blocked={!editing && requiredUnset} editing={editing}
                     autoHeight={!!c.options.autoHeight}
                     rowHeight={rowHeight}
@@ -1067,7 +1086,7 @@ export default function DashboardView() {
         </DialogContent>
       </Dialog>
       {drillMenu && (
-        <DrillMenu ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+        <DrillMenu ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y} labels={drillMenu.labels}
           onFilterBy={(fs) => {
             // A dashboard parameter holds one scalar, so a bucketed drill contributes its lower
             // bound — the start of the period the cell stood for.

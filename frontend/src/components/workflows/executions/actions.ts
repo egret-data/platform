@@ -53,6 +53,18 @@ export function showsReplay(execution: Pick<ExecutionDto, "state">): boolean {
   return isTerminalState(execution.state);
 }
 
+/** Why Replay is disabled on an execution whose flow was deleted for good (KI-297). */
+export const REPLAY_FLOW_DELETED_REASON = "The flow was deleted permanently, so this execution cannot be replayed";
+
+/**
+ * Replay, for an execution that `showsReplay`: disabled once its flow was deleted permanently
+ * (`flow_id: null`), where the route can only answer 404 "not found: flow" (KI-297). A trashed
+ * flow still has its id, and the route says in its own words why it refuses.
+ */
+export function canReplay(execution: Pick<ExecutionDto, "flow_id">): Enablement {
+  return execution.flow_id == null ? { ok: false, reason: REPLAY_FLOW_DELETED_REASON } : { ok: true };
+}
+
 /**
  * Kill (workflow kill spec §7, D6): shown while the execution has not ended.
  * `KILLING` is live, not terminal, so the button stays, disabled, until the

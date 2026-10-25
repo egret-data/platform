@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -9,6 +9,7 @@ import { folderCollapseKey, UNCATEGORIZED_KEY } from "@/components/explore/folde
 const removeMock = vi.fn().mockResolvedValue(undefined);
 const duplicateMock = vi.fn().mockResolvedValue({});
 const trashMock = vi.fn().mockResolvedValue({});
+const folderRemoveMock = vi.fn().mockResolvedValue(undefined);
 type ChartFixture = { id: string; dataset_id: string; name: string; description: string; viz_type: string; params: object; created_by: null; updated_at: string; folder_id: string | null; bookmarked: boolean };
 // c1 is newest → first row under the default "updated_at desc" sort.
 const DEFAULT_CHARTS: ChartFixture[] = [
@@ -42,7 +43,7 @@ vi.mock("@/api/folders", () => ({
   useFolderMutations: () => ({
     create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
     rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
-    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    remove: { mutateAsync: folderRemoveMock },
   }),
 }));
 
@@ -91,6 +92,7 @@ describe("Charts list", () => {
     renderAt();
     await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
     await user.click(await screen.findByText("Move to Trash"));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
     expect(trashMock).toHaveBeenCalledWith("c1");
   });
   it("Duplicate fires the duplicate mutation for the first row", async () => {
@@ -148,6 +150,8 @@ describe("Charts — bulk select only reaches rows on screen", () => {
     expect(screen.queryByLabelText("Select Hidden chart")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    // Confirmed first (KI-281).
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
     // by trashing exactly the wrong chart, which is the whole defect.
@@ -174,6 +178,7 @@ describe("Charts — bulk select only reaches rows on screen", () => {
     expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Move to Trash" }));
 
     await vi.waitFor(() => expect(trashMock).toHaveBeenCalledWith("c-shown"));
     expect(trashMock).not.toHaveBeenCalledWith("c-hidden");
@@ -339,5 +344,67 @@ describe("Charts Trash summary", () => {
     await screen.findByRole("heading", { name: "Trash" });
     expect(screen.queryByText("folder")).toBeNull();
     expect(screen.queryByText("folders")).toBeNull();
+  });
+
+  // KI-291: nothing is created in the Trash, as on Dashboards (KI-074) and Datasets.
+  it("offers + Chart on the list and not in the Trash", async () => {
+    renderAt();
+    expect(screen.getByRole("link", { name: "+ Chart" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByRole("heading", { name: "Trash" });
+    expect(screen.queryByRole("link", { name: "+ Chart" })).toBeNull();
+  });
+});
+
+// KI-281: the Charts list trashed rows and deleted folders at once, while the Dashboards list asks
+// first (KI-075).
+describe("Charts asks before trashing or deleting a folder (KI-281)", () => {
+  it("a row's Move to Trash asks first, names the chart, and trashes only on confirm", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Move to Trash"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(trashMock).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('"Revenue bar" moves to the Trash');
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await vi.waitFor(() => expect(trashMock).toHaveBeenCalledWith("c1"));
+  });
+
+  it("Cancel leaves the chart where it is", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Move to Trash"));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(trashMock).not.toHaveBeenCalled();
+  });
+
+  it("the bulk Move n to Trash asks first and counts the charts", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+    await user.click(screen.getByRole("button", { name: "Move 2 to Trash" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(trashMock).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("2 charts move to the Trash");
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    await vi.waitFor(() => expect(trashMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("a folder's Delete asks first, says where its charts go, and deletes only on confirm", async () => {
+    charts = [{ ...DEFAULT_CHARTS[0], folder_id: "f1" }, DEFAULT_CHARTS[1]];
+    folders = [{ id: "f1", name: "F1" }];
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("button", { name: "Folder F1 actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(folderRemoveMock).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("The chart in it moves to Uncategorized");
+    await user.click(within(dialog).getByRole("button", { name: "Delete folder" }));
+    await vi.waitFor(() => expect(folderRemoveMock).toHaveBeenCalledWith("f1"));
   });
 });

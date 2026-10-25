@@ -514,6 +514,23 @@ describe("ExecutionDetail: Replay", () => {
   });
 });
 
+// KI-297: an execution of a flow deleted for good (`flow_id: null`) offered Replay, and pressing it
+// answered 404 "not found: flow". It is disabled now, and says why.
+describe("ExecutionDetail: Replay of a flow deleted for good (KI-297)", () => {
+  it("is disabled with the reason, and sends nothing", async () => {
+    const server = new Server(ok(execution("SUCCESS", { flow_id: null })));
+    renderPage();
+    const button = await screen.findByRole("button", { name: "Replay" });
+    expect(button).toBeDisabled();
+    const reason = "The flow was deleted permanently, so this execution cannot be replayed";
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(button).toHaveAccessibleDescription(reason);
+    await userEvent.click(button);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+});
+
 describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
   const killing = () => execution("KILLING", { ended_at: null });
   const killCalls = (server: Server) => server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/kill`);

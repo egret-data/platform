@@ -232,3 +232,44 @@ describe("DashboardGridLayout breakpoint", () => {
     expect(desktop.container.querySelector(".react-resizable-hide")).toBeNull();
   });
 });
+
+// KI-282: the 340px edit panel (plus its 16px gap) narrowed a 1366px window's canvas to 706px,
+// under the 753px breakpoint, and the cards dropped to the one-column layout while the author was
+// editing them. The breakpoint is decided as if the canvas had the panel's width back.
+describe("DashboardGridLayout breakpoint beside the edit panel (KI-282)", () => {
+  const renderAt = (px: number, besidePanelPx?: number) => {
+    withContainerWidth(px);
+    const onBreakpoint = vi.fn();
+    render(
+      <DashboardGridLayout
+        editing
+        layout={layout}
+        kindOf={() => "bar"}
+        besidePanelPx={besidePanelPx}
+        onBreakpointChange={onBreakpoint}
+        onLayoutChange={() => {}}
+        onResizeStart={() => {}}
+        onResizeStop={() => {}}
+        onDragStart={() => {}}
+        onDragStop={() => {}}
+      >
+        {() => <div key="a" data-testid="card-a" />}
+      </DashboardGridLayout>,
+    );
+    return onBreakpoint;
+  };
+
+  it("keeps the desktop grid on a 706px canvas while the panel is open", () => {
+    const onBreakpoint = renderAt(706, 356);
+    // The first report is the unmeasured width 0, as on any canvas; the measured one is desktop.
+    expect(onBreakpoint).toHaveBeenLastCalledWith("desktop");
+  });
+
+  it("still drops to one column on a phone, panel or not", () => {
+    expect(renderAt(390, 356)).toHaveBeenCalledWith("mobile");
+  });
+
+  it("drops to one column on a 706px canvas with no panel", () => {
+    expect(renderAt(706)).toHaveBeenCalledWith("mobile");
+  });
+});

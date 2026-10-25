@@ -96,7 +96,7 @@ export function funnelSteps(columns: ResultColumn[], rows: unknown[][], cfg: Fun
   const first = raw[0]?.value;
   const max = raw.reduce((m, s) => Math.max(m, s.value), 0);
   return raw.map((s, i) => ({
-    name: formatDimensionValue(s.raw, dimType, dimFormat),
+    name: formatDimensionValue(s.raw, cfg.dimension ?? "", dimType, dimFormat),
     raw: s.raw,
     value: s.value,
     label: fmt(s.value),

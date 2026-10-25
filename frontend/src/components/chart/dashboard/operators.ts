@@ -24,3 +24,25 @@ export const PARAM_TYPE_LABELS: Record<ParamType, string> = {
   location: "Location",
   temporal_unit: "Time grouping",
 };
+
+/** What the Operator select calls each operator. The keys are stored in the dashboard; an author
+ *  picks by these labels (KI-280). */
+export const OPERATOR_LABELS: Record<ParamOperator, string> = {
+  is: "Is",
+  "is-not": "Is not",
+  contains: "Contains",
+  "does-not-contain": "Does not contain",
+  "starts-with": "Starts with",
+  "ends-with": "Ends with",
+  "=": "Equal to",
+  "!=": "Not equal to",
+  between: "Between",
+  ">=": "Greater than or equal to",
+  "<=": "Less than or equal to",
+  range: "Date range",
+  relative: "Relative date",
+  single: "Single date",
+  "month-year": "Month and year",
+  "quarter-year": "Quarter and year",
+  "all-options": "All options",
+};

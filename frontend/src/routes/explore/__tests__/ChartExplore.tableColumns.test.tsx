@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QuerySpec } from "@/api/charts";
+import ChartExplore from "../ChartExplore";
 
 /**
  * THE THREE-STEP SEQUENCE, driven through the route that owns both lists.
@@ -140,7 +141,6 @@ vi.mock("@/api/datasets", () => ({
 }));
 
 async function mountTable(id = "c-raw-table") {
-  const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>

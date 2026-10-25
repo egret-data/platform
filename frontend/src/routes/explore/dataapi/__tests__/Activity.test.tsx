@@ -5,15 +5,12 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // There is no msw in this repo — tests mock the API module directly (see
-// Endpoints.test.tsx / Clients.test.tsx / AuditLog.test.tsx). Activity also
-// resolves trial actors to emails via `listUsers`, and the call list's
-// endpoint filter reads the endpoints list — both need a mock or they fire a
+// Endpoints.test.tsx / Clients.test.tsx / AuditLog.test.tsx). The call list's
+// endpoint filter reads the endpoints list — it needs a mock or it fires a
 // real, unhandled `fetch` in jsdom.
 vi.mock("@/api/generated/data-api/data-api");
-vi.mock("@/api/access");
 
 import * as api from "@/api/generated/data-api/data-api";
-import * as accessApi from "@/api/access";
 import type {
   ActivityCallDto,
   ActivityRow,
@@ -200,7 +197,6 @@ beforeEach(() => {
   mockSummary();
   mockCalls();
   mockEndpoints();
-  vi.mocked(accessApi.listUsers).mockResolvedValue([]);
 });
 
 describe("Activity — tiles", () => {
@@ -386,14 +382,14 @@ describe("Activity — call list", () => {
     expect(await screen.findByText("POST /v1/orders")).toBeInTheDocument();
   });
 
-  it("labels a trial row with the actor's email, not the reserved client_id marker", async () => {
-    vi.mocked(accessApi.listUsers).mockResolvedValue([
-      { id: "user-77", email: "alice@egret.local", name: "Alice" },
-    ] as unknown as accessApi.AccessUser[]);
+  // KI-296: the actor is named by the server, so a user who may not list the platform's users
+  // sees a name, not a shortened id.
+  it("labels a trial row with the actor's name, not the reserved client_id marker (KI-296)", async () => {
     mockCalls([
       makeCall({
         id: "call-3",
         actor_user_id: "user-77",
+        actor_name: "alice@egret.local",
         // The reserved marker a trial's `sub` really carries — must never be
         // shown as if it were a real client.
         client_id: "trial:sa-99",
@@ -1477,10 +1473,7 @@ describe("Activity — a call row's ids can be copied", () => {
     // and the row shows the actor instead. A copy button there would hand over
     // a string that is not a client id.
     const user = userEvent.setup();
-    vi.mocked(accessApi.listUsers).mockResolvedValue([
-      { id: "user-77", email: "alice@egret.local", name: "Alice" },
-    ] as unknown as accessApi.AccessUser[]);
-    mockCalls([makeCall({ id: "c-trial", actor_user_id: "user-77", client_id: "trial:sa-99", request_id: "req-trial" })]);
+    mockCalls([makeCall({ id: "c-trial", actor_user_id: "user-77", actor_name: "alice@egret.local", client_id: "trial:sa-99", request_id: "req-trial" })]);
     renderActivity();
     await screen.findByText("alice@egret.local");
 

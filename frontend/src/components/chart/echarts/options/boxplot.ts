@@ -325,7 +325,7 @@ export function buildBoxplotOption(
    * measurements that decide rotation and gutters — goes through this.
    */
   const catFormat = cfg.category != null ? cfg.columnSettings?.[cfg.category] : undefined;
-  const catLabel = (c: unknown) => formatDimensionValue(c, catType, catFormat);
+  const catLabel = (c: unknown) => formatDimensionValue(c, cfg.category ?? "", catType, catFormat);
   // Computed ONCE and reused by the three measurements and the aria below. `widestLabelWidth` and
   // `fitXLabels` both walk the whole list against a canvas, and a per-call `.map` would put a
   // formatter between them and the strings ECharts will really draw — which is exactly the drift

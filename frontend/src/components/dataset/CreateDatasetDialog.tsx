@@ -51,7 +51,7 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
   }, [open]);
 
   async function submit(source: CreateSource) {
-    if (!dbId) { toast.error("Pick a database"); return; }
+    if (!dbId) { toast.error("Pick a connection"); return; }
     if (!name.trim()) { toast.error("Name required"); return; }
     try {
       const ds = await create.mutateAsync({ name: name.trim(), database_id: dbId, description, source });
@@ -118,7 +118,7 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
                 <div className="space-y-1.5">
                   <Label>Catalog</Label>
                   <Select value={catalog} onValueChange={(v) => { setCatalog(v); setSchema(""); setTable(""); }} disabled={!dbId}>
-                    <SelectTrigger className="w-full"><SelectValue placeholder={!dbId ? "Pick a database first" : "Choose a catalog"} /></SelectTrigger>
+                    <SelectTrigger className="w-full"><SelectValue placeholder={!dbId ? "Pick a connection first" : "Choose a catalog"} /></SelectTrigger>
                     <SelectContent>{(cats.data ?? []).map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>

@@ -1,9 +1,8 @@
 import { type Ref, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Check, Copy, Inbox } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 
-import { listUsers } from "@/api/access";
 import { dataApiActivityCalls, useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 import type { ActivityCallDto, ActivityRange } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -142,23 +141,6 @@ export default function ActivityCallList({
     endpointsKnown && endpointParam !== undefined && !endpoints.some((e) => e.id === endpointParam)
       ? endpointParam
       : undefined;
-
-  // Trial rows are identified by `actor_user_id`, and resolving it to an
-  // email is the same problem AuditLog.tsx solves for its actor column.
-  // Query key is deliberately NOT scoped under "activity" — Versions.tsx
-  // resolves `created_by` off the exact same unfiltered `listUsers()` call
-  // and shares this cache entry rather than firing a second identical
-  // request. There is nothing for the two call sites to diverge on: the
-  // function takes no arguments.
-  const usersQuery = useQuery({
-    queryKey: ["data-api", "users"],
-    queryFn: listUsers,
-    retry: false,
-  });
-  const userEmailById = useMemo(
-    () => new Map((usersQuery.data ?? []).map((u) => [u.id, u.email])),
-    [usersQuery.data],
-  );
 
   const callsQuery = useInfiniteQuery({
     queryKey: [
@@ -373,7 +355,7 @@ export default function ActivityCallList({
             </TableHeader>
             <TableBody>
               {entries.map((c) => (
-                <CallRow key={c.id} call={c} userEmailById={userEmailById} />
+                <CallRow key={c.id} call={c} />
               ))}
             </TableBody>
           </Table>
@@ -403,13 +385,7 @@ export default function ActivityCallList({
   );
 }
 
-function CallRow({
-  call,
-  userEmailById,
-}: {
-  call: ActivityCallDto;
-  userEmailById: Map<string, string>;
-}) {
+function CallRow({ call }: { call: ActivityCallDto }) {
   const isTrial = call.actor_user_id != null;
   const endpointLabel = call.endpoint_id
     ? (call.endpoint_name ?? call.endpoint_id)
@@ -454,8 +430,7 @@ function CallRow({
           <span className="inline-flex items-center gap-1.5 text-xs">
             <Badge variant="outline">Trial</Badge>
             <span className="text-muted-foreground">
-              {(call.actor_user_id && userEmailById.get(call.actor_user_id)) ??
-                call.actor_user_id?.slice(0, 8)}
+              {call.actor_name ?? call.actor_user_id?.slice(0, 8)}
             </span>
           </span>
         ) : (

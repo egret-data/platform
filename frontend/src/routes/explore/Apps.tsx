@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { ConfirmFolderDeleteDialog, ConfirmTrashDialog } from "@/components/explore/ConfirmActionDialog";
 import {
   Dialog,
   DialogContent,
@@ -39,6 +40,7 @@ import { EntityLink } from "@/components/ui/entity-link";
 import { ScrollX } from "@/components/ui/scroll-cue";
 
 type SortKey = "name" | "status" | "updated_at";
+const APP_NOUN = { singular: "app", plural: "apps" };
 
 /** The server's own words (`ApiError.message` is the body's `error` field), without the
  *  `Error: ` prefix `String(e)` adds. Duplicate in particular can be refused for a row whose
@@ -150,6 +152,10 @@ export default function Apps() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<AppSummary | null>(null);
+  // Moving to the Trash and deleting a folder are confirmed first, as on Dashboards (KI-281):
+  // what is being trashed — one row, or the bulk selection — and which folder is being deleted.
+  const [pendingTrash, setPendingTrash] = useState<AppSummary | "bulk" | null>(null);
+  const [pendingFolderDelete, setPendingFolderDelete] = useState<{ id: string; name: string } | null>(null);
   const [shareTarget, setShareTarget] = useState<AppSummary | null>(null);
   const [renameTarget, setRenameTarget] = useState<AppSummary | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
@@ -339,7 +345,7 @@ export default function Apps() {
             // Creating a folder is the workspace's permission, not this row's.
             onNewFolder={canCreate ? (x) => setFolderDialog({ mode: "move", app: x }) : undefined}
             onShare={setShareTarget}
-            onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
+            onTrash={setPendingTrash}
             onRestore={(x) => guard(restore.mutateAsync(x.id))}
             onDeletePermanent={setPendingDelete}
           />
@@ -434,7 +440,7 @@ export default function Apps() {
                   onMove={doBulkMoveTo}
                   onNewFolder={canCreate ? () => setFolderDialog({ mode: "bulkmove" }) : undefined}
                 />
-                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                <Button variant="destructive" size="sm" onClick={() => setPendingTrash("bulk")}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
@@ -483,7 +489,7 @@ export default function Apps() {
                         // is that app's own `can_write` — already what makes its row draggable.
                         onShare={group.folder && canCreate ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
                         onRename={group.folder && canCreate ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
-                        onDelete={group.folder && canCreate ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(errText(e))) : undefined}
+                        onDelete={group.folder && canCreate ? () => setPendingFolderDelete(group.folder!) : undefined}
                         onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(errText(e)))}
                       />
                       {!isCollapsed && group.rows.map(renderRow)}
@@ -521,6 +527,30 @@ export default function Apps() {
           else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.app!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(errText(e)));
           else if (d.mode === "bulkmove") doBulkMoveToNew(name);
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(errText(e)));
+        }}
+      />
+
+      <ConfirmTrashDialog
+        pending={pendingTrash === "bulk" ? { count: bulk.selectedIds.length } : pendingTrash}
+        noun={APP_NOUN}
+        onCancel={() => setPendingTrash(null)}
+        onConfirm={() => {
+          const target = pendingTrash;
+          setPendingTrash(null);
+          if (target === "bulk") void doBulkTrash();
+          else if (target) guard(trash.mutateAsync(target.id).then(() => toast.success("Moved to Trash")));
+        }}
+      />
+
+      <ConfirmFolderDeleteDialog
+        folder={pendingFolderDelete}
+        itemCount={(data ?? []).filter((a) => a.folder_id === pendingFolderDelete?.id).length}
+        noun={APP_NOUN}
+        onCancel={() => setPendingFolderDelete(null)}
+        onConfirm={() => {
+          const target = pendingFolderDelete;
+          setPendingFolderDelete(null);
+          if (target) removeFolder.mutateAsync(target.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(errText(e)));
         }}
       />
 

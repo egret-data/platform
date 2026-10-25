@@ -2308,6 +2308,37 @@ async fn read_permission_cannot_drive_the_lifecycle() {
     assert_eq!(b.as_array().expect("array").len(), 1);
 }
 
+/// KI-296: a version names who published it, by profile name, else email. The
+/// browser used to resolve `created_by` through the platform's user list, which
+/// only a platform admin may read, so a workspace editor saw a shortened id.
+#[tokio::test]
+async fn a_version_names_its_publisher() {
+    let f = skip_without_db!();
+    let ep = f.create_endpoint("who", "who", "SELECT 1 AS n").await;
+    f.publish(ep).await;
+    let publisher: Uuid = f.versions(ep).await[0]["created_by"]
+        .as_str()
+        .expect("created_by")
+        .parse()
+        .unwrap();
+
+    sqlx::query("UPDATE users SET name = 'Lena Publisher' WHERE id = $1")
+        .bind(publisher)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.versions(ep).await[0]["created_by_name"], "Lena Publisher");
+
+    // No profile name: the email, as the Apps versions do.
+    let email: String =
+        sqlx::query_scalar("UPDATE users SET name = '' WHERE id = $1 RETURNING email::text")
+            .bind(publisher)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(f.versions(ep).await[0]["created_by_name"], email.as_str());
+}
+
 #[tokio::test]
 async fn listing_versions_requires_read_not_manage() {
     let f = skip_without_db!();

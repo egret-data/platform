@@ -294,9 +294,14 @@ export function formatValue(value: unknown, columnType: string, fmt: ColumnForma
  */
 export function formatDimensionValue(
   value: unknown,
+  columnName: string,
   columnType: string,
-  fmt: ColumnFormat | undefined,
+  stored: ColumnFormat | undefined,
 ): string {
+  // An identifier keeps no thousands separator unless one was chosen (KI-058), here as in a table
+  // cell: without this, a Column title alone sent `orderkey` through `formatNumber` as `29,989`
+  // (KI-294). Only on a stored format: with none, the raw value below is already separator-free.
+  const fmt = stored && withIdentifierDefault(columnName, columnType, stored);
   const formatWins = fmt != null && (isTemporalType(columnType) ? specifiesDateRendering(fmt) : true);
   if (formatWins) {
     const out = formatValue(value, columnType, fmt);

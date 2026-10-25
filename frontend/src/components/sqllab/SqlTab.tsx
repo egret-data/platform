@@ -109,7 +109,7 @@ export function SqlTab({ ws, tab, active = true, patch, onOpenSaved, onOpenPrevi
   async function run(sqlOverride?: string, dbOverride?: string | null) {
     if (running) return;
     const dbId = dbOverride ?? tab.dbId;
-    if (!dbId) { toast.error("Pick a database"); return; }
+    if (!dbId) { toast.error("Pick a connection"); return; }
     const sql = sqlOverride ?? tab.sql;
     setQueryId(null); setElapsedMs(null); setSubmitError(null); setTabValue("results"); setResultView("table");
     const params = extractParams(sql).map((n) => ({
@@ -243,9 +243,9 @@ export function SqlTab({ ws, tab, active = true, patch, onOpenSaved, onOpenPrevi
 
             <Separator orientation="vertical" className="mx-0.5 h-5" />
 
-            <span className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs" title={db ? `${db.name} (${db.engine})` : "No database selected"}>
+            <span className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs" title={db ? `${db.name} (${db.engine})` : "No connection selected"}>
               <Database className={`h-3.5 w-3.5 ${db ? "text-primary" : "text-muted-foreground"}`} />
-              <span className="max-w-[10rem] truncate">{db ? db.name : "No database"}</span>
+              <span className="max-w-[10rem] truncate">{db ? db.name : "No connection"}</span>
               {engine && <span className="text-muted-foreground">· {engine}</span>}
             </span>
             {statusChip}

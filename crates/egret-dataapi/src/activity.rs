@@ -124,6 +124,10 @@ pub struct ActivityCallDto {
     pub request_id: String,
     /// Non-null ⇒ a Try-it run by this person, not consumer traffic.
     pub actor_user_id: Option<Uuid>,
+    /// The actor's profile name, else email; null for consumer traffic or a deleted user.
+    /// Resolved here because the user list is admin-only, so an editor's browser could not
+    /// (KI-296).
+    pub actor_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -309,9 +313,11 @@ impl ActivityStore {
             "SELECT al.id, al.ts, al.endpoint_id, e.name AS endpoint_name, \
                     al.request_method, al.request_path, al.status_code, al.error_code, \
                     al.duration_ms, al.cache_hit, al.client_id, al.request_id, \
-                    al.actor_user_id \
+                    al.actor_user_id, \
+                    COALESCE(NULLIF(u.name, ''), u.email::text) AS actor_name \
              FROM dataapi.access_log al \
              LEFT JOIN dataapi.endpoints e ON e.id = al.endpoint_id \
+             LEFT JOIN users u ON u.id = al.actor_user_id \
              WHERE al.workspace_id = $1 \
                AND al.ts >= $2 \
                AND ($3::uuid IS NULL OR al.endpoint_id = $3) \
