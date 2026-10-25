@@ -13,7 +13,7 @@ import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
-import { columnLabels, metricLabels } from "@/components/chart/config/field-names";
+import { columnLabels, metricLabels, type FieldLabels } from "@/components/chart/config/field-names";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
@@ -336,6 +336,14 @@ export default function ChartExplore() {
     [detail.data],
   );
   const effCS = useMemo(() => withDatasetDefaults(datasetDefaults, columnSettings), [datasetDefaults, columnSettings]);
+  // What each field is CALLED on screen — the title the chart draws it under (dataset display name,
+  // or the chart's own rename) — for the menus that name fields outside the pickers: Sort and the
+  // drill menu (KI-050).
+  const fieldLabels = useMemo<FieldLabels>(() => {
+    const out: FieldLabels = {};
+    for (const [name, fmt] of Object.entries(effCS)) if (fmt.column_title) out[name] = fmt.column_title;
+    return out;
+  }, [effCS]);
 
   // "View SQL" disclosure: build-only, fetched lazily (only while the
   // disclosure is open) via the `charts`-gated ch_data endpoint — independent
@@ -756,7 +764,7 @@ export default function ChartExplore() {
                 its steps in — and the order that reads correctly, since the sort is what decides
                 WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
             {descriptor && honoursOrderby(descriptor, descConfig) && (
-              <SortRows fields={sortableFields(specForRun())} value={orderby} onChange={setOrderby} />
+              <SortRows fields={sortableFields(specForRun())} labels={fieldLabels} value={orderby} onChange={setOrderby} />
             )}
 
             {/* THE CEILING IS NOW ON SCREEN. `max={10000}` mirrors the backend's `MAX_CHART_ROWS`
@@ -910,9 +918,12 @@ export default function ChartExplore() {
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <StudioToolbar
           name={saveName} onName={setSaveName}
+          description={saveDesc} onDescription={setSaveDesc}
           autoRun={autoRun} onAutoRun={setAutoRun}
-          onRun={run} onSave={() => setSaveOpen(true)}
-          running={data.isLoading} saveLabel={id ? "Update" : "Save"}
+          // An existing chart saves in one step: its name and description are edited right here,
+          // so a dialog would only ask again (KI-008). A new chart still opens the Save dialog.
+          onRun={run} onSave={() => (id ? void save() : setSaveOpen(true))}
+          running={data.isLoading} saving={mutations.update.isPending} saveLabel={id ? "Update" : "Save"}
           exportMenu={
             <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
               columnSettings={effCS}
@@ -1018,7 +1029,7 @@ export default function ChartExplore() {
       {/* Save dialog */}
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{id ? "Update chart" : "Save chart"}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Save chart</DialogTitle></DialogHeader>
           <div className="space-y-3 py-2">
             <div className="space-y-1">
               <Label htmlFor="chart-name">Name</Label>
@@ -1031,14 +1042,14 @@ export default function ChartExplore() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSaveOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={mutations.create.isPending || mutations.update.isPending}>{id ? "Update" : "Save"}</Button>
+            <Button onClick={save} disabled={mutations.create.isPending}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {drillMenu && (
         <DrillMenu
-          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y} labels={fieldLabels}
           onFilterBy={addFilter}
           onSeeRecords={(fs) => setRecordsFilters(fs)}
           onClose={() => setDrillMenu(null)}

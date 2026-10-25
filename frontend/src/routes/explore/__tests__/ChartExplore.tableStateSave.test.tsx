@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -127,11 +127,9 @@ async function mountTable(id = "c-raw-table") {
 const drawnHeaders = () =>
   screen.queryAllByRole("columnheader").map((th) => th.textContent?.replace(/[ ▲▼]+$/, "") ?? "");
 
-/** Toolbar Update → dialog Update. Both carry the same label, so the dialog's is scoped to it. */
+/** Toolbar Update saves an existing chart in one step (KI-008). */
 async function saveChart() {
   await userEvent.click(screen.getByRole("button", { name: "Update" }));
-  const dialog = await screen.findByRole("dialog");
-  await userEvent.click(within(dialog).getByRole("button", { name: "Update" }));
 }
 
 /** The `settings` blob of the payload the last Update sent. */

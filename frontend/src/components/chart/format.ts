@@ -214,6 +214,31 @@ export function specifiesDateRendering(fmt: ColumnFormat | undefined): boolean {
   );
 }
 
+/**
+ * Whether a column holds IDENTIFIERS — `orderkey`, `customer_id` — rather than quantities (KI-058).
+ *
+ * Recognised by two facts together: an INTEGER type (an identifier is never fractional, and a
+ * `double` named `…key` is a measure) and a name that says identifier — `id`, `…_id`, camel-case
+ * `…Id`, or `…key` (TPC-H's `orderkey`/`custkey`, and `…_key`). egret has no identifier semantic
+ * type, and adding one would leave every existing dataset unrecognised until someone set it, so
+ * the name decides. A wrong guess costs only the thousands separator, and the user's own
+ * Separator style (on the chart or in the dataset) overrides it either way.
+ */
+const INTEGER_TYPE_RE = /^(tinyint|smallint|int|integer|bigint|largeint)\b/i;
+export function isIdentifierColumn(name: string, columnType: string): boolean {
+  if (!INTEGER_TYPE_RE.test(columnType.trim())) return false;
+  return /^id$|_id$|key$/i.test(name) || /[a-z0-9]Id$/.test(name);
+}
+
+/**
+ * The format an identifier column is drawn with: no thousands separator (`29989`, not `29,989`)
+ * unless a separator style was chosen for it. Any other column's format is returned unchanged.
+ */
+export function withIdentifierDefault(name: string, columnType: string, fmt?: ColumnFormat): ColumnFormat | undefined {
+  if (fmt?.number_separators != null || !isIdentifierColumn(name, columnType)) return fmt;
+  return { ...fmt, number_separators: "." };
+}
+
 export function formatValue(value: unknown, columnType: string, fmt: ColumnFormat = {}): string {
   if (value == null) return "";
   if (isTemporalType(columnType)) return formatDate(value, fmt);

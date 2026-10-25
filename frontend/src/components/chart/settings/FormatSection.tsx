@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Hash, Calendar, Type, ChevronDown, type LucideIcon } from "lucide-react";
 import { isNumericType, isTemporalType, type ColumnFormat } from "../format-types";
+import { isIdentifierColumn } from "../format";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import { CurrencySelect } from "./CurrencySelect";
@@ -262,7 +263,9 @@ export function ColumnFormatFields({
                 no control anywhere — implemented and unreachable, the same shape of defect
                 that cost the pie four settings. Metabase offers both. */}
             <Field label="Separator style">
-              <Select value={fmt.number_separators ?? ".,"}
+              {/* With nothing stored, the style the column is drawn with: none for an identifier
+                  such as `orderkey` (KI-058), grouped thousands otherwise. */}
+              <Select value={fmt.number_separators ?? (isIdentifierColumn(c.name, c.type ?? "") ? "." : ".,")}
                 onValueChange={(v) => patch({ number_separators: v })}>
                 <SelectTrigger aria-label="Separator style" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
