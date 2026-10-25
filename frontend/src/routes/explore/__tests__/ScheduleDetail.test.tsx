@@ -1205,3 +1205,45 @@ describe("Alerts & Reports UX (U7)", () => {
     expect(new URLSearchParams(search).get("section")).toBe("contents");
   });
 });
+
+// S2 — opened straight on the Schedule section (a deep link or a reload), the
+// picker must show the STORED schedule, and Save must send it back unchanged.
+// Going General → Schedule mounted the picker after the record had landed, so
+// only the deep link reached the controls before their values did.
+describe("Schedule section opened by a deep link (S2)", () => {
+  it.each([
+    ["alert", "0 * * * *", "Hourly", "Asia/Ho_Chi_Minh"],
+    ["report", "0 8 * * *", "Daily", "Europe/Berlin"],
+    ["dataapi_alert", "0 8 * * *", "Daily", "America/New_York"],
+  ])("a %s keeps %s in %s when saved untouched", async (type, crontab, period, timezone) => {
+    const user = userEvent.setup();
+    scheduleMock.mockReturnValue({
+      data: {
+        ...row({ type: type as ScheduleSummary["type"], crontab, timezone }),
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        dashboard_id: type === "report" ? "d1" : null,
+        dataapi_endpoint_id: type === "dataapi_alert" ? "ep1" : null,
+        dataapi_metric: type === "dataapi_alert" ? "error_rate" : null,
+        recipients: [],
+        targets: [],
+      },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1?section=schedule");
+
+    expect(await screen.findByLabelText(/^repeat$/i)).toHaveTextContent(period);
+    expect(screen.getByLabelText(/^timezone$/i)).toHaveTextContent(timezone);
+    const preview = screen.getByText(/^Runs every/).textContent;
+    expect(preview).toContain(crontab);
+    expect(preview).toContain(`in ${timezone}`);
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    const body = updateMutate.mock.calls[0][0].body;
+    expect(body.crontab).toBe(crontab);
+    expect(body.timezone).toBe(timezone);
+  });
+});

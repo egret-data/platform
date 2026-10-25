@@ -331,6 +331,23 @@ export function ScheduleEditor({
   const [attachTarget, setAttachTarget] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Whether the loaded schedule has been copied into the fields yet. Until it
+   * has, an existing schedule's form is not rendered at all.
+   *
+   * The fields start at create-form defaults (`Daily`, the browser's zone) and
+   * the effect below swaps in the stored values one render later. A Radix
+   * `Select` that is already mounted when its value changes like that — the
+   * Schedule section opened straight from a link or a reload — pushes the new
+   * value into its hidden native `<select>` before that select has the
+   * matching `<option>`, reads back `""`, and reports it through
+   * `onValueChange("")`. Repeat and Timezone went blank and Save sent a
+   * rewritten cron and an empty zone (S2). Mounting the controls only once
+   * they hold the stored values means no select ever sees that change.
+   */
+  const [hydrated, setHydrated] = useState(false);
+  const ready = !scheduleId || hydrated;
+
   // Populate from the loaded schedule when editing. Keyed on the row's id so
   // reopening the editor on a different schedule refills rather than keeping
   // the previous one's values.
@@ -385,6 +402,7 @@ export function ScheduleEditor({
     setCustomHeight(existing.custom_height == null ? "" : String(existing.custom_height));
     setAttachTarget(Boolean(existing.chart_id || existing.dashboard_id));
     setDestinations(toDestinations(existing.recipients));
+    setHydrated(true);
   }, [existing]);
 
   /**
@@ -603,19 +621,19 @@ export function ScheduleEditor({
   const current = JSON.stringify(buildBody());
   useEffect(() => {
     if (baseline.current === null) {
-      // Wait for hydration to LAND before snapshotting. The effect above sets
-      // the fields from `existing`, but its `setState` calls only take effect
-      // on the next render — snapshot too early and the loaded values read as
-      // edits, so the page would warn about unsaved changes on the way out of
-      // a schedule nobody touched.
-      if (scheduleId && existing && name !== existing.name) return;
-      if (scheduleId && !existing) return;
+      // Wait for hydration to LAND before snapshotting: snapshot the
+      // create-form defaults and the loaded values read as edits, so the page
+      // would warn about unsaved changes on the way out of a schedule nobody
+      // touched.
+      if (!ready) return;
       baseline.current = current;
       onDirtyChange?.(false);
       return;
     }
     onDirtyChange?.(current !== baseline.current);
-  }, [current, existing, scheduleId, name, onDirtyChange]);
+  }, [current, ready, onDirtyChange]);
+
+  if (!ready) return null;
 
   return (
     /* ONE column, and NO width of its own — the PAGE sets the measure, so the
