@@ -411,10 +411,10 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
                   Trino an uncleared owner&apos;s DEFINER view blocks everybody, the cleared included.
                 </Callout>
                 <Callout>
-                  A StarRocks clearance expands to one policy per tagged column, counted per profile: if more than 500 of this
-                  tag&apos;s columns are visible to one StarRocks profile, that profile&apos;s recompile fails outright rather
-                  than truncating the clearance, and every write that would recompile it fails with it — until the tag is
-                  narrowed or untagged back under the limit. Profiles that see fewer are unaffected.
+                  A StarRocks clearance expands, per profile, to one policy per tagged column, and 1 plus the table&apos;s
+                  column count for a classification on a whole table: if that comes to more than 500 for one StarRocks
+                  profile, the write that would cause it is refused (a classification, rule or table change), rather than
+                  truncating the clearance. Profiles that see fewer are unaffected.
                 </Callout>
               </>
             ) : null}

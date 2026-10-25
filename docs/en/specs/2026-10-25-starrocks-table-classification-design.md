@@ -610,3 +610,13 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   test was built for the interleaving (it needs a concurrent writer holding the second profile and wanting a minted
   `users` row); `a_column_add_reaches_every_bound_starrocks_profile` covers the two-profile path and passes before and
   after.
+- **Dry-run spelling (review finding 6): not changed.** The overlay still carries the request's spelling of the
+  schema and table (`table_hook::pending`), so a client committing to `SALES/ORDERS` while the catalog holds
+  `sales.orders` dry-runs clearance-mask names in the request's spelling. Ceilings are unaffected; the risk is a
+  stored mask tie looking new to the dry run's overlap check, which would refuse a change the real compile accepts
+  (a 409 the client can retry with the catalog's spelling; never a wedge). Fixing it for an update is cheap
+  (`current_columns_via` gives the catalog spelling), but no red test through the handler was found that is cheaper
+  than the fix's risk, and a create needs the namespace's stored spelling from another Lakekeeper table the drift
+  test does not cover. Left as is.
+- **Clearance tab ceiling copy (review finding 7):** now says a whole table costs 1 plus its column count and that the
+  write causing the excess is refused.
