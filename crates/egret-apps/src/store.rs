@@ -13,6 +13,8 @@ use sqlx::{FromRow, Row};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::template::is_untouched_starter;
+
 pub const MAX_SOURCE_BYTES: usize = 1_048_576;
 
 /// `analytics.apps.name` is `CHECK (length(name) BETWEEN 1 AND 200)` (migration
@@ -64,7 +66,26 @@ pub struct VersionSummary {
     pub from_revision: Option<i64>,
     pub restored_from: Option<Uuid>,
     pub published_by: Option<Uuid>,
+    /// Filled by [`with_publisher_name!`] in the statement that reads the row.
+    pub published_by_name: Option<String>,
     pub published_at: DateTime<Utc>,
+}
+
+/// Wraps a statement that yields `app_versions` rows (a SELECT, or an INSERT
+/// RETURNING) so each row also carries `published_by_name`: the profile name, else
+/// the email -- the expression `egret-workflow`'s `with_creator_name!` uses.
+/// `LEFT JOIN`, so a NULL `published_by` or a deleted user answers NULL. In SQL, not
+/// in the browser: the user list is admin-only, so an editor could not resolve ids.
+macro_rules! with_publisher_name {
+    ($cte:expr, $tail:expr) => {
+        concat!(
+            "WITH r AS (",
+            $cte,
+            ") SELECT r.*, COALESCE(NULLIF(u.name, ''), u.email::text) AS published_by_name \
+             FROM r LEFT JOIN users u ON u.id = r.published_by",
+            $tail
+        )
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +104,11 @@ pub enum SaveOutcome {
 #[derive(Debug, Clone)]
 pub enum PublishOutcome {
     Published(VersionSummary),
-    Stale { current_revision: i64 },
+    Stale {
+        current_revision: i64,
+    },
+    /// The draft is still the source a new app starts from: nothing to publish.
+    Starter,
 }
 
 /// What [`AppStore::delete`] found.
@@ -733,6 +758,11 @@ impl AppStore {
             .draft(ws, id)
             .await?
             .ok_or_else(|| Error::NotFound(format!("draft of app {id}")))?;
+        // Content, not revision: a duplicate's revision 1 is a real notebook, and an
+        // author who saves the starter back unchanged still has nothing to publish.
+        if is_untouched_starter(&draft.source) {
+            return Ok(PublishOutcome::Starter);
+        }
         let v = self
             .insert_version(
                 &mut tx,
@@ -751,10 +781,11 @@ impl AppStore {
 
     /// Called only after the handler resolved the app in the workspace. Newest first.
     pub async fn versions(&self, id: Uuid) -> Result<Vec<VersionSummary>> {
-        sqlx::query_as::<_, VersionSummary>(
+        sqlx::query_as::<_, VersionSummary>(with_publisher_name!(
             "SELECT id, version_no, from_revision, restored_from, published_by, published_at \
-               FROM analytics.app_versions WHERE app_id = $1 ORDER BY version_no DESC",
-        )
+               FROM analytics.app_versions WHERE app_id = $1",
+            " ORDER BY r.version_no DESC"
+        ))
         .bind(id)
         .fetch_all(&self.db.pool)
         .await
@@ -773,10 +804,11 @@ impl AppStore {
         id: Uuid,
         version_id: Uuid,
     ) -> Result<Option<Version>> {
-        let Some(row) = sqlx::query(
+        let Some(row) = sqlx::query(with_publisher_name!(
             "SELECT id, version_no, from_revision, restored_from, published_by, published_at \
                FROM analytics.app_versions WHERE app_id = $1 AND id = $2",
-        )
+            ""
+        ))
         .bind(id)
         .bind(version_id)
         .fetch_optional(&self.db.pool)
@@ -903,11 +935,12 @@ impl AppStore {
             Err(e) => return Err(store_err(e)),
         }
 
-        let v = sqlx::query_as::<_, VersionSummary>(
+        let v = sqlx::query_as::<_, VersionSummary>(with_publisher_name!(
             "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
              VALUES ($1, $2, NULL, $3, $4) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
-        )
+            ""
+        ))
         .bind(id)
         .bind(new_no)
         .bind(version_id)
@@ -972,11 +1005,12 @@ impl AppStore {
                 .map_err(store_err)?;
         }
 
-        sqlx::query_as::<_, VersionSummary>(
+        sqlx::query_as::<_, VersionSummary>(with_publisher_name!(
             "INSERT INTO analytics.app_versions (app_id, version_no, from_revision, restored_from, published_by) \
              VALUES ($1, $2, $3, $4, $5) \
              RETURNING id, version_no, from_revision, restored_from, published_by, published_at",
-        )
+            ""
+        ))
         .bind(app)
         .bind(version_no)
         .bind(from_revision)

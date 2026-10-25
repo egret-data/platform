@@ -18140,7 +18140,7 @@
             }
           },
           "409": {
-            "description": "expected_revision is stale (reload current_revision), or the app is in the trash",
+            "description": "expected_revision is stale (reload current_revision), the draft is still the new-app starter (code `starter_draft`), or the app is in the trash",
             "content": {
               "application/json": {
                 "schema": {
@@ -38807,6 +38807,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "published_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The publisher's display name: the profile name, else the email. Null when\n`published_by` is null or the user no longer exists."
           },
           "published_at": {
             "type": "string",

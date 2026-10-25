@@ -357,6 +357,9 @@ pub struct AppVersionSummary {
     /// The version this one republished; `None` for a publish.
     pub restored_from: Option<Uuid>,
     pub published_by: Option<Uuid>,
+    /// The publisher's display name: the profile name, else the email. Null when
+    /// `published_by` is null or the user no longer exists.
+    pub published_by_name: Option<String>,
     pub published_at: DateTime<Utc>,
 }
 
@@ -368,6 +371,7 @@ impl From<VersionSummary> for AppVersionSummary {
             from_revision: v.from_revision,
             restored_from: v.restored_from,
             published_by: v.published_by,
+            published_by_name: v.published_by_name,
             published_at: v.published_at,
         }
     }
@@ -404,6 +408,8 @@ pub enum AppsHttpError {
     NotTrashed,
     /// 409: a run ticket for an app that has never been published.
     NoPublishedVersion,
+    /// 409: a publish of a draft that is still the new-app starter.
+    StarterDraft,
     /// 503: `apps.origin` is not configured, so there is nowhere to send an iframe.
     OriginNotConfigured,
 }
@@ -421,10 +427,9 @@ impl IntoResponse for AppsHttpError {
                 .into_response()
         };
         match self {
-            Self::PreconditionRequired => body(
-                StatusCode::PRECONDITION_REQUIRED,
-                "If-Match with the draft revision is required",
-            ),
+            Self::PreconditionRequired => {
+                body(StatusCode::PRECONDITION_REQUIRED, PRECONDITION_REQUIRED_MSG)
+            }
             Self::SourceTooLarge => body(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 1 MiB"),
             Self::StaleRevision { current_revision } => (
                 StatusCode::CONFLICT,
@@ -436,6 +441,14 @@ impl IntoResponse for AppsHttpError {
                 .into_response(),
             Self::Trashed => body(StatusCode::CONFLICT, TRASHED),
             Self::NotTrashed => body(StatusCode::CONFLICT, NOT_TRASHED),
+            Self::StarterDraft => (
+                StatusCode::CONFLICT,
+                Json(ErrorBody {
+                    error: STARTER_DRAFT_MSG.to_string(),
+                    code: Some(STARTER_DRAFT_CODE.to_string()),
+                }),
+            )
+                .into_response(),
             Self::NoPublishedVersion => body(
                 StatusCode::CONFLICT,
                 "the app has no published version to run; publish it first",
@@ -447,6 +460,16 @@ impl IntoResponse for AppsHttpError {
         }
     }
 }
+
+/// Says where the revision comes from: a client that only holds the draft body
+/// cannot know it otherwise.
+const PRECONDITION_REQUIRED_MSG: &str = "If-Match with the draft revision is required: \
+     GET the draft first and send its ETag (also its `revision` field) as If-Match";
+
+/// The `code` of the 409 a publish of the untouched starter answers.
+pub const STARTER_DRAFT_CODE: &str = "starter_draft";
+const STARTER_DRAFT_MSG: &str =
+    "the draft is still the new-app starter; save your changes to the draft, then publish";
 
 pub(crate) type AppsResult<T> = Result<T, ApiError<AppsHttpError>>;
 
@@ -1189,7 +1212,7 @@ fn publish_body(body: &[u8]) -> AppsResult<AppPublish> {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing app:write on this app", body = ErrorBody),
         (status = 404, description = "No such app in this workspace", body = ErrorBody),
-        (status = 409, description = "expected_revision is stale (reload current_revision), or the app is in the trash", body = AppConflict),
+        (status = 409, description = "expected_revision is stale (reload current_revision), the draft is still the new-app starter (code `starter_draft`), or the app is in the trash", body = AppConflict),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1226,6 +1249,7 @@ async fn publish(
         PublishOutcome::Stale { current_revision } => {
             Err(domain(AppsHttpError::StaleRevision { current_revision }))
         }
+        PublishOutcome::Starter => Err(domain(AppsHttpError::StarterDraft)),
     }
 }
 
