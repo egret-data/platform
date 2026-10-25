@@ -29,6 +29,40 @@ export function dataRuleUrl(ruleId: string, back: string): string {
   return `/governance/rules/${encodeURIComponent(ruleId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
 }
 
+/** A grant's page, opened from the Data page at `back`, as {@link dataRuleUrl} (KI-131). */
+export function dataGrantUrl(grantId: string, back: string): string {
+  return `/governance/grants/${encodeURIComponent(grantId)}?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`;
+}
+
+/**
+ * The way back a `?from=data:<url-encoded path>` names: that Data-area page,
+ * labelled by its last path segment. Only a path inside the Data area is
+ * followed; anything else (an absolute URL, `//host`, an empty or `..`
+ * segment) is `null`, so `from` cannot send the reader off egret or out of
+ * the Data area. `encoded` is what follows `data:`.
+ */
+export function dataBackFrom(encoded: string): { to: string; label: string } | null {
+  let to: string;
+  try {
+    to = decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+  if (!to.startsWith(`${DATA_BASE}/`)) return null;
+  const segments = to.slice(DATA_BASE.length + 1).split(/[?#]/)[0].split("/");
+  // An empty, `.` or `..` segment (raw or encoded) is not a Data page; a router would resolve it elsewhere.
+  const dotty = (s: string) => /^(\.|%2e){1,2}$/i.test(s);
+  if (segments.some((s) => s === "" || dotty(s))) return null;
+  const segment = segments[segments.length - 1];
+  let label = segment;
+  try {
+    label = decodeURIComponent(segment);
+  } catch {
+    // A segment that is not valid percent-encoding reads as written.
+  }
+  return { to, label };
+}
+
 /** The URL of `p`. A column needs an object, and an object a schema; a level without its parent is dropped. */
 export function pathToUrl(p: ObjectPath, tab?: string): string {
   const segments = [p.catalog];

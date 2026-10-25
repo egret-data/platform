@@ -21,7 +21,7 @@ import { NOT_ENFORCED_YET } from "@/routes/governance/NotEnforced";
 import { tagUrl } from "@/routes/governance/classifications/tagUrl";
 import { Detail, ItemHeader, ItemMissing, type ItemBack } from "@/routes/governance/people/itemParts";
 import { PEOPLE_BASE } from "@/routes/governance/people/peopleUrl";
-import { DATA_BASE } from "@/routes/governance/data/objectPath";
+import { dataBackFrom } from "@/routes/governance/data/objectPath";
 import { TERM } from "@/routes/governance/glossary";
 import { effectSentence, notEnforcedWarning, PARTLY_ENFORCED, partlyEnforcedLines } from "@/routes/governance/ruleEffect";
 import { PageContainer } from "@/components/layout/PageContainer";
@@ -286,25 +286,8 @@ function parseRuleFrom(from: string | null): RuleFrom {
     return id ? { kind: "classification", id } : null;
   }
   if (from.startsWith("data:")) {
-    let to: string;
-    try {
-      to = decodeURIComponent(from.slice("data:".length));
-    } catch {
-      return null;
-    }
-    if (!to.startsWith(`${DATA_BASE}/`)) return null;
-    const segments = to.slice(DATA_BASE.length + 1).split(/[?#]/)[0].split("/");
-    // An empty, `.` or `..` segment (raw or encoded) is not a Data page; a router would resolve it elsewhere.
-    const dotty = (s: string) => /^(\.|%2e){1,2}$/i.test(s);
-    if (segments.some((s) => s === "" || dotty(s))) return null;
-    const segment = segments[segments.length - 1];
-    let label = segment;
-    try {
-      label = decodeURIComponent(segment);
-    } catch {
-      // A segment that is not valid percent-encoding reads as written.
-    }
-    return { kind: "data", back: { to, label } };
+    const back = dataBackFrom(from.slice("data:".length));
+    return back ? { kind: "data", back } : null;
   }
   return null;
 }

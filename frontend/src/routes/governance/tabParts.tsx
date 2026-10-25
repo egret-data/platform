@@ -65,6 +65,12 @@ export function Section({ title, children, headingRef }: { title: string; childr
 export const ACTIONS_CELL = "sticky right-0 w-24 bg-background";
 
 /**
+ * {@link ACTIONS_CELL} for actions labelled in words (Open, Edit, Delete;
+ * KI-131): as narrow as its buttons and never wrapped, still pinned right.
+ */
+export const LABELLED_ACTIONS_CELL = "sticky right-0 w-px whitespace-nowrap bg-background";
+
+/**
  * A table whose rows stack into cards below `sm` (People live check D6): the
  * header row is hidden and each cell is a line of its own, labelled by its
  * column through the cell's `data-label` (the first cell, the row's name,

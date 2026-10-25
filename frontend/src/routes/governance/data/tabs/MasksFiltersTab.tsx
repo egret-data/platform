@@ -31,7 +31,7 @@ import { tagReach, type CatalogState, type TagsResult } from "@/routes/governanc
 import { dataRuleUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { HandWrittenSection } from "@/routes/governance/handwritten/HandWrittenSection";
 import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
-import { ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
+import { LABELLED_ACTIONS_CELL, Section, TabError } from "@/routes/governance/tabParts";
 import { tagUnresolved } from "@/routes/governance/ruleMatch";
 import { TERM } from "@/routes/governance/glossary";
 import { NotEnforcedBadge, useRuleEnforcementIn, type EnforcementAnswer } from "@/routes/governance/NotEnforced";
@@ -365,7 +365,7 @@ function RuleTable({
           {extra ? <TableHead>{extra.head}</TableHead> : null}
           <TableHead>{TERM.exempt}</TableHead>
           {canWrite ? (
-            <TableHead className={ACTIONS_CELL}>
+            <TableHead className={LABELLED_ACTIONS_CELL}>
               <span className="sr-only">Actions</span>
             </TableHead>
           ) : null}
@@ -395,19 +395,27 @@ function RuleTable({
               )}
             </TableCell>
             {canWrite ? (
-              <TableCell className={`${ACTIONS_CELL} text-right`}>
+              <TableCell className={`${LABELLED_ACTIONS_CELL} text-right`}>
                 <div className="flex justify-end gap-1">
-                  <Button variant="ghost" size="icon" aria-label={`Edit ${rule.name}`} onClick={() => onEdit(rule)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground"
+                    aria-label={`Edit ${rule.name}`}
+                    onClick={() => onEdit(rule)}
+                  >
                     <Pencil aria-hidden className="size-4" />
+                    Edit
                   </Button>
                   <Button
                     variant="ghost"
-                    size="icon"
+                    size="sm"
                     className="text-muted-foreground hover:text-destructive"
                     aria-label={`Delete ${rule.name}`}
                     onClick={() => onDelete(rule)}
                   >
                     <Trash2 aria-hidden className="size-4" />
+                    Delete
                   </Button>
                 </div>
               </TableCell>

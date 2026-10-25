@@ -134,7 +134,9 @@ export function PrincipalPicker({
         onChange={(include) => onChange({ ...value, include })}
         kinds={kinds}
         disabled={disabled}
-        listInFlow={exempt}
+        // In an engine grant (includeOnly) the dialog's Grant button follows the
+        // field: a popup floated over it after a pick (KI-203).
+        listInFlow={exempt || includeOnly}
         searchAll={exempt}
       />
       {!exempt && !includeOnly && (
@@ -171,10 +173,10 @@ function PrincipalListEditor({
    */
   searchAll?: boolean;
   /**
-   * N26 (spec 2026-10-21-classification-ux C8.5), a rule's exemptions only:
-   * the help line sits under the search field and the suggestions follow it
-   * in the flow, instead of a popup floating over the line that explains the
-   * choice.
+   * N26 (spec 2026-10-21-classification-ux C8.5), a rule's exemptions and an
+   * engine grant's principals (KI-203): the help line sits under the search
+   * field and the suggestions follow it in the flow, instead of a popup
+   * floating over the line that explains the choice or the button below.
    */
   listInFlow?: boolean;
 }) {

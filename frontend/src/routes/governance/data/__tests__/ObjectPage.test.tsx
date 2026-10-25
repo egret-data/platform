@@ -747,14 +747,14 @@ describe("PermissionsTab", () => {
       "Inherited",
       "On columns",
     ]);
-    expect(rowsOf("Here")).toEqual([["user alice can read and write ice.sales.orders", "Allow", ""]]);
+    expect(rowsOf("Here")).toEqual([["user alice can read and write ice.sales.orders", "Allow", "OpenEditDelete"]]);
     // Catalog before schema; the assignment grant names its workspace, in its sentence too (live check D5).
     expect(rowsOf("Inherited")).toEqual([
-      ["members of workspace Finance can read ice.*Set by workspace assignment · Finance", "Catalog", "Allow", ""],
-      ["role analyst can read ice.*", "Catalog", "Allow", ""],
-      ["group contractors cannot read ice.sales.*", "Schema", "Deny", ""],
+      ["members of workspace Finance can read ice.*Set by workspace assignment · Finance", "Catalog", "Allow", "Open"],
+      ["role analyst can read ice.*", "Catalog", "Allow", "OpenEditDelete"],
+      ["group contractors cannot read ice.sales.*", "Schema", "Deny", "OpenEditDelete"],
     ]);
-    expect(rowsOf("On columns")).toEqual([["role analyst cannot read ice.sales.orders.email", "email", "Deny", ""]]);
+    expect(rowsOf("On columns")).toEqual([["role analyst cannot read ice.sales.orders.email", "email", "Deny", "OpenEditDelete"]]);
     // Nothing unrelated, and nothing from another catalog.
     // On text content, not `queryByText`: a sentence's principal names are links, so no one
     // element carries the whole sentence and `queryByText` would pass whatever the panel lists.
@@ -774,7 +774,7 @@ describe("PermissionsTab", () => {
       "href",
       "/governance/people/groups/contractors",
     );
-    expect(within(inherited).queryByRole("link", { name: /Finance/ })).not.toBeInTheDocument();
+    expect(within(inherited).queryByRole("link", { name: "Finance" })).not.toBeInTheDocument();
   });
 
   it("gives an explicit grant Edit and Delete, and a workspace-assignment grant neither", async () => {
@@ -836,7 +836,7 @@ describe("PermissionsTab", () => {
       ["user alice can read and write ice.sales.orders", "orders"],
       ["role analyst cannot read ice.sales.orders.email", "orders.email"],
     ]);
-    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", ""]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", "OpenEditDelete"]]);
     // The pattern grant can be edited and deleted where it is listed.
     expect(within(panel()).getByRole("button", { name: "Delete role analyst can read ice.sales.“*”" })).toBeInTheDocument();
     expect(within(panel()).queryByText(/ice\.hr/)).not.toBeInTheDocument();
@@ -875,7 +875,7 @@ describe("PermissionsTab", () => {
     serveData(fixture({ grants: ok([upper]) }));
     renderPage("/governance/data/ice/sales/orders?tab=permissions");
     await within(panel()).findByRole("table", { name: "Here" });
-    expect(rowsOf("Here")).toEqual([["role analyst cannot read ice.sales.Orders", "Deny"]]);
+    expect(rowsOf("Here")).toEqual([["role analyst cannot read ice.sales.Orders", "Deny", "Open"]]);
     expect(within(panel()).queryByText(/No egret grant reaches/)).not.toBeInTheDocument();
   });
 
@@ -973,6 +973,29 @@ describe("PermissionsTab", () => {
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants", "DELETE /perm/grants/g-table", "GET /perm/grants"]);
     expect(toast.success).toHaveBeenCalledWith("Grant deleted.");
   });
+  it("links each grant to its page and labels Edit and Delete in words (KI-131)", async () => {
+    serveData(fixture({ grants: ok([ON_TABLE]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    const open = within(here).getByRole("link", { name: "Open user alice can read and write ice.sales.orders" });
+    expect(open).toHaveTextContent("Open");
+    // The grant page's way back returns here (`?from=data:`, as a rule's does).
+    expect(open).toHaveAttribute(
+      "href",
+      `/governance/grants/g-table?from=${encodeURIComponent(`data:${encodeURIComponent("/governance/data/ice/sales/orders?tab=permissions")}`)}`,
+    );
+    expect(within(here).getByRole("button", { name: "Edit user alice can read and write ice.sales.orders" })).toHaveTextContent("Edit");
+    expect(within(here).getByRole("button", { name: "Delete user alice can read and write ice.sales.orders" })).toHaveTextContent("Delete");
+  });
+
+  it("links a grant to its page for a reader who cannot edit it (KI-131)", async () => {
+    serveData(fixture({ grants: ok([ON_TABLE]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(here).getByRole("link", { name: "Open user alice can read and write ice.sales.orders" })).toBeInTheDocument();
+    expect(within(here).queryByRole("button", { name: /^Edit / })).not.toBeInTheDocument();
+  });
+
   it("keeps a pattern grant apart from an inherited one, in its group and in its sentence", async () => {
     const pattern = g("g-star", { schema: "sales", table: "*" });
     serveData(fixture({ grants: ok([pattern, g("g-sales", { schema: "sales" })]) }));
@@ -980,8 +1003,8 @@ describe("PermissionsTab", () => {
     await within(panel()).findByRole("table", { name: "Matching a pattern" });
 
     expect(within(panel()).queryByRole("table", { name: "Here" })).not.toBeInTheDocument();
-    expect(rowsOf("Inherited")).toEqual([["role analyst can read ice.sales.*", "Schema", "Allow", ""]]);
-    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", ""]]);
+    expect(rowsOf("Inherited")).toEqual([["role analyst can read ice.sales.*", "Schema", "Allow", "OpenEditDelete"]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", "OpenEditDelete"]]);
   });
 
   it("says how far a pattern grant reaches before deleting it", async () => {
@@ -1086,25 +1109,33 @@ describe("MasksFiltersTab", () => {
       "Matching a pattern",
     ]);
     // Each row names its exemptions ("—" for none).
-    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "Row filter · region = 'us'", "group auditors, user alice", ""]]);
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "Row filter · region = 'us'", "group auditors, user alice", "EditDelete"]]);
     const here = within(panel()).getByRole("table", { name: "Here" });
     expect(within(here).getByRole("link", { name: "auditors" })).toHaveAttribute("href", "/governance/people/groups/auditors");
     expect(within(here).getByRole("link", { name: "alice" })).toHaveAttribute("href", "/governance/people/users/by-name/alice");
     // Masks before row filters; then catalog before schema.
     expect(rowsOf("Inherited")).toEqual([
-      ["null_salesice.sales.*", "Mask · Nullify", "Schema", "—", ""],
-      ["ice_filterice.*", "Row filter · region = 'us'", "Catalog", "—", ""],
+      ["null_salesice.sales.*", "Mask · Nullify", "Schema", "—", "EditDelete"],
+      ["ice_filterice.*", "Row filter · region = 'us'", "Catalog", "—", "EditDelete"],
     ]);
-    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "Mask · Hash", "email", "—", ""]]);
+    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "Mask · Hash", "email", "—", "EditDelete"]]);
     // A tag on the table reaches the table; a mask by a column's tag reaches that column; a row filter by it reaches nothing.
     expect(rowsOf("By classification")).toEqual([
-      ["redact_confidentialClassification CONFIDENTIAL", "Mask · Redact", "On the table", "—", ""],
-      ["redact_piiClassification PII", "Mask · Redact", "On column email", "—", ""],
+      ["redact_confidentialClassification CONFIDENTIAL", "Mask · Redact", "On the table", "—", "EditDelete"],
+      ["redact_piiClassification PII", "Mask · Redact", "On column email", "—", "EditDelete"],
     ]);
-    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "Mask · Redact", "table “ord*”", "—", ""]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "Mask · Redact", "table “ord*”", "—", "EditDelete"]]);
     expect(within(panel()).queryByText(/pii_filter|hash_customers|pg_mask|redact_secret/)).not.toBeInTheDocument();
     // The rules, then whether the listed ones are enforced (one request for every row).
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "GET /perm/rules/enforcement"]);
+  });
+
+  it("labels a rule's Edit and Delete in words (KI-131)", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(here).getByRole("button", { name: "Edit us_only" })).toHaveTextContent("Edit");
+    expect(within(here).getByRole("button", { name: "Delete us_only" })).toHaveTextContent("Delete");
   });
 
   it("says on a rule's row that no engine enforces it, once the server says so", async () => {
