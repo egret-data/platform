@@ -9,8 +9,8 @@ import { useDashboardCardData } from "@/api/useSavedChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
-import { shellSettings, withShellColumnSettings } from "@/components/chart/viz/renderConfig";
-import { withDatasetDefaults } from "@/components/dataset/columnDefaults";
+import { shellSettings } from "@/components/chart/viz/renderConfig";
+import { paramsWithDatasetDefaults } from "@/components/dataset/columnDefaults";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import type { DrillContext } from "@/components/chart/drill";
@@ -135,7 +135,7 @@ function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, au
   // rename that's actually in effect) and the render branch below share the same override.
   const overridden = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
   const eff = datasetDefaults
-    ? { ...overridden, params: withShellColumnSettings(overridden.params, withDatasetDefaults(datasetDefaults, shellSettings(overridden.params).columnSettings)) }
+    ? { ...overridden, params: paramsWithDatasetDefaults(overridden.params, datasetDefaults) }
     : overridden;
   // What the chart editor still asks for ("Set up your Bar" — Add: X-axis), from the same
   // descriptor. A chart saved without it would otherwise draw an empty card with no word of why

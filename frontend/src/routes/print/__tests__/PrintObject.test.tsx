@@ -18,9 +18,12 @@ vi.mock("@/api/render", () => ({
 // dispatches a viz spec to an ECharts option (with an `onFinished` prop added for this task) is
 // `ChartRenderer` at `@/components/chart/ChartRenderer` — see task-4-report.md for why.
 let finishHandlers: Array<() => void> = [];
+// The params each chart was drawn with, in card order.
+let drawnParams: unknown[] = [];
 vi.mock("@/components/chart/ChartRenderer", () => ({
-  ChartRenderer: ({ onFinished }: { onFinished?: () => void }) => {
+  ChartRenderer: ({ onFinished, params }: { onFinished?: () => void; params: unknown }) => {
     if (onFinished) finishHandlers.push(onFinished);
+    drawnParams.push(params);
     return <div data-testid="chart" />;
   },
 }));
@@ -40,6 +43,7 @@ beforeEach(() => {
   payloadMock.mockClear();
   dataMock.mockClear();
   finishHandlers = [];
+  drawnParams = [];
   (window as never as Record<string, unknown>).__EGRET_PRINT_READY__ = undefined;
   Object.defineProperty(document, "fonts", { value: { ready: Promise.resolve() }, configurable: true });
   // Step one describes the object; the rows arrive from step two. The split is
@@ -167,4 +171,31 @@ it("contains a chart in its fixed box, and lets a table card grow to its rows", 
   expect(bar.className).toContain("overflow-y-clip");
   expect(bar.className).not.toContain("overflow-hidden");
   expect(table.className).not.toContain("h-96");
+});
+
+// KI-301: the print page drew each chart with the chart's own settings only, so a PNG or PDF
+// report said `order_count` where the dashboard (KI-251) and the chart page say "Orders".
+it("draws a card with its dataset's display names and formats under the chart's own settings", async () => {
+  payloadMock.mockResolvedValue({
+    kind: "dashboard", id: "d1", title: "Ops", parameters: [],
+    cards: [{
+      chart_id: "c1", title: "A", viz_type: "table",
+      params: {
+        version: 2,
+        spec: { metrics: ["order_count"], dimensions: ["orderpriority"], columns: [], filters: [], orderby: [], row_limit: 10, rollup_groups: [] },
+        settings: { column_settings: { orderpriority: { column_title: "Priority" } } },
+      },
+      param_mappings: {},
+      dataset: {
+        columns: [{ column_name: "orderpriority", verbose_name: "Order priority", format: "", semantic_type: "" }],
+        metrics: [{ metric_name: "order_count", verbose_name: "Orders", format: "" }],
+      },
+    }],
+  });
+  const { findAllByTestId } = renderPrint();
+  await findAllByTestId("chart");
+  const settings = (drawnParams.at(-1) as { settings: { column_settings: Record<string, { column_title?: string }> } }).settings;
+  expect(settings.column_settings.order_count.column_title).toBe("Orders");
+  // A Column title set in the chart itself still wins, as on the dashboard.
+  expect(settings.column_settings.orderpriority.column_title).toBe("Priority");
 });

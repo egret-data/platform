@@ -226,6 +226,9 @@ pub fn automation_router() -> Router<AutomationState> {
         crate::render::payload::RenderCardRequest,
         crate::render::payload::RenderCardData,
         crate::render::payload::RenderCard,
+        crate::render::payload::RenderDataset,
+        crate::render::payload::RenderDatasetColumn,
+        crate::render::payload::RenderDatasetMetric,
     ))
 )]
 pub struct AutomationApi;
