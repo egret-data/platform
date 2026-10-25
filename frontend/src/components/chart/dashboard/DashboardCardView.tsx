@@ -9,7 +9,9 @@ import { useDashboardCardData } from "@/api/useSavedChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
-import { shellSettings } from "@/components/chart/viz/renderConfig";
+import { shellSettings, withShellColumnSettings } from "@/components/chart/viz/renderConfig";
+import { withDatasetDefaults } from "@/components/dataset/columnDefaults";
+import type { ColumnFormat } from "@/components/chart/format-types";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
@@ -43,7 +45,11 @@ export interface InlineFilterProps {
   activeId?: string | null;
 }
 
-type ChartCardTileProps = { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; inline?: InlineFilterProps };
+type ChartCardTileProps = { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; inline?: InlineFilterProps;
+  /** The chart's dataset's formats and display names (`datasetColumnDefaults`), layered under the
+   *  chart's own column settings as the chart page does (KI-290, KI-251). Absent while the dataset
+   *  loads, or when the viewer may not read it: the card then draws the chart's own settings. */
+  datasetDefaults?: Record<string, ColumnFormat> };
 
 /**
  * View-mode chart tile: fetches via the object-scoped card-data endpoint
@@ -72,7 +78,7 @@ function ChartCardTileEdit(props: ChartCardTileProps) {
   return <ChartCardTileBody {...props} data={data} />;
 }
 
-function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, inline, data }: ChartCardTileProps & { data: ChartData }) {
+function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, inline, datasetDefaults, data }: ChartCardTileProps & { data: ChartData }) {
   // Ref the render-only container (NOT the whole tile), so the PNG export targets the
   // chart's <svg> and not the export menu's own Download icon. Also keeps PNG hidden for
   // table/pivot cards (their render container has no <svg>).
@@ -127,7 +133,10 @@ function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, au
   );
   // Computed once the chart is known to exist, so both the export menu (which needs the
   // rename that's actually in effect) and the render branch below share the same override.
-  const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+  const overridden = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+  const eff = datasetDefaults
+    ? { ...overridden, params: withShellColumnSettings(overridden.params, withDatasetDefaults(datasetDefaults, shellSettings(overridden.params).columnSettings)) }
+    : overridden;
   // What the chart editor still asks for ("Set up your Bar" — Add: X-axis), from the same
   // descriptor. A chart saved without it would otherwise draw an empty card with no word of why
   // (KI-003).
@@ -203,7 +212,7 @@ function HeadingCardHost({ text, editing, autoFocus, onChange, inline }: { text:
 }
 
 /** Render one dashboard card by its card_type. */
-export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, parameters, paramValues, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, onEditText, autoFocusText, inline }: { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; onEditText?: (text: string) => void; autoFocusText?: boolean; inline?: InlineFilterProps }) {
+export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, parameters, paramValues, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, onEditText, autoFocusText, inline, datasetDefaults }: { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; onEditText?: (text: string) => void; autoFocusText?: boolean; inline?: InlineFilterProps; datasetDefaults?: Record<string, ColumnFormat> }) {
   const wrap = (body: React.ReactNode) => (autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body);
   if (card.card_type === "text") {
     const raw = asString(card.options.text) ?? "";
@@ -223,7 +232,7 @@ export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, 
   // No `inline` either: W7 hosts inline parameters on heading and question cards, and an iframe
   // is neither — a filter drawn on it would have no query to reach.
   if (card.card_type === "iframe") return <IFrameCard iframe={asString(card.options.iframe)} editing={editing} />;
-  const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, inline };
+  const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, inline, datasetDefaults };
   // View mode reads through the object-scoped card-data endpoint; edit mode runs
   // the live draft spec directly so unsaved draft cards + param injection still render.
   return editing ? <ChartCardTileEdit {...tileProps} /> : <ChartCardTileView {...tileProps} />;

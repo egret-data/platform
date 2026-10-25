@@ -284,6 +284,25 @@ export function useDatasetUsage(ws: string, id: string | null, opts?: { includeT
 }
 
 /**
+ * Each of `datasetIds`' detail, keyed by id: one request per distinct dataset however many cards
+ * share it. A dashboard draws its cards with their datasets' display names and formats (KI-290).
+ * An id still loading, or one the viewer may not read (a guest holding only the dashboard grant),
+ * has no entry, and is not retried: the card draws with the chart's own settings instead.
+ */
+export function useDatasetDetails(ws: string, datasetIds: string[]): Map<string, DatasetDetail> {
+  const ids = [...new Set(datasetIds)].sort();
+  const results = useQueries({
+    queries: ids.map((id) => getDatasetsDsGetQueryOptions(ws, id, { query: { retry: false } })),
+  });
+  const out = new Map<string, DatasetDetail>();
+  results.forEach((r, i) => {
+    const d = (r.data as { data?: DatasetDetail } | undefined)?.data;
+    if (d) out.set(ids[i], d);
+  });
+  return out;
+}
+
+/**
  * For each of `datasetIds`, the names of its columns with the **Filter** switch off (KI-096). A
  * dashboard's filter-to-card mapping draws on every card at once, so this loads one dataset per
  * distinct id, and only while `enabled` (a filter's mapping is being edited). An id still loading
