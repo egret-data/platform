@@ -24,6 +24,23 @@ const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB is generous for a {url,width,height
 // constraint, and an unbounded capture buffer for a runaway/malicious page is how you OOM it.
 const MAX_CAPTURE_HEIGHT_PX = 20000;
 
+// A PDF is printed on A4, and laid out at A4's width (KI-283). The print page draws each chart at
+// the width of the window it is opened in; Chromium then prints that layout onto the sheet, and a
+// layout wider than the sheet is shrunk to fit it. At the old 1200-1280 px screen width every
+// label, axis and table cell came out at about two thirds of its size. Opening the page in a
+// window exactly as wide as the sheet makes the layout and the paper agree, so nothing is scaled.
+// Chromium's A4 sheet is 595.92 x 842.88 pt, i.e. 794.56 x 1123.84 CSS px (96 px to the inch);
+// the window is floored to whole pixels so the layout is never wider than the sheet.
+const A4_WIDTH_PX = 794;
+const A4_HEIGHT_PX = 1123;
+// Top and bottom only: the print page carries its own side padding, and a page break needs room
+// above and below the card it lands on.
+const PDF_OPTIONS = {
+  format: "A4",
+  printBackground: true,
+  margin: { top: "10mm", bottom: "10mm", left: "0", right: "0" },
+};
+
 // A report covering more objects than this is almost certainly a mistake, and
 // each one costs a full page load in a pod sized for two at a time.
 const MAX_URLS = Number(process.env.RENDER_MAX_URLS || 20);
@@ -93,8 +110,11 @@ async function renderOnce({ url, width, height, format, scale, readyTimeoutMs })
   let context;
   try {
     const browser = await getBrowser();
-    const viewportWidth = Number.isFinite(width) && width > 0 ? Math.round(width) : 1280;
-    const viewportHeight = Number.isFinite(height) && height > 0 ? Math.round(height) : 800;
+    // A PDF ignores the requested size: its page is the sheet (see `A4_WIDTH_PX`). The requested
+    // width is an image's width, and only a PNG is an image.
+    const pdf = format === "pdf";
+    const viewportWidth = pdf ? A4_WIDTH_PX : Number.isFinite(width) && width > 0 ? Math.round(width) : 1280;
+    const viewportHeight = pdf ? A4_HEIGHT_PX : Number.isFinite(height) && height > 0 ? Math.round(height) : 800;
     context = await browser.newContext({
       viewport: { width: viewportWidth, height: viewportHeight },
       deviceScaleFactor: Number.isFinite(scale) && scale > 0 ? scale : 1,
@@ -189,8 +209,9 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs, viewport
     // Deliberately NOT given the same content-height treatment as the PNG path below: `page.pdf`
     // lays out onto paper-sized pages via print CSS and paginates automatically (it has never
     // used the screenshot viewport as an image canvas), so it cannot exhibit "content shorter
-    // than a fixed capture height" — there is no equivalent white band to fix here.
-    const buffer = await page.pdf({ printBackground: true });
+    // than a fixed capture height" — there is no equivalent white band to fix here. The sheet is
+    // the one the window was sized to, so the layout prints 1:1.
+    const buffer = await page.pdf(PDF_OPTIONS);
     return { buffer, contentType: "application/pdf" };
   }
 
@@ -230,14 +251,20 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs, viewport
  * hand-made request cannot produce something misleading.
  */
 async function renderMany({ urls, width, height, format, scale, readyTimeoutMs, withSlot }) {
+  // Each object is captured as wide as the sheet it is placed on, for the same reason a
+  // single-object PDF is laid out at it: an image wider than the sheet is shrunk to fit (KI-283).
+  // A tall object is still scaled down to one sheet, by design (see below).
+  const pdf = format === "pdf";
+  const shotWidth = pdf ? A4_WIDTH_PX : width;
+  const shotHeight = pdf ? A4_HEIGHT_PX : height;
   const shots = [];
   for (const url of urls) {
     const { buffer } = await withSlot(() =>
-      renderOnce({ url, width, height, format: "png", scale, readyTimeoutMs }),
+      renderOnce({ url, width: shotWidth, height: shotHeight, format: "png", scale, readyTimeoutMs }),
     );
     shots.push(buffer);
   }
-  if (format !== "pdf") {
+  if (!pdf) {
     return { buffer: shots[0], contentType: "image/png" };
   }
 
@@ -267,14 +294,16 @@ async function renderMany({ urls, width, height, format, scale, readyTimeoutMs, 
   return await withSlot(async () => {
     const b = await getBrowser();
     const context = await b.newContext({
-      viewport: { width: Math.round(width) || 1280, height: 800 },
+      viewport: { width: A4_WIDTH_PX, height: A4_HEIGHT_PX },
     });
     try {
       const page = await context.newPage();
       // `setContent` with no network waits: the images are data URIs, so there
       // is nothing to fetch and `networkidle` would just add a timeout.
       await page.setContent(doc, { waitUntil: "load" });
-      const buffer = await page.pdf({ printBackground: true });
+      // Full-bleed sheets (`@page{margin:0}` above): each capture carries the print page's own
+      // padding, so the margin is already in the image.
+      const buffer = await page.pdf({ format: "A4", printBackground: true });
       return { buffer, contentType: "application/pdf" };
     } finally {
       await context.close();

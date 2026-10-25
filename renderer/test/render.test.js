@@ -59,7 +59,21 @@ const FIXTURES = {
     </div>
     <script>window.__EGRET_PRINT_READY__ = true;</script>
   </body></html>`,
+  // Reports the width it was laid out at before it signals readiness — the width a real chart
+  // sizes its canvas to. `k` keeps one test's reports apart from another's.
+  "/width": `<!doctype html><html><body style="margin:0">
+    <div data-print-root><div style="height:200px;background:#111"></div></div>
+    <script>
+      const k = new URLSearchParams(location.search).get("k");
+      fetch("/seen?k=" + k + "&w=" + window.innerWidth).then(() => {
+        window.__EGRET_PRINT_READY__ = true;
+      });
+    </script>
+  </body></html>`,
 };
+
+/** `/width` reports, by key: the innerWidth of every page that loaded with that key. */
+const seenWidths = new Map();
 
 let fixtureServer;
 let fixtureBase;
@@ -71,6 +85,14 @@ let shortAppBase;
 before(async () => {
   fixtureServer = createServer((req, res) => {
     const path = (req.url || "/").split("?")[0];
+    if (path === "/seen") {
+      const q = new URL(req.url, "http://fixture").searchParams;
+      const k = q.get("k");
+      seenWidths.set(k, [...(seenWidths.get(k) ?? []), Number(q.get("w"))]);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     const body = FIXTURES[path];
     if (!body) {
       res.writeHead(404, { "content-type": "text/plain" });
@@ -330,4 +352,50 @@ test("a png request with several urls is refused rather than answered with one o
   // The single-image fallback is documented behaviour, so assert what it
   // actually is rather than pretending it errors.
   assert.equal(body.toString("ascii", 1, 4), "PNG");
+});
+
+/** The first page's size in CSS px (a PDF's MediaBox is in points, 72 to the inch; CSS has 96). */
+function pdfPageSizePx(buf) {
+  const m = buf.toString("latin1").match(/\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/);
+  assert.ok(m, "no MediaBox in the PDF");
+  return { width: (Number(m[1]) * 96) / 72, height: (Number(m[2]) * 96) / 72 };
+}
+
+// KI-283: a PDF used to be laid out at the requested screen width (1200 px for a dashboard), so
+// every chart drew its canvas that wide, and Chromium then shrank the whole page to fit the
+// sheet: labels and axes came out at about two thirds of their size. The page must be laid out
+// at the width of the sheet it is printed on, so the PDF prints it 1:1.
+test("a PDF is laid out at the width of its own A4 sheet, not the requested screen width", async () => {
+  const { status, body } = await postRender(appBase, {
+    url: `${fixtureBase}/width?k=pdf-one`,
+    width: 1200,
+    height: 800,
+    format: "pdf",
+  });
+  assert.equal(status, 200);
+  const page = pdfPageSizePx(body);
+  // Chromium's A4: 8.27 x 11.7 in, 595.92 x 842.88 pt.
+  assert.ok(Math.abs(page.width - 794.56) < 0.1 && Math.abs(page.height - 1123.84) < 0.1, `not A4: ${JSON.stringify(page)}`);
+  const [laidOut] = seenWidths.get("pdf-one") ?? [];
+  assert.ok(laidOut <= page.width && laidOut > page.width - 1, `laid out at ${laidOut}px on a ${page.width}px sheet`);
+});
+
+test("several objects in one PDF are each captured at the width of the sheet they are placed on", async () => {
+  const { status, body } = await postRender(appBase, {
+    urls: [`${fixtureBase}/width?k=pdf-many`, `${fixtureBase}/width?k=pdf-many`],
+    width: 1200,
+    height: 800,
+    format: "pdf",
+  });
+  assert.equal(status, 200);
+  const page = pdfPageSizePx(body);
+  const widths = seenWidths.get("pdf-many") ?? [];
+  assert.equal(widths.length, 2);
+  for (const w of widths) assert.ok(w <= page.width && w > page.width - 1, `captured at ${w}px for a ${page.width}px sheet`);
+});
+
+test("a PNG keeps the requested width: it is an image, not a sheet", async () => {
+  const { status } = await postRender(appBase, { url: `${fixtureBase}/width?k=png`, width: 1200, height: 800 });
+  assert.equal(status, 200);
+  assert.deepEqual(seenWidths.get("png"), [1200]);
 });

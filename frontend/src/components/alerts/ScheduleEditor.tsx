@@ -1548,7 +1548,7 @@ export function ScheduleEditor({
                     label="Image width (px)"
                     htmlFor="sched-width"
                     details="Width of the rendered image. Needs a height too."
-                    more="Leave either size blank and both fall back to the default size."
+                    more="Leave either size blank and both fall back to the default size. A PDF is laid out on an A4 page and uses neither."
                   >
                     <Input
                       id="sched-width"
@@ -1562,7 +1562,7 @@ export function ScheduleEditor({
                     label="Image height (px)"
                     htmlFor="sched-height"
                     details="Height of the rendered image. Needs a width too."
-                    more="Leave either size blank and both fall back to the default size."
+                    more="Leave either size blank and both fall back to the default size. A PDF is laid out on an A4 page and uses neither."
                   >
                     <Input
                       id="sched-height"
