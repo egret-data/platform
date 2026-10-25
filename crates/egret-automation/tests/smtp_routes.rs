@@ -356,12 +356,15 @@ async fn saving_again_without_a_password_keeps_the_stored_one(pool: sqlx::PgPool
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_unconfigured_workspace_is_a_404_not_an_empty_config(pool: sqlx::PgPool) {
+async fn an_unconfigured_workspace_is_a_204_not_an_empty_config(pool: sqlx::PgPool) {
     // "Not configured" and "configured with blanks" must be distinguishable, or
     // the settings page cannot tell the user which one they are looking at.
+    // It is 204, not 404 (KI-212): every workspace starts unconfigured, and a
+    // 404 on each visit of the settings page logged a console error.
     let fx = setup(pool).await;
-    let (s, _) = req(&fx, &fx.admin_tok, "GET", &path(&fx), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, body) = req(&fx, &fx.admin_tok, "GET", &path(&fx), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -433,7 +436,7 @@ async fn deleting_the_config_makes_it_unconfigured_again(pool: sqlx::PgPool) {
     let (s, _) = req(&fx, &fx.admin_tok, "DELETE", &path(&fx), None).await;
     assert_eq!(s, StatusCode::OK);
     let (s, _) = req(&fx, &fx.admin_tok, "GET", &path(&fx), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::NO_CONTENT);
 }
 
 fn slack_path(fx: &Fx) -> String {
@@ -500,6 +503,15 @@ async fn saving_slack_without_a_token_keeps_the_stored_one(pool: sqlx::PgPool) {
 ///
 /// A config row whose whole purpose is to hold a credential, holding none, is
 /// a workspace that looks configured and silently cannot deliver.
+/// KI-212: as SMTP's, an unconfigured Slack app is a 204, not a 404.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unconfigured_slack_app_is_a_204(pool: sqlx::PgPool) {
+    let fx = setup(pool).await;
+    let (s, body) = req(&fx, &fx.admin_tok, "GET", &slack_path(&fx), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_first_slack_save_without_a_token_is_refused(pool: sqlx::PgPool) {
     let fx = setup(pool).await;

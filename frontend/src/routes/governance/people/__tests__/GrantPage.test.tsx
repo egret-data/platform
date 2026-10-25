@@ -277,6 +277,19 @@ describe("GrantPage: states", () => {
     expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
   });
 
+  test("opened from the Data page, its way back returns there (KI-131)", () => {
+    serveGrants([grant()]);
+    const back = "/governance/data/wh/sales?tab=permissions";
+    renderPage(`g1?from=${encodeURIComponent(`data:${encodeURIComponent(back)}`)}`);
+    expect(screen.getByRole("link", { name: "Back to sales" })).toHaveAttribute("href", back);
+  });
+
+  test("a `from` outside the Data area falls back to People & groups", () => {
+    serveGrants([grant()]);
+    renderPage(`g1?from=${encodeURIComponent(`data:${encodeURIComponent("//evil.example/x")}`)}`);
+    expect(screen.getByRole("link", { name: "Back to People & groups" })).toHaveAttribute("href", "/governance/people");
+  });
+
   test("a failed read shows its error with a retry, never the missing state", () => {
     vi.mocked(permApi.usePermListGrants).mockReturnValue({
       data: undefined,

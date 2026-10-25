@@ -157,10 +157,10 @@ export default function EndpointCreate() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="new-ep-db">Database</Label>
+              <Label htmlFor="new-ep-db">Connection</Label>
               <Select value={databaseId} onValueChange={setDatabaseId}>
-                <SelectTrigger id="new-ep-db" aria-label="Database">
-                  <SelectValue placeholder="Choose a database" />
+                <SelectTrigger id="new-ep-db" aria-label="Connection">
+                  <SelectValue placeholder="Choose a connection" />
                 </SelectTrigger>
                 <SelectContent>
                   {/* The option is still OFFERED when it is governed and the

@@ -292,7 +292,7 @@ export default function Datasets() {
                   ]}
                 />
                 <FacetSelect
-                  label="Database"
+                  label="Connection"
                   value={dbFilter}
                   onChange={setDbFilter}
                   options={(databases ?? []).map((d) => ({ value: d.id, label: `${d.name} (${d.engine})` }))}
@@ -332,7 +332,7 @@ export default function Datasets() {
                   {bulk.bulkMode && !showTrash && <th className="w-8 py-1"><Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" /></th>}
                   <SortableHeader sortKey="name" label="Name" current={sort} onSort={setSortKey} />
                   <th>Kind</th>
-                  <th>Database</th>
+                  <th>Connection</th>
                   <th>Source</th>
                   <SortableHeader sortKey="column_count" label="Columns" current={sort} onSort={setSortKey} />
                   <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={setSortKey} />

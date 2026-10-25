@@ -151,7 +151,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
           <DeclaredCatalogs engine={engine} />
         </TabsContent>
         <TabsContent value="plugin-config">
-          <EnginePluginConfig engineId={engine.id} />
+          <EnginePluginConfig engineId={engine.id} onOpenSettings={() => setTab("settings")} />
         </TabsContent>
         <TabsContent value="settings">
           <ExternalSettings engine={engine} profilesQ={profilesQ} bound={bound} />

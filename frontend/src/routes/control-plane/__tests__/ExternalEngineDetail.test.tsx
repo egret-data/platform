@@ -211,18 +211,37 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("tok-must-never-render");
   });
 
-  test("Plugin config with no profile bound says to bind one, in the server's words", async () => {
+  test("Plugin config with no profile bound says why in a sentence and offers Settings (KI-204)", async () => {
     stubFetch(
       routes({
         "GET /api/control-plane/policies/services": { body: PROFILES },
+        // The server's own words, as it sends them.
         "GET /api/control-plane/engines/x1/ranger-plugin-config": {
           status: 409,
-          body: { error: "Bind a profile first: the plugin asks for a service by its name." },
+          body: { error: "conflict: engine legacy-trino is bound to no policy profile: bind a profile first" },
         },
       }),
     );
+    const user = userEvent.setup();
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
-    expect(await screen.findByText(/Bind a profile first/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "No policy profile is bound to this engine yet. The plugin configuration names the profile's Ranger service, so bind a profile first.",
+      ),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("conflict:");
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("Plugin config shows any other refusal in the server's words", async () => {
+    stubFetch(
+      routes({
+        "GET /api/control-plane/engines/x1/ranger-plugin-config": { status: 500, body: { error: "the vault is sealed" } },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    expect(await screen.findByText("the vault is sealed")).toBeInTheDocument();
   });
 
   test("Settings: saving sends only what changed", async () => {

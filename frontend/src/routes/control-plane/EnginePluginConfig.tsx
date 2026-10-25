@@ -64,20 +64,34 @@ function FileBlock({ file }: { file: RangerPluginFileDto }) {
  * documented fields are rendered, so a credential can never reach the screen: the
  * server sends none, and this component reads none.
  */
-export function EnginePluginConfig({ engineId }: { engineId: string }) {
+export function EnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
   const q = useControlPlaneEnginesRangerPluginConfig<controlPlaneEnginesRangerPluginConfigResponse, ApiError>(
     engineId,
     { query: { retry: false } },
   );
 
   // FE-STATE-1: error first, so a failed read never renders as "nothing to install".
+  // On an external engine the one 409 is "bound to no policy profile": a step the
+  // operator has not taken yet, said in a sentence with the way to it (KI-204),
+  // not the server's `conflict: …` text.
+  if (q.isError && q.error?.status === 409)
+    return (
+      <Alert data-testid="plugin-config-no-profile">
+        <AlertDescription className="space-y-2">
+          <p>
+            No policy profile is bound to this engine yet. The plugin configuration names the profile&apos;s Ranger
+            service, so bind a profile first.
+          </p>
+          <Button size="sm" variant="outline" onClick={onOpenSettings}>
+            Open Settings
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
   if (q.isError)
     return (
       <Alert variant="destructive" data-testid="plugin-config-error">
-        <AlertDescription>
-          {q.error?.message ?? "Could not read the plugin configuration."}
-          {q.error?.status === 409 ? " Bind a policy profile on the Settings tab, then come back." : ""}
-        </AlertDescription>
+        <AlertDescription>{q.error?.message ?? "Could not read the plugin configuration."}</AlertDescription>
       </Alert>
     );
   if (q.isLoading || !q.data) return <ListSkeleton rows={4} cols={2} />;

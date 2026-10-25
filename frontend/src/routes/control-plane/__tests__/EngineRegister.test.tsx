@@ -178,7 +178,8 @@ describe("EngineRegister", () => {
     // Escape does not close it, and the way out is disabled, saying why.
     await user.keyboard("{Escape}");
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
-    const done = within(dialog).getByRole("button", { name: "Open plugin configuration" });
+    // Registered without a profile: the next step is binding one (KI-204), not the plugin files.
+    const done = within(dialog).getByRole("button", { name: "Bind a policy profile" });
     expect(done).toBeDisabled();
     expect(done).toHaveAccessibleDescription(/does not show this password again/);
 
@@ -187,7 +188,7 @@ describe("EngineRegister", () => {
     await user.click(done);
 
     await waitFor(() =>
-      expect(screen.getByTestId("location")).toHaveTextContent("/control-plane/engines/x1?tab=plugin-config"),
+      expect(screen.getByTestId("location")).toHaveTextContent("/control-plane/engines/x1?tab=settings"),
     );
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(document.body.innerHTML).not.toContain(CRED.password);
@@ -195,6 +196,32 @@ describe("EngineRegister", () => {
     expect(cacheText(client)).not.toContain(CRED.password);
     expect(storageText()).not.toContain(CRED.password);
     expect(logged.some((line) => line.includes(CRED.password))).toBe(false);
+  });
+
+  test("registered with a profile, the credential dialog leads to the plugin configuration", async () => {
+    stubFetch({
+      ...READS,
+      "POST /api/control-plane/engines/external": { status: 201, body: registered("x1") },
+    });
+    const user = userEvent.setup();
+    render(
+      <Harness entry="/control-plane/engines/register">
+        <Routes>
+          <Route path="/control-plane/engines/register" element={<EngineRegister />} />
+          <Route path="/control-plane/engines/:id" element={<LocationProbe />} />
+        </Routes>
+      </Harness>,
+    );
+    await fillRequired(user);
+    await user.click(await screen.findByRole("combobox", { name: "Policy profile" }));
+    await user.click(await screen.findByRole("option", { name: /trino-main/ }));
+    await user.click(screen.getByRole("button", { name: "Register engine" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("checkbox", { name: "I have saved the password and the credential id" }));
+    await user.click(within(dialog).getByRole("button", { name: "Open plugin configuration" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent("/control-plane/engines/x1?tab=plugin-config"),
+    );
   });
 
   test("a 400 shows the server's sentence beside the form and keeps every field", async () => {

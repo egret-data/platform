@@ -221,6 +221,24 @@ describe("PrincipalPicker", () => {
     expect(await within(listbox).findByRole("option", { name: /^analysts/ })).toBeInTheDocument();
   });
 
+  // KI-203: in Grant engine permission (includeOnly) the open list floated over the dialog's
+  // Grant button after a pick. jsdom has no layout, so the check reads what positions it.
+  test("includeOnly lists the suggestions in the flow, so the open list pushes what follows down", async () => {
+    const user = userEvent.setup();
+    renderPicker({ includeOnly: true });
+    await user.type(screen.getByRole("combobox", { name: "Include user search" }), "alice");
+    const listbox = await screen.findByRole("listbox", { name: "Include user suggestions" });
+    expect(listbox.parentElement).not.toHaveClass("absolute");
+  });
+
+  test("a grant's Include list still pops up over the Exclude list below it", async () => {
+    const user = userEvent.setup();
+    renderPicker();
+    await user.type(screen.getByRole("combobox", { name: "Include user search" }), "alice");
+    const listbox = await screen.findByRole("listbox", { name: "Include user suggestions" });
+    expect(listbox.parentElement).toHaveClass("absolute");
+  });
+
   test("selecting a user suggestion stores the server-allocated username, not the email, and shows which value is stored", async () => {
     const user = userEvent.setup();
     const { onChange } = renderPicker();

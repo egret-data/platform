@@ -799,6 +799,18 @@ async fn send_once(req: reqwest::RequestBuilder) -> Attempt {
             );
             return Attempt::Done(Err(EngineError::AuthFailed(reason)));
         }
+        // KI-001: Trino (airlift) answers 406 to a request carrying an
+        // `X-Forwarded-*` header unless `http-server.process-forwarded=true`,
+        // and egret sends `X-Forwarded-Proto` on every plain-HTTP request (see
+        // `auth`). A bare "http 406" told the operator nothing; name the setting.
+        if status == reqwest::StatusCode::NOT_ACCEPTABLE {
+            return Attempt::Done(Err(EngineError::Engine(
+                "Trino refused the X-Forwarded-Proto header egret sends over plain HTTP (HTTP 406). \
+                 Set http-server.process-forwarded=true in the coordinator's config.properties, \
+                 or connect over https."
+                    .to_string(),
+            )));
+        }
         return Attempt::Done(Err(EngineError::Engine(format!("http {status}"))));
     }
     Attempt::Done(
@@ -1273,6 +1285,36 @@ mod tests {
             _ => panic!("401 must be AuthFailed"),
         }
         assert!(matches!(r403, Attempt::Done(Err(EngineError::Forbidden))));
+    }
+
+    /// KI-001: a Trino without `http-server.process-forwarded=true` refuses the
+    /// `X-Forwarded-Proto` header with a 406 (airlift's
+    /// `RejectForwardedRequestCustomizer`, measured on Trino 483). The error
+    /// names the setting instead of a bare "http 406".
+    #[tokio::test]
+    async fn engine_406_names_the_process_forwarded_setting() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let app = Router::new().route(
+            "/s",
+            get(|| async {
+                (
+                    StatusCode::NOT_ACCEPTABLE,
+                    "<html><title>Error 406 Server configuration does not allow processing of the X-Forwarded-Proto header</title></html>",
+                )
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = tokio::spawn(async move { axum::serve(l, app).await });
+        let r = send_once(reqwest::Client::new().get(format!("http://{addr}/s"))).await;
+        srv.abort();
+        match r {
+            Attempt::Done(Err(EngineError::Engine(msg))) => {
+                assert!(msg.contains("http-server.process-forwarded=true"), "{msg}");
+                assert!(msg.contains("X-Forwarded-Proto"), "{msg}");
+            }
+            _ => panic!("406 must be an engine error naming the setting"),
+        }
     }
 
     // --- offline request shape (fix round 1, Minor 2) ---

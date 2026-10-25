@@ -24,14 +24,14 @@ import { ScrollStrip } from "@/components/ui/scroll-cue";
 type SettingsItem = { to: string; label: string; icon: LucideIcon; perm?: string };
 type SettingsGroup = { heading: string; items: SettingsItem[] };
 
-/** Members, roles, requests, shares, engine connections and notification
+/** Members, roles, requests, shares, connections and notification
  *  channels are all `workspace:manage_members` on the server. */
 const MANAGE = "workspace:manage_members";
 
 /**
  * Workspace settings sections, grouped by mental model rather than listed flat:
  * "Access" (who's in the workspace and what they can do) is the day-to-day work,
- * "Connections" is infrastructure wiring, "Workspace" is the identity of the
+ * "Data" is infrastructure wiring (the connections), "Workspace" is the identity of the
  * space itself. Grouping keeps the six sections scannable and leaves obvious
  * homes for future settings.
  */
@@ -46,8 +46,10 @@ const GROUPS: SettingsGroup[] = [
     ],
   },
   {
-    heading: "Connections",
-    items: [{ to: "engines", label: "Engines", icon: Database, perm: MANAGE }],
+    // Decision D5 (KI-007): the workspace level says Connections; the Control
+    // Plane says Engines. The path stays `engines`, so old links still open it.
+    heading: "Data",
+    items: [{ to: "engines", label: "Connections", icon: Database, perm: MANAGE }],
   },
   {
     heading: "Workspace",

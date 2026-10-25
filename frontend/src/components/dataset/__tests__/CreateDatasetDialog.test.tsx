@@ -34,7 +34,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof CreateDatasetDi
 test("physical mode: name input + database picker are present", () => {
   renderDialog();
   expect(screen.getByPlaceholderText("Dataset name")).toBeInTheDocument();
-  expect(screen.getByText("Database")).toBeInTheDocument();
+  expect(screen.getByText("Connection")).toBeInTheDocument();
 });
 
 test("physical mode: no SQL editor, but a link to SQL Lab for custom queries", () => {

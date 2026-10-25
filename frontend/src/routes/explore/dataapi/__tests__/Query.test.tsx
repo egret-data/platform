@@ -721,7 +721,7 @@ describe("Query section — layout", () => {
     } as never);
 
     renderQuery(endpoint);
-    expect(await screen.findByLabelText("Database")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Connection")).toBeInTheDocument();
     expect(screen.getByLabelText("SQL")).toBeInTheDocument();
     // The DECLARATION, from ParamEditor…
     expect(screen.getByDisplayValue("region")).toBeInTheDocument();
@@ -1699,7 +1699,7 @@ describe("Query section — the editor, the split and the preview", () => {
 
   it("puts the database picker in a config table row rather than loose above the editor", async () => {
     show(makeEndpoint());
-    const picker = await screen.findByLabelText("Database");
+    const picker = await screen.findByLabelText("Connection");
 
     // "Everything except the SQL becomes a table" — the picker is a
     // `Setting | Details | Value` row, so it is inside a table with the
@@ -1707,7 +1707,7 @@ describe("Query section — the editor, the split and the preview", () => {
     const cell = picker.closest("td");
     expect(cell).not.toBeNull();
     const row = cell!.closest("tr")!;
-    expect(within(row).getByText("Database")).toBeInTheDocument();
+    expect(within(row).getByText("Connection")).toBeInTheDocument();
     // And it is in the strip, above the split, not inside either panel.
     for (const panel of screen.getAllByTestId("panel")) {
       expect(panel.contains(picker)).toBe(false);
@@ -1731,13 +1731,13 @@ describe("Query section — the editor, the split and the preview", () => {
         { name: "region", type: ParamType.string, location: ParamLocation.query, required: true },
       ],
     }));
-    const summary = await screen.findByText(/Database and parameters/);
+    const summary = await screen.findByText(/Connection and parameters/);
     const details = summary.closest("details")!;
 
     expect(details.open).toBe(false);
     // The count is what makes a collapsed strip honest — the reader can see
     // there is one declaration in there without opening it.
-    expect(summary).toHaveTextContent("Database and parameters (1)");
+    expect(summary).toHaveTextContent("Connection and parameters (1)");
   });
 
   it("names the database and the parameters in the closed strip, not only their count (KI-031)", async () => {

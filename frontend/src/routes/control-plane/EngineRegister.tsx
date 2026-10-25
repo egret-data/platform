@@ -55,7 +55,8 @@ const NO_PROFILE = "__none__";
  * it is copied into this page's state, the mutation is reset (and kept by no
  * cache, `gcTime: 0`), and a dialog that only closes once the operator says
  * they saved it shows it. Then the page goes to the engine's Plugin config tab
- * and the password is gone with it.
+ * (its Settings tab when no profile was bound: the plugin configuration needs
+ * one, KI-204) and the password is gone with it.
  */
 export default function EngineRegister() {
   const navigate = useNavigate();
@@ -71,7 +72,12 @@ export default function EngineRegister() {
   const [otherVersion, setOtherVersion] = useState("");
   const [profileId, setProfileId] = useState("");
   const [catalogIds, setCatalogIds] = useState<string[]>([]);
-  const [issued, setIssued] = useState<{ engineId: string; credential: RangerCredentialDto } | null>(null);
+  const [issued, setIssued] = useState<{
+    engineId: string;
+    credential: RangerCredentialDto;
+    /** Registered with a profile bound; without one the plugin configuration cannot be rendered yet. */
+    profiled: boolean;
+  } | null>(null);
 
   const profilesQ = useQuery<Profile[], ApiError>({
     queryKey: profilesQueryKey,
@@ -94,7 +100,11 @@ export default function EngineRegister() {
         void queryClient.invalidateQueries({ queryKey: profilesQueryKey });
         if (res.status === 201) {
           const { username, password, credentialId } = res.data.rangerCredential;
-          setIssued({ engineId: res.data.id, credential: { username, password, credentialId } });
+          setIssued({
+            engineId: res.data.id,
+            credential: { username, password, credentialId },
+            profiled: chosenProfile !== undefined,
+          });
         }
         // Drop the response from the hook: from here on, `issued` is its only holder.
         register.reset();
@@ -394,11 +404,14 @@ export default function EngineRegister() {
         engineType={type}
         title="Engine registered: save its Ranger credential"
         intro="Copy it now: egret shows this password once. The engine's Ranger plugin presents it to egret to download policies; without it, the download is refused."
-        doneLabel="Open plugin configuration"
+        // Without a profile the plugin configuration cannot be rendered, so the
+        // next step is binding one, on the engine's Settings tab (KI-204).
+        doneLabel={issued?.profiled === false ? "Bind a policy profile" : "Open plugin configuration"}
         onDone={() => {
           const id = issued?.engineId;
+          const tab = issued?.profiled === false ? "settings" : "plugin-config";
           setIssued(null);
-          if (id) navigate(`/control-plane/engines/${id}?tab=plugin-config`);
+          if (id) navigate(`/control-plane/engines/${id}?tab=${tab}`);
         }}
       />
     </PageContainer>
