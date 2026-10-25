@@ -316,7 +316,7 @@
       "maxAttempts": "honoured",
       "maxDuration": "honoured",
       "type": "honoured",
-      "warningOnRetry": "honoured"
+      "warningOnRetry": "ignored"
     },
     "io.kestra.core.models.tasks.retrys.Exponential-2": {
       "behavior": "honoured",
@@ -326,7 +326,7 @@
       "maxDuration": "honoured",
       "maxInterval": "honoured",
       "type": "honoured",
-      "warningOnRetry": "honoured"
+      "warningOnRetry": "ignored"
     },
     "io.kestra.core.models.tasks.retrys.Random-2": {
       "behavior": "honoured",
@@ -335,7 +335,7 @@
       "maxInterval": "honoured",
       "minInterval": "honoured",
       "type": "honoured",
-      "warningOnRetry": "honoured"
+      "warningOnRetry": "ignored"
     },
     "io.kestra.core.models.triggers.Window": {
       "deadline": "honoured",

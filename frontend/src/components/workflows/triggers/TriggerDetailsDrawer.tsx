@@ -19,6 +19,7 @@ import {
   ticksText,
   webhookNote,
   webhookPath,
+  firesNext,
   type FlowContext,
 } from "@/components/workflows/triggers/triggersModel";
 import dayjs from "dayjs";
@@ -68,7 +69,7 @@ function Facts({ items }: { items: [string, ReactNode][] }) {
   );
 }
 
-function ScheduleFacts({ schedule, runtimeDisabled }: { schedule: ScheduleInfoDto; runtimeDisabled: boolean }) {
+function ScheduleFacts({ schedule, runtimeDisabled, fires }: { schedule: ScheduleInfoDto; runtimeDisabled: boolean; fires: boolean }) {
   const next = schedule.next_evaluation_date;
   const zoned = next ? inZone(next, schedule.timezone) : null;
   const items: [string, ReactNode][] = [
@@ -76,7 +77,10 @@ function ScheduleFacts({ schedule, runtimeDisabled }: { schedule: ScheduleInfoDt
     ["Timezone", schedule.timezone],
     [
       "Next run",
-      next ? (
+      // A trigger that does not fire has no next run (KI-189); its stored date is where it resumes.
+      !fires ? (
+        "None: the trigger does not fire (see its status)"
+      ) : next ? (
         <span className="grid">
           <span>
             {zoned ?? "—"} <span className="text-muted-foreground">(the trigger's timezone)</span>
@@ -393,7 +397,7 @@ export function TriggerDetailsDrawer({
               </Section>
               {entry.schedule ? (
                 <Section title="Schedule">
-                  <ScheduleFacts schedule={entry.schedule} runtimeDisabled={entry.runtime_disabled} />
+                  <ScheduleFacts schedule={entry.schedule} runtimeDisabled={entry.runtime_disabled} fires={firesNext(entry, ctx)} />
                 </Section>
               ) : null}
               {entry.schedule && entry.backfill ? (

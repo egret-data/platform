@@ -67,7 +67,7 @@ export function BackfillCell({
   if (!onBackfill) return <span className="text-muted-foreground">—</span>;
   const enablement = backfillEnablement(row, manage);
   return (
-    <span className="inline-flex flex-wrap items-center gap-2">
+    <span className="inline-flex items-center gap-2">
       <Button
         type="button"
         size="sm"
@@ -79,8 +79,10 @@ export function BackfillCell({
       >
         Backfill
       </Button>
+      {/* The reason is the button's description and its tooltip (FE-ACTION-4), not a second line
+          under it: the row stays one line high and the table fits (KI-190). */}
       {enablement.ok ? null : (
-        <span id={reasonId} className="text-xs text-muted-foreground">
+        <span id={reasonId} className="sr-only">
           {enablement.reason}
         </span>
       )}

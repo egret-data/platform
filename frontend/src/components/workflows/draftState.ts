@@ -13,6 +13,13 @@ import type { ServerValidation } from "@/components/workflows/editor/useServerVa
  * compare and restore; it changes nothing that runs.
  */
 
+/**
+ * What a version is, for the flow header (KI-014): said where the number is, before the first
+ * version exists, so "Create version" and "Run the saved draft" can be read against it.
+ */
+export const VERSION_HELP =
+  "A version is a numbered snapshot of the saved draft, to compare and restore. Runs, schedules and webhooks always use the saved draft, whether or not it has a version.";
+
 /** An action is allowed, or refused with the sentence the control shows. */
 export type Enablement = { ok: true } | { ok: false; reason: string };
 

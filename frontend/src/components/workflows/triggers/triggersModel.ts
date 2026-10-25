@@ -65,7 +65,29 @@ export function statusText(entry: TriggerEntryDto, ctx: FlowContext): string {
   return "Active";
 }
 
+/**
+ * Whether a trigger fires at all (KI-189): not off in its YAML or by the runtime switch, and its
+ * flow neither disabled nor in the trash. A trigger that does not fire shows no next run.
+ */
+export function firesNext(
+  entry: Pick<TriggerEntryDto, "yaml_disabled" | "runtime_disabled">,
+  ctx: FlowContext,
+): boolean {
+  return !entry.yaml_disabled && !entry.runtime_disabled && !ctx.flowDisabled && !ctx.flowDeleted;
+}
+
 export const MANAGE_REASON = "You need workflow:manage";
+
+/**
+ * Why the bulk actions wait (KI-226): said once for all of them, not once per button. They are
+ * shown only to a caller holding `workflow:manage`, the only one who can select.
+ */
+export const SELECT_TRIGGERS_HINT = "Select triggers to switch them or change their backfills";
+
+/** The bulk actions' enablement: on with a selection, else waiting for one. */
+export function bulkEnablement(selected: number): Enablement {
+  return selected === 0 ? { ok: false, reason: SELECT_TRIGGERS_HINT } : { ok: true };
+}
 
 /** A backfill's progress, as the server computed it (Kestra's formula, `BackfillDto.progress`). */
 export const progressText = (b: Pick<BackfillDto, "progress">): string => `${b.progress}%`;

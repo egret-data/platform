@@ -970,13 +970,22 @@ async fn a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_author
         "another workspace's id must not reach the plan: {}",
         v.snapshot
     );
+    // KI-121: the authored `flowRef` is no property of Kestra's Subflow, and
+    // publish clears it, so the author is told it is ignored.
     assert_eq!(
         v.snapshot["warnings"],
-        serde_json::json!([{
-            "code": "subflow_not_found",
-            "message": subflow_warning("company.analytics", "nightly_rollup"),
-            "path": "tasks.seq.h",
-        }]),
+        serde_json::json!([
+            {
+                "code": "unknown_property",
+                "message": "task 'h': `flowRef` is not a property of io.kestra.plugin.core.flow.Subflow; egret ignores it",
+                "path": "tasks.seq.h.flowRef",
+            },
+            {
+                "code": "subflow_not_found",
+                "message": subflow_warning("company.analytics", "nightly_rollup"),
+                "path": "tasks.seq.h",
+            },
+        ]),
     );
 }
 
@@ -1111,12 +1120,21 @@ async fn a_subflow_inside_an_allow_failure_finally_is_resolved_warned_and_its_au
         "another workspace's id must not reach the plan: {}",
         v.snapshot
     );
+    // KI-121: the authored `flowRef` is no property of Kestra's Subflow, and
+    // publish clears it, so the author is told it is ignored.
     assert_eq!(
         v.snapshot["warnings"],
-        serde_json::json!([{
-            "code": "subflow_not_found",
-            "message": subflow_warning("company.analytics", "nightly_rollup"),
-            "path": "tasks.af.h",
-        }]),
+        serde_json::json!([
+            {
+                "code": "unknown_property",
+                "message": "task 'h': `flowRef` is not a property of io.kestra.plugin.core.flow.Subflow; egret ignores it",
+                "path": "tasks.af.h.flowRef",
+            },
+            {
+                "code": "subflow_not_found",
+                "message": subflow_warning("company.analytics", "nightly_rollup"),
+                "path": "tasks.af.h",
+            },
+        ]),
     );
 }

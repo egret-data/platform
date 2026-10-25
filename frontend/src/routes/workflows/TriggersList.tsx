@@ -33,12 +33,11 @@ import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
-import type { Enablement } from "@/components/workflows/draftState";
 import { namespaceContains } from "@/components/workflows/namespaceTree";
-import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
+import { ReasonButton } from "@/components/workflows/ReasonButton";
 import { TriggerBanners } from "@/components/workflows/triggers/TriggerBanners";
 import { selectionKey, TriggersTable, type TableRowData } from "@/components/workflows/triggers/TriggersTable";
-import { bannersFor, kindLabel, MANAGE_REASON } from "@/components/workflows/triggers/triggersModel";
+import { bannersFor, bulkEnablement, kindLabel } from "@/components/workflows/triggers/triggersModel";
 import { useBackfill } from "@/components/workflows/triggers/useBackfill";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
@@ -283,11 +282,7 @@ export default function TriggersList() {
     const manage = page.can_manage;
     // A trigger id may repeat within a flow (`duplicate_id`); the switch is per id, so it is selected once.
     const selected = rows.filter((r, i) => selection.has(selectionKey(r)) && rows.findIndex((o) => selectionKey(o) === selectionKey(r)) === i);
-    const bulk: Enablement = !manage
-      ? { ok: false, reason: MANAGE_REASON }
-      : selected.length === 0
-        ? { ok: false, reason: "Select triggers first" }
-        : { ok: true };
+    const bulk = bulkEnablement(selected.length);
     // While the next page or filter loads, the rows on screen are the last answer's: nothing may
     // be selected or switched in bulk on them.
     const stale = query.isPlaceholderData;
@@ -366,44 +361,35 @@ export default function TriggersList() {
         <div data-testid="triggers-summary">
           <SummaryStrip items={[{ label: "triggers", singular: "trigger", value: page.total }]} />
         </div>
-        <div className="flex flex-col items-start gap-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, true)}>
+        {/* The bulk actions, for a caller who can select (KI-226); one hint says why they wait,
+            rather than one per button. */}
+        {manage ? (
+          <div className="flex flex-wrap items-center gap-2" data-testid="triggers-bulk-actions">
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, true)}>
               <Power aria-hidden />
               Enable
             </ReasonButton>
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, false)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, false)}>
               <PowerOff aria-hidden />
               Disable
             </ReasonButton>
-            {selected.length > 0 ? (
-              <span className="text-sm text-muted-foreground tabular-nums">
-                {selected.length === 1 ? "1 trigger selected" : `${selected.length} triggers selected`}
-              </span>
-            ) : null}
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-pause-backfills`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, true)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, true)}>
               <Pause aria-hidden />
               Pause backfills
             </ReasonButton>
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-resume-backfills`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, false)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, false)}>
               <Play aria-hidden />
               Resume backfills
             </ReasonButton>
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-delete-backfills`} variant="outline" busy={bulkBusy} onClick={() => setConfirmingDelete(true)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-hint`} variant="outline" busy={bulkBusy} onClick={() => setConfirmingDelete(true)}>
               <Trash2 aria-hidden />
               Delete backfills
             </ReasonButton>
+            <span id={`${reasonsId}-hint`} className="text-sm text-muted-foreground tabular-nums">
+              {bulk.ok ? (selected.length === 1 ? "1 trigger selected" : `${selected.length} triggers selected`) : bulk.reason}
+            </span>
           </div>
-          <DisabledReasons
-            actions={[
-              { id: `${reasonsId}-enable`, label: "Enable", enablement: bulk },
-              { id: `${reasonsId}-disable`, label: "Disable", enablement: bulk },
-              { id: `${reasonsId}-pause-backfills`, label: "Pause backfills", enablement: bulk },
-              { id: `${reasonsId}-resume-backfills`, label: "Resume backfills", enablement: bulk },
-              { id: `${reasonsId}-delete-backfills`, label: "Delete backfills", enablement: bulk },
-            ]}
-          />
-        </div>
+        ) : null}
         <AlertDialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
           <AlertDialogContent>
             <AlertDialogHeader>

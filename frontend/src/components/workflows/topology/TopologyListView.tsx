@@ -14,6 +14,7 @@ import {
   durationText,
   iterationsText,
   nodeFacts,
+  noRunWord,
   shortType,
   typeIcon,
   type TaskNode,
@@ -115,6 +116,8 @@ export interface TopologyListViewProps {
   /** The layout of the whole graph (nothing collapsed): rows follow its order. Empty when it failed. */
   order: readonly Positioned[];
   states?: Readonly<Record<string, NodeState>>;
+  /** The execution has not finished: a task with no run says "Not started" (KI-191). */
+  running?: boolean;
   collapsed: ReadonlySet<string>;
   onToggle: (clusterUid: string, open?: boolean) => void;
   selectedUid: string | null;
@@ -122,7 +125,7 @@ export interface TopologyListViewProps {
   now: number;
 }
 
-export function TopologyListView({ graph, order, states, collapsed, onToggle, selectedUid, onSelect, now }: TopologyListViewProps) {
+export function TopologyListView({ graph, order, states, running = false, collapsed, onToggle, selectedUid, onSelect, now }: TopologyListViewProps) {
   const tree = buildTree(graph, order);
   const rows = flatten(tree, collapsed);
   const [focusUid, setFocusUid] = useState<string | null>(selectedUid);
@@ -210,7 +213,7 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
           const selected = r.uid === selectedUid;
           const node = r.node;
           const expansion = node ? failed.get(node.uid) : undefined;
-          const facts = node ? nodeFacts(node, states, expansion ?? undefined) : null;
+          const facts = node ? nodeFacts(node, states, expansion ?? undefined, running) : null;
           const icon = node
             ? typeIcon(node, node.node === "task" ? clusterKindOf(node.uid, graph.clusters) : undefined)
             : clusterIcon((r.cluster as Cluster).kind);
@@ -218,7 +221,7 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
           const name = node ? (node.node === "task" ? node.task_id : node.trigger_id) : CLUSTER_WORD[(r.cluster as Cluster).kind];
           const state = facts?.state;
           const notes = [
-            ...(facts?.badges.filter((b) => b !== "Not run") ?? []),
+            ...(facts?.badges.filter((b) => b !== noRunWord(running)) ?? []),
             ...(facts?.refusal ? [`${REFUSAL_NOTE} (${facts.refusal})`] : []),
             ...(facts?.expansion ? [facts.expansion] : []),
             ...(state?.iterations ? [iterationsText(state.iterations)] : []),
@@ -276,7 +279,7 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
               {states ? (
                 <>
                   <div role="gridcell" className="px-2">
-                    {state ? <StateChip state={state.state} kind="execution" /> : state === null ? <span className="text-xs">Not run</span> : null}
+                    {state ? <StateChip state={state.state} kind="execution" /> : state === null ? <span className="text-xs">{noRunWord(running)}</span> : null}
                   </div>
                   <div role="gridcell" className="px-2 tabular-nums">
                     {state ? (durationText(state, now) ?? "—") : "—"}

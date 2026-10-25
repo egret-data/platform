@@ -138,7 +138,8 @@ pub enum Treatment {
     /// `not_yet_enforced` warning. Served: the editor shows the warning, so
     /// nothing is dropped silently.
     Warned,
-    /// Accepted and dropped without a word. Never served.
+    /// Accepted and not acted on. Never served, and a draft that writes one
+    /// gets an `ignored_property` warning (`spec::property_warnings`, KI-121).
     Ignored,
     /// Refused at save or publish. Never served.
     Refused,
