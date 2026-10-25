@@ -9822,13 +9822,14 @@ async fn a_rule_whose_own_outcome_is_no_transform_is_not_an_exemption() {
     );
 }
 
-/// Live check finding 2, the mirror of D3: StarRocks expands a classification
-/// row filter over the tagged COLUMNS of a table, so a classification on the
-/// table only compiles nothing there. Explain lists the rule on the StarRocks
-/// profile and the rows line says why; the rule preview counts the tables
-/// (`starrocksTableOnly`). The compiler fix is the D2 StarRocks package.
+/// Live check finding 2, the mirror of D3, fixed by the D2 StarRocks package
+/// (spec 2026-10-25, C8): a classification row filter on a table-level
+/// classification now compiles on StarRocks, and Explain evaluates it there.
+/// The gap statements Package 2 added (`starrocksTableOnly`, the StarRocks
+/// entry in `row_filter_not_applied`) are removed by that package's Task 11,
+/// which completes this test's inversion.
 #[tokio::test]
-async fn a_starrocks_row_filter_on_a_table_classification_filters_nothing() {
+async fn a_starrocks_row_filter_on_a_table_classification_filters_rows() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
@@ -9869,20 +9870,18 @@ async fn a_starrocks_row_filter_on_a_table_classification_filters_nothing() {
     let body = explain_with(&f, &token, explain_body(f.catalog_id, "analyst")).await;
     let sr = profile_for(&body, "starrocks");
     assert_eq!(
-        sr["row_filter"]["decision"]["kind"], "no_filter",
+        sr["row_filter"]["decision"]["kind"], "filtered",
         "body: {body}"
     );
     assert_eq!(
-        sr["row_filter_not_applied"],
-        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+        sr["row_filter"]["attribution"]["rule_id"],
+        json!(rule_id),
         "body: {body}"
     );
     assert_eq!(
         sr["effect_lines"][1]["text"],
         json!(format!(
-            "analyst sees every row: rule {rule_name} does not filter on StarRocks here, because \
-             {} is on the table, not on a column",
-            tag.name
+            "analyst sees rows where region = 'us' (rule {rule_name})"
         )),
         "body: {body}"
     );

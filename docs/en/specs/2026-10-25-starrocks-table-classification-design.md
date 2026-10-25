@@ -443,3 +443,16 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
   column-level column the catalog knows takes its column spelling (`catalog_spelled = true`). A column-level
   assignment naming a column the catalog does not have keeps its typed column name and compiles as before.
 - A table the column source does not know compiles its `*` deny and no mask; Task 6 adds the skip report.
+
+### Task 5
+
+- `compile_rule`'s StarRocks input is `tagged: &[TableTarget]` (one parameter for both rule kinds) rather than a
+  separate `RowFilterTables(&[TableRef])` input: a row filter emits one policy per target table, a mask one per
+  column-level column. Every other caller passes `&[]`; `compile_rules.rs` groups its column lists with a local
+  `targets` helper.
+- The mask branch lost its per-resource `seen` dedup: targets are already one per folded table and columns one per
+  folded name, so it could no longer fire.
+- The route test `a_starrocks_row_filter_on_a_table_classification_filters_nothing` failed once the row filter
+  compiled, so it is renamed `…_filters_rows` here and asserts the filtered decision and the "sees rows where" line.
+  Its preview `starrocksTableOnly` assertion stays, and `row_filter_not_applied` (which still, wrongly, lists the
+  StarRocks rule) is no longer asserted: both go in Task 11, which completes the inversion.

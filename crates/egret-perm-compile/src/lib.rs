@@ -137,7 +137,7 @@ pub use role_membership::{
     set_user_status_and_recompile, sync_admin_policies, unassign_platform_role_and_recompile,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
-pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
+pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TableTarget, TaggedColumn};
 pub use trigger::{
     affected_services_for_classification, affected_services_for_grant,
     affected_services_for_group_membership, affected_services_for_role_membership,

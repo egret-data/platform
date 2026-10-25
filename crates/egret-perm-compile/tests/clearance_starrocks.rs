@@ -1991,3 +1991,73 @@ async fn a_column_and_a_table_attachment_give_one_mask_per_column() {
         "bob is cleared for A, the only classification on id"
     );
 }
+
+// ── D2 Task 5: row filters on a whole-table classification (C8) ──
+
+/// A classification row filter reaches the tables the classification is on,
+/// at EITHER level: `Orders` (whole table) and `orders.email` (a column) are
+/// one table and one policy; `shipments` (whole table only) gets its own. The
+/// served download filters both tables.
+#[tokio::test]
+async fn a_tag_row_filter_filters_every_table_the_classification_is_on() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, tag_key) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "Orders").await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "email").await;
+    tag_table(&db, tag_id, f.warehouse_id, "shipments").await;
+    let rule_id = f
+        .perm
+        .create_rule(&egret_perm::Rule {
+            id: Uuid::nil(),
+            name: unique("d2-rowfilter"),
+            kind: egret_perm::RuleKind::RowFilter {
+                filter_expr: "region = 'us'".to_string(),
+            },
+            selector: egret_perm::Selector::Tag { key: tag_key },
+            exempt: egret_perm::PrincipalSet::default(),
+        })
+        .await
+        .expect("create rule");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(name) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE $2 || '%'",
+    )
+    .bind(f.service_id)
+    .bind(format!("{}{rule_id}-", egret_policy::COMPILER_RULE_PREFIX))
+    .fetch_all(&db.pool)
+    .await
+    .expect("rule policies");
+    names.sort();
+    let p = format!(
+        "{}{rule_id}-{}.sales",
+        egret_policy::COMPILER_RULE_PREFIX,
+        f.catalog_name
+    );
+    assert_eq!(names, vec![format!("{p}.orders"), format!("{p}.shipments")]);
+
+    use egret_ranger_eval::eval::RowFilterDecision;
+    for table in ["orders", "shipments"] {
+        let d = engine_eval::starrocks_row_filter(
+            &db,
+            f.service_id,
+            &unique("reader"),
+            &[
+                ("catalog", f.catalog_name.as_str()),
+                ("database", "sales"),
+                ("table", table),
+            ],
+        )
+        .await;
+        match d {
+            RowFilterDecision::Filtered(r) => {
+                assert_eq!(r.filter_expr, "region = 'us'", "{table}")
+            }
+            other => panic!("{table}: {other:?}"),
+        }
+    }
+}

@@ -118,7 +118,7 @@ use egret_policy::{
 };
 
 use crate::grants::compile_grant;
-use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TaggedColumn};
+use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TableTarget};
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
 ///
@@ -886,7 +886,7 @@ async fn compile_one_rule(
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
 ) -> Result<(), CompileError> {
-    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TaggedColumn>) =
+    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TableTarget>) =
         match &r.selector {
             Selector::Path(scope) => {
                 let Some(name) = catalog_names.get(&scope.catalog_id) else {
@@ -914,17 +914,15 @@ async fn compile_one_rule(
                     });
                     return Ok(());
                 };
-                let mut tagged = Vec::new();
-                if engine == EngineType::StarRocks {
-                    let targets = crate::rules::group_by_table(
+                let tagged = if engine == EngineType::StarRocks {
+                    crate::rules::group_by_table(
                         tag_assignments_for_service_via(conn, service_id, key)
                             .await
                             .map_err(db_err)?,
-                    );
-                    for t in &targets {
-                        tagged.extend(t.tagged_columns()?);
-                    }
-                }
+                    )
+                } else {
+                    Vec::new()
+                };
                 (String::new(), Some(name), tagged)
             }
         };
