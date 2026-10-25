@@ -419,3 +419,17 @@ Measured on StarRocks 4.1.4 by a separate spike (compose project `egret-srspike`
 - Caveats: a query whose masked predicate folds to false is not refused (0 rows, nothing leaks), so "refused the
   whole table" holds for reads that scan. `DESC` and `SHOW CREATE TABLE` stay visible. Masks alone expose
   `_file`/`_pos` on `SELECT *` (§11 item 4).
+
+### Task 3
+
+- The §5.2 SQL held against real Lakekeeper as sketched, with one change: the warehouse join compares
+  `ti.warehouse_id::text = w.lakekeeper_warehouse_id` (the egret column is `text`) rather than casting the egret
+  column to `uuid`, so a malformed value elsewhere cannot fail a compile.
+- The batched variant is `current_columns_batch_via(conn, &[TableKey])` (`unnest … WITH ORDINALITY`), answering in
+  input order; `current_columns_via` is a one-key call of it. The overlay waits for Task 8.
+- `table_columns::LAKEKEEPER_SCHEMA` is the literal the SQL spells; the drift test asserts it equals
+  `egret_catalog_engine::LAKEKEEPER_SCHEMA`.
+- The drift test switches the warehouse to a soft delete profile before the drop: an in-memory warehouse drops hard
+  (the row goes), which would leave the `deleted_at IS NULL` predicate untested (measured by mutation).
+- The stub (`tests/support/lakekeeper_stub.rs`) types `typ` as `text` (Lakekeeper's is an enum); the query compares
+  it with a literal, which works on both.

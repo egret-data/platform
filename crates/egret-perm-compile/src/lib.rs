@@ -117,6 +117,9 @@ pub mod principal_refs;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;
+// D2 (StarRocks whole-table classification): a table's current columns, read
+// from the embedded catalog.
+pub mod table_columns;
 pub mod trigger;
 pub mod username_reuse;
 pub mod view_audit;
