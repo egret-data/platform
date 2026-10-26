@@ -4,12 +4,12 @@
 //! # Why this file is not optional
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.
-//! That corpus holds **345** flows and **zero** of them declare a script,
+//! That corpus holds **351** flows and **zero** of them declare a script,
 //! container, shell or command task type — measured, not assumed:
 //!
 //! ```bash
 //! cd crates/egret-workflow/oracle-exec
-//! find corpus -name '*.yaml' -o -name '*.yml' | wc -l          # 345
+//! find corpus -name '*.yaml' -o -name '*.yml' | wc -l          # 351
 //! grep -rhoE 'type:\s*\S+' corpus | sed 's/.*type:[[:space:]]*//' | sort -u \
 //!   | grep -icE 'script|container|shell|command|docker|bash|python|node'   # 0
 //! ```

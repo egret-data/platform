@@ -6980,7 +6980,7 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
 /// ships on.
 ///
 /// For a shape **no corpus flow reaches** — derived, not remembered: over
-/// `oracle-exec/corpus/`, 345 flows, 4 writing `CREATE_NEW_EXECUTION` and none
+/// `oracle-exec/corpus/`, 351 flows, 4 writing `CREATE_NEW_EXECUTION` and none
 /// of those declaring a `Loop`; 25 declaring a `Subflow` across 20 literal
 /// `flowId` targets; intersection with the four is empty.
 ///

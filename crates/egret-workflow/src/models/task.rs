@@ -47,7 +47,7 @@ pub struct Task {
     /// spelling *might* skip the task instead — but `@Builder.Default` versus
     /// Jackson's null handling decides it and nothing measured which, so the
     /// divergence is named rather than guessed at. No corpus flow writes it
-    /// (`no_corpus_flow_writes_a_null_run_if` re-derives that from all 345 on
+    /// (`no_corpus_flow_writes_a_null_run_if` re-derives that from all 351 on
     /// every run), and `disabled: null` is already read the same way.
     pub run_if: Option<String>,
     /// `Task.java:92` — `@Builder.Default private boolean allowFailure = false;`

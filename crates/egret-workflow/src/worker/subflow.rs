@@ -276,7 +276,7 @@ impl Requested {
 /// the corpus's one unresolvable target belongs to `valids/task-runif`'s
 /// `notexecutedflowable`, whose falsy `runIf:` skips it first, and
 /// `tests/executor.rs`'s `the_only_unresolvable_subflow_target_in_the_corpus_is_skipped`
-/// re-derives that over all 345 flows rather than remembering it.
+/// re-derives that over all 351 flows rather than remembering it.
 pub(super) async fn spawn_one(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,

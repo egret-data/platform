@@ -71,7 +71,7 @@ use super::{current_list, latest, Current, Step};
 /// that says rule 1 still closes the branch on a real failure. No corpus `Dag`
 /// node carries a `runIf:` or an `allowFailure:`
 /// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives the first
-/// from all 345 flows), so **the oracle scores none of them** and those four
+/// from all 351 flows), so **the oracle scores none of them** and those four
 /// rows are the whole instrument.
 pub(crate) fn drive(
     plan: &Plan,

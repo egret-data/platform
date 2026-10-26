@@ -1268,7 +1268,7 @@ mod tests {
     /// Kestra's cap is on the *stream* of next task runs
     /// (`limit(concurrency - runningCount)` in `resolveParallelNexts`), so it
     /// bounds creation and not merely submission; the second batch arrives when
-    /// the first has drained. Nothing in the 345-flow corpus exercises this
+    /// the first has drained. Nothing in the 351-flow corpus exercises this
     /// (`valids/if` and `valids/full` are the only two flows with a
     /// `concurrent:` at all, and both are baselined for other flowables), so
     /// this test is the only thing holding it.
@@ -2693,7 +2693,7 @@ mod tests {
     }
 
     /// **Every corpus `Loop` declares `values:` and a limit this builder can
-    /// read**, derived from all 345 flows on every run.
+    /// read**, derived from all 351 flows on every run.
     ///
     /// Three things it pins, each of which would otherwise be an assumption in
     /// [`build_plan`]: that the `values:` refusal is unreachable from the corpus
@@ -2761,7 +2761,7 @@ mod tests {
         assert_eq!(
             (loops.len(), non_default),
             (52, 14),
-            "52 `Loop` tasks across the 345 corpus flows, of which 14 write a \
+            "52 `Loop` tasks across the 351 corpus flows, of which 14 write a \
              `concurrencyLimit:` other than the default 1. Fifteen flows write \
              the property at all -- `valids/if-in-parallel` writes \
              `concurrencyLimit: 1`, which IS the default, and that is the \
@@ -2778,8 +2778,8 @@ mod tests {
     /// other test in this crate, because `advance()` never consults the method
     /// at all.
     ///
-    /// So the difference is measured. Over all 345 corpus flows the wide
-    /// reading names **89** tasks and the narrow one **64**; the 25 between them
+    /// So the difference is measured. Over all 351 corpus flows the wide
+    /// reading names **88** tasks and the narrow one **59**; the 29 between them
     /// are the ones a narrow reading would have called reachable, and the oracle
     /// would then have tried to render their expressions against a context with
     /// no `item`. (Restricted to the comparable entries the oracle actually
@@ -4349,7 +4349,7 @@ mod tests {
     ///
     /// The population is derived from `corpus.json`'s own `publish_status`,
     /// not from the `invalids/` directory name and not from the golden:
-    /// **295** of the 345 flows. That is deliberately wider than the golden's
+    /// **301** of the 351 flows. That is deliberately wider than the golden's
     /// 266 `runs` entries — it includes every `not-standalone` flow, which is
     /// exactly where the two known over-refusals hide, and one flow
     /// (`invalids/inputs-with-multiple-constraint-violations`) that published
@@ -5331,7 +5331,7 @@ mod tests {
     /// [`PlanTask::retry`] is dropped whole when any of its durations is not a
     /// literal, which is the safe direction — a policy this builder cannot
     /// evaluate must not become a policy it guesses at. This measures that the
-    /// direction is never taken: every flow in the 345-flow corpus that
+    /// direction is never taken: every flow in the 351-flow corpus that
     /// declares a `retry:` anywhere produces a `RetryPolicy` for it.
     #[test]
     fn every_corpus_retry_is_written_in_literals() {
@@ -5547,7 +5547,7 @@ mod tests {
              SEVEN types -- derived from the YAML, so a type W1 does not model \
              still appears here. Round 0 matched on W1's parsed kind and could \
              only ever report the five types that already had the field.\n\n\
-             The denominator is all **345** corpus flows, `invalids/` included, \
+             The denominator is all **351** corpus flows, `invalids/` included, \
              and that is worth two tasks rather than a footnote. Counting only \
              `valids/` gives `Loop` 3 and `Sequential` 6: the missing `Loop` is \
              `invalids/loop-switch-failed`, which Task 1 measured is NOT an \
@@ -9542,7 +9542,7 @@ tasks:
     /// string, so the loop stops on its first iteration and succeeds.
     ///
     /// **Two halves, and the first is what keeps the second from being a
-    /// sentence about one flow.** The scan derives, from all 345 corpus flows,
+    /// sentence about one flow.** The scan derives, from all 351 corpus flows,
     /// that this shape occurs exactly once -- so the divergence is bounded, and
     /// a flow added later that writes another one fails here rather than
     /// quietly joining the baseline.

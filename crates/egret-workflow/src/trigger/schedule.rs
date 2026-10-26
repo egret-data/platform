@@ -263,7 +263,7 @@
 //! after `end`, so the schedule returns to the live clock);
 //! `currentDate = 06-05T02:00Z` → `06-16T02:00Z`.
 //!
-//! **The corpus contains zero live backfill declarations** — 345 flows, two
+//! **The corpus contains zero live backfill declarations** — 351 flows, two
 //! commented-out lines — so nothing in this section is or can be judged by the
 //! execution ratchet. The tests in this file are the whole instrument.
 

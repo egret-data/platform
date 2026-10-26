@@ -4616,7 +4616,7 @@ impl Marks {
 /// 1. **the flow parses and its `sla:` is non-empty** — `flow == null ||
 ///    isEmpty(getSla())`. Read off [`Surface::flow`], which `Surface::load`
 ///    already parsed: W8 Task 6 parsed `ctx.source` a SECOND time here, on
-///    every settle of every execution, and 339 of the corpus's 345 flows paid
+///    every settle of every execution, and 345 of the corpus's 351 flows paid
 ///    for a parse only to be told they have no `sla:`. An unparseable source
 ///    yields `None` rather than an error — this execution is already running
 ///    and `ctx.plan` was built from that same source, so failing it here would

@@ -189,7 +189,7 @@ enum Bound {
 /// # `pauseDuration` wins over `timeout`, and nothing in this corpus can tell
 ///
 /// No corpus `Pause` writes both — `every_corpus_pause_bound_is_one_or_none`
-/// re-derives that from all 345 flows — so the precedence below is a **choice
+/// re-derives that from all 351 flows — so the precedence below is a **choice
 /// with no measurement behind it**, stated rather than implied. It is Kestra's
 /// shape in the narrow sense that `pauseDuration` is `Pause`'s own field and
 /// `timeout` is inherited from `Task`, and the more specific one is the one the

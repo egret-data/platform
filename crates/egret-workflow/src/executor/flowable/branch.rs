@@ -186,7 +186,7 @@ pub(crate) fn drive_if(
 /// the artifact an empty-but-non-null list leaves the `Switch` `RUNNING` for
 /// ever (measured live, same probe as above), and an empty `Vec` here cannot
 /// hold that apart from the other two. **Nothing in the corpus writes
-/// `defaults: []`** (measured over all 345 flows), so nothing reaches it.
+/// `defaults: []`** (measured over all 351 flows), so nothing reaches it.
 /// Closing it needs an `Option<Vec<Task>>` in W1's model and a third arm here.
 pub(crate) fn drive_switch(
     plan: &Plan,
