@@ -2985,3 +2985,88 @@ async fn table_states_follow_lakekeeper() {
     assert!(status.is_success(), "drop: {status} {body}");
     assert_eq!(env.states(&[("sales", "orders_v2")]).await, vec![Dropped]);
 }
+
+// ── Task 10: columns that are not in their table (R8) ──
+
+impl Env {
+    async fn missing_columns(
+        &self,
+        table: &str,
+        columns: &[&str],
+    ) -> Vec<(String, Option<String>)> {
+        let key = egret_perm_compile::table_columns::TableKey {
+            warehouse_id: self.warehouse_id,
+            schema: "sales".into(),
+            table: table.into(),
+        };
+        let columns: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+        let mut conn = self.db.pool.acquire().await.expect("acquire");
+        egret_perm_compile::table_columns::missing_columns_via(&mut conn, &[(key, columns)])
+            .await
+            .expect("missing columns")
+            .into_iter()
+            .map(|m| (m.column, m.renamed_to))
+            .collect()
+    }
+}
+
+/// R8, the drift guard of the missing-columns report: a classified column the
+/// current schema lacks is missing, with the field that last carried its name
+/// as the rename candidate when that field is still there.
+#[tokio::test]
+async fn missing_columns_follow_the_schema_history() {
+    let Some(env) = env().await else { return };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales/tables",
+            Some(json!({
+                "name": "orders",
+                "schema": schema(0, &[(1, "id"), (2, "email"), (3, "region")]),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create: {body}");
+    for (id, fields) in [
+        (1, vec![(1, "id"), (2, "mail"), (3, "region")]),
+        (2, vec![(1, "id"), (2, "mail")]),
+    ] {
+        let (status, body) = env
+            .call_raw(
+                "POST",
+                "namespaces/sales/tables/orders",
+                Some(schema_commit(schema(id, &fields))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "schema {id}: {body}");
+    }
+    assert_eq!(
+        env.missing_columns("orders", &["email", "region", "ghost", "ID"])
+            .await,
+        vec![
+            ("email".to_string(), Some("mail".to_string())),
+            ("region".to_string(), None),
+            ("ghost".to_string(), None),
+        ]
+    );
+
+    // A new `region` (field 4), renamed to `area`: the newest field that
+    // carried the name is the candidate, a suggestion a steward confirms.
+    for (id, fields) in [
+        (3, vec![(1, "id"), (2, "mail"), (4, "region")]),
+        (4, vec![(1, "id"), (2, "mail"), (4, "area")]),
+    ] {
+        let (status, body) = env
+            .call_raw(
+                "POST",
+                "namespaces/sales/tables/orders",
+                Some(schema_commit(schema(id, &fields))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "schema {id}: {body}");
+    }
+    assert_eq!(
+        env.missing_columns("orders", &["region"]).await,
+        vec![("region".to_string(), Some("area".to_string()))]
+    );
+}

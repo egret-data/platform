@@ -678,3 +678,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   sample's label takes the first row's spelling and the warehouse's first registry catalog by name.
 - The controlplane test binary carries a copy of perm-compile's `lakekeeper` stub (`tests/support/`), its doc
   naming the drift tests as its guard.
+
+### Task 10: columns that are not in their table
+
+- `missing_columns_via` reads every stored schema of the asked live tables in one query (newest first) and applies
+  §5.8's rule in Rust; a key that is not an active table reports nothing. `ClassifiedTable` (Task 9) now also
+  groups each table's classified columns, folded.
+- A sample's detail is plain text ("renamed to mail", "not in the table"), as Task 7's sentences: the frontend
+  renders it as text, so §5.8's backticks would show literally. The sentence omits a zero part ("…: they were
+  renamed …" / "…: it was dropped or never existed.").

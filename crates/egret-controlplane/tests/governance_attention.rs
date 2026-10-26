@@ -1642,3 +1642,64 @@ async fn classifications_on_missing_and_dropped_tables_are_findings() {
         );
     }
 }
+
+/// R8: classified columns a live table lacks are a warning, each sample
+/// naming the rename candidate or saying it is not in the table; a column of
+/// a dropped or missing table is not counted here (its table is).
+#[tokio::test]
+async fn columns_not_in_their_table_are_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    let orders =
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email"]).await;
+    // `email` (field 2) renamed to `mail`.
+    lakekeeper_stub::set_schema(
+        &f.db,
+        lk,
+        orders,
+        1,
+        json!({"type": "struct", "schema-id": 1, "fields": [
+            {"id": 1, "name": "id", "type": "string", "required": false},
+            {"id": 2, "name": "mail", "type": "string", "required": false},
+        ]}),
+    )
+    .await;
+    let gone = lakekeeper_stub::add_table(&f.db, lk, &["sales"], "gone", &["id"]).await;
+    lakekeeper_stub::soft_drop(&f.db, lk, gone).await;
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for (table, column) in [
+        ("orders", "email"),
+        ("orders", "ghost"),
+        ("orders", "ID"),
+        ("gone", "nothing"),
+        ("ghost", "nothing"),
+    ] {
+        classify(&f, pii, warehouse, table, column).await;
+    }
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let missing = finding(&body, "classifications_on_missing_columns").expect("missing columns");
+    assert_eq!(missing["severity"], "warning");
+    assert_eq!(missing["count"], 2);
+    assert_eq!(
+        missing["sentence"],
+        "2 classified columns are not in their table: 1 was renamed (egret names the new \
+         column), 1 was dropped or never existed."
+    );
+    let tag_ref = json!({"type": "tag", "id": pii, "name": "PII"});
+    assert_eq!(
+        missing["sample"],
+        json!([
+            {"label": "lake.sales.orders.email", "detail": "renamed to mail", "ref": tag_ref},
+            {"label": "lake.sales.orders.ghost", "detail": "not in the table", "ref": tag_ref},
+        ])
+    );
+}

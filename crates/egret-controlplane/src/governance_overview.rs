@@ -31,7 +31,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
-use egret_perm_compile::table_columns::{table_states_via, TableKey, TableState};
+use egret_perm_compile::table_columns::{
+    missing_columns_via, table_states_via, TableKey, TableState,
+};
 use futures_util::future::BoxFuture;
 use serde::Serialize;
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -318,6 +320,12 @@ pub const SOURCES: &[Source] = &[
         what: "classified tables",
         requires: Requires::All(&[TAG_READ]),
         run: |c| Box::pin(classifications_on_tables(c, TableState::Dropped)),
+    },
+    Source {
+        kind: "classifications_on_missing_columns",
+        what: "classified columns",
+        requires: Requires::All(&[TAG_READ]),
+        run: |c| Box::pin(classifications_on_missing_columns(c)),
     },
     Source {
         kind: "catalogs_without_engine",
@@ -1301,20 +1309,23 @@ async fn tags_without_clearance(c: &mut PgConnection) -> Result<Option<Finding>,
 }
 
 /// One classified table (rows grouped by folded schema and name) of a
-/// warehouse the embedded catalog serves: its catalog's name, the catalog's
-/// spelling where rows disagree (the first row's), and its classifications.
+/// warehouse the embedded catalog serves: its catalog's name, the first row's
+/// spelling, its classifications at either level, and its classified columns
+/// (grouped folded) with theirs.
 pub(crate) struct ClassifiedTable {
     pub(crate) key: TableKey,
     pub(crate) catalog: Option<String>,
     pub(crate) tags: Vec<(Uuid, String)>,
+    pub(crate) columns: Vec<(String, Vec<(Uuid, String)>)>,
 }
 
 /// Every classified table of an embedded-catalog warehouse, by label.
 pub(crate) async fn classified_tables(
     c: &mut PgConnection,
 ) -> Result<Vec<ClassifiedTable>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String, Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT a.warehouse_id, a.schema_name, a.table_name, t.id, t.name, \
+    type Row = (Uuid, String, String, String, Uuid, String, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT a.warehouse_id, a.schema_name, a.table_name, a.column_name, t.id, t.name, \
                 (SELECT r.name FROM registry.catalogs r WHERE r.warehouse_id = a.warehouse_id \
                   ORDER BY r.name LIMIT 1) \
            FROM catalog_tag_assignments a \
@@ -1326,27 +1337,48 @@ pub(crate) async fn classified_tables(
     .fetch_all(&mut *c)
     .await?;
     let mut out: Vec<ClassifiedTable> = Vec::new();
-    for (warehouse_id, schema, table, tag_id, tag_name, catalog) in rows {
+    for (warehouse_id, schema, table, column, tag_id, tag_name, catalog) in rows {
         let same = |t: &ClassifiedTable| {
             t.key.warehouse_id == warehouse_id
                 && t.key.schema.to_lowercase() == schema.to_lowercase()
                 && t.key.table.to_lowercase() == table.to_lowercase()
         };
-        match out.iter_mut().find(|t| same(t)) {
-            Some(t) => {
-                if !t.tags.iter().any(|(id, _)| *id == tag_id) {
-                    t.tags.push((tag_id, tag_name));
-                }
+        let i = match out.iter().position(same) {
+            Some(i) => i,
+            None => {
+                out.push(ClassifiedTable {
+                    key: TableKey {
+                        warehouse_id,
+                        schema,
+                        table,
+                    },
+                    catalog,
+                    tags: Vec::new(),
+                    columns: Vec::new(),
+                });
+                out.len() - 1
             }
-            None => out.push(ClassifiedTable {
-                key: TableKey {
-                    warehouse_id,
-                    schema,
-                    table,
-                },
-                catalog,
-                tags: vec![(tag_id, tag_name)],
-            }),
+        };
+        let t = &mut out[i];
+        if !t.tags.iter().any(|(id, _)| *id == tag_id) {
+            t.tags.push((tag_id, tag_name.clone()));
+        }
+        if column.is_empty() {
+            continue;
+        }
+        let c = match t
+            .columns
+            .iter()
+            .position(|(c, _)| c.to_lowercase() == column.to_lowercase())
+        {
+            Some(c) => c,
+            None => {
+                t.columns.push((column, Vec::new()));
+                t.columns.len() - 1
+            }
+        };
+        if !t.columns[c].1.iter().any(|(id, _)| *id == tag_id) {
+            t.columns[c].1.push((tag_id, tag_name));
         }
     }
     out.sort_by_key(table_label);
@@ -1433,6 +1465,96 @@ async fn classifications_on_tables(
     Ok(finding(
         kind,
         severity,
+        n,
+        sentence,
+        sample,
+        Some(Ref::Tags),
+    ))
+}
+
+/// The classified columns of live tables that their current schema lacks
+/// (rename spec R8), each with its rename candidate. A column of a dropped or
+/// missing table is not counted here: its table is.
+async fn classifications_on_missing_columns(
+    c: &mut PgConnection,
+) -> Result<Option<Finding>, SourceError> {
+    let tables: Vec<ClassifiedTable> = classified_tables(c)
+        .await?
+        .into_iter()
+        .filter(|t| !t.columns.is_empty())
+        .collect();
+    if tables.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<TableKey> = tables.iter().map(|t| t.key.clone()).collect();
+    let states = table_states_via(c, &keys).await?;
+    let live: Vec<&ClassifiedTable> = tables
+        .iter()
+        .zip(states)
+        .filter(|(_, s)| *s == TableState::Live)
+        .map(|(t, _)| t)
+        .collect();
+    let asked: Vec<(TableKey, Vec<String>)> = live
+        .iter()
+        .map(|t| {
+            (
+                t.key.clone(),
+                t.columns.iter().map(|(c, _)| c.clone()).collect(),
+            )
+        })
+        .collect();
+    let missing = missing_columns_via(c, &asked).await?;
+    let n = missing.len();
+    let renamed = missing.iter().filter(|m| m.renamed_to.is_some()).count();
+    let mut sample = Vec::new();
+    for m in &missing {
+        let Some(t) = live.iter().find(|t| t.key == m.key) else {
+            continue;
+        };
+        let tag = t
+            .columns
+            .iter()
+            .find(|(c, _)| *c == m.column)
+            .and_then(|(_, tags)| tags.first());
+        sample.push(Sample {
+            label: format!("{}.{}", table_label(t), m.column),
+            detail: Some(match &m.renamed_to {
+                Some(to) => format!("renamed to {to}"),
+                None => "not in the table".to_string(),
+            }),
+            r#ref: tag.map(|(id, name)| Ref::Tag {
+                id: *id,
+                name: name.clone(),
+            }),
+        });
+    }
+    sample.sort_by(|a, b| a.label.cmp(&b.label));
+    let was = |k: usize| if k == 1 { "was" } else { "were" };
+    let head = if n == 1 {
+        "1 classified column is not in its table".to_string()
+    } else {
+        format!("{n} classified columns are not in their table")
+    };
+    let dropped = n - renamed;
+    let sentence = match (renamed, dropped) {
+        (0, _) => format!(
+            "{head}: {} dropped or never existed.",
+            if n == 1 { "it was" } else { "they were" }
+        ),
+        (_, 0) => format!(
+            "{head}: {} renamed (egret names the new column).",
+            if n == 1 { "it was" } else { "they were" }
+        ),
+        (r, d) => format!(
+            "{head}: {r} {} renamed (egret names the new column), {d} {} dropped or never \
+             existed.",
+            was(r),
+            was(d)
+        ),
+    };
+    Ok(finding(
+        "classifications_on_missing_columns",
+        Severity::Warning,
         n,
         sentence,
         sample,

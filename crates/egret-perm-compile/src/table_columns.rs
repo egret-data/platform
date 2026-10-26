@@ -373,6 +373,92 @@ pub async fn table_states_via(
         .collect())
 }
 
+/// A classified column a live table does not have (rename spec R8, §5.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingColumn {
+    pub key: TableKey,
+    /// The column as the classification row spells it.
+    pub column: String,
+    /// The current name of the field that last carried this name in an older
+    /// schema of the table, when that field is still there under another
+    /// name. A candidate for a steward to confirm, never applied: a name
+    /// dropped and later re-added for a new field resolves to the newest one.
+    pub renamed_to: Option<String>,
+}
+
+/// Which of each table's `columns` its current schema lacks (folded), with
+/// the rename candidate from the schema history (rename spec §5.8): the field
+/// id that carried the name in the most recent older schema that had it
+/// (highest `schema_id` below the current one). Only active tables answer;
+/// any other key reports nothing. One query.
+pub async fn missing_columns_via(
+    conn: &mut sqlx::PgConnection,
+    tables: &[(TableKey, Vec<String>)],
+) -> Result<Vec<MissingColumn>, CompileError> {
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let warehouses: Vec<Uuid> = tables.iter().map(|(k, _)| k.warehouse_id).collect();
+    let schemas: Vec<String> = tables.iter().map(|(k, _)| k.schema.clone()).collect();
+    let names: Vec<String> = tables.iter().map(|(k, _)| k.table.clone()).collect();
+    let rows: Vec<(i64, i32, i32, Value)> = sqlx::query_as(
+        "SELECT q.ord, tcs.schema_id, ts.schema_id, ts.schema \
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, schema_name, table_name, ord) \
+           JOIN catalog.warehouses w ON w.id = q.warehouse_id \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+           JOIN lakekeeper.table_current_schema tcs \
+             ON tcs.warehouse_id = ti.warehouse_id AND tcs.table_id = ti.tabular_id \
+           JOIN lakekeeper.table_schema ts \
+             ON ts.warehouse_id = ti.warehouse_id AND ts.table_id = ti.tabular_id \
+          WHERE ti.typ = 'table' AND ti.deleted_at IS NULL AND ti.metadata_location IS NOT NULL \
+            AND cardinality(ti.tabular_namespace_name) = 1 \
+            AND lower(ti.tabular_namespace_name[1]) = lower(q.schema_name) \
+            AND lower(ti.name) = lower(q.table_name) \
+          ORDER BY q.ord, ts.schema_id DESC",
+    )
+    .bind(&warehouses)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading table schemas from the catalog: {e}")))?;
+    let mut out = Vec::new();
+    for (i, (key, columns)) in tables.iter().enumerate() {
+        let ord = i as i64 + 1;
+        // Newest first: the current schema, then older ones by falling id.
+        let mut current: Option<Vec<(i64, String)>> = None;
+        let mut older: Vec<Vec<(i64, String)>> = Vec::new();
+        for (_, current_id, schema_id, schema) in rows.iter().filter(|r| r.0 == ord) {
+            if schema_id == current_id {
+                current = Some(top_level_fields(schema));
+            } else if schema_id < current_id {
+                older.push(top_level_fields(schema));
+            }
+        }
+        let Some(current) = current else {
+            continue;
+        };
+        let folded = |n: &str| fold_identifier(n);
+        for column in columns {
+            if current.iter().any(|(_, n)| folded(n) == folded(column)) {
+                continue;
+            }
+            let renamed_to = older
+                .iter()
+                .find_map(|fields| fields.iter().find(|(_, n)| folded(n) == folded(column)))
+                .and_then(|(id, _)| current.iter().find(|(i, _)| i == id))
+                .map(|(_, n)| n.clone());
+            out.push(MissingColumn {
+                key: key.clone(),
+                column: column.clone(),
+                renamed_to,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// The columns a SOFT-DELETED table would come back with if it were undropped:
 /// the catalog's spelling of its single-level schema and name, and its current
 /// columns, by its Lakekeeper `tabular_id`. `None` for anything else (a view, a
