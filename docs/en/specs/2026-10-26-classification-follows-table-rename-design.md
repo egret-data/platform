@@ -703,3 +703,14 @@ Deviations the code forces are recorded here, per task, as they happen.
   back). Badges sit beside the table link and after each missing column's link; nothing changes for live tables,
   present columns or tables outside an embedded catalog.
 - Not verified in a browser here (FE-TEST-2): the painted result is Task 14's live check (step 9).
+
+### Task 13: final gate (2026-10-26, HEAD `40fae250`)
+
+- fmt, `clippy --workspace --all-targets -D warnings`, `just test-shipping-resolution`, `just test-ranger-gates`
+  (both jar versions, 0 disagreements) and the OpenAPI regeneration (unchanged) pass. `cargo test --workspace
+  --no-fail-fast` on the per-process test DB: 8231 passed, 0 DB skips; two targets failed for their environment only:
+  `egret-workflow --test sql_starrocks_live` (needs a live StarRocks, known) and `egret-dataapi --test
+  serving_shared_store` (needs `EGRET_TEST_SHARED_STORE_URL`), which passes 14/14 rerun alone against a Valkey.
+- Frontend: `gen:api` (no change), lint (0 errors), `tsc -b`, build and all ten bundle tests pass; `npm run test`
+  passed 8492/8499 while the Ranger differential loaded the machine, and the 7 failures (4 files this package does
+  not touch: OutputsTree, EngineRegister, ScheduleDetail, EndpointCreate) pass 100/100 rerun alone.
