@@ -334,6 +334,18 @@ struct FeaturePresence {
     triggers: bool,
 }
 
+/// **The save-time report** with the key census of package #1 (spec D11):
+/// [`validate`] plus [`crate::spec::keys::findings`], which reads the raw
+/// source for the keys serde dropped. Every caller that reports on a SAVED
+/// or PUBLISHING flow calls this; the run-time gate never does
+/// (`executor::build_plan` calls [`validate_for_run`]), so a version
+/// published before #1 keeps running.
+pub fn validate_source(source: &str, flow: &Flow) -> ValidationReport {
+    let mut report = validate(flow);
+    crate::spec::keys::findings(source, flow, &mut report);
+    report
+}
+
 /// **The save-time report**: what a draft shows and what blocks publish
 /// (`routes::draft_dto`, `POST .../validate`, `publish`). It is
 /// [`validate_for_run`] plus the findings that only SAVING a flow may raise
@@ -2167,6 +2179,59 @@ fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationRepo
 mod tests {
     use super::NOT_YET_ENFORCED;
     use crate::spec::{parse, validate, validate_for_run};
+
+    fn walk_rs(dir: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("a source directory") {
+            let path = entry.expect("an entry").path();
+            let name = path.to_string_lossy().into_owned();
+            if path.is_dir() {
+                out.extend(walk_rs(&name));
+            } else if name.ends_with(".rs") {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// **No production caller reports on a saved flow without the key census**
+    /// (spec D11). `validate(&Flow)` stays public for tests and for
+    /// `validate_source` itself; a production call to it outside `spec/` would
+    /// publish a flow whose unknown keys nobody checked.
+    #[test]
+    fn every_production_save_path_calls_validate_source() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut offenders = Vec::new();
+        for path in walk_rs(root) {
+            if path.contains("/spec/") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let prod = text.split("#[cfg(test)]").next().unwrap();
+            // `spec`'s `validate` reaches a file either by path or by a `use`;
+            // other functions named `validate` (`runners/javaformat.rs`,
+            // `worker/k8s/pod_spec.rs`) are not it.
+            let imported = prod.lines().any(|l| {
+                l.trim_start().starts_with("use crate::spec::")
+                    && l.contains("validate")
+                    && !l.contains("validate_source")
+            });
+            for (n, line) in prod.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || code.contains("fn validate") {
+                    continue;
+                }
+                let by_path =
+                    code.contains("spec::validate(&") || code.contains("validate::validate(&");
+                let by_use =
+                    imported && (code.contains(" validate(&") || code.contains("(validate(&"));
+                if by_path || by_use {
+                    offenders.push(format!("{path}:{}: {code}", n + 1));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "{offenders:#?}");
+    }
 
     // ---------- W3a Task 8: refusing what Kestra refuses ----------
     //

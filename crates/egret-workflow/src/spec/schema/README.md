@@ -140,7 +140,9 @@ nothing in egret acts on it (KI-121), so both are `ignored`.
 `warned` is served because it is not silent: the editor shows the warning.
 `ignored` is not served, and since KI-121 it is not silent either: a draft
 that writes an `ignored` property, or a key its object's row does not list
-at all, gets a warning (`spec::property_warnings`: `ignored_property`,
+at all, is told so when it is saved (`spec::validate_source`, package #1): the
+first as a `not_honoured` warning that names the package which lifts it, the
+second as an `unknown_property` error (KI-121 warned `ignored_property` /
 `unknown_property`).
 
 ### Passed through unfiltered

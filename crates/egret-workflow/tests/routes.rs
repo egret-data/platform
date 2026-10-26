@@ -1068,6 +1068,64 @@ async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
     assert_eq!(flow_count(&db, ws).await, before, "validate wrote a row");
 }
 
+/// Both validate routes carry the save-time key census (package #1): an
+/// unknown key is an `unknown_property` ERROR, a key Kestra accepts and egret
+/// ignores a `not_honoured` WARNING that names the package which lifts it.
+#[tokio::test]
+async fn the_validate_routes_report_the_key_census() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow("a.census") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    mesage: typo\n    logLevel: INFO\n";
+    for url in [
+        format!("/api/ws/{ws}/workflows/flows/{id}/validate"),
+        format!("/api/ws/{ws}/workflows/flows/validate"),
+    ] {
+        let report = common::json(
+            common::post(&app, &url, user, serde_json::json!({ "source": source })).await,
+        )
+        .await;
+        let has = |list: &str, code: &str, path: &str| {
+            report[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == code && f["path"] == path)
+        };
+        assert!(
+            has("errors", "unknown_property", "tasks.t.mesage"),
+            "{url}: {report}"
+        );
+        assert!(
+            has("warnings", "not_honoured", "tasks.t.logLevel"),
+            "{url}: {report}"
+        );
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("roadmap package #13 lifts it")),
+            "{url}: {report}"
+        );
+    }
+}
+
 /// A source that does not parse is a 400 whose message carries the line and
 /// column, as on the by-id route.
 #[tokio::test]

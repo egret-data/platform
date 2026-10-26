@@ -98,7 +98,7 @@ use crate::repo::{
     FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput, DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
 };
-use crate::spec::{parse, validate, Finding, ValidationReport};
+use crate::spec::{parse, validate_source, Finding, ValidationReport};
 use crate::storage::multipart::{
     is_length_limit, is_multipart, multipart_body_limit, multipart_refusal, HeaderBudget,
     MultipartGate,
@@ -507,7 +507,7 @@ pub struct PublishFlowRequest {
     pub note: String,
 }
 
-/// Parse `source`, run [`validate`] and [`crate::spec::unrunnable`] against
+/// Parse `source`, run [`validate_source`] and [`crate::spec::unrunnable`] against
 /// this deployment's served set, and build the wire DTO for a stored draft
 /// row. A parse failure here is a bug, not a caller error — `source`
 /// only reaches storage after successfully parsing in [`create_flow`]/
@@ -524,13 +524,10 @@ fn draft_dto(row: FlowRow, can_manage: bool, worker_enabled: bool) -> EgretResul
             e.column
         ))
     })?;
-    let mut report = validate(&parsed);
+    let mut report = validate_source(&row.source, &parsed);
     report
         .errors
         .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
-    report
-        .warnings
-        .extend(crate::spec::property_warnings(&row.source));
     Ok(FlowDto {
         id: row.id,
         folder_id: row.folder_id,
@@ -1013,18 +1010,16 @@ async fn validate_flow(
 
 /// The report both validate routes answer for `source`: parse (a YAML that
 /// does not parse is a 400 whose message carries the line and column), then
-/// [`validate`], plus [`crate::spec::unrunnable`] against this deployment's
-/// served set and the properties egret drops ([`crate::spec::property_warnings`],
-/// KI-121). Writes nothing.
+/// [`validate_source`] (which carries the key census: an unknown property is an
+/// error, a key Kestra accepts and egret ignores a `not_honoured` warning),
+/// plus [`crate::spec::unrunnable`] against this deployment's served set.
+/// Writes nothing.
 fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
     let flow = parse_unsaved(source)?;
-    let mut report = validate(&flow);
+    let mut report = validate_source(source, &flow);
     report
         .errors
         .extend(crate::spec::unrunnable(&flow, crate::runtime::served()));
-    report
-        .warnings
-        .extend(crate::spec::property_warnings(source));
     Ok(ValidationReportDto::from(&report))
 }
 

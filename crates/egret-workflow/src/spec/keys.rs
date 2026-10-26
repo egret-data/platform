@@ -6,11 +6,16 @@
 //! `spec::schema::measure` imports these instead of keeping its own copies,
 //! so the instrument and the check read one table.
 
-// Nothing in production reads these until the save-time walker (plan Task 2).
+// Some tables are read only by the later tasks' walkers (plan Tasks 3-7).
 #![allow(dead_code)]
 
-use crate::models;
-use crate::spec::schema::wire_fields_of;
+use serde_json::Value;
+
+use crate::models::{self, Flow};
+use crate::spec::schema::{
+    property_treatment, wire_fields_of, Treatment, FLOWABLE_TYPES, FLOW_ROW, TRIGGER_TYPES,
+};
+use crate::spec::validate::{Finding, ValidationReport};
 use crate::worker::handlers as h;
 
 /// What `models::Task`'s deserializer reads itself (`models/task.rs:764-781`).
@@ -273,6 +278,224 @@ pub(crate) fn trigger_keys(t: &str) -> Vec<&'static str> {
     }
 }
 
+// ---------- the save-time check ----------
+//
+// Absorbs KI-121's `spec/properties.rs` (spec D17). The model is not
+// `deny_unknown_fields` (a Kestra flow pasted in must parse), so serde drops a
+// key it has no field for: a typo (`mesage:`), a key no Kestra class has, or a
+// property Kestra documents that egret does not act on. This walk reads the RAW
+// document, where the keys are still there. For now the list to check against
+// is the committed measurement ([`crate::spec::schema::property_treatment`]);
+// Tasks 3-7 move each site onto the key tables above.
+//
+// - a key the object's row does not list at all: `unknown_property`, an ERROR
+//   (Kestra's Jackson refuses an unknown name; KI-121 only warned);
+// - a key the row measures `ignored`: `not_honoured`, a warning that names the
+//   package that lifts it (`lift_of`) when one is known.
+//
+// `honoured` and `warned` keys say nothing here (a `warned` one already has its
+// `not_yet_enforced` warning), nor do `refused` ones, which a validation error
+// or a publish gate already names. An object whose type resolves to no row (an
+// egret-only type, a plugin whose row is named otherwise) is not checked.
+//
+// Objects checked: the flow document, every task at every depth (paths are
+// `spec::path`'s, `tasks.a.b`), a task's or the flow's `retry`, every trigger.
+
+/// The keys under which a task holds child tasks: a list of tasks, a
+/// `Switch`'s `cases` (a map of lists), a `Dag`'s `tasks` (a list of
+/// `{task, dependsOn}` nodes).
+const CHILD_LISTS: &[&str] = &[
+    "tasks", "then", "else", "errors", "finally", "defaults", "cases",
+];
+
+/// The flow's four root lists, as `spec::path::root_lists` names them.
+const ROOT_LISTS: &[&str] = &["tasks", "errors", "finally", "afterExecution"];
+
+/// The save-time key census (spec D11): the keys of `source` that serde
+/// dropped. Called only by [`crate::spec::validate_source`]; the run-time gate
+/// never reaches it. `source` has already parsed as a [`Flow`]; if it does not
+/// parse as a mapping here, the census adds nothing (it fails open, never a
+/// false refusal).
+pub(crate) fn findings(source: &str, _flow: &Flow, report: &mut ValidationReport) {
+    let doc = serde_norway::from_str::<Value>(source);
+    debug_assert!(
+        doc.is_ok(),
+        "a source that parsed as a Flow parses as a Value"
+    );
+    let Ok(Value::Object(flow)) = doc else {
+        return;
+    };
+    let mut w = Walk { report };
+    w.check(FLOW_ROW, Site::Flow, "the flow", &flow, "");
+    if let Some(retry) = flow.get("retry") {
+        w.retry(retry, "retry");
+    }
+    for list in ROOT_LISTS {
+        if let Some(Value::Array(tasks)) = flow.get(*list) {
+            for task in tasks {
+                w.task(task, list);
+            }
+        }
+    }
+    if let Some(Value::Array(triggers)) = flow.get("triggers") {
+        for trigger in triggers {
+            let Some(t) = trigger.as_object() else {
+                continue;
+            };
+            let Some(id) = t.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(row) = t.get("type").and_then(Value::as_str).and_then(trigger_row) {
+                w.check(
+                    row,
+                    Site::Trigger(row),
+                    &format!("trigger '{id}'"),
+                    t,
+                    &format!("triggers.{id}"),
+                );
+            }
+        }
+    }
+}
+
+struct Walk<'a> {
+    report: &'a mut ValidationReport,
+}
+
+impl Walk<'_> {
+    fn task(&mut self, task: &Value, prefix: &str) {
+        let Some(t) = task.as_object() else { return };
+        let Some(id) = t.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let path = crate::spec::path::task_path(prefix, id);
+        if let Some(row) = t.get("type").and_then(Value::as_str).and_then(task_row) {
+            self.check(row, Site::Task(row), &format!("task '{id}'"), t, &path);
+        }
+        if let Some(retry) = t.get("retry") {
+            self.retry(retry, &format!("{path}.retry"));
+        }
+        for key in CHILD_LISTS {
+            match t.get(*key) {
+                Some(Value::Array(children)) => {
+                    for child in children {
+                        // A `Dag` node holds its task under `task`.
+                        match child.get("task") {
+                            Some(inner) if child.get("type").is_none() => self.task(inner, &path),
+                            _ => self.task(child, &path),
+                        }
+                    }
+                }
+                Some(Value::Object(cases)) if *key == "cases" => {
+                    for children in cases.values() {
+                        for child in children.as_array().into_iter().flatten() {
+                            self.task(child, &path);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn retry(&mut self, retry: &Value, path: &str) {
+        let Some(r) = retry.as_object() else { return };
+        let row = match r.get("type").and_then(Value::as_str) {
+            Some("constant") => "io.kestra.core.models.tasks.retrys.Constant-2",
+            Some("exponential") => "io.kestra.core.models.tasks.retrys.Exponential-2",
+            Some("random") => "io.kestra.core.models.tasks.retrys.Random-2",
+            _ => return,
+        };
+        // A retry has no `Site`: no lift row names its keys yet (Tasks 3, 6).
+        self.check_with(row, None, "the retry", r, path);
+    }
+
+    fn check(
+        &mut self,
+        row: &str,
+        site: Site<'_>,
+        what: &str,
+        object: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        self.check_with(row, Some(site), what, object, path);
+    }
+
+    /// One object against its row.
+    fn check_with(
+        &mut self,
+        row: &str,
+        site: Option<Site<'_>>,
+        what: &str,
+        object: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        let Some(props) = property_treatment().get(row) else {
+            return;
+        };
+        for key in object.keys() {
+            let at = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            match props.get(key) {
+                None => self.report.errors.push(Finding {
+                    code: "unknown_property",
+                    message: format!(
+                        "{what}: `{key}` is not a property of {}",
+                        if row == FLOW_ROW { "a flow" } else { row }
+                    ),
+                    path: at,
+                }),
+                Some(Treatment::Ignored) => {
+                    let lifted = site
+                        .and_then(|s| lift_of(s, key))
+                        .map(|l| format!("; {}", l.sentence()))
+                        .unwrap_or_default();
+                    self.report.warnings.push(Finding {
+                        code: "not_honoured",
+                        message: format!(
+                            "{what}: `{key}` is accepted, but egret does not act on it{lifted}"
+                        ),
+                        path: at,
+                    });
+                }
+                Some(Treatment::Honoured | Treatment::Warned | Treatment::Refused) => {}
+            }
+        }
+    }
+}
+
+/// The row of a task `type`: a flowable's, a registry type's canonical
+/// spelling (an alias resolves to it), or the type itself when the table
+/// has a row of that name (a script task).
+fn task_row(t: &str) -> Option<&'static str> {
+    if let Some(row) = row_in(FLOWABLE_TYPES, t) {
+        return Some(row);
+    }
+    if let Some(spec) = crate::spec::registry::known_type(t) {
+        return Some(spec.r#type);
+    }
+    property_treatment()
+        .get_key_value(t)
+        .map(|(k, _)| k.as_str())
+}
+
+fn trigger_row(t: &str) -> Option<&'static str> {
+    row_in(TRIGGER_TYPES, t)
+}
+
+fn row_in(
+    table: &'static [(&'static str, &'static [&'static str])],
+    t: &str,
+) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(canonical, aliases)| *canonical == t || aliases.contains(&t))
+        .map(|(canonical, _)| *canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +648,150 @@ mod tests {
             DIFFERENCES.len(),
             "a DIFFERENCES row the export no longer has is stale"
         );
+    }
+
+    // ---------- the save-time check (moved from KI-121's `spec/properties.rs`) ----------
+
+    /// `(path, code)` of the key census's findings for `source`, errors then
+    /// warnings.
+    fn census(source: &str) -> Vec<(String, &'static str)> {
+        let flow = crate::spec::parse(source).expect("the test source parses");
+        let mut report = ValidationReport::default();
+        findings(source, &flow, &mut report);
+        report
+            .errors
+            .into_iter()
+            .chain(report.warnings)
+            .map(|f| (f.path, f.code))
+            .collect()
+    }
+
+    #[test]
+    fn an_unknown_top_level_key_is_an_error() {
+        let w = census("id: f\nnamespace: a.b\ncolour: blue\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        assert_eq!(w, vec![("colour".to_string(), "unknown_property")]);
+    }
+
+    /// Spec D1 / D17: KI-121 warned, #1 refuses, as Kestra's Jackson does.
+    #[test]
+    fn an_unknown_property_blocks_publish_by_being_an_error() {
+        let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    mesage: typo\n";
+        let flow = crate::spec::parse(source).unwrap();
+        let report = crate::spec::validate_source(source, &flow);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "tasks.t.mesage"),
+            "{report:?}"
+        );
+        assert!(
+            report.warnings.iter().all(|w| w.code != "unknown_property"),
+            "{report:?}"
+        );
+        // `validate` alone does not know the key: the census is the entry point's.
+        assert!(crate::spec::validate(&flow).errors.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_task_property_is_an_error_at_any_depth() {
+        let w = census(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: t\n        type: core.log\n        message: hi\n        mesage: typo\n",
+        );
+        assert_eq!(
+            w,
+            vec![("tasks.outer.t.mesage".to_string(), "unknown_property")]
+        );
+    }
+
+    /// A key Kestra accepts and egret ignores is a warning that names who
+    /// lifts it (D2, D12): `onResume` is #9's, `logLevel` #13's.
+    /// `warningOnRetry` has no `lift_of` row yet (Tasks 3 and 6), so it says
+    /// only that egret does not act on it.
+    #[test]
+    fn a_key_kestra_accepts_and_egret_ignores_is_not_honoured_and_names_its_package() {
+        let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    logLevel: INFO\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n      warningOnRetry: true\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    onResume:\n      - id: ok\n        type: BOOLEAN\n";
+        let flow = crate::spec::parse(source).unwrap();
+        let report = crate::spec::validate_source(source, &flow);
+        let got: Vec<_> = report
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| (w.path.as_str(), w.message.as_str()))
+            .collect();
+        let at = |path: &str| {
+            got.iter()
+                .find(|(p, _)| *p == path)
+                .unwrap_or_else(|| panic!("no not_honoured at {path}: {got:#?}"))
+                .1
+        };
+        assert!(at("tasks.t.logLevel").contains("roadmap package #13 lifts it"));
+        assert!(at("tasks.gate.onResume").contains("roadmap package #9 lifts it"));
+        assert!(at("tasks.t.retry.warningOnRetry").contains("`warningOnRetry`"));
+        assert_eq!(got.len(), 3, "{got:#?}");
+        assert!(report.warnings.iter().all(|w| w.code != "ignored_property"));
+    }
+
+    #[test]
+    fn an_unknown_trigger_property_is_an_error() {
+        let w = census(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\ntriggers:\n  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n    crn: x\n",
+        );
+        assert_eq!(w, vec![("triggers.s.crn".to_string(), "unknown_property")]);
+    }
+
+    /// The flow's own `retry` is checked as a task's is (KI-121 covered it).
+    #[test]
+    fn an_unknown_flow_retry_property_is_an_error() {
+        let w = census(
+            "id: f\nnamespace: a.b\nretry:\n  type: constant\n  interval: PT1S\n  maxAttempts: 2\n  attempts: 3\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+        );
+        assert_eq!(w, vec![("retry.attempts".to_string(), "unknown_property")]);
+    }
+
+    #[test]
+    fn a_flow_of_known_properties_has_no_finding() {
+        let w = census(
+            "id: f\nnamespace: a.b\ndescription: d\nlabels:\n  a: b\ninputs:\n  - id: i\n    type: STRING\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Switch\n    value: x\n    cases:\n      x:\n        - id: t\n          type: core.log\n          message: hi\n    defaults:\n      - id: d\n        type: core.log\n        message: hi\n",
+        );
+        assert!(w.is_empty(), "{w:?}");
+    }
+}
+
+#[cfg(test)]
+mod corpus {
+    use super::*;
+
+    /// The oracle's valid Kestra flows (`oracle-exec/corpus/valids`, 323 of
+    /// them) write only properties Kestra documents, so none may be called
+    /// unknown: the check is the treatment table, and a false `unknown_property`
+    /// here would be a row the walk resolves wrongly. Measured 2026-10-25 (KI-121):
+    /// 0 unknown, 45 ignored (all keys the table measures `ignored`).
+    #[test]
+    fn no_valid_kestra_flow_has_an_unknown_property() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/corpus/valids");
+        let mut checked = 0;
+        let mut unknown = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("the corpus") {
+            let path = entry.expect("an entry").path();
+            let src = std::fs::read_to_string(&path).expect("a flow");
+            checked += 1;
+            // A corpus flow egret's model cannot parse has no model to pair
+            // with; the census fails open on it, as in production.
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            let mut report = ValidationReport::default();
+            findings(&src, &flow, &mut report);
+            for f in report
+                .errors
+                .iter()
+                .filter(|f| f.code == "unknown_property")
+            {
+                unknown.push(format!("{}: {}", path.display(), f.message));
+            }
+        }
+        assert!(checked > 300, "the corpus is where it was: {checked} files");
+        assert!(unknown.is_empty(), "{unknown:#?}");
     }
 }

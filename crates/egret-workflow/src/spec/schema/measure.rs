@@ -61,7 +61,7 @@ use super::{
     wire_fields_of as fields_of, Measured, Treatment, FLOWABLE_TYPES, FLOW_ROW, TRIGGER_TYPES,
 };
 use crate::models::{Flow, TriggerKind};
-use crate::spec::{parse, registry, validate};
+use crate::spec::{parse, registry, validate_source};
 use crate::worker::handlers as h;
 
 /// Properties egret reads and that do nothing in egret:
@@ -166,7 +166,7 @@ fn run(flow: &Value) -> Outcome {
             plan: None,
         },
         Ok(f) => {
-            let r = validate(&f);
+            let r = validate_source(&source, &f);
             Outcome {
                 parsed: true,
                 errors: r
@@ -872,5 +872,21 @@ fn properties_refused_after_parse_are_measured_refused() {
     assert_eq!(
         m.refused_values["io.kestra.plugin.core.trigger.Webhook"]["fetchType"],
         vec![json!("STORE")]
+    );
+}
+
+/// **A `not_honoured` warning does not serve a key** (spec D3): `classify`
+/// reads `not_yet_enforced` only, so a key #1 warns on stays `ignored`, and
+/// the editor does not start offering it.
+#[test]
+fn a_not_honoured_warning_is_not_served() {
+    let row = "io.kestra.plugin.core.log.Log";
+    let flow = json!({"id": "f", "namespace": "a.b",
+        "tasks": [{"id": "t", "type": row, "message": "m", "logLevel": "INFO"}]});
+    let o = run(&flow);
+    assert!(o.not_yet_enforced.is_empty(), "{:?}", o.not_yet_enforced);
+    assert_eq!(
+        crate::spec::schema::property_treatment()[row].get("logLevel"),
+        Some(&Treatment::Ignored)
     );
 }
