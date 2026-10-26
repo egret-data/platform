@@ -1516,3 +1516,129 @@ async fn a_boot_pass_refusal_names_and_links_the_two_rules() {
         "{body}"
     );
 }
+
+// ── Classifications follow a rename, Task 9: stale rows (R2, C14, C15) ──
+
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
+
+/// An egret warehouse over a stub Lakekeeper warehouse, with registry catalog
+/// `catalog` over it: `(warehouse id, Lakekeeper warehouse id)`.
+async fn stub_warehouse(f: &Fixture, catalog: &str) -> (Uuid, Uuid) {
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'S') RETURNING id")
+            .bind(unique("stale-ws"))
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','b','AK') RETURNING id",
+    )
+    .bind(unique("stale-sc"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let warehouse: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("stale_wh"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', '{}'::jsonb, $2)",
+    )
+    .bind(catalog)
+    .bind(warehouse)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let lk = lakekeeper_stub::link_warehouse(&f.db, warehouse).await;
+    (warehouse, lk)
+}
+
+async fn classify(f: &Fixture, tag: Uuid, warehouse: Uuid, table: &str, column: &str) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales',$3,$4)",
+    )
+    .bind(tag)
+    .bind(warehouse)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// C15: rows on a name with no tabular are a warning, rows on a name with
+/// only soft-deleted tabulars are info; a live table is in neither; a reader
+/// without `tag:read` gets both as not checked.
+#[tokio::test]
+async fn classifications_on_missing_and_dropped_tables_are_findings() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email"]).await;
+    let gone = lakekeeper_stub::add_table(&f.db, lk, &["sales"], "gone", &["id"]).await;
+    lakekeeper_stub::soft_drop(&f.db, lk, gone).await;
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for (table, column) in [
+        ("ghost", ""),
+        ("gone", ""),
+        ("orders", ""),
+        ("orders", "email"),
+    ] {
+        classify(&f, pii, warehouse, table, column).await;
+    }
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let missing = finding(&body, "classifications_on_missing_tables").expect("missing");
+    assert_eq!(missing["severity"], "warning");
+    assert_eq!(missing["count"], 1);
+    assert_eq!(
+        missing["sentence"],
+        "1 table carries classifications but does not exist in its catalog: renamed before \
+         egret moved classifications, purged, or classified before it was created."
+    );
+    assert_eq!(
+        missing["sample"],
+        json!([{"label": "lake.sales.ghost", "detail": "PII",
+                "ref": {"type": "tag", "id": pii, "name": "PII"}}])
+    );
+    assert_eq!(missing["ref"], json!({"type": "tags"}));
+    let dropped = finding(&body, "classifications_on_dropped_tables").expect("dropped");
+    assert_eq!(dropped["severity"], "info");
+    assert_eq!(dropped["count"], 1);
+    assert_eq!(dropped["sample"][0]["label"], "lake.sales.gone");
+    assert_eq!(
+        dropped["sentence"],
+        "1 dropped table keeps its classifications, which apply again if it is restored."
+    );
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let nc = not_checked(&body);
+    for kind in [
+        "classifications_on_missing_tables",
+        "classifications_on_dropped_tables",
+    ] {
+        assert!(
+            nc.contains(&(kind.to_string(), json!(["tag:read"]))),
+            "{kind}: {body}"
+        );
+    }
+}

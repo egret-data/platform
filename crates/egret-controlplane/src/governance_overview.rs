@@ -31,6 +31,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
+use egret_perm_compile::table_columns::{table_states_via, TableKey, TableState};
 use futures_util::future::BoxFuture;
 use serde::Serialize;
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -305,6 +306,18 @@ pub const SOURCES: &[Source] = &[
         what: "username reuse",
         requires: Requires::All(&[PLATFORM_ADMIN]),
         run: |c| Box::pin(username_reuse(c)),
+    },
+    Source {
+        kind: "classifications_on_missing_tables",
+        what: "classified tables",
+        requires: Requires::All(&[TAG_READ]),
+        run: |c| Box::pin(classifications_on_tables(c, TableState::Missing)),
+    },
+    Source {
+        kind: "classifications_on_dropped_tables",
+        what: "classified tables",
+        requires: Requires::All(&[TAG_READ]),
+        run: |c| Box::pin(classifications_on_tables(c, TableState::Dropped)),
     },
     Source {
         kind: "catalogs_without_engine",
@@ -1282,6 +1295,146 @@ async fn tags_without_clearance(c: &mut PgConnection) -> Result<Option<Finding>,
         } else {
             format!("{n} classifications have no clearance: they gate nothing.")
         },
+        sample,
+        Some(Ref::Tags),
+    ))
+}
+
+/// One classified table (rows grouped by folded schema and name) of a
+/// warehouse the embedded catalog serves: its catalog's name, the catalog's
+/// spelling where rows disagree (the first row's), and its classifications.
+pub(crate) struct ClassifiedTable {
+    pub(crate) key: TableKey,
+    pub(crate) catalog: Option<String>,
+    pub(crate) tags: Vec<(Uuid, String)>,
+}
+
+/// Every classified table of an embedded-catalog warehouse, by label.
+pub(crate) async fn classified_tables(
+    c: &mut PgConnection,
+) -> Result<Vec<ClassifiedTable>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, String, Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.warehouse_id, a.schema_name, a.table_name, t.id, t.name, \
+                (SELECT r.name FROM registry.catalogs r WHERE r.warehouse_id = a.warehouse_id \
+                  ORDER BY r.name LIMIT 1) \
+           FROM catalog_tag_assignments a \
+           JOIN tags t ON t.id = a.tag_id \
+           JOIN catalog.warehouses w ON w.id = a.warehouse_id \
+          WHERE w.lakekeeper_warehouse_id IS NOT NULL \
+          ORDER BY a.warehouse_id, lower(a.schema_name), lower(a.table_name), t.name, t.id",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let mut out: Vec<ClassifiedTable> = Vec::new();
+    for (warehouse_id, schema, table, tag_id, tag_name, catalog) in rows {
+        let same = |t: &ClassifiedTable| {
+            t.key.warehouse_id == warehouse_id
+                && t.key.schema.to_lowercase() == schema.to_lowercase()
+                && t.key.table.to_lowercase() == table.to_lowercase()
+        };
+        match out.iter_mut().find(|t| same(t)) {
+            Some(t) => {
+                if !t.tags.iter().any(|(id, _)| *id == tag_id) {
+                    t.tags.push((tag_id, tag_name));
+                }
+            }
+            None => out.push(ClassifiedTable {
+                key: TableKey {
+                    warehouse_id,
+                    schema,
+                    table,
+                },
+                catalog,
+                tags: vec![(tag_id, tag_name)],
+            }),
+        }
+    }
+    out.sort_by_key(table_label);
+    Ok(out)
+}
+
+/// `catalog.schema.table`, or `schema.table` with no registry catalog.
+pub(crate) fn table_label(t: &ClassifiedTable) -> String {
+    match &t.catalog {
+        Some(catalog) => format!("{catalog}.{}.{}", t.key.schema, t.key.table),
+        None => format!("{}.{}", t.key.schema, t.key.table),
+    }
+}
+
+/// Rows on a name the catalog has no live table for (rename spec C14, C15):
+/// `Missing` (renamed away, purged or pre-placed) is a warning, since the
+/// renamed table may be unclassified under its new name; `Dropped` is info,
+/// since an undrop needs those rows.
+async fn classifications_on_tables(
+    c: &mut PgConnection,
+    state: TableState,
+) -> Result<Option<Finding>, SourceError> {
+    let tables = classified_tables(c).await?;
+    if tables.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<TableKey> = tables.iter().map(|t| t.key.clone()).collect();
+    let states = table_states_via(c, &keys).await?;
+    let hits: Vec<&ClassifiedTable> = tables
+        .iter()
+        .zip(states)
+        .filter(|(_, s)| *s == state)
+        .map(|(t, _)| t)
+        .collect();
+    let n = hits.len();
+    let sample = hits
+        .iter()
+        .map(|t| Sample {
+            label: table_label(t),
+            detail: Some(
+                t.tags
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            r#ref: t.tags.first().map(|(id, name)| Ref::Tag {
+                id: *id,
+                name: name.clone(),
+            }),
+        })
+        .collect();
+    let (kind, severity, sentence) = match state {
+        TableState::Dropped => (
+            "classifications_on_dropped_tables",
+            Severity::Info,
+            if n == 1 {
+                "1 dropped table keeps its classifications, which apply again if it is restored."
+                    .to_string()
+            } else {
+                format!(
+                    "{n} dropped tables keep their classifications, which apply again if they \
+                     are restored."
+                )
+            },
+        ),
+        _ => (
+            "classifications_on_missing_tables",
+            Severity::Warning,
+            if n == 1 {
+                "1 table carries classifications but does not exist in its catalog: renamed \
+                 before egret moved classifications, purged, or classified before it was \
+                 created."
+                    .to_string()
+            } else {
+                format!(
+                    "{n} tables carry classifications but do not exist in their catalog: \
+                     renamed before egret moved classifications, purged, or classified before \
+                     they were created."
+                )
+            },
+        ),
+    };
+    Ok(finding(
+        kind,
+        severity,
+        n,
+        sentence,
         sample,
         Some(Ref::Tags),
     ))

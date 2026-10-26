@@ -2874,3 +2874,114 @@ async fn a_dropped_table_keeps_its_rows_and_an_undrop_restores_them() {
     );
     assert!(policies.contains(&mask), "{policies:?}");
 }
+
+// ── Task 9: the stale-row report's table states (C14) ──
+
+impl Env {
+    async fn states(
+        &self,
+        keys: &[(&str, &str)],
+    ) -> Vec<egret_perm_compile::table_columns::TableState> {
+        let keys: Vec<egret_perm_compile::table_columns::TableKey> = keys
+            .iter()
+            .map(|(s, t)| egret_perm_compile::table_columns::TableKey {
+                warehouse_id: self.warehouse_id,
+                schema: s.to_string(),
+                table: t.to_string(),
+            })
+            .collect();
+        let mut conn = self.db.pool.acquire().await.expect("acquire");
+        egret_perm_compile::table_columns::table_states_via(&mut conn, &keys)
+            .await
+            .expect("table states")
+    }
+}
+
+/// C14, the drift guard of the stale-row report: its states follow what
+/// Lakekeeper holds, folded, through a rename and a soft drop.
+#[tokio::test]
+async fn table_states_follow_lakekeeper() {
+    use egret_perm_compile::table_columns::TableState::{Dropped, Live, Missing};
+    let Some(env) = env().await else { return };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales/tables",
+            Some(json!({"name": "orders", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create: {body}");
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales/views",
+            Some(json!({
+                "name": "v_orders",
+                "schema": schema(0, &[(1, "id")]),
+                "view-version": {
+                    "version-id": 1, "schema-id": 0,
+                    "timestamp-ms": 1_700_000_000_000_i64,
+                    "summary": {"engine-name": "trino"},
+                    "default-namespace": ["sales"],
+                    "representations": [{"type": "sql", "sql": "SELECT 1 AS id", "dialect": "trino"}]
+                },
+                "properties": {}
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create view: {body}");
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces",
+            Some(json!({"namespace": ["sales", "eu"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "nested namespace: {body}");
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales%1Feu/tables",
+            Some(json!({"name": "deep", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "nested table: {body}");
+    assert_eq!(
+        env.states(&[
+            ("sales", "orders"),
+            ("SALES", "Orders"),
+            ("sales", "v_orders"),
+            ("sales", "ghost"),
+            ("eu", "deep"),
+            ("sales", "deep"),
+        ])
+        .await,
+        vec![Live, Live, Live, Missing, Missing, Missing]
+    );
+
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "orders_v2"},
+            })),
+        )
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.states(&[("sales", "orders"), ("sales", "orders_v2")])
+            .await,
+        vec![Missing, Live]
+    );
+
+    set_delete_profile(env.state.clone(), SYSTEM_USER, &env.prefix, Some(3600))
+        .await
+        .expect("soft delete profile");
+    let (status, body) = env
+        .call_raw("DELETE", "namespaces/sales/tables/orders_v2", None)
+        .await;
+    assert!(status.is_success(), "drop: {status} {body}");
+    assert_eq!(env.states(&[("sales", "orders_v2")]).await, vec![Dropped]);
+}

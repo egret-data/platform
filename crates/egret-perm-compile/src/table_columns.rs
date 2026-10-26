@@ -312,6 +312,67 @@ pub async fn current_fields_via(
         }))
 }
 
+/// What the catalog holds under a classified table's name (rename spec C14):
+/// a live table or view (`Live`; a view's rows are the view hold's), only
+/// soft-deleted tabulars (`Dropped`, an undrop brings one back), or nothing
+/// (`Missing`: renamed away, purged, or classified before it was created,
+/// which cannot be told apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TableState {
+    Live,
+    Dropped,
+    Missing,
+}
+
+/// The [`TableState`] of each of `keys`, in `keys`' order, in one query. A
+/// multi-level namespace holds no classification row and is `Missing`; so is
+/// a warehouse with no Lakekeeper warehouse.
+pub async fn table_states_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[TableKey],
+) -> Result<Vec<TableState>, CompileError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
+    let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
+    let tables: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
+    let rows: Vec<(i64, bool, bool)> = sqlx::query_as(
+        "SELECT q.ord, \
+                COALESCE(bool_or(t.deleted_at IS NULL AND t.metadata_location IS NOT NULL), \
+                         false), \
+                COALESCE(bool_or(t.deleted_at IS NOT NULL), false) \
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, schema_name, table_name, ord) \
+           LEFT JOIN catalog.warehouses w ON w.id = q.warehouse_id \
+           LEFT JOIN lakekeeper.tabular t \
+             ON t.warehouse_id::text = w.lakekeeper_warehouse_id \
+            AND cardinality(t.tabular_namespace_name) = 1 \
+            AND lower(t.tabular_namespace_name[1]) = lower(q.schema_name) \
+            AND lower(t.name) = lower(q.table_name) \
+          GROUP BY q.ord ORDER BY q.ord",
+    )
+    .bind(&warehouses)
+    .bind(&schemas)
+    .bind(&tables)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading table states from the catalog: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|(_, live, dropped)| {
+            if live {
+                TableState::Live
+            } else if dropped {
+                TableState::Dropped
+            } else {
+                TableState::Missing
+            }
+        })
+        .collect())
+}
+
 /// The columns a SOFT-DELETED table would come back with if it were undropped:
 /// the catalog's spelling of its single-level schema and name, and its current
 /// columns, by its Lakekeeper `tabular_id`. `None` for anything else (a view, a

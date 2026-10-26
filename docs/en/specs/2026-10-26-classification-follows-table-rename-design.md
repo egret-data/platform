@@ -666,3 +666,15 @@ Deviations the code forces are recorded here, per task, as they happen.
   with C13 the classification rows go, so the deny goes too, and the test now asserts that.
 - R9's premise holds on the pinned Lakekeeper: a plain drop of a namespace whose only table is soft-deleted is
   refused (`a_plain_drop_of_a_namespace_with_a_dropped_table_is_refused`).
+
+### Task 9: stale-row report
+
+- `table_states_via` pins §5.8's sketch with two changes: `catalog.warehouses` is LEFT-joined and the `bool_or`s are
+  `COALESCE`d, so a key whose warehouse is unknown or has no Lakekeeper warehouse is `Missing` instead of being
+  dropped from the result (the answer keeps `keys`' order and length). `TableState` derives `Serialize` and
+  `ToSchema` (lowercase) for Task 11's wire shape. The drift test also pins case folding and the multi-level case.
+- The Overview groups rows by folded `(warehouse, schema, table)` in Rust (`classified_tables`, shared with Task 10),
+  only for warehouses with a Lakekeeper warehouse, and runs no `lakekeeper.*` query when there is no such row. A
+  sample's label takes the first row's spelling and the warehouse's first registry catalog by name.
+- The controlplane test binary carries a copy of perm-compile's `lakekeeper` stub (`tests/support/`), its doc
+  naming the drift tests as its guard.
