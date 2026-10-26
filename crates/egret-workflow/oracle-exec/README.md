@@ -3548,14 +3548,18 @@ direction.
   `STILL_OVER_ACCEPTED` to a refusal group. The 44 Kestra-published flows the
   same error refuses are named in `executor::PUBLISHED_BUT_REFUSED`.
 - `invalids/invalid-property` — `Unrecognized field "invalid"`. W1 models a
-  task's plugin properties as an opaque `Leaf { spec }` on purpose. **Since
-  2026-10-26 (no-silent-drops Task 3) publish refuses it**: `keys::findings`
-  checks a core task's keys against the keys its handler reads, and `invalid` is
-  an `unknown_property` error. It stays here because the run gate still plans it
-  (a version published before the check keeps running; spec D1) and because the
-  corpus cannot file it: it shares `id: duplicate` with `invalids/duplicate`,
-  loses the name (a `name-contested loser`), so `LIVE` and `VALIDATE_REFUSED`
-  did not move (measured: 295 live, unchanged).
+  task's plugin properties as an opaque `Leaf { spec }` on purpose. **Banked
+  2026-10-26 (no-silent-drops Tasks 3 and 8b)**: `keys::findings` checks a core
+  task's keys against the keys its handler reads, and `invalid` is an
+  `unknown_property` error, so publish refuses it. The run gate still plans it
+  (a version published before the check keeps running; spec D1), so the ratchet
+  counts it through a `Seam::Save` group in `executor::REFUSAL_GROUPS`: a golden
+  `refused` entry also matches when `spec::validate_source` refuses the corpus
+  source with the group's code. The corpus cannot file it (it shares `id:
+  duplicate` with `invalids/duplicate` and is a name-contested loser, so `LIVE`
+  and `VALIDATE_REFUSED` did not move: 295 live), which is why the oracle calls
+  `validate_source` on the source and not `publish_corpus`'s `Filed` map.
+  Ratchet 301 / 73 / 73 / 0 became 301 / 72 / 72 / 0.
 - `invalids/dag-invalid-subtask` — `tasks[task1].tasks[task1].task.message: must
   not be null`, a `@NotNull` on `Log.message`. Bean validation of a plugin's own
   property; same gap.

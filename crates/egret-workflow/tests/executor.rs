@@ -807,7 +807,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // (2026-10-18): eleven entries `SetVariables`, `UnsetVariables` and
         // `Labels` held bank; `valids/task-runif-taskswithstate` stays
         // baselined on the flow-level `finally:`; 73 + 228 = 301.
-        (301, 228, 73),
+        // 73 -> 72 baselined, 228 -> 229 matching at no-silent-drops Task 8b
+        // (2026-10-26): `invalids/invalid-property` banks through a
+        // `Seam::Save` refusal group; 72 + 229 = 301.
+        (301, 229, 72),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2019,6 +2022,8 @@ async fn executor_matches_golden() {
     for entry in &golden {
         match (entry.verdict, evaluate(side, entry)) {
             (Verdict::Refused, Outcome::Refused(_)) => {}
+            // Kestra refuses at save, and so does egret (Seam::Save group).
+            (Verdict::Refused, Outcome::Trace(_)) if refused_at_save(&entry.id) => {}
             (Verdict::Refused, Outcome::Trace(_)) => {
                 mismatched.insert(entry.id.clone());
                 detail.insert(
@@ -6498,7 +6503,82 @@ struct RefusalGroup {
     /// wrong in more than one way, so a rule that fires for the wrong reason
     /// still returns `Err`.
     message: &'static str,
+    /// Where egret refuses the group's flows.
+    seam: Seam,
     ids: &'static [&'static str],
+}
+
+/// The seam at which egret refuses a flow Kestra refuses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    /// `build_plan`, the run-time gate: `message` is a substring of
+    /// `PlanError::message`.
+    Run,
+    /// SAVE time, `spec::validate_source` (what publish and a draft call;
+    /// the run gate never does, spec D1): `message` is the `code` of an error
+    /// finding. No-silent-drops Task 8b (spec Q1 (b), 2026-10-26).
+    Save,
+}
+
+/// Does `spec::validate_source` -- the function production calls when a flow
+/// is saved -- refuse `id` with the error code its `Seam::Save` group names?
+///
+/// Called on the corpus source directly and not through `publish_corpus`'s
+/// `Filed` map: an id that shares its `(namespace, flowId)` with another
+/// corpus flow loses the name contest (`CREATE_REFUSED`) and is never filed,
+/// so `Filed` cannot see it (measured, Task 3: `invalids/invalid-property`).
+/// It is `false` for an id in no `Seam::Save` group, and for a refusal whose
+/// code is not the group's, so an unrelated save-time refusal never banks.
+fn refused_at_save(id: &str) -> bool {
+    REFUSAL_GROUPS
+        .iter()
+        .find(|g| g.seam == Seam::Save && g.ids.contains(&id))
+        .is_some_and(|group| save_refusal_has_code(id, group.message))
+}
+
+/// Does `spec::validate_source` refuse the corpus flow `id` with an error
+/// finding whose code is `code`?
+fn save_refusal_has_code(id: &str, code: &str) -> bool {
+    let source = corpus_source(id);
+    let Ok(flow) = egret_workflow::spec::parse(&source) else {
+        return false;
+    };
+    egret_workflow::spec::validate_source(&source, &flow)
+        .errors
+        .iter()
+        .any(|f| f.code == code)
+}
+
+/// The two checks `refused_at_save` makes, each driven in the direction that
+/// must say no. Without this test, dropping either leaves the ratchet green:
+/// measured 2026-10-26, a `refused_at_save` that accepted ANY save-time error
+/// for ANY id banked nothing beyond `invalids/invalid-property` (301 / 72 / 72
+/// / 0), because no other baselined `refused` entry has a save-time error.
+#[test]
+fn a_save_time_refusal_banks_only_for_its_own_group_and_code() {
+    // The id is in a Seam::Save group and the code is the group's.
+    assert!(refused_at_save("invalids/invalid-property"));
+    assert!(save_refusal_has_code(
+        "invalids/invalid-property",
+        "unknown_property"
+    ));
+    // Same flow, another code: an unrelated refusal cannot bank it.
+    assert!(!save_refusal_has_code(
+        "invalids/invalid-property",
+        "duplicate_task_id"
+    ));
+    // A flow save DOES refuse (a repeated task id) but that is in no Seam::Save
+    // group, so it never matches a golden `refused` entry this way.
+    assert!(
+        !egret_workflow::spec::validate_source(
+            &corpus_source("invalids/duplicate"),
+            &egret_workflow::spec::parse(&corpus_source("invalids/duplicate")).unwrap()
+        )
+        .errors
+        .is_empty(),
+        "the control: save refuses invalids/duplicate"
+    );
+    assert!(!refused_at_save("invalids/duplicate"));
 }
 
 /// The 23 refusals, by cause. Not by directory: `invalids/loop-switch-failed`
@@ -6512,6 +6592,7 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
         cause: "the YAML is not a flow — a required field is absent or has a value \
                 no variant of its type accepts",
         message: "cannot parse flow at line",
+        seam: Seam::Run,
         ids: &[
             // Kestra: `Invalid type: null` — the input declares no `type`.
             "invalids/inputs",
@@ -6528,6 +6609,7 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
     RefusalGroup {
         cause: "the same key twice in one mapping — YAML would silently keep the last",
         message: "duplicate field 'message'",
+        seam: Seam::Run,
         ids: &["invalids/duplicate-key"],
     },
     // These two were ONE group until the null-list fix, and the group was not a
@@ -6548,6 +6630,7 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
                 under any match. Kestra: `tasks[impossible]: No task defined, \
                 neither cases or default have any tasks`",
         message: "switch_no_branches:",
+        seam: Seam::Run,
         ids: &["invalids/switch-invalid"],
     },
     RefusalGroup {
@@ -6555,41 +6638,49 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
                 three `Parallel`s with no children. Kestra names all of it; egret \
                 reports the namespace first and counts the rest",
         message: "invalid_namespace:",
+        seam: Seam::Run,
         ids: &["invalids/invalid-parallel"],
     },
     RefusalGroup {
         cause: "a flowable with nothing to decide on — it cannot be planned at all",
         message: "has no condition to branch on",
+        seam: Seam::Run,
         ids: &["invalids/if-without-condition"],
     },
     RefusalGroup {
         cause: "a `Dag` whose `dependsOn` graph cannot be ordered",
         message: "has a cyclic dependency through task id(s)",
+        seam: Seam::Run,
         ids: &["invalids/dag-cyclicdependency"],
     },
     RefusalGroup {
         cause: "a `Dag` node depending on a task that is not a node of it",
         message: "depends on task id(s) that are not nodes of it",
+        seam: Seam::Run,
         ids: &["invalids/dag-notexist-task"],
     },
     RefusalGroup {
         cause: "an id declared twice, so a reference to it names two things",
         message: "duplicate_task_id:",
+        seam: Seam::Run,
         ids: &["invalids/duplicate", "invalids/duplicate-parallel"],
     },
     RefusalGroup {
         cause: "an input id declared twice",
         message: "duplicate_input_id:",
+        seam: Seam::Run,
         ids: &["invalids/duplicate-inputs"],
     },
     RefusalGroup {
         cause: "a flow with no tasks — there is nothing to execute",
         message: "empty_tasks:",
+        seam: Seam::Run,
         ids: &["invalids/empty", "valids/invalid-draft-flow"],
     },
     RefusalGroup {
         cause: "a flow that calls itself as a subflow",
         message: "self_subflow:",
+        seam: Seam::Run,
         ids: &["invalids/recursive-flow"],
     },
     // no-silent-stall Task 1. This was `STILL_OVER_ACCEPTED`'s first row
@@ -6601,21 +6692,25 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
     RefusalGroup {
         cause: "a task type that does not exist (`Invalid type: ...MissingTwo`)",
         message: "unknown_task_type:",
+        seam: Seam::Run,
         ids: &["invalids/invalid-task"],
     },
     RefusalGroup {
         cause: "a `WorkingDirectory` with no children",
         message: "working_directory_tasks_required:",
+        seam: Seam::Run,
         ids: &["invalids/workingdirectory-no-tasks"],
     },
     RefusalGroup {
         cause: "a `WorkingDirectory` whose child is not a runnable task",
         message: "working_directory_child_not_runnable:",
+        seam: Seam::Run,
         ids: &["invalids/workingdirectory-invalid"],
     },
     RefusalGroup {
         cause: "a `Schedule` trigger that cannot supply an input with no default",
         message: "schedule_missing_inputs:",
+        seam: Seam::Run,
         ids: &[
             "invalids/scheduled-missing-inputs-defaults",
             "invalids/scheduled-missing-inputs-defaults-2",
@@ -6624,18 +6719,28 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
     RefusalGroup {
         cause: "an `itemType` an ARRAY or MULTISELECT input cannot hold",
         message: "input_item_type_invalid:",
+        seam: Seam::Run,
         ids: &["invalids/inputs-validation"],
     },
     RefusalGroup {
         cause: "a dotted reference to an id containing a dash — Pebble reads the \
                 dash as subtraction",
         message: "dashed_input_reference:",
+        seam: Seam::Run,
         ids: &["invalids/inputs-key-with-subtraction-symbol-validation"],
     },
     RefusalGroup {
         cause: "the same, on an `outputs.` reference",
         message: "dashed_output_reference:",
+        seam: Seam::Run,
         ids: &["invalids/outputs-key-with-subtraction-symbol-validation"],
+    },
+    RefusalGroup {
+        cause: "an unknown property on a core task, refused at save as Kestra refuses it \
+                (YamlParser.java:29-31); the run gate plans it on purpose (spec D1)",
+        message: "unknown_property",
+        seam: Seam::Save,
+        ids: &["invalids/invalid-property"],
     },
 ];
 
@@ -6646,15 +6751,6 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
 /// test and force the record to be corrected, exactly as the ratchet's
 /// `banked` arm does for the other direction.
 const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[
-    (
-        "invalids/invalid-property",
-        "`Unrecognized field \"invalid\" (class ...debug.Return)` — refused at SAVE since \
-         no-silent-drops Task 3 (2026-10-26: `keys::findings`, `unknown_property`, an error), \
-         but the run gate still plans it on purpose (spec D1: a version published before the \
-         check keeps running), and the corpus cannot file it: it shares `id: duplicate` with \
-         `invalids/duplicate` and loses the name, so the publish census does not see the \
-         refusal. Owner: none; accepted at run time by design.",
-    ),
     (
         "invalids/dag-invalid-subtask",
         "`tasks[task1].tasks[task1].task.message: must not be null` — a `@NotNull` on \
@@ -6715,6 +6811,22 @@ fn egret_refuses_every_flow_kestra_refuses() {
         for id in group.ids {
             let source = corpus_source(id);
             refused_in_groups += 1;
+            if group.seam == Seam::Save {
+                // Refused at SAVE, and the run gate plans it by design (D1).
+                if !refused_at_save(id) {
+                    failures.push(format!(
+                        "  {id}: not refused at save with code {:?}.\n\
+                               cause: {}",
+                        group.message, group.cause
+                    ));
+                }
+                if build_plan(&source).is_err() {
+                    failures.push(format!(
+                        "  {id}: the RUN gate refuses it now; move it to a Seam::Run group"
+                    ));
+                }
+                continue;
+            }
             match build_plan(&source) {
                 Ok(plan) => failures.push(format!(
                     "  {id}: OVER-ACCEPTED. Kestra refused it; egret planned {} task(s).\n\
@@ -7091,10 +7203,6 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "invalids/inputs-with-multiple-constraint-violations",
             "over-accepted: refused at a different seam",
-        ),
-        (
-            "invalids/invalid-property",
-            "over-accepted at run time: refused at save since 2026-10-26 (no-silent-drops Task 3), the run gate plans it by design",
         ),
         (
             "valids/dag",
@@ -7610,9 +7718,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // `valids/purge_logs_*` it banked.
     // (2, 82, 84) -> (2, 71, 73) at group C2 Task 5: nor do the eleven
     // entries it banked.
+    // (2, 71, 73) -> (2, 70, 72) at no-silent-drops Task 8b: nor does
+    // `invalids/invalid-property`, which it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 71, 73),
+        (2, 70, 72),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \
