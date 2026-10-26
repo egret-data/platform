@@ -100,10 +100,18 @@ impl From<egret_query::EngineError> for BiError {
 /// failed" and renders the message, not just a generic label.
 impl From<egret_perm::CompileError> for BiError {
     fn from(e: egret_perm::CompileError) -> Self {
-        match egret_perm_compile::overlap::refusal_body(&e) {
-            Some(body) => BiError::Overlap { body },
-            None => BiError::Engine(format!("permission recompile failed: {e}")),
+        if let Some(body) = egret_perm_compile::overlap::refusal_body(&e) {
+            return BiError::Overlap { body };
         }
+        // A ceiling refuses the steward's own write (D2, U3): a 409, not a
+        // failing engine.
+        if let Some(body) = e.expansion_ceiling_body() {
+            return BiError::Coded {
+                status: StatusCode::CONFLICT,
+                body,
+            };
+        }
+        BiError::Engine(format!("permission recompile failed: {e}"))
     }
 }
 

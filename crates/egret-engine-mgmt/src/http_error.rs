@@ -196,6 +196,10 @@ impl From<egret_perm::CompileError> for EngineHttpError {
         if let Some(body) = e.rule_overlap_body() {
             return EngineHttpError::RuleOverlap(body);
         }
+        // So is a ceiling the write would cross (D2, U3).
+        if e.expansion_ceiling_body().is_some() {
+            return EngineHttpError::Conflict(e.to_string());
+        }
         tracing::error!(
             error = %e,
             "perm-model recompile failed inside a catalog-workspace assignment write"
@@ -339,6 +343,19 @@ impl IntoResponse for EngineHttpError {
 
 #[cfg(test)]
 mod tests {
+    /// Live check F1: a catalog-workspace write whose recompile crosses an
+    /// expansion ceiling is the caller's 409 with the compiler's sentence.
+    #[test]
+    fn a_ceiling_refusal_is_a_conflict() {
+        let e = egret_perm::CompileError::ExpansionCeiling {
+            rule: "r".into(),
+            count: 501,
+            ceiling: 500,
+        };
+        let sentence = e.to_string();
+        assert!(matches!(EngineHttpError::from(e), EngineHttpError::Conflict(m) if m == sentence));
+    }
+
     use super::*;
     use crate::dependents::EngineDependentKind;
 

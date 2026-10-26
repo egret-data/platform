@@ -20,7 +20,9 @@ use egret_perm::{
     CompileError, EngineType, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind, Scope,
     Selector,
 };
-use egret_perm_compile::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
+use egret_perm_compile::{
+    compile_rule, validate_rule_shape, ResolvedNames, TableTarget, TaggedColumn,
+};
 
 // Dumb helpers only — a helper that computes anything is a second
 // implementation of the thing under test.
@@ -91,6 +93,41 @@ fn col(catalog: &str, schema: &str, table: &str, column: &str) -> TaggedColumn {
     }
 }
 
+/// Column-level tag attachments, as the StarRocks expansion groups them: one
+/// [`TableTarget`] per table, in first-seen order.
+fn targets(cols: &[TaggedColumn]) -> Vec<TableTarget> {
+    let mut out: Vec<TableTarget> = Vec::new();
+    for c in cols {
+        match out
+            .iter_mut()
+            .find(|t| t.catalog == c.catalog && t.schema == c.schema && t.table == c.table)
+        {
+            Some(t) => t.columns.push(c.column.clone()),
+            None => out.push(TableTarget {
+                catalog: c.catalog.clone(),
+                warehouse_id: Uuid::nil(),
+                schema: c.schema.clone(),
+                table: c.table.clone(),
+                table_level: false,
+                columns: vec![c.column.clone()],
+            }),
+        }
+    }
+    out
+}
+
+/// A whole-table tag attachment on `{catalog}.{schema}.{table}`.
+fn whole_table(catalog: &str, schema: &str, table: &str) -> TableTarget {
+    TableTarget {
+        catalog: catalog.to_string(),
+        warehouse_id: Uuid::nil(),
+        schema: schema.to_string(),
+        table: table.to_string(),
+        table_level: true,
+        columns: Vec::new(),
+    }
+}
+
 fn user(r#ref: &str) -> Principal {
     Principal {
         kind: PrincipalKind::User,
@@ -124,7 +161,7 @@ fn a_tag_rule_is_one_policy_on_trino_however_many_columns_carry_the_tag() {
         "trino-1",
         Some("trino-1_tag"),
         &resolved("wh", Some("pii")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap();
@@ -147,7 +184,7 @@ fn the_same_rule_becomes_one_policy_per_column_on_starrocks() {
         "sr-1",
         None,
         &resolved("wh", Some("pii")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap();
@@ -170,7 +207,7 @@ fn the_ceiling_refuses_and_names_the_rule_and_the_count() {
         "sr-1",
         None,
         &resolved("wh", Some("pii")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap_err();
@@ -202,7 +239,7 @@ fn the_ceiling_refuses_rather_than_truncating() {
         "sr-1",
         None,
         &resolved("wh", Some("pii")),
-        &tagged,
+        &targets(&tagged),
         100
     )
     .is_err());
@@ -214,7 +251,7 @@ fn the_ceiling_refuses_rather_than_truncating() {
         "sr-1",
         None,
         &resolved("wh", Some("pii")),
-        &tagged[..100],
+        &targets(&tagged[..100]),
         100,
     )
     .unwrap();
@@ -365,7 +402,7 @@ fn starrocks_expanded_policies_each_name_their_own_column_and_are_all_distinct()
         "sr-1",
         None,
         &resolved("wh", Some("pii")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap();
@@ -972,7 +1009,7 @@ fn a_starrocks_tag_row_filter_addresses_the_table_and_not_the_column() {
         "sr-1",
         None,
         &resolved("wh", Some("region-tag")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap();
@@ -1020,7 +1057,7 @@ fn a_starrocks_tag_row_filter_addresses_the_table_and_not_the_column() {
         "sr-1",
         None,
         &resolved("wh", Some("region-tag")),
-        &tagged,
+        &targets(&tagged),
         100,
     )
     .unwrap();
@@ -1360,4 +1397,118 @@ fn a_path_row_filter_must_name_exactly_catalog_schema_and_table() {
     // Nor across to a TAG-selected row filter, which carries no scope at all.
     validate_rule_shape(&rowfilter_rule_on_tag("region", "country = 'US'"))
         .expect("a tag row filter has no path scope to get wrong");
+}
+
+/// C8: a tag row filter on StarRocks addresses the TABLE, so a whole-table
+/// attachment needs no column list: one policy per table, the same name and
+/// body shape as one derived from a tagged column.
+#[test]
+fn a_starrocks_tag_row_filter_on_a_table_attachment_filters_the_table() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let from_table = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &[whole_table("wh", "sales", "orders")],
+        100,
+    )
+    .unwrap();
+    let from_column = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &targets(&[col("wh", "sales", "orders", "email")]),
+        100,
+    )
+    .unwrap();
+    assert_eq!(from_table.len(), 1);
+    assert_eq!(from_table, from_column, "byte-identical either way");
+    assert_eq!(
+        from_table[0]["name"],
+        format!(
+            "{}{}-wh.sales.orders",
+            egret_policy::COMPILER_RULE_PREFIX,
+            Uuid::nil()
+        )
+    );
+}
+
+/// C8: a table reached at both levels is one row-filter policy.
+#[test]
+fn a_row_filter_on_both_levels_of_one_table_is_one_policy() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let mut both = whole_table("wh", "sales", "orders");
+    both.columns.push("email".to_string());
+    let out = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &[both],
+        100,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1, "{out:?}");
+}
+
+/// C8: the rule ceiling counts TABLES for a row filter (what it emits), and
+/// still counts columns for a mask.
+#[test]
+fn a_row_filter_ceiling_counts_tables() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let many: Vec<TableTarget> = (0..501)
+        .map(|i| whole_table("wh", "sales", &format!("t{i}")))
+        .collect();
+    let err = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &many,
+        500,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CompileError::ExpansionCeiling { count: 501, .. }),
+        "{err:?}"
+    );
+
+    let wide = targets(
+        &(0..600)
+            .map(|i| col("wh", "sales", "orders", &format!("c{i}")))
+            .collect::<Vec<_>>(),
+    );
+    let out = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &wide,
+        500,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1, "one table, one row filter");
+    let m = mask_rule_on_tag("region", "MASK_HASH");
+    assert!(
+        matches!(
+            compile_rule(
+                &m,
+                EngineType::StarRocks,
+                "sr-1",
+                None,
+                &resolved("wh", Some("region-tag")),
+                &wide,
+                500,
+            ),
+            Err(CompileError::ExpansionCeiling { count: 600, .. })
+        ),
+        "a mask still counts its 600 columns"
+    );
 }

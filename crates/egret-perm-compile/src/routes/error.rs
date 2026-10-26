@@ -118,6 +118,14 @@ impl From<CompileError> for PermHttpError {
                         .expect("refusal_body answers every AmbiguousMaskOrFilterArbitration"),
                 }
             }
+            ref ceiling @ (CompileError::ExpansionCeiling { .. }
+            | CompileError::ClearanceExpansionCeiling { .. }
+            | CompileError::ProfileExpansionCeiling { .. }) => PermHttpError::Coded {
+                status: StatusCode::CONFLICT,
+                body: ceiling
+                    .expansion_ceiling_body()
+                    .expect("expansion_ceiling_body answers every ceiling variant"),
+            },
             CompileError::ServiceDefUnreadable { .. } => {
                 tracing::error!(error = %e, "embedded service-def failed to parse");
                 PermHttpError::Internal

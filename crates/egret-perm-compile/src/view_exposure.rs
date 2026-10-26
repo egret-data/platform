@@ -12,7 +12,7 @@
 //!
 //! **Per engine, from that engine's OWN catalog attachments.** Two engines may
 //! share one policy profile, and the profile-wide query
-//! (`egret_policy::tagged_columns_for_service_via`) returns every column
+//! (`egret_policy::tag_assignments_for_service_via`) returns every column
 //! reachable through ANY engine on the profile. A view on engine B can only
 //! read a catalog attached to B, so each engine is matched against the
 //! classified tables of its own attachments (Task 4 review I-3).
@@ -65,7 +65,7 @@ struct Row {
 /// `tag_key` in the catalogs attached to THAT engine, ordered by engine name.
 /// An engine that reaches none is absent. Column-level assignments only, as the
 /// clearance compiles them (`a.column_name <> ''`, the same filter as
-/// `tagged_columns_for_service_via`).
+/// `tag_assignments_for_service_via`).
 pub async fn classified_starrocks_engines(
     conn: &mut PgConnection,
     tag_key: &str,

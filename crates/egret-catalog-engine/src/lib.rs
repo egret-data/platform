@@ -26,6 +26,9 @@ pub mod recovery;
 /// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
 /// egret-side pool, which is now the same sqlx major lakekeeper uses.
 pub mod store;
+// D2: recompile StarRocks profiles when a table classified as a whole changes
+// schema.
+pub mod table_hook;
 /// The view-governance DEFINER audit's reader (spec B5): every view in
 /// egret's catalogs and its stored `trino.run-as-owner`.
 pub mod view_audit;
@@ -78,6 +81,7 @@ pub use recovery::{
     list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
     TabularKindName,
 };
+pub use table_hook::TableHook;
 pub use view_audit::{
     load_view_run_as_owner, CatalogView, CatalogViews, EmbeddedViewCatalog, NoViewCatalog,
     ViewCatalog, RUN_AS_OWNER_PROPERTY,

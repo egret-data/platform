@@ -36,6 +36,11 @@
 //! profile. Every assertion is therefore keyed to the `(service_id, name)` pairs
 //! this test's own tag produces, never to a count of everything in the table.
 
+#[path = "support/engine_eval.rs"]
+mod engine_eval;
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
+
 use egret_metastore::Db;
 use egret_perm::PermStore;
 use egret_perm_compile::{recompile_service, DEFAULT_EXPANSION_CEILING};
@@ -65,7 +70,7 @@ struct Fixture {
 }
 
 /// A StarRocks profile with one engine bound to it and one registry catalog
-/// attached to that engine — the chain `tagged_columns_for_service_via` walks to
+/// attached to that engine — the chain `tag_assignments_for_service_via` walks to
 /// decide which tagged columns this profile's plugin can be served a policy for.
 /// No `perm.rules` row and no grant: a clearance comes from
 /// `classification_policies`, not from the perm model, and a fixture carrying a
@@ -1499,4 +1504,698 @@ async fn a_generated_profile_without_a_compiled_clearance_mask_still_refolds_on_
         axum::http::StatusCode::CONFLICT,
         "a generated profile refolds on a mask write, so the refused recompile refuses it: {body}"
     );
+}
+
+// ── D2 (2026-10-25): one expansion for both levels, folded once ──
+
+/// Every clearance policy name and body under `service_id` for `tags`, ordered
+/// by name: the served state a recompile must leave byte-identical.
+async fn clearance_state(db: &Db, service_id: i64, tags: &[Uuid]) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for t in tags {
+        out.extend(
+            sqlx::query_as::<_, (String, Value)>(
+                "SELECT name, policy_jsonb FROM policy.authz_policies \
+                 WHERE service_id = $1 AND name LIKE $2 || '%' ORDER BY name",
+            )
+            .bind(service_id)
+            .bind(format!("{COMPILER_CLEARANCE_PREFIX}{t}-"))
+            .fetch_all(&db.pool)
+            .await
+            .expect("policy read"),
+        );
+    }
+    out
+}
+
+/// Ranger matches every StarRocks level case-insensitively (spec E6), so
+/// `Orders.Email` and `orders.email` are ONE column. Two gated classifications
+/// on its two spellings must compile ONE clearance mask (cleared = the
+/// intersection), not two priority-1 masks that tie and refuse the compile.
+#[tokio::test]
+async fn a_column_tagged_in_two_spellings_compiles_one_clearance_mask() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_a, _) = new_tag(&db).await;
+    let (tag_b, _) = new_tag(&db).await;
+    tag_column(&db, tag_a, f.warehouse_id, "Orders", "Email").await;
+    tag_column(&db, tag_b, f.warehouse_id, "orders", "email").await;
+    let (ann, bob) = cleared_pair(&db, tag_a).await;
+    // Only ann is cleared for B: the merged mask clears ann alone.
+    let ann_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&ann)
+        .fetch_one(&db.pool)
+        .await
+        .expect("ann");
+    let role_b = unique("d2-clear-b");
+    let role_b_id = new_role(&db, &role_b).await;
+    grant_role(&db, ann_id, role_b_id).await;
+    gate(&db, tag_b, &[&role_b]).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("two spellings of one column must not refuse the compile");
+
+    let mut masks = clearance_masks(&db, f.service_id, tag_a).await;
+    masks.extend(clearance_masks(&db, f.service_id, tag_b).await);
+    assert_eq!(
+        masks.len(),
+        1,
+        "one clearance mask for one column: {:?}",
+        masks.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let col = [
+        ("catalog", f.catalog_name.as_str()),
+        ("database", "sales"),
+        ("table", "orders"),
+        ("column", "email"),
+    ];
+    use engine_eval::{mask_type, starrocks_mask};
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &ann, &col).await).as_deref(),
+        Some("MASK_NONE"),
+        "ann is cleared for both"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &col).await).as_deref(),
+        Some("MASK_NULL"),
+        "bob is cleared for A only"
+    );
+}
+
+/// C5's no-churn rule: a table tagged in ONE spelling keeps today's names
+/// (the stored spelling, not a folded one) and a second recompile writes
+/// nothing.
+#[tokio::test]
+async fn a_column_only_table_keeps_its_policy_names() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "Orders", "Email").await;
+    tag_column(&db, tag_id, f.warehouse_id, "Orders", "SSN").await;
+    cleared_pair(&db, tag_id).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let names: Vec<String> = clearance_state(&db, f.service_id, &[tag_id])
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let c = &f.catalog_name;
+    let p = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}");
+    assert_eq!(
+        names,
+        vec![
+            format!("{p}-{c}.sales.Orders.Email"),
+            format!("{p}-{c}.sales.Orders.SSN"),
+            format!("{p}-mask-{c}.sales.Orders.Email"),
+            format!("{p}-mask-{c}.sales.Orders.SSN"),
+        ]
+    );
+    let before = clearance_state(&db, f.service_id, &[tag_id]).await;
+    let version_before: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("version");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile again");
+    assert_eq!(clearance_state(&db, f.service_id, &[tag_id]).await, before);
+    let version_after: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("version");
+    assert_eq!(
+        version_after, version_before,
+        "an unchanged recompile writes nothing"
+    );
+}
+
+// ── D2 Task 2: the whole-table clearance deny (U1, C6, C7) ──
+
+/// Attach `tag_id` to the whole table `sales.{table}` (`column_name = ''`).
+async fn tag_table(db: &Db, tag_id: Uuid, warehouse_id: Uuid, table: &str) {
+    tag_column(db, tag_id, warehouse_id, table, "").await;
+}
+
+/// A hand-written allow of `select` on every column of the catalog to
+/// `{public}`: the grant an uncleared reader holds, so a refusal is the
+/// clearance's and not the absence of a grant.
+async fn grant_select_to_everyone(db: &Db, f: &Fixture) {
+    let name = unique("grant-all");
+    let level =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 0, "isEnabled": true,
+        "resources": {"catalog": level(&f.catalog_name), "database": level("*"),
+                      "table": level("*"), "column": level("*")},
+        "policyItems": [{"groups": ["public"],
+                         "accesses": [{"type": "select", "isAllowed": true}]}],
+    }))
+    .execute(&db.pool)
+    .await
+    .expect("store the grant");
+}
+
+/// The column request `{catalog}.sales.{table}.{column}`.
+fn column_of<'a>(f: &'a Fixture, table: &'a str, column: &'a str) -> [(&'a str, &'a str); 4] {
+    [
+        ("catalog", f.catalog_name.as_str()),
+        ("database", "sales"),
+        ("table", table),
+        ("column", column),
+    ]
+}
+
+/// U1: a classification on the whole table `orders` compiles ONE access deny
+/// with `column: *` — `{public}` denied `select`, the cleared users excepted,
+/// priority 0 — and no column list is needed for it. The served download
+/// refuses an uncleared granted reader every column, including the hidden
+/// `_file` StarRocks checks when every column is masked (spec E9), and allows
+/// a cleared one.
+#[tokio::test]
+async fn a_table_level_clearance_compiles_one_wildcard_deny_per_table() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    let (ann, bob) = cleared_pair(&db, tag_id).await;
+    grant_select_to_everyone(&db, &f).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let denies = clearance_policies(&db, f.service_id, tag_id).await;
+    let names: Vec<&String> = denies.iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        vec![&format!(
+            "{COMPILER_CLEARANCE_PREFIX}{tag_id}-{}.sales.orders.*",
+            f.catalog_name
+        )]
+    );
+    let body = &denies[0].1;
+    assert_eq!(body["serviceType"], serde_json::json!("starrocks"));
+    assert_eq!(
+        strings_of(&body["resources"]["column"]["values"]),
+        vec!["*"]
+    );
+    assert_eq!(
+        strings_of(&body["resources"]["table"]["values"]),
+        vec!["orders"]
+    );
+    let deny = &body["denyPolicyItems"][0];
+    assert_eq!(strings_of(&deny["groups"]), vec!["public"]);
+    assert_eq!(access_types(deny), vec!["select"]);
+    let mut both = vec![ann.clone(), bob.clone()];
+    both.sort();
+    assert_eq!(users_of(&body["denyExceptions"][0]), both);
+
+    use engine_eval::{allowed, denied, starrocks_decides};
+    let uncleared = unique("nobody");
+    for column in ["email", "region", "_file", "___count___"] {
+        let d = starrocks_decides(
+            &db,
+            f.service_id,
+            &uncleared,
+            "select",
+            &column_of(&f, "orders", column),
+        )
+        .await;
+        assert!(denied(&d), "uncleared on {column}: {d:?}");
+    }
+    let d = starrocks_decides(
+        &db,
+        f.service_id,
+        &ann,
+        "select",
+        &column_of(&f, "orders", "email"),
+    )
+    .await;
+    assert!(allowed(&d), "cleared on email: {d:?}");
+    // Another table of the catalog is untouched.
+    let d = starrocks_decides(
+        &db,
+        f.service_id,
+        &uncleared,
+        "select",
+        &column_of(&f, "customers", "email"),
+    )
+    .await;
+    assert!(allowed(&d), "uncleared on an unclassified table: {d:?}");
+}
+
+/// C6: a whole-table attachment of a tag covers that tag's per-column denies
+/// on the same table (in any spelling), so only the `*` deny is compiled; a
+/// SECOND tag on a column of the table keeps its own per-column deny.
+#[tokio::test]
+async fn a_table_level_attachment_covers_the_column_denies_of_its_tag() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_a, _) = new_tag(&db).await;
+    let (tag_b, _) = new_tag(&db).await;
+    tag_table(&db, tag_a, f.warehouse_id, "orders").await;
+    tag_column(&db, tag_a, f.warehouse_id, "Orders", "email").await;
+    tag_column(&db, tag_b, f.warehouse_id, "orders", "email").await;
+    cleared_pair(&db, tag_a).await;
+    let role_b = unique("d2-clear-b");
+    new_role(&db, &role_b).await;
+    gate(&db, tag_b, &[&role_b]).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let c = &f.catalog_name;
+    // The table's spelling is the first in the expansion's (collation)
+    // order, so the name is compared folded.
+    let a: Vec<String> = clearance_policies(&db, f.service_id, tag_a)
+        .await
+        .into_iter()
+        .map(|(n, _)| n.to_lowercase())
+        .collect();
+    assert_eq!(
+        a,
+        vec![format!("{COMPILER_CLEARANCE_PREFIX}{tag_a}-{c}.sales.orders.*").to_lowercase()]
+    );
+    let b: Vec<String> = clearance_policies(&db, f.service_id, tag_b)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(
+        b,
+        vec![format!(
+            "{COMPILER_CLEARANCE_PREFIX}{tag_b}-{c}.sales.orders.email"
+        )]
+    );
+}
+
+/// Spec E8: no policy compiled for a table-level attachment carries an empty
+/// resource value, which Ranger would read as match-any.
+#[tokio::test]
+async fn no_table_level_compile_emits_an_empty_resource_value() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    tag_column(&db, tag_id, f.warehouse_id, "customers", "email").await;
+    cleared_pair(&db, tag_id).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let bodies: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies WHERE service_id = $1",
+    )
+    .bind(f.service_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("policies");
+    assert!(
+        bodies.iter().any(|(n, _)| n.ends_with(".sales.orders.*")),
+        "the fixture must compile the table-level deny: {:?}",
+        bodies.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    for (name, body) in &bodies {
+        for (level, l) in body["resources"].as_object().expect("resources") {
+            for v in l["values"].as_array().expect("values") {
+                assert_ne!(v, "", "{name}: level {level} carries an empty value");
+            }
+        }
+    }
+}
+
+/// C7 / spec E3: a classification on a whole table alone creates the
+/// engine-wide materialized-view deny, excepting its cleared users.
+#[tokio::test]
+async fn a_table_only_classification_narrows_the_materialized_view_deny() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    let (ann, bob) = cleared_pair(&db, tag_id).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = mv_deny(&db, &f)
+        .await
+        .expect("a table-level classification must create the MV deny");
+    let mut both = vec![ann, bob];
+    both.sort();
+    assert_eq!(users_of(&body["denyExceptions"][0]), both);
+}
+
+// ── D2 Task 4: NULL masks for every column of a whole-table classification ──
+
+/// C1: a classification on the whole table `orders(id, email, region)` gets
+/// one priority-1 `MASK_NULL` clearance mask per column of the table's current
+/// schema (read from the catalog), folded like a column-level one: an
+/// uncleared reader is served NULL in every column, a cleared one what the
+/// rule masks give them.
+#[tokio::test]
+async fn a_table_level_clearance_masks_every_column_of_the_table() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email", "region"]).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    let (ann, _bob) = cleared_pair(&db, tag_id).await;
+    f.perm
+        .create_rule(&mask_rule(&f, "email", "MASK", &[]))
+        .await
+        .expect("create rule");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let c = &f.catalog_name;
+    let p = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-mask-{c}.sales.orders");
+    let masks = clearance_masks(&db, f.service_id, tag_id).await;
+    let names: Vec<&String> = masks.iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        vec![
+            &format!("{p}.email"),
+            &format!("{p}.id"),
+            &format!("{p}.region")
+        ]
+    );
+    for (_, body) in &masks {
+        assert_eq!(body["policyPriority"], serde_json::json!(1));
+    }
+
+    use engine_eval::{mask_type, starrocks_mask};
+    let uncleared = unique("nobody");
+    for column in ["id", "email", "region"] {
+        let d = starrocks_mask(
+            &db,
+            f.service_id,
+            &uncleared,
+            &column_of(&f, "orders", column),
+        )
+        .await;
+        assert_eq!(
+            mask_type(&d).as_deref(),
+            Some("MASK_NULL"),
+            "uncleared on {column}"
+        );
+    }
+    let d = starrocks_mask(&db, f.service_id, &ann, &column_of(&f, "orders", "email")).await;
+    assert_eq!(
+        mask_type(&d).as_deref(),
+        Some("MASK"),
+        "cleared on email: the rule mask"
+    );
+    let d = starrocks_mask(&db, f.service_id, &ann, &column_of(&f, "orders", "id")).await;
+    assert_eq!(mask_type(&d).as_deref(), Some("MASK_NONE"), "cleared on id");
+}
+
+/// C1 + C5: tag A on the whole table and tag B on its column `Email` (typed in
+/// another case than the catalog's `email`) give ONE mask on that column, in
+/// the catalog's spelling, cleared for A ∩ B, named after the lower tag id —
+/// and no refused tie.
+#[tokio::test]
+async fn a_column_and_a_table_attachment_give_one_mask_per_column() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email"]).await;
+    let (tag_a, _) = new_tag(&db).await;
+    let (tag_b, _) = new_tag(&db).await;
+    tag_table(&db, tag_a, f.warehouse_id, "orders").await;
+    tag_column(&db, tag_b, f.warehouse_id, "Orders", "Email").await;
+    let (ann, bob) = cleared_pair(&db, tag_a).await;
+    let ann_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&ann)
+        .fetch_one(&db.pool)
+        .await
+        .expect("ann");
+    let role_b = unique("d2-clear-b");
+    let role_b_id = new_role(&db, &role_b).await;
+    grant_role(&db, ann_id, role_b_id).await;
+    gate(&db, tag_b, &[&role_b]).await;
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("a table and a column attachment must not refuse the compile");
+
+    let c = &f.catalog_name;
+    let low = tag_a.min(tag_b);
+    let mut masks = clearance_masks(&db, f.service_id, tag_a).await;
+    masks.extend(clearance_masks(&db, f.service_id, tag_b).await);
+    let mut names: Vec<String> = masks.into_iter().map(|(n, _)| n).collect();
+    names.sort();
+    let mut want = vec![
+        format!("{COMPILER_CLEARANCE_PREFIX}{low}-mask-{c}.sales.orders.email"),
+        format!("{COMPILER_CLEARANCE_PREFIX}{tag_a}-mask-{c}.sales.orders.id"),
+    ];
+    want.sort();
+    assert_eq!(names, want);
+
+    use engine_eval::{mask_type, starrocks_mask};
+    let email = column_of(&f, "orders", "email");
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &ann, &email).await).as_deref(),
+        Some("MASK_NONE"),
+        "ann is cleared for both"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &email).await).as_deref(),
+        Some("MASK_NULL"),
+        "bob is cleared for A only"
+    );
+    assert_eq!(
+        mask_type(&starrocks_mask(&db, f.service_id, &bob, &column_of(&f, "orders", "id")).await)
+            .as_deref(),
+        Some("MASK_NONE"),
+        "bob is cleared for A, the only classification on id"
+    );
+}
+
+// ── D2 Task 5: row filters on a whole-table classification (C8) ──
+
+/// A classification row filter reaches the tables the classification is on,
+/// at EITHER level: `Orders` (whole table) and `orders.email` (a column) are
+/// one table and one policy; `shipments` (whole table only) gets its own. The
+/// served download filters both tables.
+#[tokio::test]
+async fn a_tag_row_filter_filters_every_table_the_classification_is_on() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, tag_key) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "Orders").await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "email").await;
+    tag_table(&db, tag_id, f.warehouse_id, "shipments").await;
+    let rule_id = f
+        .perm
+        .create_rule(&egret_perm::Rule {
+            id: Uuid::nil(),
+            name: unique("d2-rowfilter"),
+            kind: egret_perm::RuleKind::RowFilter {
+                filter_expr: "region = 'us'".to_string(),
+            },
+            selector: egret_perm::Selector::Tag { key: tag_key },
+            exempt: egret_perm::PrincipalSet::default(),
+        })
+        .await
+        .expect("create rule");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(name) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE $2 || '%'",
+    )
+    .bind(f.service_id)
+    .bind(format!("{}{rule_id}-", egret_policy::COMPILER_RULE_PREFIX))
+    .fetch_all(&db.pool)
+    .await
+    .expect("rule policies");
+    names.sort();
+    let p = format!(
+        "{}{rule_id}-{}.sales",
+        egret_policy::COMPILER_RULE_PREFIX,
+        f.catalog_name
+    );
+    assert_eq!(names, vec![format!("{p}.orders"), format!("{p}.shipments")]);
+
+    use egret_ranger_eval::eval::RowFilterDecision;
+    for table in ["orders", "shipments"] {
+        let d = engine_eval::starrocks_row_filter(
+            &db,
+            f.service_id,
+            &unique("reader"),
+            &[
+                ("catalog", f.catalog_name.as_str()),
+                ("database", "sales"),
+                ("table", table),
+            ],
+        )
+        .await;
+        match d {
+            RowFilterDecision::Filtered(r) => {
+                assert_eq!(r.filter_expr, "region = 'us'", "{table}")
+            }
+            other => panic!("{table}: {other:?}"),
+        }
+    }
+}
+
+// ── D2 Task 6: unknown table report and ceiling messages (U3, U4, C9) ──
+
+/// `n` synthetic column names `c1..cn`.
+fn many_columns(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("c{i}")).collect()
+}
+
+/// U4: a whole-table classification on a table the catalog does not have
+/// keeps its `*` deny (it needs no column list), compiles no mask, and the
+/// compile result says so, naming the table and that a view over it is not
+/// protected.
+#[tokio::test]
+async fn an_unknown_table_keeps_its_deny_and_reports_the_missing_masks() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "ghost").await;
+    cleared_pair(&db, tag_id).await;
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("an unknown table must not refuse the compile");
+
+    let denies: Vec<String> = clearance_policies(&db, f.service_id, tag_id)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(
+        denies,
+        vec![format!(
+            "{COMPILER_CLEARANCE_PREFIX}{tag_id}-{}.sales.ghost.*",
+            f.catalog_name
+        )]
+    );
+    assert!(clearance_masks(&db, f.service_id, tag_id).await.is_empty());
+    let skips: Vec<&egret_perm_compile::SkippedItem> =
+        summary.skipped.iter().filter(|s| s.id == tag_id).collect();
+    assert_eq!(skips.len(), 1, "{:?}", summary.skipped);
+    assert_eq!(
+        skips[0].source_kind,
+        egret_perm_compile::SourceKind::Clearance
+    );
+    let reason = &skips[0].reason;
+    assert!(
+        reason.contains(&format!("{}.sales.ghost", f.catalog_name)),
+        "{reason}"
+    );
+    assert!(reason.contains("view"), "{reason}");
+}
+
+/// U3/C9: a whole-table clearance counts 1 deny + one mask per column of the
+/// table. 1 + 520 is over the per-clearance ceiling of 500 and is refused,
+/// naming the table and its column count; 1 + 400 is accepted.
+#[tokio::test]
+async fn a_wide_table_level_clearance_is_refused_with_its_tables() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let wide = many_columns(520);
+    let wide: Vec<&str> = wide.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "wide", &wide).await;
+    let ok = many_columns(400);
+    let ok: Vec<&str> = ok.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "narrow", &ok).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "wide").await;
+    cleared_pair(&db, tag_id).await;
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("1 + 520 is over the ceiling");
+    match &err {
+        egret_perm::CompileError::ClearanceExpansionCeiling { count, tables, .. } => {
+            assert_eq!(*count, 521);
+            assert_eq!(tables.len(), 1, "{tables:?}");
+            assert_eq!(tables[0].columns, 520);
+        }
+        other => panic!("{other:?}"),
+    }
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("{}.sales.wide", f.catalog_name)),
+        "{message}"
+    );
+    assert!(message.contains("520"), "{message}");
+
+    sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = $1")
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .expect("untag");
+    tag_table(&db, tag_id, f.warehouse_id, "narrow").await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("1 + 400 is under the ceiling");
+    assert_eq!(clearance_masks(&db, f.service_id, tag_id).await.len(), 400);
+}
+
+/// U3: a profile that grows over its total ceiling through whole-table masks
+/// is refused with a message naming the largest whole-table tables.
+#[tokio::test]
+async fn the_profile_ceiling_names_the_largest_tables() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let cols = many_columns(400);
+    let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
+    for (i, table) in ["big_a", "big_b", "big_c"].iter().enumerate() {
+        lakekeeper_stub::add_table(&db, lk, &["sales"], table, &cols).await;
+        let (tag_id, _) = new_tag(&db).await;
+        tag_table(&db, tag_id, f.warehouse_id, table).await;
+        let role = unique(&format!("d2-profile-{i}"));
+        new_role(&db, &role).await;
+        gate(&db, tag_id, &[&role]).await;
+    }
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("3 × (1 + 400) + the MV deny is over 1000");
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::ProfileExpansionCeiling { .. }
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    for table in ["big_a", "big_b", "big_c"] {
+        assert!(
+            message.contains(&format!("{}.sales.{table}", f.catalog_name)),
+            "{message}"
+        );
+    }
+    assert!(message.contains("400"), "{message}");
 }

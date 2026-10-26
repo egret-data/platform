@@ -264,12 +264,22 @@ pub trait CatalogGuard: Send + Sync {
 ///   guard, so an unauthenticated request does no lineage work, and before
 ///   lakekeeper, so a classified view is not committed until its tags are on
 ///   every plugin.
+/// * `table_hook` — the table-commit hook ([`crate::table_hook`], D2): it
+///   recompiles the bound StarRocks profiles when a table classified as a
+///   whole changes schema. It sits inside the guard and the view hold, next to
+///   lakekeeper.
 pub fn mount_catalog_engine(
     engine_state: ApiContext<EngineState>,
     guard: Option<std::sync::Arc<dyn CatalogGuard>>,
     hold: Option<std::sync::Arc<crate::view_hold::ViewHold>>,
+    table_hook: Option<std::sync::Arc<crate::table_hook::TableHook>>,
 ) -> axum::Router {
-    front_catalog_router(catalog_engine_router(engine_state), guard, hold)
+    let inner = catalog_engine_router(engine_state);
+    let inner = match table_hook {
+        Some(hook) => crate::table_hook::layer(inner, hook),
+        None => inner,
+    };
+    front_catalog_router(inner, guard, hold)
 }
 
 /// The layers [`mount_catalog_engine`] puts in front of `inner`, which is

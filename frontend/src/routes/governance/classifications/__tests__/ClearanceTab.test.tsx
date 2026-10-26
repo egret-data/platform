@@ -39,9 +39,10 @@ const table = () => screen.findByRole("table", { name: "Clearance" }, T);
 const GROUP_WARNING = /not enforced in the engine: no group provider or usersync means a group name never reaches trino or starrocks, and a role name does not either/i;
 const READS_ONLY = /this clearance withholds reads only, on trino and on starrocks alike: a user without it can still overwrite a column they cannot read/i;
 const VIEWS = /trino views in egret.s catalogs carry the classification/i;
-const CEILING = /if more than 500 of this tag.s columns are visible to one starrocks profile, that profile.s recompile fails outright rather than truncating the clearance/i;
+// D2 review: a whole table costs 1 plus its column count, not one policy.
+const CEILING = /one policy per tagged column, and 1 plus the table.s column count for a classification on a whole table: if that comes to more than 500 for one starrocks profile, the write that would cause it is refused/i;
 const COMPILES =
-  "Compiles to one deny tag policy in each Trino profile's tag service, and on StarRocks to a select deny and a NULL mask per tagged column. On StarRocks, a classification on a whole table compiles no clearance. StarRocks does not access-check a masked column, so an uncleared reader reads NULL there rather than being refused.";
+  "Compiles to one deny tag policy in each Trino profile's tag service. On StarRocks it compiles to a select deny and a NULL mask per tagged column, or, on a whole table, one select deny on the table and a NULL mask per column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL in a classified column rather than being refused, unless the classification is on the whole table.";
 
 async function pickAndAdd(user: ReturnType<typeof userEvent.setup>, type: "Role" | "Group", label: string) {
   if (type === "Group") {

@@ -101,24 +101,6 @@ pub struct RuleEffect {
     /// Trino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when
     /// there is none.
     pub trino_column_only: Option<TrinoColumnOnly>,
-    /// A classification ROW FILTER only: the tables it filters nothing on in
-    /// StarRocks ([`StarRocksTableOnly`]); `null` otherwise.
-    pub starrocks_table_only: Option<StarRocksTableOnly>,
-}
-
-/// Where a classification row filter filters nothing on StarRocks (live check
-/// finding 2, the mirror of D3): tables where the classification is on the
-/// table and on none of its columns, in catalogs a StarRocks engine enforces the
-/// rule on. StarRocks expands a classification row filter over the TAGGED
-/// COLUMNS of each table, so a table-level attachment compiles nothing. The
-/// compiler fix belongs with the StarRocks table-level clearance (D2) package.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct StarRocksTableOnly {
-    /// The catalogs those tables are in, by name, sorted.
-    pub catalogs: Vec<String>,
-    /// Distinct tables.
-    pub tables: u32,
 }
 
 /// Where a classification row filter filters nothing on Trino (spec §5.8, D3,
@@ -309,16 +291,11 @@ pub async fn rule_effect(
         (Vec::new(), false)
     };
 
-    let (trino_column_only, starrocks_table_only) = match &rule.selector {
-        Selector::Tag { key } if !is_mask => (
-            row_filter_gap_tables(conn, key, &catalogs, "trino", COLUMN_ONLY_TABLES)
-                .await?
-                .map(|(catalogs, tables)| TrinoColumnOnly { catalogs, tables }),
-            row_filter_gap_tables(conn, key, &catalogs, "starrocks", TABLE_ONLY_TABLES)
-                .await?
-                .map(|(catalogs, tables)| StarRocksTableOnly { catalogs, tables }),
-        ),
-        _ => (None, None),
+    let trino_column_only = match &rule.selector {
+        Selector::Tag { key } if !is_mask => row_filter_gap_tables(conn, key, &catalogs)
+            .await?
+            .map(|(catalogs, tables)| TrinoColumnOnly { catalogs, tables }),
+        _ => None,
     };
 
     Ok(RuleEffect {
@@ -337,7 +314,6 @@ pub async fn rule_effect(
         already_masked,
         truncated: is_mask && (reach.targets_truncated || scan_truncated),
         trino_column_only,
-        starrocks_table_only,
     })
 }
 
@@ -355,42 +331,25 @@ const COLUMN_ONLY_TABLES: &str =
                            AND lower(b.table_name) = lower(a.table_name) \
                            AND b.column_name = '')";
 
-/// Tables where a classification keyed `$1` is on the table only, in the
-/// catalogs `$2`: where StarRocks, which expands a row filter over tagged
-/// columns, compiles nothing.
-const TABLE_ONLY_TABLES: &str =
-    "SELECT DISTINCT c.name, lower(a.schema_name), lower(a.table_name) \
-       FROM catalog_tag_assignments a \
-       JOIN tags t ON t.id = a.tag_id \
-       JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-      WHERE t.key = $1 AND c.id = ANY($2) AND a.column_name = '' \
-        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments b \
-                         WHERE b.tag_id = a.tag_id AND b.warehouse_id = a.warehouse_id \
-                           AND lower(b.schema_name) = lower(a.schema_name) \
-                           AND lower(b.table_name) = lower(a.table_name) \
-                           AND b.column_name <> '')";
-
 /// The `(catalog names, tables)` a classification row filter keyed `key`
-/// misses on `engine_type`, over the reached `catalogs` whose enforcing engines
-/// include one of that type; `None` when there are none. `query` is one of
-/// [`COLUMN_ONLY_TABLES`] / [`TABLE_ONLY_TABLES`]. Levels compare case-folded,
-/// as the tag resolution does.
+/// misses on Trino ([`COLUMN_ONLY_TABLES`]), over the reached `catalogs` whose
+/// enforcing engines include a Trino one; `None` when there are none. Levels
+/// compare case-folded, as the tag resolution does. (StarRocks misses none
+/// since D2: it filters a table the classification is on at either level.)
 async fn row_filter_gap_tables(
     conn: &mut sqlx::PgConnection,
     key: &str,
     catalogs: &[EffectCatalog],
-    engine_type: &str,
-    query: &'static str,
 ) -> Result<Option<(Vec<String>, u32)>, PermHttpError> {
     let enforcing: Vec<Uuid> = catalogs
         .iter()
-        .filter(|c| c.engines.iter().any(|e| e.engine_type == engine_type))
+        .filter(|c| c.engines.iter().any(|e| e.engine_type == "trino"))
         .map(|c| c.catalog_id)
         .collect();
     if enforcing.is_empty() {
         return Ok(None);
     }
-    let rows: Vec<(String, String, String)> = sqlx::query_as(query)
+    let rows: Vec<(String, String, String)> = sqlx::query_as(COLUMN_ONLY_TABLES)
         .bind(key)
         .bind(&enforcing)
         .fetch_all(&mut *conn)

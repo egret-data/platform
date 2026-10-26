@@ -44,7 +44,7 @@
 //!    write happen against the SAME `&mut Transaction`, via
 //!    `egret_perm::{list_grants_via, list_rules_via}` and
 //!    `egret_policy::{get_service_by_id_via, catalogs_for_service_via,
-//!    tagged_columns_for_service_via, tag_name_for_key_via}` (all
+//!    tag_assignments_for_service_via, tag_name_for_key_via}` (all
 //!    connection-generic, added in this fix round for exactly this reason).
 //!    Round 1 read through `PermStore`/`PolicyStore`'s own POOLS — a second
 //!    connection that, under Postgres' default READ COMMITTED isolation,
@@ -113,12 +113,12 @@ use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
+    tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
     COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
-use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TaggedColumn};
+use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TableTarget};
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
 ///
@@ -565,7 +565,7 @@ async fn compile_desired(
     // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
     // it compiles identically into every Trino profile with a tag service. A
     // StarRocks clearance expands to one ACCESS deny per tagged column
-    // reachable from THIS service — the same `tagged_columns_for_service_via`
+    // reachable from THIS service — the same `tag_assignments_for_service_via`
     // expansion a tag-selected rule uses above — so `service_id` and the
     // profile's own name both have to reach the compiler.
     let clearances = crate::clearance::compile_clearance(
@@ -577,6 +577,7 @@ async fn compile_desired(
     )
     .await?;
     skipped.extend(clearances.skipped);
+    let whole_tables = clearances.whole_tables;
     for (name, body) in clearances.policies {
         let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
         desired.insert(
@@ -677,6 +678,7 @@ async fn compile_desired(
         skipped,
         sweep,
         profile_name: svc.name,
+        largest: whole_tables,
     }))
 }
 
@@ -780,6 +782,8 @@ struct Compiled {
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
     profile_name: String,
+    /// The largest whole-table classified tables (D2), for the same refusal.
+    largest: Vec<egret_perm::TableCount>,
 }
 
 /// Fold one priority-1 clearance mask per classified column into `desired`
@@ -886,7 +890,7 @@ async fn compile_one_rule(
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
 ) -> Result<(), CompileError> {
-    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TaggedColumn>) =
+    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TableTarget>) =
         match &r.selector {
             Selector::Path(scope) => {
                 let Some(name) = catalog_names.get(&scope.catalog_id) else {
@@ -915,17 +919,11 @@ async fn compile_one_rule(
                     return Ok(());
                 };
                 let tagged = if engine == EngineType::StarRocks {
-                    tagged_columns_for_service_via(conn, service_id, key)
-                        .await
-                        .map_err(db_err)?
-                        .into_iter()
-                        .map(|row| TaggedColumn {
-                            catalog: row.catalog,
-                            schema: row.schema_name,
-                            table: row.table_name,
-                            column: row.column_name,
-                        })
-                        .collect()
+                    crate::rules::group_by_table(
+                        tag_assignments_for_service_via(conn, service_id, key)
+                            .await
+                            .map_err(db_err)?,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -1083,6 +1081,7 @@ async fn apply_diff_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     profile_service_id: i64,
     profile_name: &str,
+    largest: &[egret_perm::TableCount],
     sweep: &[i64],
     desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
@@ -1173,6 +1172,7 @@ async fn apply_diff_in_tx(
             profile: profile_name.to_string(),
             total: new_total,
             ceiling: PROFILE_EXPANSION_CEILING,
+            largest: largest.to_vec(),
         });
     }
 
@@ -1467,6 +1467,7 @@ async fn recompile_locked_service_in_tx(
         tx,
         service_id,
         &compiled.profile_name,
+        &compiled.largest,
         &compiled.sweep,
         compiled.desired,
         compiled.skipped,
@@ -1601,6 +1602,106 @@ pub(crate) async fn record_failure_logged(
 // failure on any one of those profiles fails the whole request and rolls the
 // rule write back. Grant mutations and path-rule mutations are narrow; tag-rule
 // mutations are installation-wide.
+
+/// D2 (spec §5.5, C12): the StarRocks profiles bound to `warehouse_id` whose
+/// compile a schema change of `tables` can change: those where one of the
+/// tables (folded) carries a WHOLE-TABLE attachment of a classification with a
+/// role-bearing clearance, whose NULL masks follow the table's columns.
+/// `tables` is `(schema, Some(table))`, or `(schema, None)` for every table in
+/// the schema (a namespace drop). Row filters need no entry: they do not
+/// depend on columns. Ascending, each id once.
+pub async fn affected_starrocks_profiles_for_tables(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    tables: &[(String, Option<String>)],
+) -> Result<Vec<i64>, CompileError> {
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let schemas: Vec<String> = tables.iter().map(|(s, _)| s.clone()).collect();
+    let names: Vec<Option<String>> = tables.iter().map(|(_, t)| t.clone()).collect();
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id \
+           FROM registry.catalogs c \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE c.warehouse_id = $1 AND e.type = 'starrocks' \
+            AND e.authz_service_id IS NOT NULL \
+            AND EXISTS ( \
+                SELECT 1 FROM catalog_tag_assignments a \
+                  JOIN classification_policies cp ON cp.tag_id = a.tag_id \
+                  JOIN unnest($2::text[], $3::text[]) AS q(schema_name, table_name) \
+                    ON lower(a.schema_name) = lower(q.schema_name) \
+                   AND (q.table_name IS NULL OR lower(a.table_name) = lower(q.table_name)) \
+                 WHERE a.warehouse_id = $1 AND a.column_name = '' \
+                   AND cardinality(cp.required_roles) > 0) \
+          ORDER BY 1",
+    )
+    .bind(warehouse_id)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
+/// D2 (spec §5.6, C13): the boot pass. Recompiles every StarRocks profile
+/// that reaches a whole-table attachment of a classification with a
+/// role-bearing clearance, or of one a row-filter rule selects, so the first
+/// compile after an upgrade does not wait for an unrelated write, and a
+/// table-commit hook recompile that failed is retried.
+///
+/// One transaction per profile, so one refusal (a ceiling, or a row-filter tie
+/// a newly reached table creates, C14) does not block the others: a refused
+/// profile keeps its previous compile, and the refusal is logged and recorded
+/// in `perm.compile_runs`, where the Governance Overview's `compile_failed`
+/// finding shows it (user decision U6). Idempotent: an unchanged profile
+/// writes nothing. Returns how many profiles compiled.
+pub async fn recompile_table_classified_profiles(
+    pool: &sqlx::PgPool,
+) -> Result<usize, CompileError> {
+    let profiles: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id \
+           FROM catalog_tag_assignments a \
+           JOIN tags t ON t.id = a.tag_id \
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE a.column_name = '' AND e.type = 'starrocks' \
+            AND e.authz_service_id IS NOT NULL \
+            AND (EXISTS (SELECT 1 FROM classification_policies cp \
+                          WHERE cp.tag_id = a.tag_id AND cardinality(cp.required_roles) > 0) \
+                 OR EXISTS (SELECT 1 FROM perm.rules r \
+                             WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                               AND r.kind = 'row_filter')) \
+          ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut compiled = 0;
+    for service_id in profiles {
+        let result = async {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            recompile_service_in_tx(&mut tx, service_id).await?;
+            tx.commit().await.map_err(db_err)
+        }
+        .await;
+        match result {
+            Ok(()) => compiled += 1,
+            Err(e) => {
+                tracing::warn!(
+                    service_id,
+                    error = %e,
+                    "the boot recompile of a StarRocks profile with whole-table \
+                     classifications was refused; it keeps its previous compile"
+                );
+                record_failure_logged(pool, service_id, &e).await;
+            }
+        }
+    }
+    Ok(compiled)
+}
 
 /// The services a create/delete of `g` can change the compiled output of —
 /// the profiles bound to the grant's own catalog. See this module's Task 9

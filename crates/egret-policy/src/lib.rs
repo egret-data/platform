@@ -54,12 +54,12 @@ pub use store::{
     get_service_def_via, insert_policy_owned_by_via, is_compiler_owned_policy_name,
     lock_service_rows_via, resolved_tags_for_resource_via, service_id_by_name_via,
     services_and_tag_services_via, services_for_catalog_via, set_policy_enabled_via,
-    tag_assignment_coordinates_via, tag_assignments_for_catalogs_via, tag_keys_by_ids_via,
-    tag_keys_for_resource_via, tag_name_for_key_via, tag_names_for_keys_via,
-    tagged_columns_for_service_via, update_policy_via, usable_tag_services_via, CatalogRow,
-    PolicyRow, PolicyStore, ResolvedTag, ServiceRow, TagAssignmentRow, TaggedColumnRow,
-    COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX,
-    COMPILER_RULE_PREFIX,
+    tag_assignment_coordinates_via, tag_assignments_for_catalogs_via,
+    tag_assignments_for_service_via, tag_keys_by_ids_via, tag_keys_for_resource_via,
+    tag_name_for_key_via, tag_names_for_keys_via, update_policy_via, usable_tag_services_via,
+    CatalogRow, PolicyRow, PolicyStore, ResolvedTag, ServiceRow, ServiceTagAssignmentRow,
+    TagAssignmentRow, COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX,
+    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 /// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies

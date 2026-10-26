@@ -902,21 +902,21 @@ impl ValueMatcher {
         match self {
             ValueMatcher::Equals(p) => {
                 if ignore_case {
-                    fold(resource_value) == fold(p)
+                    fold_identifier(resource_value) == fold_identifier(p)
                 } else {
                     resource_value == p
                 }
             }
             ValueMatcher::StartsWith(p) => {
                 if ignore_case {
-                    fold(resource_value).starts_with(&fold(p))
+                    fold_identifier(resource_value).starts_with(&fold_identifier(p))
                 } else {
                     resource_value.starts_with(p)
                 }
             }
             ValueMatcher::EndsWith(p) => {
                 if ignore_case {
-                    fold(resource_value).ends_with(&fold(p))
+                    fold_identifier(resource_value).ends_with(&fold_identifier(p))
                 } else {
                     resource_value.ends_with(p)
                 }
@@ -939,7 +939,10 @@ impl ValueMatcher {
 /// the whole string with Unicode lowercasing. The two differ only for
 /// characters whose lowercase form is longer than one code point (e.g. `İ`),
 /// which no catalog/schema/table/column identifier on either engine uses.
-fn fold(s: &str) -> String {
+///
+/// Public so the compiler folds identifiers the way this evaluator matches
+/// them: two spellings that fold equal are one Ranger resource.
+pub fn fold_identifier(s: &str) -> String {
     s.to_lowercase()
 }
 

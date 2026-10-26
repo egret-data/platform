@@ -114,6 +114,107 @@ pub struct TaggedColumn {
     pub column: String,
 }
 
+impl TaggedColumn {
+    /// A column with every level named. An empty level is refused
+    /// ([`CompileError::EmptyScopeLevel`]): `resources_object` keeps a `""`
+    /// value and Ranger drops it, so the level would become match-any (spec
+    /// E8). A table-level attachment's `column_name` is `''`, which is why the
+    /// StarRocks expansion builds its columns through here.
+    pub fn new(
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<Self, CompileError> {
+        for (level, value) in [
+            ("catalog", catalog),
+            ("schema", schema),
+            ("table", table),
+            ("column", column),
+        ] {
+            if value.is_empty() {
+                return Err(CompileError::EmptyScopeLevel { level });
+            }
+        }
+        Ok(Self {
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+        })
+    }
+}
+
+/// One table a tag reaches on a StarRocks profile, at either level (spec
+/// §5.1). Ranger matches every StarRocks level case-insensitively, so the
+/// assignments are grouped under the FOLDED `(catalog, schema, table)`
+/// ([`egret_ranger_eval::resource::fold_identifier`]) and each name keeps the
+/// first spelling in the expansion's order: a table tagged in one spelling
+/// compiles exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableTarget {
+    pub catalog: String,
+    /// The egret warehouse (`catalog.warehouses.id`) the table lives in.
+    pub warehouse_id: uuid::Uuid,
+    pub schema: String,
+    pub table: String,
+    /// The tag is attached to the whole table (`column_name = ''`).
+    pub table_level: bool,
+    /// The columns the tag is attached to, one per folded name.
+    pub columns: Vec<String>,
+}
+
+impl TableTarget {
+    /// The column-level attachments as fully named columns.
+    pub fn tagged_columns(&self) -> Result<Vec<TaggedColumn>, CompileError> {
+        self.columns
+            .iter()
+            .map(|c| TaggedColumn::new(&self.catalog, &self.schema, &self.table, c))
+            .collect()
+    }
+}
+
+/// Group a tag's assignments (both levels, as
+/// `egret_policy::tag_assignments_for_service_via` returns them) into one
+/// [`TableTarget`] per folded table, in first-seen order.
+pub fn group_by_table(
+    rows: impl IntoIterator<Item = egret_policy::ServiceTagAssignmentRow>,
+) -> Vec<TableTarget> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
+    let mut out: Vec<TableTarget> = Vec::new();
+    let mut index: std::collections::HashMap<(String, String, String), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let key = (
+            fold(&row.catalog),
+            fold(&row.schema_name),
+            fold(&row.table_name),
+        );
+        let i = *index.entry(key).or_insert_with(|| {
+            out.push(TableTarget {
+                catalog: row.catalog.clone(),
+                warehouse_id: row.warehouse_id,
+                schema: row.schema_name.clone(),
+                table: row.table_name.clone(),
+                table_level: false,
+                columns: Vec::new(),
+            });
+            out.len() - 1
+        });
+        let target = &mut out[i];
+        if row.column_name.is_empty() {
+            target.table_level = true;
+        } else if !target
+            .columns
+            .iter()
+            .any(|c| fold(c) == fold(&row.column_name))
+        {
+            target.columns.push(row.column_name);
+        }
+    }
+    out
+}
+
 /// The engine-facing names `compile_rule` cannot resolve itself (no registry
 /// or tag I/O in this compiler). `catalog_name` is used only for a `Path`
 /// selector (`compile_grant`'s equivalent parameter); `tag_name` is used
@@ -258,10 +359,13 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// - A tag selector on Trino compiles to exactly one tag policy, covering
 ///   whatever the plugin currently resolves the tag to (D5) —
 ///   `tag_service` and `resolved.tag_name` must both be `Some`.
-/// - A tag selector on StarRocks compiles to one policy per entry in
-///   `tagged`, refusing with `CompileError::ExpansionCeiling` if that would
-///   exceed `ceiling` (`resolved.tag_name` must still be `Some` — see the
-///   module doc comment).
+/// - A tag selector on StarRocks compiles a MASK to one policy per tagged
+///   column in `tagged` (column-level attachments only: a mask rule on a
+///   whole-table classification is refused at write), and a ROW FILTER to one
+///   policy per table in `tagged`, at either attachment level (D2, C8). Above
+///   `ceiling` (columns for a mask, tables for a row filter) it refuses with
+///   `CompileError::ExpansionCeiling` (`resolved.tag_name` must still be
+///   `Some` — see the module doc comment).
 /// - A path selector compiles to exactly one policy on either engine, at
 ///   `r`'s own scope with `resolved.catalog_name` as the catalog resource
 ///   (`tagged`/`ceiling`/`resolved.tag_name` are unused on this path).
@@ -326,7 +430,7 @@ pub fn compile_rule(
     service: &str,
     tag_service: Option<&str>,
     resolved: &ResolvedNames,
-    tagged: &[TaggedColumn],
+    tagged: &[TableTarget],
     ceiling: usize,
 ) -> Result<Vec<Value>, CompileError> {
     // Validated up front, before any engine/selector branching, so a rule
@@ -384,54 +488,57 @@ pub fn compile_rule(
                     rule: r.name.clone(),
                 });
             }
-            if tagged.len() > ceiling {
-                return Err(CompileError::ExpansionCeiling {
-                    rule: r.name.clone(),
-                    count: tagged.len(),
-                    ceiling,
-                });
-            }
             // **A mask expands per COLUMN; a row filter expands per TABLE**
             // (whole-branch review, Critical 1, third shape). A row-filter
             // policy has no column resource to carry — `rowFilterDef` does not
             // declare one — so two tagged columns of the same table are one
-            // and the same row filter, and emitting it twice would write two
-            // policies with identical bodies under two different names for the
-            // plugin to evaluate in an order nothing here controls. The
-            // dedup key is the row-filter resource map's own granularity, so
-            // it cannot disagree with what `column_resources` emits, and the
-            // policy NAME is built from the same key for the same reason:
-            // a name carrying a column this policy does not address would
-            // say the expansion is per-column when it is not.
+            // and the same row filter, and so is a whole-table attachment of
+            // the tag (D2, C8). The policy NAME is built from the table for
+            // the same reason: a name carrying a column this policy does not
+            // address would say the expansion is per-column when it is not.
             //
-            // The ceiling above still counts `tagged` rather than the deduped
-            // set: it bounds the compile-time expansion the model asks for,
-            // which is what D5's measurement is about, and dedup can only
-            // ever make the emitted count smaller.
+            // The ceiling counts what is emitted: tables for a row filter,
+            // columns for a mask.
             let target = policy_target(&r.kind);
-            let mut seen: std::collections::BTreeSet<Vec<String>> =
-                std::collections::BTreeSet::new();
             let mut out = Vec::new();
-            for col in tagged {
-                let resources = column_resources(e, col, target);
-                let key: Vec<String> = resources
-                    .values()
-                    .map(|l| l.values.join(","))
-                    .collect::<Vec<_>>();
-                if !seen.insert(key) {
-                    continue;
-                }
-                let suffix = match target {
-                    PolicyTarget::RowFilter => {
-                        format!("{}.{}.{}", col.catalog, col.schema, col.table)
+            match target {
+                PolicyTarget::RowFilter => {
+                    if tagged.len() > ceiling {
+                        return Err(CompileError::ExpansionCeiling {
+                            rule: r.name.clone(),
+                            count: tagged.len(),
+                            ceiling,
+                        });
                     }
-                    _ => format!(
-                        "{}.{}.{}.{}",
-                        col.catalog, col.schema, col.table, col.column
-                    ),
-                };
-                let name = format!("{COMPILER_RULE_PREFIX}{}-{suffix}", r.id);
-                out.push(build_body(r, e, service, name, resources)?);
+                    for t in tagged {
+                        let name = format!(
+                            "{COMPILER_RULE_PREFIX}{}-{}.{}.{}",
+                            r.id, t.catalog, t.schema, t.table
+                        );
+                        out.push(build_body(r, e, service, name, table_resources(e, t))?);
+                    }
+                }
+                PolicyTarget::Mask | PolicyTarget::Access => {
+                    let mut columns = Vec::new();
+                    for t in tagged {
+                        columns.extend(t.tagged_columns()?);
+                    }
+                    if columns.len() > ceiling {
+                        return Err(CompileError::ExpansionCeiling {
+                            rule: r.name.clone(),
+                            count: columns.len(),
+                            ceiling,
+                        });
+                    }
+                    for col in &columns {
+                        let name = format!(
+                            "{COMPILER_RULE_PREFIX}{}-{}.{}.{}.{}",
+                            r.id, col.catalog, col.schema, col.table, col.column
+                        );
+                        let resources = column_resources(e, col, target);
+                        out.push(build_body(r, e, service, name, resources)?);
+                    }
+                }
             }
             Ok(out)
         }
@@ -481,6 +588,18 @@ pub(crate) fn column_resources(
     };
     let mut map = BTreeMap::new();
     for i in 0..depth {
+        map.insert(names[i].to_string(), level(values[i].clone()));
+    }
+    map
+}
+
+/// The row-filter `resources` map for one table: the [`ROW_FILTER_LEVELS`]
+/// levels `rowFilterDef` declares, never a column.
+fn table_resources(e: EngineType, t: &TableTarget) -> BTreeMap<String, ResourceLevel> {
+    let names = resource_level_names(e);
+    let values = [&t.catalog, &t.schema, &t.table];
+    let mut map = BTreeMap::new();
+    for i in 0..ROW_FILTER_LEVELS {
         map.insert(names[i].to_string(), level(values[i].clone()));
     }
     map

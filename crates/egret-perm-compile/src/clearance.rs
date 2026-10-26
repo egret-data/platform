@@ -149,21 +149,24 @@
 //! the evaluator once the whole desired set is known. See
 //! `crate::clearance_mask`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 use uuid::Uuid;
 
-use egret_perm::{engine_accesses, Action, CompileError, EngineType};
+use egret_perm::{engine_accesses, Action, CompileError, EngineType, TableCount};
 use egret_policy::admin::{
     access_to_ranger_json, tag_access_to_ranger_json, AccessItemInput, AccessPolicyInput,
     ResourceLevel,
 };
-use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
+use egret_policy::{tag_assignments_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
 use crate::clearance_mask::PendingMask;
 use crate::grants::{level, PolicyTarget};
-use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
+use crate::rules::{
+    column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
+};
+use crate::table_columns::{current_columns_batch_via, TableColumns, TableKey};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
@@ -178,7 +181,7 @@ struct GateRow {
     /// resolution `crate::rules` uses via `tag_name_for_key_via`.
     tag_name: String,
     /// `tags.key` — the STABLE identifier, needed only on the StarRocks branch:
-    /// `tagged_columns_for_service_via` selects assignments by key, the same
+    /// `tag_assignments_for_service_via` selects assignments by key, the same
     /// lookup `crate::trigger` already does for a tag-selected rule. The Trino
     /// branch never uses it (a tag POLICY matches on the name).
     tag_key: String,
@@ -202,6 +205,9 @@ pub(crate) struct Clearances {
     /// once the whole desired set is known — the fold reads the profile's other
     /// masks, which this function cannot see. Empty on Trino.
     pub(crate) masks: Vec<PendingMask>,
+    /// StarRocks only (D2): the largest tables classified as a whole, for the
+    /// profile ceiling's refusal to name (each costs a mask per column).
+    pub(crate) whole_tables: Vec<TableCount>,
 }
 
 /// Compile every gated tag into a clearance deny for one profile.
@@ -212,7 +218,7 @@ pub(crate) struct Clearances {
 /// compiles into every Trino profile that has a tag service.
 ///
 /// On **StarRocks** it is service-scoped, because the expansion is: only the
-/// columns reachable from `service_id` (`tagged_columns_for_service_via`) can be
+/// columns reachable from `service_id` (`tag_assignments_for_service_via`) can be
 /// addressed by a policy served to that profile's plugin. A gated tag with no
 /// reachable tagged column compiles to nothing there, and that is NOT a skip —
 /// there is no column to withhold, which is the same answer SP4a's tag masks
@@ -244,6 +250,7 @@ pub(crate) async fn compile_clearance(
         policies: Vec::new(),
         skipped: Vec::new(),
         masks: Vec::new(),
+        whole_tables: Vec::new(),
     };
     if gates.is_empty() {
         return Ok(out);
@@ -264,6 +271,9 @@ pub(crate) async fn compile_clearance(
             .await?;
 
     let accesses = withheld_accesses(engine)?;
+    // StarRocks: compiled once every gate is known, so the column source is
+    // asked about every whole-table attachment in one query.
+    let mut starrocks: Vec<StarRocksGate<'_>> = Vec::new();
 
     for g in &gates {
         // BOTH lists empty is NO gate — an informational tag
@@ -346,67 +356,32 @@ pub(crate) async fn compile_clearance(
             // SP4a's tag masks use, at `PolicyTarget::Access`: one policy per
             // matched column and NO dedup, because an access deny DOES carry a
             // column resource and collapsing two columns would un-deny one.
+            //
+            // **D2 (2026-10-25): a whole-table attachment is ONE `column: *`
+            // deny** (user decision U1), which needs no column list and also
+            // covers columns added later, the hidden `_file`/`_pos` and
+            // `___count___` StarRocks checks when every column is masked. It
+            // covers the tag's per-column denies on the same table (C6): same
+            // exceptions, wider resource.
             EngineType::StarRocks => {
-                let tagged: Vec<TaggedColumn> =
-                    tagged_columns_for_service_via(conn, service_id, &g.tag_key)
+                let targets = group_by_table(
+                    tag_assignments_for_service_via(conn, service_id, &g.tag_key)
                         .await
-                        .map_err(|e| CompileError::Db(e.to_string()))?
-                        .into_iter()
-                        .map(|row| TaggedColumn {
-                            catalog: row.catalog,
-                            schema: row.schema_name,
-                            table: row.table_name,
-                            column: row.column_name,
-                        })
-                        .collect();
-                // **Refuse, never truncate.** A truncated clearance withholds
-                // SOME of the columns it claims to, and the ones silently
-                // dropped are readable by exactly the people the classification
-                // exists to keep out. The refusal fails the write that caused it
-                // (`crate::trigger` propagates it, the caller's `?` rolls back)
-                // rather than committing a clearance the UI shows as active.
-                if tagged.len() > DEFAULT_EXPANSION_CEILING {
-                    return Err(CompileError::ClearanceExpansionCeiling {
-                        tag: g.tag_name.clone(),
-                        count: tagged.len(),
-                        ceiling: DEFAULT_EXPANSION_CEILING,
-                    });
-                }
-                for col in &tagged {
-                    let name = format!(
-                        "{COMPILER_CLEARANCE_PREFIX}{}-{}.{}.{}.{}",
-                        g.tag_id, col.catalog, col.schema, col.table, col.column
-                    );
-                    let input = clearance_input(
-                        name.clone(),
-                        service.to_string(),
-                        column_resources(engine, col, PolicyTarget::Access),
-                        &accesses,
-                        cleared.clone(),
-                    );
-                    // `access_to_ranger_json` hardcodes `serviceType: "trino"`;
-                    // a StarRocks-targeted body rendered without this stamp
-                    // deploys cleanly and enforces nothing
-                    // (`stamp_service_type`'s own reason for existing).
-                    out.policies.push((
-                        name,
-                        stamp_service_type(access_to_ranger_json(&input), engine),
-                    ));
-                    // The deny withholds a DIRECT read only; a plain view reads
-                    // straight through it. The column's mask (A2) is what holds
-                    // through views — see `crate::clearance_mask`.
-                    out.masks.push(PendingMask {
-                        tag_id: g.tag_id,
-                        column: col.clone(),
-                        cleared: cleared.clone(),
-                    });
-                }
+                        .map_err(|e| CompileError::Db(e.to_string()))?,
+                );
+                starrocks.push(StarRocksGate {
+                    gate: g,
+                    cleared,
+                    targets,
+                });
             }
         }
     }
 
     if engine == EngineType::StarRocks {
-        for (name, input) in mv_deny_inputs(&out.masks, service) {
+        let mv_cleared =
+            compile_starrocks_gates(conn, service, &starrocks, &accesses, &mut out).await?;
+        for (name, input) in mv_deny_inputs(&mv_cleared, service) {
             out.policies.push((
                 name,
                 stamp_service_type(access_to_ranger_json(&input), engine),
@@ -415,6 +390,221 @@ pub(crate) async fn compile_clearance(
     }
 
     Ok(out)
+}
+
+/// One gated tag with required roles on StarRocks: its cleared users and the
+/// tables it reaches, at either level.
+struct StarRocksGate<'a> {
+    gate: &'a GateRow,
+    cleared: Vec<String>,
+    targets: Vec<TableTarget>,
+}
+
+/// The StarRocks half of [`compile_clearance`]: per gate, the denies and the
+/// pending masks, into `out`. Returns one cleared set per gate that reaches
+/// the profile, for the materialized-view deny (C7).
+///
+/// **Whole-table attachments (D2).** The column source
+/// ([`crate::table_columns`]) is asked once for every table any gate reaches
+/// at table level. A table it knows gets a NULL mask per current column (C1),
+/// and the catalog's spelling of its schema, table and columns for every
+/// policy on it, whichever gate's (C5); spelled as the catalog spells it, two
+/// spellings of one table can never become two policies.
+async fn compile_starrocks_gates(
+    conn: &mut sqlx::PgConnection,
+    service: &str,
+    gates: &[StarRocksGate<'_>],
+    accesses: &[String],
+    out: &mut Clearances,
+) -> Result<Vec<Vec<String>>, CompileError> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
+    type Key = (Uuid, String, String);
+    let key_of = |t: &TableTarget| -> Key { (t.warehouse_id, fold(&t.schema), fold(&t.table)) };
+    let mut keys: Vec<TableKey> = Vec::new();
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    for t in gates
+        .iter()
+        .flat_map(|g| g.targets.iter())
+        .filter(|t| t.table_level)
+    {
+        index.entry(key_of(t)).or_insert_with(|| {
+            keys.push(TableKey {
+                warehouse_id: t.warehouse_id,
+                schema: t.schema.clone(),
+                table: t.table.clone(),
+            });
+            keys.len() - 1
+        });
+    }
+    let found = current_columns_batch_via(conn, &keys).await?;
+    let catalog_of = |t: &TableTarget| -> Option<&TableColumns> {
+        index.get(&key_of(t)).and_then(|&i| found[i].as_ref())
+    };
+
+    let mut mv_cleared = Vec::new();
+    let mut whole_tables: BTreeMap<String, usize> = BTreeMap::new();
+    for g in gates {
+        // C9: a whole-table attachment costs its `*` deny and one mask per
+        // known column; a column-level one its per-column denies (column
+        // masks stay uncounted per tag, as before D2).
+        let mut per_column_denies = 0;
+        let mut tables: Vec<TableCount> = Vec::new();
+        for t in &g.targets {
+            if t.table_level {
+                let (schema, table, columns) = match catalog_of(t) {
+                    Some(c) => (c.schema.as_str(), c.table.as_str(), c.columns.len()),
+                    None => (t.schema.as_str(), t.table.as_str(), 0),
+                };
+                let name = format!("{}.{schema}.{table}", t.catalog);
+                whole_tables.insert(name.clone(), columns);
+                tables.push(TableCount {
+                    table: name,
+                    columns,
+                });
+            } else {
+                per_column_denies += t.columns.len();
+            }
+        }
+        let count = per_column_denies + tables.iter().map(|t| 1 + t.columns).sum::<usize>();
+        // **Refuse, never truncate.** A truncated clearance withholds SOME of
+        // the columns it claims to, and the ones silently dropped are readable
+        // by exactly the people the classification exists to keep out. The
+        // refusal fails the write that caused it (`crate::trigger` propagates
+        // it, the caller's `?` rolls back) rather than committing a clearance
+        // the UI shows as active.
+        if count > DEFAULT_EXPANSION_CEILING {
+            return Err(CompileError::ClearanceExpansionCeiling {
+                tag: g.gate.tag_name.clone(),
+                count,
+                ceiling: DEFAULT_EXPANSION_CEILING,
+                tables: largest(tables),
+                per_column_denies,
+            });
+        }
+        for t in &g.targets {
+            let catalog = catalog_of(t);
+            let (schema, table) = match catalog {
+                Some(c) => (c.schema.as_str(), c.table.as_str()),
+                None => (t.schema.as_str(), t.table.as_str()),
+            };
+            // (column, spelled as the catalog spells it)
+            let mut columns: Vec<(TaggedColumn, bool)> = Vec::new();
+            for c in &t.columns {
+                let known = catalog.and_then(|cat| cat.columns.iter().find(|k| fold(k) == fold(c)));
+                columns.push((
+                    TaggedColumn::new(&t.catalog, schema, table, known.unwrap_or(c))?,
+                    known.is_some(),
+                ));
+            }
+            if t.table_level {
+                let all = TaggedColumn::new(&t.catalog, schema, table, WHOLE_TABLE_COLUMN)?;
+                out.policies.push(starrocks_deny(
+                    g.gate.tag_id,
+                    service,
+                    &all,
+                    accesses,
+                    g.cleared.clone(),
+                ));
+                match catalog {
+                    Some(cat) => {
+                        for c in &cat.columns {
+                            columns.push((TaggedColumn::new(&t.catalog, schema, table, c)?, true));
+                        }
+                    }
+                    // U4: the deny needs no column list and is compiled; the
+                    // masks do. The live spike measured that the deny alone
+                    // lets a view read real values, so the skip says so.
+                    None => out.skipped.push(skip(
+                        g.gate,
+                        format!(
+                            "{}.{schema}.{table} is not a table in the catalog (unknown, a view, \
+                             or not yet created): its whole-table select deny is compiled, its \
+                             NULL masks are not, so a view over it is not protected until the \
+                             table exists",
+                            t.catalog
+                        ),
+                    )),
+                }
+            } else {
+                for (col, _) in &columns {
+                    out.policies.push(starrocks_deny(
+                        g.gate.tag_id,
+                        service,
+                        col,
+                        accesses,
+                        g.cleared.clone(),
+                    ));
+                }
+            }
+            // The deny withholds a DIRECT read only; a plain view reads
+            // straight through it. The column's mask (A2) is what holds
+            // through views — see `crate::clearance_mask`.
+            for (column, catalog_spelled) in columns {
+                out.masks.push(PendingMask {
+                    tag_id: g.gate.tag_id,
+                    column,
+                    cleared: g.cleared.clone(),
+                    catalog_spelled,
+                });
+            }
+        }
+        // C7: every gated tag that reaches the profile, at either level,
+        // narrows the materialized-view deny.
+        if !g.targets.is_empty() {
+            mv_cleared.push(g.cleared.clone());
+        }
+    }
+    out.whole_tables = largest(
+        whole_tables
+            .into_iter()
+            .map(|(table, columns)| TableCount { table, columns })
+            .collect(),
+    );
+    Ok(mv_cleared)
+}
+
+/// The five tables with the most columns, most first, for a ceiling refusal.
+fn largest(mut tables: Vec<TableCount>) -> Vec<TableCount> {
+    tables.sort_by(|a, b| {
+        b.columns
+            .cmp(&a.columns)
+            .then_with(|| a.table.cmp(&b.table))
+    });
+    tables.truncate(5);
+    tables
+}
+
+/// The `column` value of a whole-table clearance deny (U1): every column of
+/// the table, including ones added after the compile and the hidden ones.
+pub(crate) const WHOLE_TABLE_COLUMN: &str = "*";
+
+/// One StarRocks clearance deny on `col` (a named column, or
+/// [`WHOLE_TABLE_COLUMN`]), named `perm-clearance-{tag}-{c}.{d}.{t}.{col}`.
+pub(crate) fn starrocks_deny(
+    tag_id: Uuid,
+    service: &str,
+    col: &TaggedColumn,
+    accesses: &[String],
+    cleared: Vec<String>,
+) -> (String, Value) {
+    let name = format!(
+        "{COMPILER_CLEARANCE_PREFIX}{tag_id}-{}.{}.{}.{}",
+        col.catalog, col.schema, col.table, col.column
+    );
+    let input = clearance_input(
+        name.clone(),
+        service.to_string(),
+        column_resources(EngineType::StarRocks, col, PolicyTarget::Access),
+        accesses,
+        cleared,
+    );
+    // `access_to_ranger_json` hardcodes `serviceType: "trino"`; a
+    // StarRocks-targeted body rendered without this stamp deploys cleanly and
+    // enforces nothing (`stamp_service_type`'s own reason for existing).
+    (
+        name,
+        stamp_service_type(access_to_ranger_json(&input), EngineType::StarRocks),
+    )
 }
 
 /// The access type that lets a user store a query result as a materialized
@@ -443,26 +633,26 @@ pub(crate) const MV_DENY_SUFFIX: &str = "mv";
 /// `{catalog: default_catalog, database: *}`. The first draft's
 /// `…mv-{catalog}.{database}` policies are swept by the compiler prefix.
 ///
-/// The exceptions are the users cleared for EVERY classification with a column
-/// on the profile: the intersection across every pending (gate, column) pair.
-/// An empty intersection leaves no exception, so the deny holds for everyone.
+/// The exceptions are the users cleared for EVERY classification on the
+/// profile: the intersection of `cleared`, one entry per gated tag that
+/// reaches a column or (D2, C7) a whole table of the profile. An empty
+/// intersection leaves no exception, so the deny holds for everyone.
 /// **Cost (accepted by the user):** a user not cleared for every classification
 /// on the engine cannot create any materialized view there, including over
 /// unclassified data.
 ///
-/// `pending` is one entry per (gate, column), as `compile_clearance` records
-/// them. A group-only gate is skipped before it records any, so it neither
-/// creates the deny nor narrows its exceptions (the same skip as the column
-/// deny). A profile with no classified column gets no policy.
+/// A group-only gate is skipped before it contributes, so it neither creates
+/// the deny nor narrows its exceptions (the same skip as the column deny). A
+/// profile with no classification gets no policy.
 pub(crate) fn mv_deny_inputs(
-    pending: &[PendingMask],
+    cleared_sets: &[Vec<String>],
     service: &str,
 ) -> Vec<(String, AccessPolicyInput)> {
     let mut cleared: Option<Vec<String>> = None;
-    for p in pending {
+    for set in cleared_sets {
         cleared = Some(match cleared.take() {
-            None => p.cleared.clone(),
-            Some(have) => have.into_iter().filter(|u| p.cleared.contains(u)).collect(),
+            None => set.clone(),
+            Some(have) => have.into_iter().filter(|u| set.contains(u)).collect(),
         });
     }
     let Some(cleared) = cleared else {
@@ -592,7 +782,7 @@ fn skip(g: &GateRow, reason: String) -> SkippedItem {
 /// **The consequence is real on BOTH engines: a user without clearance can still
 /// overwrite a column they cannot read.** SP4c Task 5/7 says exactly that in the
 /// UI.
-fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
+pub(crate) fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
     let actions: &[Action] = match engine {
         EngineType::Trino => &[Action::Read, Action::Write],
         EngineType::StarRocks => &[Action::Read],
@@ -612,17 +802,8 @@ fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
 mod tests {
     use super::*;
 
-    fn pending(tag: u128, catalog: &str, db: &str, cleared: &[&str]) -> PendingMask {
-        PendingMask {
-            tag_id: Uuid::from_u128(tag),
-            column: TaggedColumn {
-                catalog: catalog.into(),
-                schema: db.into(),
-                table: "t".into(),
-                column: "c".into(),
-            },
-            cleared: cleared.iter().map(|s| s.to_string()).collect(),
-        }
+    fn pending(cleared: &[&str]) -> Vec<String> {
+        cleared.iter().map(|s| s.to_string()).collect()
     }
 
     fn exceptions(i: &AccessPolicyInput) -> Vec<String> {
@@ -638,9 +819,9 @@ mod tests {
     fn a_service_with_two_classifications_gets_one_engine_wide_deny_excepting_the_intersection() {
         let got = mv_deny_inputs(
             &[
-                pending(1, "lake", "sales", &["ann", "bob"]),
-                pending(1, "lake", "sales", &["ann", "bob"]),
-                pending(2, "ice", "hr", &["bob", "cy"]),
+                pending(&["ann", "bob"]),
+                pending(&["ann", "bob"]),
+                pending(&["bob", "cy"]),
             ],
             "sr",
         );
@@ -665,13 +846,7 @@ mod tests {
 
     #[test]
     fn an_empty_intersection_denies_everyone() {
-        let got = mv_deny_inputs(
-            &[
-                pending(1, "lake", "sales", &["ann"]),
-                pending(2, "lake", "hr", &["bob"]),
-            ],
-            "sr",
-        );
+        let got = mv_deny_inputs(&[pending(&["ann"]), pending(&["bob"])], "sr");
         assert_eq!(got.len(), 1);
         assert!(exceptions(&got[0].1).is_empty());
         assert_eq!(got[0].1.items[0].groups, vec!["public"]);

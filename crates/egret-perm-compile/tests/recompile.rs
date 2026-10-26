@@ -854,6 +854,7 @@ async fn the_profile_total_ceiling_refuses_and_names_the_profile_and_the_total()
             profile,
             total,
             ceiling,
+            ..
         } => {
             assert_eq!(profile, service_name, "the refusal must name the PROFILE");
             assert_eq!(total, 1200, "the refusal must name the running TOTAL");

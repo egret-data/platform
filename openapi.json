@@ -40631,6 +40631,14 @@
           }
         }
       },
+      "ClearanceMaskGapReason": {
+        "type": "string",
+        "description": "Why a column has no clearance NULL mask.",
+        "enum": [
+          "table_not_in_catalog",
+          "not_compiled"
+        ]
+      },
       "ClearedPeople": {
         "type": "object",
         "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`); engines\n  refuse them (the compiler expands only user holders).\n- **Group member, gate names no role** (`enginesEnforce` false): egret\n  clears them; engines withhold the data from NOBODY, since a group-only\n  gate compiles to nothing on engines.\n- **Group member, gate also names a role**: egret clears them; engines\n  refuse them (a Ranger group matches nobody; only role holders are\n  excepted).\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.",
@@ -45620,12 +45628,13 @@
           }
         }
       },
-      "ExplainClearanceGap": {
+      "ExplainClearanceMaskGap": {
         "type": "object",
-        "description": "A gated classification that StarRocks does not enforce on the target column\n(spec §5.8, D2): it reaches the column only from its table, and StarRocks\ncompiles a clearance only where the classification is on a column (E13).",
+        "description": "A gated classification on the target column with no clearance NULL mask\nserved for the column (D2, spec §5.7). Content-derived: the served artifact\nis read, never a timestamp.",
         "required": [
           "tag_id",
-          "tag_name"
+          "tag_name",
+          "reason"
         ],
         "properties": {
           "tag_id": {
@@ -45635,6 +45644,9 @@
           "tag_name": {
             "type": "string",
             "description": "`tags.name`."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ClearanceMaskGapReason"
           }
         }
       },
@@ -45889,19 +45901,19 @@
               }
             ]
           },
-          "clearance_not_enforced": {
+          "clearance_masks_missing": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ExplainClearanceGap"
+              "$ref": "#/components/schemas/ExplainClearanceMaskGap"
             },
-            "description": "StarRocks only, for a column read: the gated classifications that reach\nthe column only from its table and so compile no clearance here\n([`ExplainClearanceGap`]). Empty on Trino, whose tag deny reaches the\ncolumn as an `ANCESTOR`."
+            "description": "StarRocks only, for a column read: the gated classifications that reach\nthe column (from the column or from its whole table) while the served\nartifact holds no clearance NULL mask for it\n([`ExplainClearanceMaskGap`]). The direct read is still refused by the\nclassification's deny; a view over the table shows the values until the\nmasks exist (live spike, spec §14)."
           },
           "row_filter_not_applied": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ExplainRowFilterGap"
             },
-            "description": "For a read naming a table: the classification row filters that filter\nnothing here ([`ExplainRowFilterGap`]). On Trino (when the download has\ntag policies), those whose classification is on columns of the table\nonly; on StarRocks, those whose classification is on the table only."
+            "description": "For a read naming a table, Trino only (when the download has tag\npolicies): the classification row filters that filter nothing here\nbecause their classification is on columns of the table only\n([`ExplainRowFilterGap`])."
           },
           "effect_lines": {
             "type": "array",
@@ -46079,7 +46091,7 @@
       },
       "ExplainRowFilterGap": {
         "type": "object",
-        "description": "A classification row-filter rule that filters nothing on a profile for the\ntarget's table. Trino (spec §5.8, D3, E14): the classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment. StarRocks (live check finding 2): the\nclassification is on the table and on none of its columns, and StarRocks\nexpands the rule over tagged columns, so nothing compiles.",
+        "description": "A classification row-filter rule that filters nothing on a Trino profile\nfor the target's table (spec §5.8, D3, E14): the classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment.",
         "required": [
           "rule_id",
           "rule_name",
@@ -53224,17 +53236,6 @@
                 "description": "A classification ROW FILTER only: the tables it filters nothing on in\nTrino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when\nthere is none."
               }
             ]
-          },
-          "starrocksTableOnly": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/StarRocksTableOnly",
-                "description": "A classification ROW FILTER only: the tables it filters nothing on in\nStarRocks ([`StarRocksTableOnly`]); `null` otherwise."
-              }
-            ]
           }
         }
       },
@@ -55025,29 +55026,6 @@
             ],
             "description": "Size of the FE metadata PVC, as a k8s binary quantity (`\"20Gi\"`).\nOmitted ⇒ preserved on update, then\n`egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.",
             "default": null
-          }
-        }
-      },
-      "StarRocksTableOnly": {
-        "type": "object",
-        "description": "Where a classification row filter filters nothing on StarRocks (live check\nfinding 2, the mirror of D3): tables where the classification is on the\ntable and on none of its columns, in catalogs a StarRocks engine enforces the\nrule on. StarRocks expands a classification row filter over the TAGGED\nCOLUMNS of each table, so a table-level attachment compiles nothing. The\ncompiler fix belongs with the StarRocks table-level clearance (D2) package.",
-        "required": [
-          "catalogs",
-          "tables"
-        ],
-        "properties": {
-          "catalogs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The catalogs those tables are in, by name, sorted."
-          },
-          "tables": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Distinct tables.",
-            "minimum": 0
           }
         }
       },

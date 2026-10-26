@@ -1375,3 +1375,144 @@ async fn a_ref_nobody_holds_is_no_username_reuse_finding() {
         "a dead ref is reported as a takeover: {body}"
     );
 }
+
+/// D2 (user decision U6): a StarRocks profile whose first recompile after the
+/// upgrade is refused (a classification row filter that now reaches a whole
+/// table where another one already filters: a new differing tie) keeps its
+/// previous compile, and the boot pass records the refusal; the Overview's
+/// `compile_failed` finding names the two rules in conflict and links them.
+#[tokio::test]
+async fn a_boot_pass_refusal_names_and_links_the_two_rules() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let pool = &f.db.pool;
+    let sid = profile(&f, "k_sr_tie", "starrocks").await;
+    let eng = engine(
+        &f,
+        "k_sr_eng",
+        "starrocks",
+        "provisioned",
+        "running",
+        Some(sid),
+    )
+    .await;
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, 'T') RETURNING id")
+            .bind(unique("k-ws"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-k-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("k-sc"))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let wh: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("k_wh"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let cat: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ('k_ice', 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $1::uuid::text)), $1) \
+         RETURNING id",
+    )
+    .bind(wh)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(eng)
+    .bind(cat)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Rule X filters `orders` through a column classification, compiled.
+    let tag = |key: &'static str| async move {
+        let id: Uuid =
+            sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+                .bind(key)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        id
+    };
+    let rule = |name: &'static str, key: &'static str, expr: &'static str| async move {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO perm.rules (name, kind, filter_expr, selector_kind, tag_key) \
+             VALUES ($1, 'row_filter', $3, 'tag', $2) RETURNING id",
+        )
+        .bind(name)
+        .bind(key)
+        .bind(expr)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        id
+    };
+    let assign = |tag: Uuid, column: &'static str| async move {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+             column_name) VALUES ($1,$2,'sales','orders',$3)",
+        )
+        .bind(tag)
+        .bind(wh)
+        .bind(column)
+        .execute(pool)
+        .await
+        .unwrap();
+    };
+    let tag_x = tag("k_region").await;
+    assign(tag_x, "email").await;
+    let rule_x = rule("k_us_only", "k_region", "region = 'us'").await;
+    let mut tx = pool.begin().await.unwrap();
+    egret_perm_compile::recompile_service_in_tx(&mut tx, sid)
+        .await
+        .expect("rule X compiles");
+    tx.commit().await.unwrap();
+    // Rule Y, on a whole-table classification of the same table, compiled
+    // nothing before D2.
+    let tag_y = tag("k_market").await;
+    assign(tag_y, "").await;
+    let rule_y = rule("k_eu_only", "k_market", "region = 'eu'").await;
+
+    egret_perm_compile::recompile_table_classified_profiles(pool)
+        .await
+        .expect("the boot pass runs");
+
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &session(&f, &["platform_admin"]).await).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let c = finding(&body, "compile_failed").expect("compile_failed");
+    assert_eq!(c["count"], 1, "{body}");
+    assert_eq!(
+        c["sentence"],
+        "The last compile of 1 profile failed; engines keep the previous compile. The refusal \
+         names rules k_eu_only and k_us_only.",
+        "{body}"
+    );
+    assert_eq!(c["sample"][0]["label"], "k_sr_tie", "{body}");
+    let linked: HashSet<String> = c["sample"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["ref"]["type"] == "rule")
+        .map(|s| s["ref"]["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        linked,
+        HashSet::from([rule_x.to_string(), rule_y.to_string()]),
+        "{body}"
+    );
+}

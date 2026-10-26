@@ -79,9 +79,14 @@ impl From<CatalogError> for CpError {
 /// role-membership path. Same `Internal` treatment `CatalogError::Compile`
 /// already gets, and for the same reason: the transaction rolled the write back
 /// with it, so the caller's state is unchanged and there is nothing they can fix
-/// by editing their request.
+/// by editing their request. A ceiling refusal is the exception: it IS about
+/// the request (it would grow a profile past its ceiling), so it is a coded 409.
 impl From<egret_perm::CompileError> for CpError {
     fn from(e: egret_perm::CompileError) -> Self {
+        // A ceiling refuses the write itself (D2, U3): the caller's 409.
+        if let Some(body) = e.expansion_ceiling_body() {
+            return CpError::Coded(StatusCode::CONFLICT, body);
+        }
         tracing::error!(error = %e, "a control-plane write's policy recompile failed");
         CpError::Internal
     }
@@ -204,5 +209,29 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(got, body);
+    }
+
+    /// Live check F1: a ceiling refusal of a control-plane write (a clearance,
+    /// a role membership) is the caller's coded 409, not a 500.
+    #[tokio::test]
+    async fn a_ceiling_refusal_is_a_coded_409() {
+        let e = egret_perm::CompileError::ClearanceExpansionCeiling {
+            tag: "PII".into(),
+            count: 501,
+            ceiling: 500,
+            tables: Vec::new(),
+            per_column_denies: 501,
+        };
+        let sentence = e.to_string();
+        for resp in [
+            CpError::from(e.clone()).into_response(),
+            CpError::from(egret_bi::BiError::from(e)).into_response(),
+        ] {
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(got["code"], "expansion_ceiling");
+            assert_eq!(got["error"], sentence);
+        }
     }
 }

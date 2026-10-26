@@ -117,6 +117,9 @@ pub mod principal_refs;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;
+// D2 (StarRocks whole-table classification): a table's current columns, read
+// from the embedded catalog.
+pub mod table_columns;
 pub mod trigger;
 pub mod username_reuse;
 pub mod view_audit;
@@ -134,13 +137,14 @@ pub use role_membership::{
     set_user_status_and_recompile, sync_admin_policies, unassign_platform_role_and_recompile,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
-pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
+pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TableTarget, TaggedColumn};
 pub use trigger::{
     affected_services_for_classification, affected_services_for_grant,
     affected_services_for_group_membership, affected_services_for_role_membership,
     affected_services_for_rule, affected_services_for_tag_rename,
-    affected_services_for_workspace_members, group_references_via, lock_services_in_tx,
-    merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
+    affected_services_for_workspace_members, affected_starrocks_profiles_for_tables,
+    group_references_via, lock_services_in_tx, merge_service_ids, recompile_service,
+    recompile_service_in_tx, recompile_services_in_tx, recompile_table_classified_profiles,
     CompileSummary, PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING,
     PROFILE_EXPANSION_CEILING,
 };

@@ -895,6 +895,9 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
 struct LakekeeperBrowser {
     engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
     system_user: String,
+    /// An undrop reaches lakekeeper in process, past the Iceberg mount; it goes
+    /// through the table-commit hook so a classified table gets its masks back.
+    table_hook: std::sync::Arc<egret_catalog_engine::TableHook>,
 }
 
 #[async_trait::async_trait]
@@ -1072,14 +1075,9 @@ impl egret_catalog_engine::WarehouseBrowser for LakekeeperBrowser {
             "view" => egret_catalog_engine::TabularKindName::View,
             _ => egret_catalog_engine::TabularKindName::Table,
         };
-        egret_catalog_engine::undrop_tabular(
-            self.engine_state.clone(),
-            &self.system_user,
-            wh,
-            k,
-            id,
-        )
-        .await
+        self.table_hook
+            .undrop(self.engine_state.clone(), &self.system_user, wh, k, id)
+            .await
     }
 
     async fn set_protection(
@@ -2130,9 +2128,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             engine_state: engine_state.clone(),
             system_user: config.catalog.system_user.clone(),
         }));
+        let table_hook = std::sync::Arc::new(egret_catalog_engine::TableHook::new(db.clone()));
         catalog_browser = Some(std::sync::Arc::new(LakekeeperBrowser {
             engine_state: engine_state.clone(),
             system_user: config.catalog.system_user.clone(),
+            table_hook: table_hook.clone(),
         }));
         let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
             std::sync::Arc::new(EgretCatalogGuard {
@@ -2205,6 +2205,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             engine_state,
             Some(guard),
             Some(view_hold),
+            Some(table_hook),
         ))
     } else {
         None
@@ -2392,6 +2393,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 Err(e) => tracing::warn!(
                     error = %e,
                     "the boot sync of the egret-admin policies did not run"
+                ),
+            }
+        });
+    }
+    // D2: StarRocks whole-table classifications written before this version
+    // compiled nothing there; the first boot compiles them, one profile at a
+    // time, and every boot retries a table-commit recompile that failed. A
+    // refused profile keeps its previous compile and is recorded.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::recompile_table_classified_profiles(&pool).await {
+                Ok(n) => tracing::info!(
+                    profiles = n,
+                    "StarRocks profiles with whole-table classifications compiled at boot"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot compile of StarRocks whole-table classifications did not run"
                 ),
             }
         });

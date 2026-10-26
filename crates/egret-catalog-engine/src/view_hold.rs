@@ -374,7 +374,7 @@ fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
 
 /// Percent-decode one path segment. `None` for a malformed escape or invalid
 /// UTF-8, which lakekeeper refuses too.
-fn decode_segment(seg: &str) -> Option<String> {
+pub(crate) fn decode_segment(seg: &str) -> Option<String> {
     let bytes = seg.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -393,7 +393,7 @@ fn decode_segment(seg: &str) -> Option<String> {
 
 /// A lakekeeper multi-level namespace (`\u{1f}`-separated). Trino sends
 /// single-level namespaces, and the Ranger resource has one schema level.
-fn is_multi_level(ns: &str) -> bool {
+pub(crate) fn is_multi_level(ns: &str) -> bool {
     ns.contains('\u{1f}')
 }
 
@@ -667,8 +667,9 @@ pub(crate) fn current_definition(metadata: &Value) -> Result<Definition, String>
 
 /// `{source, destination}` of a rename, each `(namespace, name)`, the
 /// namespace's levels joined with `\u{1f}`. `None` for a body of another
-/// shape, which lakekeeper refuses.
-fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
+/// shape, which lakekeeper refuses. A table rename has the same body
+/// ([`crate::table_hook`]).
+pub(crate) fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
     let side = |k: &str| -> Option<(String, String)> {
         let v = body.get(k)?;
         let parts: Vec<&str> = v
@@ -686,8 +687,9 @@ fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
 }
 
 /// The egret warehouse a lakekeeper prefix belongs to, and its registry
-/// catalog name (the name the engines and the lineage use).
-async fn resolve(
+/// catalog name (the name the engines and the lineage use). Shared with
+/// [`crate::table_hook`].
+pub(crate) async fn resolve(
     conn: &mut sqlx::PgConnection,
     prefix: &str,
 ) -> Result<Option<(Uuid, Option<String>)>, sqlx::Error> {
@@ -812,7 +814,7 @@ fn db_refusal(limit: Duration, e: sqlx::Error) -> Refusal {
     }
 }
 
-fn is_lock_timeout(e: &sqlx::Error) -> bool {
+pub(crate) fn is_lock_timeout(e: &sqlx::Error) -> bool {
     e.as_database_error()
         .and_then(|d| d.code())
         .is_some_and(|c| c == "55P03")
@@ -859,7 +861,7 @@ async fn bump_and_recompile(
 /// carries the database error as text only (`egret_perm`), so this reads the
 /// message Postgres gives SQLSTATE 55P03 ("canceling statement due to lock
 /// timeout"), as sqlx renders it.
-fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
+pub(crate) fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
     matches!(e, egret_perm::CompileError::Db(m) if m.contains("lock timeout"))
 }
 
@@ -2084,7 +2086,7 @@ where
 }
 
 /// The commit's request metadata (the guard put it there), or an internal one.
-fn request_metadata(req: &Request) -> lakekeeper::api::RequestMetadata {
+pub(crate) fn request_metadata(req: &Request) -> lakekeeper::api::RequestMetadata {
     req.extensions()
         .get::<lakekeeper::api::RequestMetadata>()
         .cloned()

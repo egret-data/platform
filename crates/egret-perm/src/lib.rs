@@ -26,7 +26,8 @@ pub mod store;
 
 pub use actions::{
     engine_accesses, modelled_ranger_plugins_sentence, ranger_plugin_is_modelled, CompileError,
-    EngineType, OverlapKind, OverlapRule, EXTERNAL_PLUGIN_ASSUMPTIONS, MODELLED_RANGER_PLUGINS,
+    EngineType, OverlapKind, OverlapRule, TableCount, EXTERNAL_PLUGIN_ASSUMPTIONS,
+    MODELLED_RANGER_PLUGINS,
 };
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
 pub use engine_grants::{

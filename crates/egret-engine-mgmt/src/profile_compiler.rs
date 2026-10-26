@@ -331,6 +331,7 @@ mod bind_refusal_tests {
             profile: "p".into(),
             total: 10,
             ceiling: 5,
+            largest: Vec::new(),
         };
         match bind_refusal("eng-1", 7, e) {
             EngineHttpError::Conflict(m) => {
