@@ -134,6 +134,13 @@ Answers to the first draft's open questions (2026-10-26):
   Nothing is built for it; a plain drop only ever removes an empty namespace, whose pre-placed rows (if any) the
   report shows as `missing`.
 
+A decision taken after the review (2026-10-26):
+
+- **R10. The swap pattern keeps R1; the Overview reports it.** For `t -> t_old` then `t_new -> t`, the rows move to
+  `t_old` (R1) and the new `t` carries nothing. A Governance Overview finding says that name `t` lost its
+  classifications by a rename to `t_old` and a new table now holds `t`, and links the renamed table, so a steward can
+  re-assign its classifications (§5.10).
+
 ## 4. Controller decisions (defaults; the user may revisit)
 
 | # | Decision | Why |
@@ -414,6 +421,24 @@ did.
 - `TableHook::undrop`: unchanged.
 - The hook's module doc loses "does not move a table's classifications" (`TH:66-69`) and gains the move.
 
+### 5.10 Names a rename left unclassified under a new table (R10)
+
+An Overview source `renamed_names_reused` (warning, `requires: All(TAG_READ)`), derived, with nothing stored:
+
+1. each source name's latest `tag:move` event of a table rename (`detail.trigger = "iceberg_rename"`, `DISTINCT ON
+   resource_id` newest first), which names the old name (`before`), the new name (`after`) and the moved
+   classifications (`tags`);
+2. kept when the old name is now a live table (`table_states_via` = `live`) and carries none of the moved
+   classifications (folded match on the warehouse's rows). A name with no live table is the missing-tables finding's;
+   a new table that carries the classification again is not reported.
+
+Sentence: "1 table name lost its classifications when its table was renamed, and a new table now holds the name
+without them: check whether it needs the classifications of the renamed table." (plural: "N table names … their
+tables … the renamed tables."). Sample: label `catalog.schema.old`, detail "PII, Finance moved to
+catalog.schema.new by a rename", `ref: Object {catalog, schema, object: new}` (the renamed table's Data page, where
+its classifications are listed and can be re-assigned). Finding ref `Tags`. Frontend `CHECKS`: "table names a rename
+left unclassified under a new table".
+
 ## 6. Principles
 
 - A classification follows its table and its columns; the renamed table is protected from its first read on both
@@ -466,7 +491,8 @@ Added to `TableUsage` (control plane):
 
 `state` is `skip_serializing_if = "Option::is_none"`, `missingColumns` `skip_serializing_if = "Vec::is_empty"`;
 schemas `TableState` = `"live" | "dropped" | "missing"` and `MissingColumn` = `{column: string, renamedTo: string |
-null}`. Overview findings use the existing `Finding` shape with the three new `kind` values. Governance feed entries
+null}`. Overview findings use the existing `Finding` shape with the four new `kind` values (`renamed_names_reused`, R10,
+included; its sample `ref` is `{"type": "object", "catalog", "schema", "object"}` of the renamed table). Governance feed entries
 use the existing `ChangeEntry` with the two new actions; the `tag:move` event's stored `detail`:
 
 ```json
@@ -751,3 +777,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   an error. Lakekeeper's answer is returned as it is in every case.
 - Provoked in tests with an observer that answers 500 after Lakekeeper committed. No such post-commit error path was
   found in the pinned Lakekeeper, so the case is defensive.
+
+### Review fix 5: R10, names a rename left unclassified under a new table
+
+- Implemented as §5.10 (new user decision R10 in §3). It reads each name's latest table-rename `tag:move` and the
+  catalog; it does not track what happened between (a name renamed back carries the classifications again and drops
+  out). A rename whose source rows were kept (fix 1, `source_kept`) leaves the classifications on the old name, so
+  it is not reported either.

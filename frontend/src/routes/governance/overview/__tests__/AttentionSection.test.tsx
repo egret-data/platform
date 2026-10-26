@@ -263,7 +263,7 @@ describe("Needs attention", () => {
     expect(within(row).getByRole("link", { name: "bob" })).toHaveAttribute("href", "/governance/grants/g-bob");
   });
 
-  // Classifications follow a rename (spec 2026-10-26 §5.8, C15).
+  // Classifications follow a rename (spec 2026-10-26 §5.8, C15, R10).
   it("names the stale classification checks for a reader without tag:read", async () => {
     serve(
       ok(
@@ -272,6 +272,7 @@ describe("Needs attention", () => {
             { kind: "classifications_on_missing_tables", requires: ["tag:read"], any: false },
             { kind: "classifications_on_dropped_tables", requires: ["tag:read"], any: false },
             { kind: "classifications_on_missing_columns", requires: ["tag:read"], any: false },
+            { kind: "renamed_names_reused", requires: ["tag:read"], any: false },
           ],
         }),
       ),
@@ -281,6 +282,7 @@ describe("Needs attention", () => {
       "classifications on tables that do not exist",
       "classifications on dropped tables",
       "classifications on columns that do not exist",
+      "table names a rename left unclassified under a new table",
     ]) {
       expect(await screen.findByText(`Not checked for you: ${what} (needs \`tag:read\`).`)).toBeInTheDocument();
     }

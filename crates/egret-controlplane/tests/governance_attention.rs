@@ -1703,3 +1703,77 @@ async fn columns_not_in_their_table_are_a_finding() {
         ])
     );
 }
+
+/// One `tag:move` event of a table rename, as the table hook stores it.
+async fn moved_event(f: &Fixture, warehouse: Uuid, from: &str, to: &str, tag: Uuid, name: &str) {
+    sqlx::query(
+        "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+         VALUES ('mutation', 'tag:move', 'catalog', $1, $2)",
+    )
+    .bind(format!("{warehouse}:sales.{from}"))
+    .bind(json!({
+        "before": {"schema": "sales", "table": from, "column": null},
+        "after": {"schema": "sales", "table": to, "column": null},
+        "tags": [{"id": tag, "name": name}], "rows": 1, "kept": [],
+        "source_kept": false, "trigger": "iceberg_rename",
+    }))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// R10: after `orders -> orders_old` moved PII and a new `orders` took the
+/// name without it, the Overview says so and links the renamed table. A
+/// renamed-away name with no live table (the missing-tables finding's case)
+/// and a name whose new table carries the classification again are not
+/// reported.
+#[tokio::test]
+async fn a_name_a_rename_left_unclassified_under_a_new_table_is_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["orders", "orders_old", "events", "events_old", "gone_old"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for table in ["orders_old", "events_old", "events", "gone_old"] {
+        classify(&f, pii, warehouse, table, "").await;
+    }
+    moved_event(&f, warehouse, "orders", "orders_old", pii, "PII").await;
+    moved_event(&f, warehouse, "events", "events_old", pii, "PII").await;
+    moved_event(&f, warehouse, "gone", "gone_old", pii, "PII").await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reused = finding(&body, "renamed_names_reused").expect("renamed_names_reused");
+    assert_eq!(reused["severity"], "warning");
+    assert_eq!(reused["count"], 1);
+    assert_eq!(
+        reused["sentence"],
+        "1 table name lost its classifications when its table was renamed, and a new table now \
+         holds the name without them: check whether it needs the classifications of the renamed \
+         table."
+    );
+    assert_eq!(
+        reused["sample"],
+        json!([{"label": "lake.sales.orders",
+                "detail": "PII moved to lake.sales.orders_old by a rename",
+                "ref": {"type": "object", "catalog": "lake", "schema": "sales",
+                        "object": "orders_old"}}])
+    );
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(not_checked(&body).contains(&("renamed_names_reused".to_string(), json!(["tag:read"]))));
+}

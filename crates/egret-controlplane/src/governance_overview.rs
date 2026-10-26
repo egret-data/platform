@@ -328,6 +328,12 @@ pub const SOURCES: &[Source] = &[
         run: |c| Box::pin(classifications_on_missing_columns(c)),
     },
     Source {
+        kind: "renamed_names_reused",
+        what: "renamed classified tables",
+        requires: Requires::All(&[TAG_READ]),
+        run: |c| Box::pin(renamed_names_reused(c)),
+    },
+    Source {
         kind: "catalogs_without_engine",
         what: "catalog attachments",
         requires: GOVERNANCE,
@@ -1554,6 +1560,141 @@ async fn classifications_on_missing_columns(
     };
     Ok(finding(
         "classifications_on_missing_columns",
+        Severity::Warning,
+        n,
+        sentence,
+        sample,
+        Some(Ref::Tags),
+    ))
+}
+
+/// Rename spec R10: a table renamed away took its classifications to its new
+/// name (R1), and a new table now holds the old name without them (the swap
+/// pattern `t -> t_old`, `t_new -> t`). Derived from each name's latest
+/// `tag:move` of a table rename and the current catalog: the old name is a
+/// live table that carries none of the moved classifications. Each sample
+/// links to the renamed table, whose classifications a steward can re-assign.
+async fn renamed_names_reused(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
+    use serde_json::Value;
+    let events: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT DISTINCT ON (resource_id) resource_id, detail FROM audit.audit_log \
+          WHERE kind = 'mutation' AND action = 'tag:move' AND resource_type = 'catalog' \
+            AND detail->>'trigger' = 'iceberg_rename' \
+          ORDER BY resource_id, ts DESC, id DESC",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    struct Moved {
+        key: TableKey,
+        to: (String, String),
+        tags: Vec<(Uuid, String)>,
+    }
+    let mut moved = Vec::new();
+    for (resource_id, d) in events {
+        let Some(warehouse_id) = resource_id
+            .split_once(':')
+            .and_then(|(w, _)| w.parse::<Uuid>().ok())
+        else {
+            continue;
+        };
+        let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+        let (Some(schema), Some(table)) =
+            (text(&d["before"], "schema"), text(&d["before"], "table"))
+        else {
+            continue;
+        };
+        let (Some(to_schema), Some(to_table)) =
+            (text(&d["after"], "schema"), text(&d["after"], "table"))
+        else {
+            continue;
+        };
+        let tags: Vec<(Uuid, String)> = d["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                Some((
+                    t.get("id")?.as_str()?.parse().ok()?,
+                    text(t, "name").unwrap_or_default(),
+                ))
+            })
+            .collect();
+        moved.push(Moved {
+            key: TableKey {
+                warehouse_id,
+                schema,
+                table,
+            },
+            to: (to_schema, to_table),
+            tags,
+        });
+    }
+    if moved.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<TableKey> = moved.iter().map(|m| m.key.clone()).collect();
+    let states = table_states_via(c, &keys).await?;
+    let mut sample = Vec::new();
+    for (m, state) in moved.iter().zip(states) {
+        if state != TableState::Live {
+            continue;
+        }
+        let ids: Vec<Uuid> = m.tags.iter().map(|(id, _)| *id).collect();
+        let still: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM catalog_tag_assignments \
+                             WHERE warehouse_id = $1 AND lower(schema_name) = lower($2) \
+                               AND lower(table_name) = lower($3) AND tag_id = ANY($4))",
+        )
+        .bind(m.key.warehouse_id)
+        .bind(&m.key.schema)
+        .bind(&m.key.table)
+        .bind(&ids)
+        .fetch_one(&mut *c)
+        .await?;
+        if still {
+            continue;
+        }
+        let catalog: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM registry.catalogs WHERE warehouse_id = $1 ORDER BY name LIMIT 1",
+        )
+        .bind(m.key.warehouse_id)
+        .fetch_optional(&mut *c)
+        .await?;
+        let names: Vec<&str> = m.tags.iter().map(|(_, n)| n.as_str()).collect();
+        let at = |schema: &str, table: &str| match &catalog {
+            Some(cat) => format!("{cat}.{schema}.{table}"),
+            None => format!("{schema}.{table}"),
+        };
+        sample.push(Sample {
+            label: at(&m.key.schema, &m.key.table),
+            detail: Some(format!(
+                "{} moved to {} by a rename",
+                names.join(", "),
+                at(&m.to.0, &m.to.1)
+            )),
+            r#ref: catalog.map(|catalog| Ref::Object {
+                catalog,
+                schema: m.to.0.clone(),
+                object: m.to.1.clone(),
+            }),
+        });
+    }
+    sample.sort_by(|a, b| a.label.cmp(&b.label));
+    let n = sample.len();
+    let sentence = if n == 1 {
+        "1 table name lost its classifications when its table was renamed, and a new table now \
+         holds the name without them: check whether it needs the classifications of the renamed \
+         table."
+            .to_string()
+    } else {
+        format!(
+            "{n} table names lost their classifications when their tables were renamed, and new \
+             tables now hold the names without them: check whether they need the \
+             classifications of the renamed tables."
+        )
+    };
+    Ok(finding(
+        "renamed_names_reused",
         Severity::Warning,
         n,
         sentence,
