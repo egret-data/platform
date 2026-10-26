@@ -205,6 +205,59 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
     }
 }
 
+/// The 20 `InputType` wire names (`models/input.rs:19-41`), the `type:`
+/// strings Kestra has one class for each of.
+pub(crate) const INPUT_TYPES: [&str; 20] = [
+    "STRING",
+    "INT",
+    "FLOAT",
+    "BOOL",
+    "DATETIME",
+    "DATE",
+    "TIME",
+    "DURATION",
+    "FILE",
+    "JSON",
+    "YAML",
+    "URI",
+    "SECRET",
+    "SELECT",
+    "MULTISELECT",
+    "ARRAY",
+    "EMAIL",
+    "ION",
+    "FORM",
+    "REUSABLE_INPUTS",
+];
+
+/// The keys every Kestra input class has (`Input.java:62-98`) and egret's
+/// `Input` reads.
+const INPUT_COMMON_KEYS: &[&str] = &[
+    "id",
+    "type",
+    "description",
+    "required",
+    "defaults",
+    "prefill",
+    "displayName",
+    "dependsOn",
+];
+
+/// What egret reads on an input of this `InputType` wire name: the common keys
+/// plus the subtype's own that egret keeps. One egret struct serves all twenty
+/// Kestra classes, so `itemType` and `allowedFileExtensions` are listed on the
+/// types Kestra has them on only (spec 3.5). The keys Kestra has on a type and
+/// egret drops are not here: [`lift_of`] names their package.
+pub(crate) fn input_keys(ty: &str) -> Vec<&'static str> {
+    let mut keys = INPUT_COMMON_KEYS.to_vec();
+    match ty {
+        "ARRAY" | "MULTISELECT" => keys.push("itemType"),
+        "FILE" => keys.push("allowedFileExtensions"),
+        _ => {}
+    }
+    keys
+}
+
 /// The fields a core leaf task's handler deserializes, or `None` for a type
 /// with no such handler.
 pub(crate) fn leaf_keys(t: &str) -> Option<Vec<&'static str>> {
@@ -307,6 +360,20 @@ pub(crate) fn trigger_keys(t: &str) -> Vec<&'static str> {
 // Objects checked: the flow document, every task at every depth (paths are
 // `spec::path`'s, `tasks.a.b`), a task's or the flow's `retry`, every trigger.
 
+/// Webhook keys whose use the route refuses with a 409 (`webhook::Unsupported`).
+const WEBHOOK_REFUSED: &[&str] = &[
+    "wait",
+    "returnOutputs",
+    "responseContentType",
+    "responseCode",
+];
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Input,
+    Output,
+}
+
 /// The flow's four root lists, as `spec::path::root_lists` names them.
 const ROOT_LISTS: &[&str] = &["tasks", "errors", "finally", "afterExecution"];
 
@@ -315,7 +382,7 @@ const ROOT_LISTS: &[&str] = &["tasks", "errors", "finally", "afterExecution"];
 /// never reaches it. `source` has already parsed as a [`Flow`]; if it does not
 /// parse as a mapping here, the census adds nothing (it fails open, never a
 /// false refusal).
-pub(crate) fn findings(source: &str, _flow: &Flow, report: &mut ValidationReport) {
+pub(crate) fn findings(source: &str, model: &Flow, report: &mut ValidationReport) {
     let doc = serde_norway::from_str::<Value>(source);
     debug_assert!(
         doc.is_ok(),
@@ -326,6 +393,7 @@ pub(crate) fn findings(source: &str, _flow: &Flow, report: &mut ValidationReport
     };
     Walk {
         report,
+        flow: model,
         reached: Vec::new(),
     }
     .flow(&flow);
@@ -344,6 +412,7 @@ pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
     let mut scratch = ValidationReport::default();
     let mut walk = Walk {
         report: &mut scratch,
+        flow,
         reached: Vec::new(),
     };
     walk.flow(&doc);
@@ -406,6 +475,9 @@ fn newer_than_the_pin(site: Option<Site<'_>>, key: &str) -> bool {
 
 struct Walk<'a> {
     report: &'a mut ValidationReport,
+    /// The parsed model of the same source, for the predicates that read it
+    /// (`webhook::declared_unsupported`).
+    flow: &'a Flow,
     /// The path of every task the walk reached (for [`unpaired`]).
     reached: Vec<String>,
 }
@@ -432,14 +504,203 @@ impl Walk<'_> {
                     continue;
                 };
                 if let Some(row) = t.get("type").and_then(Value::as_str).and_then(trigger_row) {
-                    self.check(
-                        row,
-                        Site::Trigger(row),
-                        &format!("trigger '{id}'"),
-                        t,
-                        &format!("triggers.{id}"),
-                    );
+                    self.trigger(row, id, t);
                 }
+            }
+        }
+        for (list, kind) in [("inputs", Kind::Input), ("outputs", Kind::Output)] {
+            if let Some(Value::Array(items)) = flow.get(list) {
+                for item in items {
+                    let Some(o) = item.as_object() else { continue };
+                    let Some(id) = o.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    match kind {
+                        Kind::Input => self.input(id, o),
+                        Kind::Output => self.output(id, o),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A typed trigger's keys (spec 3.4). Read: the base keys and the kind's
+    /// own. A key Kestra has and egret does not act on warns with its package
+    /// (`lift_of`); any other is `unknown_property`. Three families are said
+    /// by the predicate that refuses them, so each key has one finding:
+    /// Schedule `when` and `lateMaximumDelay` by `validate`'s
+    /// `schedule_findings` (`ScheduleTrigger::resolve`), Webhook `wait`,
+    /// `returnOutputs`, `responseContentType` and `responseCode` below
+    /// (`webhook::declared_unsupported`). Neither predicate renders anything:
+    /// they read the parsed model only (spec 7).
+    fn trigger(&mut self, row: &str, id: &str, t: &serde_json::Map<String, Value>) {
+        let allowed = |key: &str| {
+            TRIGGER_BASE_KEYS.contains(&key)
+                || trigger_keys(row).contains(&key)
+                // `Schedule.interval` is `final ... = null` in Kestra: accepted, inert.
+                || (row == SCHEDULE && key == "interval")
+        };
+        let path = format!("triggers.{id}");
+        for (key, value) in t {
+            let key = key.as_str();
+            if (row == SCHEDULE && matches!(key, "when" | "lateMaximumDelay"))
+                || (row == WEBHOOK && WEBHOOK_REFUSED.contains(&key))
+            {
+                continue;
+            }
+            // Kestra's default is `false`; only a written `false` diverges (D16)
+            // from egret, which never locks.
+            if key == "allowConcurrent" && *value != Value::Bool(false) {
+                continue;
+            }
+            if let Some(lift) = lift_of(Site::Trigger(row), key) {
+                let said = if key == "allowConcurrent" {
+                    "egret never locks a trigger while its execution runs; "
+                } else {
+                    ""
+                };
+                self.report.warnings.push(Finding {
+                    code: "not_honoured",
+                    message: format!(
+                        "trigger '{id}': property '{key}' is accepted by Kestra on {row} but egret does not act on it yet: {said}{}",
+                        lift.sentence()
+                    ),
+                    path: format!("{path}.{key}"),
+                });
+            } else if !allowed(key) {
+                self.report.errors.push(Finding {
+                    code: "unknown_property",
+                    message: format!(
+                        "trigger '{id}': unknown property '{key}' on {row}: neither Kestra nor egret accepts it"
+                    ),
+                    path: format!("{path}.{key}"),
+                });
+            }
+        }
+        if row == WEBHOOK {
+            self.webhook_refusals(id, &path);
+        }
+    }
+
+    /// Webhook `wait`, `returnOutputs`, `responseContentType`, `responseCode`:
+    /// the route answers 409 to every call that reaches one
+    /// (`webhook::declared_unsupported`). `declared_unsupported` names the first
+    /// only, so each key is asked on a copy that declares that key alone.
+    fn webhook_refusals(&mut self, id: &str, path: &str) {
+        use crate::models::{TriggerKind, Webhook};
+        use crate::trigger::webhook::declared_unsupported;
+        let Some(TriggerKind::Webhook(w)) = self
+            .flow
+            .triggers
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| &t.kind)
+        else {
+            return;
+        };
+        let blank = Webhook {
+            wait: false,
+            return_outputs: false,
+            response_content_type: None,
+            response_code: None,
+            ..w.clone()
+        };
+        let alone: [(&str, Webhook); 4] = [
+            (
+                "wait",
+                Webhook {
+                    wait: w.wait,
+                    ..blank.clone()
+                },
+            ),
+            (
+                "returnOutputs",
+                Webhook {
+                    return_outputs: w.return_outputs,
+                    ..blank.clone()
+                },
+            ),
+            (
+                "responseContentType",
+                Webhook {
+                    response_content_type: w.response_content_type.clone(),
+                    ..blank.clone()
+                },
+            ),
+            (
+                "responseCode",
+                Webhook {
+                    response_code: w.response_code.clone(),
+                    ..blank
+                },
+            ),
+        ];
+        for (key, only) in alone {
+            if let Some(u) = declared_unsupported(&only) {
+                self.report.warnings.push(Finding {
+                    code: "not_honoured",
+                    message: format!(
+                        "{}; every call to this webhook answers 409. {}",
+                        u.message(id),
+                        "Roadmap package #11 lifts it"
+                    ),
+                    path: format!("{path}.{key}"),
+                });
+            }
+        }
+    }
+
+    /// An input's keys (spec 3.5): [`input_keys`] for its type are read; a key
+    /// Kestra has on that type and egret drops warns with its package; any
+    /// other, including a key of another input subtype, is `unknown_property`.
+    fn input(&mut self, id: &str, input: &serde_json::Map<String, Value>) {
+        let Some(ty) = input
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(|t| INPUT_TYPES.iter().find(|n| **n == t))
+        else {
+            return;
+        };
+        let read = input_keys(ty);
+        for key in input.keys().map(String::as_str) {
+            if read.contains(&key) {
+                continue;
+            }
+            let at = format!("inputs.{id}.{key}");
+            if let Some(lift) = lift_of(Site::Input(ty), key) {
+                self.report.warnings.push(Finding {
+                    code: "not_honoured",
+                    message: format!(
+                        "input '{id}': property '{key}' is accepted by Kestra on a {ty} input but egret does not act on it yet; {}",
+                        lift.sentence()
+                    ),
+                    path: at,
+                });
+            } else {
+                self.report.errors.push(Finding {
+                    code: "unknown_property",
+                    message: format!(
+                        "input '{id}': unknown property '{key}' on a {ty} input: neither Kestra nor egret accepts it"
+                    ),
+                    path: at,
+                });
+            }
+        }
+    }
+
+    /// A flow output's keys: `FlowOutput` has all six Kestra fields
+    /// (`Output.java`); any other key is `unknown_property`.
+    fn output(&mut self, id: &str, output: &serde_json::Map<String, Value>) {
+        let read = wire_fields_of::<models::FlowOutput>();
+        for key in output.keys().map(String::as_str) {
+            if !read.contains(&key) {
+                self.report.errors.push(Finding {
+                    code: "unknown_property",
+                    message: format!(
+                        "output '{id}': unknown property '{key}': neither Kestra nor egret accepts it"
+                    ),
+                    path: format!("outputs.{id}.{key}"),
+                });
             }
         }
     }
@@ -1212,6 +1473,314 @@ mod tests {
             "id: f\nnamespace: a.b\nretry:\n  type: constant\n  interval: PT1S\n  maxAttempts: 2\n  attempts: 3\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
         );
         assert_eq!(w, vec![("retry.attempts".to_string(), "unknown_property")]);
+    }
+
+    // ---------- Task 5: typed triggers, inputs and outputs (D6) ----------
+
+    const LOG: &str = "tasks:\n  - id: t\n    type: core.log\n    message: hi\n";
+    const SCHED: &str = "io.kestra.plugin.core.trigger.Schedule";
+    const HOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+
+    fn at<'a>(r: &'a ValidationReport, path: &str) -> Vec<&'a Finding> {
+        r.errors
+            .iter()
+            .chain(&r.warnings)
+            .filter(|f| f.path == path)
+            .collect()
+    }
+
+    #[test]
+    fn a_late_maximum_delay_warns_at_publish_that_the_schedule_will_not_fire() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    lateMaximumDelay: PT1H\n"));
+        assert!(r.errors.is_empty(), "{r:?}");
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.path == "triggers.s.lateMaximumDelay")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            w.message.contains("will not fire")
+                && w.message.ends_with("Roadmap package #11 lifts it"),
+            "{}",
+            w.message
+        );
+        // One finding for the key: KI-122's `schedule_not_resolvable`, reworded.
+        assert_eq!(w.code, "schedule_not_resolvable");
+        assert_eq!(at(&r, "triggers.s.lateMaximumDelay").len(), 1, "{r:?}");
+        assert!(at(&r, "triggers.s").is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn a_schedule_when_and_a_late_maximum_delay_are_each_warned_once() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    when: \"{{{{ true }}}}\"\n    lateMaximumDelay: PT1H\n"));
+        assert_eq!(at(&r, "triggers.s.when").len(), 1, "{r:?}");
+        assert_eq!(at(&r, "triggers.s.lateMaximumDelay").len(), 1, "{r:?}");
+        assert!(at(&r, "triggers.s.when")[0]
+            .message
+            .ends_with("Roadmap package #11 lifts it"));
+        assert_eq!(
+            r.warnings
+                .iter()
+                .filter(|w| w.code == "schedule_not_resolvable")
+                .count(),
+            2,
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_webhook_wait_warns_at_publish_that_every_call_answers_409() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: w\n    type: {HOOK}\n    key: k\n    wait: true\n"));
+        assert!(r.errors.is_empty(), "{r:?}");
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.path == "triggers.w.wait")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            w.message.contains("answers 409")
+                && w.message.ends_with("Roadmap package #11 lifts it"),
+            "{}",
+            w.message
+        );
+        assert_eq!(at(&r, "triggers.w.wait").len(), 1, "{r:?}");
+    }
+
+    #[test]
+    fn every_unsupported_webhook_key_is_warned_once_and_false_is_silent() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: w\n    type: {HOOK}\n    key: k\n    wait: true\n    returnOutputs: true\n    responseContentType: text/plain\n    responseCode: 201\n  - id: q\n    type: {HOOK}\n    key: k2\n    wait: false\n    returnOutputs: false\n"));
+        for key in [
+            "wait",
+            "returnOutputs",
+            "responseContentType",
+            "responseCode",
+        ] {
+            assert_eq!(
+                at(&r, &format!("triggers.w.{key}")).len(),
+                1,
+                "{key}: {r:?}"
+            );
+        }
+        assert!(at(&r, "triggers.q.wait").is_empty(), "{r:?}");
+        assert!(at(&r, "triggers.q.returnOutputs").is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn stop_after_and_an_explicit_allow_concurrent_false_warn_and_true_does_not() {
+        let r = report(&format!(
+            "id: f\nnamespace: a.b\n{LOG}triggers:\n\
+             \x20 - id: a\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    stopAfter: [FAILED]\n\
+             \x20 - id: b\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    allowConcurrent: false\n\
+             \x20 - id: c\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    allowConcurrent: true\n"
+        ));
+        let paths: std::collections::BTreeSet<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| w.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from([
+                "triggers.a.stopAfter",
+                "triggers.b.allowConcurrent"
+            ])
+        );
+        assert!(at(&r, "triggers.b.allowConcurrent")[0]
+            .message
+            .contains("egret never locks a trigger while its execution runs"));
+    }
+
+    #[test]
+    fn labels_warn_on_schedule_and_webhook_and_when_on_a_webhook() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    labels:\n      a: b\n  - id: w\n    type: {HOOK}\n    key: k\n    labels:\n      a: b\n    when: \"{{{{ true }}}}\"\n"));
+        for p in ["triggers.s.labels", "triggers.w.labels", "triggers.w.when"] {
+            let f = at(&r, p);
+            assert_eq!(f.len(), 1, "{p}: {r:?}");
+            assert!(
+                f[0].message.ends_with("roadmap package #11 lifts it"),
+                "{}",
+                f[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn a_trigger_key_kestra_has_and_egret_drops_names_its_package() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    logLevel: DEBUG\n    workerSelector: {{}}\n    interval: PT1H\n"));
+        assert!(
+            r.errors.is_empty(),
+            "interval is inert in Kestra, not unknown: {r:?}"
+        );
+        assert!(at(&r, "triggers.s.logLevel")[0]
+            .message
+            .ends_with("roadmap package #13 lifts it"));
+        assert!(at(&r, "triggers.s.workerSelector")[0]
+            .message
+            .contains("Enterprise"));
+        assert!(at(&r, "triggers.s.interval").is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn an_unknown_trigger_key_is_refused() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    crn: x\n"));
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "triggers.s.crn"),
+            "{r:?}"
+        );
+        assert_eq!(at(&r, "triggers.s.crn").len(), 1, "{r:?}");
+    }
+
+    /// One egret struct serves twenty Kestra classes: a key of another subtype
+    /// is unknown to Kestra (spec 3.5).
+    #[test]
+    fn an_input_key_of_another_type_is_refused_and_its_own_kestra_key_is_warned() {
+        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: n\n    type: INT\n    min: 1\n    validator: \"^a$\"\n  - id: s\n    type: STRING\n    itemType: INT\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.path == "inputs.n.min"
+                    && w.message.ends_with("roadmap package #3 lifts it")),
+            "{r:?}"
+        );
+        let unknown: std::collections::BTreeSet<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "unknown_property")
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(
+            unknown,
+            std::collections::BTreeSet::from(["inputs.n.validator", "inputs.s.itemType"])
+        );
+        let m = &at(&r, "inputs.n.validator")[0].message;
+        assert_eq!(
+            m,
+            "input 'n': unknown property 'validator' on a INT input: neither Kestra nor egret accepts it"
+        );
+    }
+
+    #[test]
+    fn the_keys_egret_reads_on_an_input_are_silent_on_their_own_type() {
+        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: a\n    type: ARRAY\n    itemType: INT\n  - id: m\n    type: MULTISELECT\n    itemType: STRING\n    values: [x]\n  - id: f1\n    type: FILE\n    allowedFileExtensions: [.csv]\n  - id: b\n    type: BOOL\n    defaults: true\n    required: false\n    displayName: B\n    description: d\n    prefill: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        let w: Vec<_> = r.warnings.iter().map(|w| w.path.as_str()).collect();
+        assert_eq!(w, vec!["inputs.m.values"], "{r:?}");
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    /// The Task 1 review: the input rows' packages were unpinned.
+    #[test]
+    fn the_input_rows_name_the_package_the_roadmap_gives() {
+        use Lift::{Enterprise, Package};
+        let rows = [
+            ("STRING", "validator", Package(3)),
+            ("SECRET", "validator", Package(3)),
+            ("INT", "min", Package(3)),
+            ("INT", "max", Package(3)),
+            ("FLOAT", "min", Package(3)),
+            ("DURATION", "max", Package(3)),
+            ("DATE", "after", Package(3)),
+            ("DATETIME", "before", Package(3)),
+            ("TIME", "after", Package(3)),
+            ("SELECT", "values", Package(3)),
+            ("SELECT", "expression", Package(3)),
+            ("SELECT", "allowCustomValue", Package(3)),
+            ("SELECT", "isRadio", Package(3)),
+            ("SELECT", "autoSelectFirst", Package(3)),
+            ("MULTISELECT", "values", Package(3)),
+            ("MULTISELECT", "autoSelectFirst", Package(3)),
+            ("JSON", "jsonSchema", Package(3)),
+            ("FORM", "inputs", Enterprise),
+            ("REUSABLE_INPUTS", "ref", Enterprise),
+            ("REUSABLE_INPUTS", "namespace", Enterprise),
+            ("REUSABLE_INPUTS", "revision", Enterprise),
+        ];
+        for (ty, key, want) in rows {
+            assert_eq!(lift_of(Site::Input(ty), key), Some(want), "{ty}.{key}");
+        }
+        // Trigger rows #11.
+        for (t, key) in [
+            (SCHED, "lateMaximumDelay"),
+            (SCHED, "when"),
+            (SCHED, "labels"),
+            (HOOK, "wait"),
+            (HOOK, "returnOutputs"),
+            (HOOK, "responseContentType"),
+            (HOOK, "responseCode"),
+            (HOOK, "when"),
+            (HOOK, "labels"),
+            (SCHED, "stopAfter"),
+            (SCHED, "failOnTriggerError"),
+            (SCHED, "allowConcurrent"),
+        ] {
+            assert_eq!(
+                lift_of(Site::Trigger(t), key),
+                Some(Package(11)),
+                "{t}.{key}"
+            );
+        }
+    }
+
+    /// The input tables agree with the committed measurement: for every input
+    /// type, the keys the treatment table measures `ignored` are exactly those
+    /// `lift_of` has a package for, and every other key it lists is read.
+    #[test]
+    fn input_keys_agree_with_the_committed_treatment() {
+        for ty in INPUT_TYPES {
+            let row = property_treatment()
+                .iter()
+                .find(|(k, _)| input_row_matches(k, ty))
+                .unwrap_or_else(|| panic!("no treatment row for {ty}"))
+                .1;
+            for (key, treatment) in row {
+                match treatment {
+                    Treatment::Ignored => {
+                        assert!(lift_of(Site::Input(ty), key).is_some(), "{ty}.{key}");
+                        assert!(!input_keys(ty).contains(&key.as_str()), "{ty}.{key}");
+                    }
+                    _ => assert!(input_keys(ty).contains(&key.as_str()), "{ty}.{key}"),
+                }
+            }
+            for key in input_keys(ty) {
+                assert!(
+                    row.contains_key(key),
+                    "{ty}.{key} is read but Kestra has no such key"
+                );
+            }
+        }
+    }
+
+    fn input_row_matches(row: &str, ty: &str) -> bool {
+        let class = match ty {
+            "BOOL" => "BoolInput",
+            "DATETIME" => "DateTimeInput",
+            "REUSABLE_INPUTS" => "ReusableInputsInput",
+            "URI" => "URIInput",
+            other => {
+                let mut c = other.to_lowercase();
+                c[..1].make_ascii_uppercase();
+                return row.starts_with("io.kestra.core.models.flows.input.")
+                    && row["io.kestra.core.models.flows.input.".len()..]
+                        .strip_prefix(&format!("{c}Input"))
+                        .is_some_and(|rest| rest.starts_with('-'));
+            }
+        };
+        row.starts_with(&format!("io.kestra.core.models.flows.input.{class}-"))
+    }
+
+    #[test]
+    fn an_unknown_output_key_is_refused() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}outputs:\n  - id: o\n    type: STRING\n    value: x\n    valu: y\n"));
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "outputs.o.valu"),
+            "{r:?}"
+        );
+        let ok = report(&format!("id: f\nnamespace: a.b\n{LOG}outputs:\n  - id: o\n    type: STRING\n    value: x\n    description: d\n    displayName: D\n    required: false\n"));
+        assert!(ok.errors.is_empty() && ok.warnings.is_empty(), "{ok:?}");
     }
 
     #[test]

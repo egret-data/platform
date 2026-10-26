@@ -404,6 +404,15 @@ fn nested_sites() -> Vec<Site> {
                 .get("const")
                 .cloned()
                 .or_else(|| ty.pointer("/enum/0").cloned())?;
+            // Kestra's schema lists no `REUSABLE_INPUTS` in this class's `type`
+            // enum (it offers `STRING` first), but egret serves the class under
+            // that wire name; measured as a `STRING`, its own keys (`ref`) would
+            // be another subtype's keys, which the save-time check refuses.
+            let t = if k.ends_with(".ReusableInputsInput-1") {
+                json!("REUSABLE_INPUTS")
+            } else {
+                t
+            };
             Some((k.clone(), t))
         })
         .collect();

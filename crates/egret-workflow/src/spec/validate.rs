@@ -383,6 +383,19 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     schedule_findings(flow, report);
 }
 
+/// The warning for a Schedule `when` or `lateMaximumDelay`: Kestra accepts and
+/// honours the key, egret's scheduler refuses it when it syncs the trigger.
+/// egret's own words; the error's `Display` is the scheduler's.
+fn sync_refusal(id: &str, key: &str, e: &crate::trigger::ScheduleError) -> Finding {
+    Finding {
+        code: "schedule_not_resolvable",
+        message: format!(
+            "trigger '{id}': {e}; egret refuses it when it syncs the trigger, so this Schedule trigger will not fire. Roadmap package #11 lifts it"
+        ),
+        path: format!("triggers.{id}.{key}"),
+    }
+}
+
 /// KI-122: what the scheduler would refuse about a `Schedule`, said at save.
 /// Warnings, not errors: the flow saves and runs by hand as before, and the
 /// trigger row records the same refusal as its `last_error`; the editor now
@@ -404,8 +417,24 @@ fn schedule_findings(flow: &Flow, report: &mut ValidationReport) {
         let TriggerKind::Schedule(schedule) = &trigger.kind else {
             continue;
         };
-        match ScheduleTrigger::resolve(trigger) {
+        // `resolve` names the first refusal only, and `when` comes before
+        // everything else, so a second resolve without `when` finds the next:
+        // each of `when` and `lateMaximumDelay` is said once, at its own key
+        // (no-silent-drops D6/D17), and `keys.rs` leaves both keys to this.
+        let mut refusal = ScheduleTrigger::resolve(trigger);
+        if let Err(e @ ScheduleError::UnsupportedWhenCondition(_)) = &refusal {
+            report.warnings.push(sync_refusal(&trigger.id, "when", e));
+            let mut without_when = trigger.clone();
+            without_when.when = None;
+            refusal = ScheduleTrigger::resolve(&without_when);
+        }
+        match refusal {
             Ok(_) | Err(ScheduleError::MissingCron) => {}
+            Err(e @ ScheduleError::UnsupportedLateMaximumDelay(_)) => {
+                report
+                    .warnings
+                    .push(sync_refusal(&trigger.id, "lateMaximumDelay", &e));
+            }
             Err(e) => report.warnings.push(Finding {
                 code: "schedule_not_resolvable",
                 message: format!("trigger '{}' will never fire: {e}", trigger.id),
