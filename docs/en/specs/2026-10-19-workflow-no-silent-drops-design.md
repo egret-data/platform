@@ -1,6 +1,6 @@
 # Workflow package #1 "No silent drops": every key egret parses and ignores is named
 
-**Status:** designed 2026-10-19. Roadmap row #1 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-19-workflow-no-silent-drops.md`. One PR, branch `feat/workflow-no-silent-drops`.
+**Status:** built and verified 2026-10-26 (draft PR #756; the as-built notes below are dated 2026-10-26 and append to the design, nothing of it is deleted). Designed 2026-10-19. Roadmap row #1 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-19-workflow-no-silent-drops.md`. One PR, branch `feat/workflow-no-silent-drops`.
 
 **Where the claims come from:** every claim about egret's code was checked in the worktree `egret-nodrops` at main `309405b1`. Code is cited `path:line` relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, pinned at `96893b589` (2.0.0-SNAPSHOT, 2026-08-17); its paths are relative to `core/src/main/java/io/kestra/`, shortened to `k/`, unless another root is given. The key census behind §3 was measured on the same two checkouts (a Ruby Psych scan of all 351 corpus files; nothing built or run). A claim that could not be checked statically says "to measure in Task N" and names the plan task that measures it.
 
@@ -34,6 +34,11 @@ Decisions D1–D10 were made by the controller on 2026-10-19; their direction is
 - **D16. A default that diverges with no key written is a roadmap row, not a warning.** Schedule `allowConcurrent` defaults to `false` in Kestra and locks the trigger until its execution ends (`scheduler/src/main/java/io/kestra/scheduler/TriggerScheduler.java:345-349`); egret never locks. #1 warns only on an explicit `allowConcurrent: false`, and the default goes to #11 (§9). Input `required` (default `true`, `k/core/models/flows/Input.java:82`) is the same shape; #3 already lists it.
 
 - **D17 (2026-10-26, default decision after rebasing onto main `28fb8693`). #747 (KI-121, KI-122) shipped part of this package, and #1 absorbs it instead of duplicating it.** `spec/properties.rs` (`property_warnings`, called at `publish.rs:317`, `routes.rs:533` and `routes.rs:1027`) already walks the raw source against `property-treatment.json` and warns `unknown_property` / `ignored_property`; `validate.rs` `schedule_findings` (KI-122) already warns `schedule_not_resolvable` for a Schedule `cron`, `timezone`, `when` or `lateMaximumDelay` the scheduler would refuse, and `schedule_input_templated`; `measure.rs` `NO_EFFECT` now lists `warningOnRetry`. Consequences: (1) `keys::findings` **replaces** `property_warnings`: `properties.rs` is deleted, its tests are ported into `keys.rs`, and the three call sites become `validate_source`. (2) D1 stands: `unknown_property` becomes an **error** (it was a warning in KI-121); `ignored_property` becomes `not_honoured` with the lifting package (D2, D3). Any test or doc that pins the KI-121 codes is updated. (3) D6's Schedule half (`lateMaximumDelay`, `when`) is already delivered by `schedule_not_resolvable`: Task 5 adds only the package name to that message and does not add a second warning for the same key. Webhook `wait`/`returnOutputs`/`responseContentType`/`responseCode` stay in Task 5. (4) Line numbers in this spec and the plan were measured at `309405b1`; the implementer re-greps every cited anchor.
+
+**As built (2026-10-26), decisions D15 and D17.**
+- **D17, what the rebase met.** The branch was rebased onto main `28fb8693`. #747 (KI-121, KI-122) had shipped `spec/properties.rs` (`property_warnings`) and `schedule_findings`. #1 absorbed `property_warnings` into `keys::findings` and deleted `properties.rs` (its tests moved to `keys.rs`). `unknown_property` became an error (KI-121 warned it); `ignored_property` became `not_honoured`, and its message names the lifting package. The Schedule `when` and `lateMaximumDelay` keys reuse KI-122's one `schedule_not_resolvable` warning, now at path `triggers.<id>.when` / `.lateMaximumDelay` and naming #11; no second warning exists for them. The `a_not_honoured_warning_is_not_served` test (`measure.rs`) pins D3.
+- **D15, `deleted:` measured by reading code (not run against a live Kestra).** Kestra persists a source `deleted: true` as a tombstone: `FlowService.java:126-148` (create) calls `AbstractJdbcFlowRepository.java:924-938` (`create`), which calls `save` (`:981-1020`); the parsed `GenericFlow` keeps the YAML `deleted` (a field of `AbstractFlow.java:65`; only `revision` and `updated` are overwritten, near `:1008`) and persists it, and the column is `GENERATED ALWAYS AS (CAST(value ->> 'deleted' AS BOOL))` (`jdbc-postgres/.../baseline-postgres.sql:117`). So Kestra acts on it, and egret warns `not_honoured` with the reason that egret deletes a flow through its own delete action and never through a key in the source (a `KeptDesign` row, test `flow_deleted_warns_because_kestra_acts_on_it`). Caveat: Jackson's field-level deserialization of the Lombok field was inferred, not executed. `revision`, `updated` and `tenantId` stay silent, as D15 says.
+- **Other facts from Task 4.** Descent into children is per flowable kind (`child_lists`), so a leaf property named `tasks` or `errors` is not walked as a task list. `unpaired(source, flow)` proves the walk fails open: over the corpus, 924 model tasks were walked and 0 were unpaired.
 
 ## 1. What #1 covers
 
@@ -154,6 +159,10 @@ The base keys `models::Trigger`'s deserializer reads (`trigger.rs:363-400`) are 
 
 The publish-time warning for a sync or fire refusal calls the same predicate the sync or the route calls, so the two cannot disagree. `measure.rs`'s stage 2 already classifies these keys `refused` (`measure.rs:722-727`); that does not change.
 
+**As built (2026-10-26), §3.4 (Task 5).** A trigger key is allowed when it is in `TRIGGER_BASE_KEYS`, `trigger_keys(kind)` or is Schedule `interval` (Kestra `final = null`, inert); a key with a `lift_of(Site::Trigger)` row warns `not_honoured`; anything else is `unknown_property`. The Webhook keys (`wait`, `returnOutputs`, `responseContentType`, `responseCode`) warn with code `not_honoured` ("every call to this webhook answers 409. Roadmap package #11 lifts it"), while Schedule `when`/`lateMaximumDelay` keep KI-122's code `schedule_not_resolvable` (D17): the same family has two codes. `allowConcurrent` warns only when written `false`, and `stopAfter` warns. §7 held: neither predicate renders (`ScheduleTrigger::resolve`, `trigger/schedule.rs:1340-1385`, reads the raw `when` string; `webhook::declared_unsupported`, `trigger/webhook.rs:345`, reads the model).
+
+**As built (2026-10-26), §3.5 (Task 5).** `INPUT_TYPES` has the 20 wire names, with `input_keys(ty)` per type. `the_input_rows_name_the_package_the_roadmap_gives` pins 21 input rows (#3, or Enterprise for FORM `inputs` and REUSABLE_INPUTS `ref`/`namespace`/`revision`) and the 12 trigger rows (#11). Measuring found an instrument artefact: Kestra's schema offers no `REUSABLE_INPUTS` in the `type` enum of `ReusableInputsInput-1`, so `measure.rs` sampled that class as a STRING input and its three keys flipped `ignored` to `refused` on a regenerate; the sample now uses type `REUSABLE_INPUTS` and `property-treatment.json` is byte-identical. Corpus: zero errors on triggers, inputs and outputs in valids and invalids (33 warnings only), so no cross-type input key exists in the 351 files.
+
 ### 3.5 Inputs and outputs (`models/input.rs:54-96`; Kestra `Input.java:62-98` plus each subtype)
 
 One egret struct serves all 20 input types; Kestra has one class per type, so a key that is valid on one type is unknown on another.
@@ -182,6 +191,8 @@ Flow outputs: `FlowOutput` has all six Kestra fields (`models/flow.rs:196-214`, 
 
 Unchanged in behaviour (D13). Their messages name the roadmap package (§5).
 
+**As built (2026-10-26), §3.6 (the mid-package regression).** The whole-suite run after Task 8 (not the unit tests) found a regression from Tasks 3 to 7: `scripts_gate::the_w4_aliases_still_publish` failed because the walker rejected the legacy `image:` key that `scripts::parse` accepts on a W4 alias. The fix (`task()` skips the check when `scripts::kind_of(row)` is `Some`; plugin tasks have no table row) restores D13: script and plugin tasks are left to their own gates, and `a_script_or_plugin_task_is_not_checked_for_unknown_keys_here` pins it. The same run showed that the `end_to_end` fixture `one_task_source` wrote both `message` and `format` on `Log` and `Return`. Kestra has `message` and `level` on `Log` (`Log.java:79,85`) and only `format` on `Return` (`Return.java:91`), so Kestra rejects that flow and the refusal was right; the fixture now writes `format` only on `Return`, and `a_log_key_on_a_return_and_a_return_key_on_a_log_are_refused` pins the pair.
+
 ### 3.7 Nested beans
 
 Each is checked against its egret struct's wire fields and, where Kestra has a key egret drops, `lift_of`:
@@ -191,6 +202,8 @@ Each is checked against its egret struct's wire fields and, where Kestra has a k
 - `Window` is `deny_unknown_fields` already (`trigger.rs:266`) and is unchanged.
 
 A bean whose model is not a plain derived struct gets a hand-written const with its Kestra file:line; Task 6 lists which.
+
+**As built (2026-10-26), §3.7 (Task 6).** Per-type consts, each with the Kestra `file:line`, replace the table's retry check: `RETRY_COMMON_KEYS` and `retry_keys(ty)` (`AbstractRetry.java:31,34,37,40`; `Constant.java:26,29`; `Exponential.java:27,30,33,35`; `Random.java:27,30,33`) and `sla_keys(ty)` (`SLA.java:42,45,48,53`; `MaxDurationSLA.java:25`; `ExecutionAssertionSLA.java:27-28`). Two unit tests check that every listed retry key and every listed SLA key deserializes into the model. `Concurrency`, `Check`, `CheckFrequency` (LoopUntil), `DagNode` (Dag), an input's `DependsOn` and a Flow trigger's `Dependency` are checked against their struct's wire fields. Two decisions of the implementer: (1) a new `Site::Check` lift row sends the deprecated Check `condition` (accepted by Jackson through `setCondition`, `Check.java:64-67`; egret reads `when` only) to #16 as a `not_honoured` warning; (2) `flowRef` on a Flow-trigger `dependsOn` entry is refused as unknown, because it is an egret-internal field that Kestra refuses. `quotas` is skipped and `Window` untouched, as designed. Corpus floors, measured: valids 323 files, 322 parsed, 39 triggers, 106 inputs, 20 outputs, 94 nested beans; invalids 28, 23, 4, 18, 1, 13. Known gap: `retry_keys` returns `None` for an unknown retry type and so fails open.
 
 ## 4. Kestra's own save-time warnings (D5)
 
@@ -202,6 +215,8 @@ A bean whose model is not a plain derived struct gets a hand-written const with 
 Code `runnable_property_on_non_runnable`, path `<task path>.<key>`. On these tasks the #13/`Enterprise` warning of §3 is not added as well: Kestra does not honour the key there either, so no package lifts it. egret must not honour `timeout` on any of these types for the warning to be true: `WorkingDirectory` and the four executor-level types are to measure in Task 7 (`worker/timeout.rs`); a type egret does honour it on is left out of the warning, with a doc line.
 
 **A Flow trigger with no `dependsOn`** (`FlowService.java:553-566`): when `dependsOn` is empty and `when` is absent or the literal `"true"`. Kestra's text is `This flow will be triggered for EVERY execution of EVERY flow on your instance. We recommend adding the dependsOn property to the Flow trigger '<id>'.` egret's listener is scoped to the workspace (`flow_trigger/process.rs:575-585`, `WHERE l.workspace_id = $1`), so egret's text replaces "on your instance" with "in this workspace" and is otherwise verbatim. Code `flow_trigger_without_depends_on`, path `triggers.<id>`.
+
+**As built (2026-10-26), §4 (Task 7).** Both warnings are in (`runnable_property_on_non_runnable`, `flow_trigger_without_depends_on`, texts as in this section; "on your instance" became "in this workspace", Q4). The `timeout` measurement §4 asked for: **egret enforces `timeout` on none of the non-runnable types**, so none is left out of the warning and `Pause` is the only exemption (Kestra's own, and egret does enforce it there). Evidence: `worker/claim.rs:425-432` `leaf()` returns a timeout only for `TaskKind::Leaf`, and a block gets `NotALeaf` and `Budget::Refused` (`claim.rs:278-296`); `worker/working_dir.rs` has no `timeout` reference; `executor/exit.rs` and `executor/update.rs` never read `timeout`; `executor/plan.rs:1438` copies `timeout` into the plan for `Pause` only, and `executor/flowable/pause.rs:243` enforces it. A `null` value counts as absent, as Kestra's `!= null`. On the four executor-level types (`Exit`, `SetVariables`, `UnsetVariables`, `Labels`) `taskCache` and `workerSelector` draw Kestra's warning and not the #13 one, so each key has one finding. Corpus: 0 findings of either code (all corpus Flow triggers carry `dependsOn` or `when`; the six corpus `timeout`s are on runnable tasks or `Pause`).
 
 ## 5. User-visible messages that change
 
@@ -231,6 +246,8 @@ Unchanged on purpose: the `Process` runner refusal, `http()`, `secret()` (D10); 
 
 Tests that pin the old texts are updated in the same task: `the_not_yet_enforced_list_is_pinned_in_both_directions` (`validate.rs:2906`), `tests/plugins_gate.rs:266` (it pins a prefix that is unchanged), `tests/publish.rs:770` (substring unchanged), and any `scripts` unit test asserting "(W5a)". The plan's sweep is `grep -rn "(W5a)\|(W5b)\|lands in\|a later package" src tests`.
 
+**As built (2026-10-26), §5 (Task 8).** Every row of the table was applied, with these differences. (1) The two script expression messages at `scripts/mod.rs` (boolean and list-of-strings expression, `not implemented by egret in W5a`) are not in the table; they lost " in W5a" and name no package, since none was invented. (2) The plugin `taskRunner` text has a period: `... (workflow.container_runner); remove it. Roadmap package #18 lifts it` (the table's "the same, then ` Roadmap package #18 lifts it`" read without one). (3) The D10 fix: `ScheduleError::UnsupportedWhenCondition` and `UnsupportedLateMaximumDelay` became unit variants, so neither `Display` nor the save-time `schedule_not_resolvable` message echoes the author's value; `Display` ends `; roadmap package #11 lifts it`, and the validate message (which already ends "Roadmap package #11 lifts it") is built from the key name only, so the sentence is not doubled. `ScheduleError`'s `UnknownTimezone` and `Cron` variants still echo the author's text (a follow-up, not in this package). (4) False docs corrected with dated notes: `models/task.rs` and `executor/plan.rs` said `Pause.tasks` is Kestra's own field. (5) `property-treatment.json` regenerated: only message texts in `refused_downstream` changed (Schedule `when`/`lateMaximumDelay`, four Webhook keys). The brief's `no_message_names_a_w_package...` test missed the last line of a literal; the committed test checks each non-comment line whole.
+
 ## 6. Corpus and ratchet
 
 ### 6.1 Where the oracle looks
@@ -255,9 +272,25 @@ If the controller answers Q1 with (b), the plan's optional Task 8b changes the i
 
 Any other census move is a finding: a cross-type input key (§3.5) or a nested-bean key (§3.7) the census did not scan. The plan stops on one and reports it, rather than adjusting the constant.
 
+**As built (2026-10-26), §6.2 (measured; the table's "expected" column was wrong in two figures).** Sources: the ratchet printout of `cargo test -p egret-workflow --test executor -- --nocapture`, and the constants in `oracle-exec/driver.rs` (`LIVE` `:853`, `UNKNOWN_TYPE_REFUSED` `:931`, `VALIDATE_REFUSED` `:979`).
+
+| figure | §6.2 expected | measured | source |
+|---|---|---|---|
+| ratchet (golden / mismatching / baselined / broken) | 301 / 73 / 73 / 0, or 72 / 72 with Q1 (b) | **301 / 72 / 72 / 0** | printout; `sixteen_banked` asserts (301, 229, 72) |
+| `LIVE` | 294 | **295** (unchanged) | `driver.rs:853`; `publish_corpus` line "295 live" |
+| `VALIDATE_REFUSED` | 26 | **25** (unchanged) | `driver.rs:979` |
+| `UNKNOWN_TYPE_REFUSED` | 21 | 21 | `driver.rs:931` |
+| `PUBLISHED_BUT_REFUSED` | 6 | 6 | `executor/mod.rs` |
+
+Why `LIVE` and `VALIDATE_REFUSED` did not move: `invalids/invalid-property` is a name-contest loser. It shares `id: duplicate` with `invalids/duplicate`, so `publish_corpus` never files it (the printout says "4 name-contested"), and the refusal is invisible to the census (Task 3 measured this first; Tasks 2 to 8 held the same figures). It is therefore also not in `STILL_OVER_ACCEPTED` or `UNATTRIBUTED` any more.
+
+How Q1 (b) was built, as `Seam::Save` (Task 8b): every `RefusalGroup` has a `Seam` (`Run` or `Save`). For an id listed in a `Seam::Save` group the oracle runs `spec::validate_source` on the corpus source and matches a golden `refused` entry when an error finding's code equals the group's `message`. The new group's message is `unknown_property`. `executor_matches_golden` got the arm `(Refused, Trace) if refused_at_save`, and a group test checks the save arm and that `build_plan` still plans the flow (D1). A mutant that accepted any save error for any id left the ratchet green (no other baselined refused entry has a save-time error), so `a_save_time_refusal_banks_only_for_its_own_group_and_code` was added. Derived figures that moved with 73 to 72: `sixteen_banked` (301, 229, 72), the timeout declarations (2, 70, 72), the `handler_surface.py` guard and its regenerated `handler-surface.txt` (ceiling 262), and the `oracle-exec/README.md` prose. Known nit: `RefusalGroup.message` means a substring for `Run` and an exact code for `Save`.
+
 ### 6.3 `property-treatment.json`
 
 Regenerated with `EGRET_WRITE_PROPERTY_TREATMENT=1` once `measure.rs` calls `validate_source`. Expected diff: `io.kestra.plugin.core.flow.Parallel.onChildFailure` and `io.kestra.plugin.core.flow.Dag.onChildFailure` go from `ignored` to `refused` (D12). No row may become `honoured` or `warned` (D3). Any other moved row is explained in the task report or the change is wrong.
+
+**As built (2026-10-26), §6.3.** Regenerated with `EGRET_WRITE_PROPERTY_TREATMENT=1`: the diff is exactly `Parallel.onChildFailure` and `Dag.onChildFailure`, `ignored` to `refused` (2 lines in, 2 out in the file diff against main `28fb8693`; `crates/egret-workflow/src/spec/schema/README.md` counts: 1625 properties, 1119 honoured, 4 warned, 378 ignored, 124 refused, counted from the file). No row became `honoured` or `warned`. Task 8 then changed message texts only (§5 note).
 
 ## 7. Security (D10)
 
@@ -274,6 +307,8 @@ The corpus is 351 (`driver.rs:1042` asserts it). Present-tense figures to fix:
 - Sentences that state another count measured over 345 (`executor/mod.rs:2764` "52 `Loop` tasks across the 345", `worker/spawn.rs:1333` "43 of its 345 files", `worker/subflow.rs:990-1036` and `webhook_routes.rs:150,153` "16 of 345", "248 of 345") are history or need a re-count. The plan re-derives a count where a test computes it and otherwise drops the numeral ("across the corpus"), as `driver.rs:859-869` did for `LIVE`.
 - Historical deltas stay: `executor/mod.rs:2990,4387`, `driver.rs:1037`, and the `tests/executor.rs:1474` comment.
 
+**As built (2026-10-26), §8 (Task 9).** Commit `a4928361`: the present-tense "345" became 351 in comments and in two assert messages (`trigger/depends_on.rs`, `trigger/flow.rs`); no other code changed. Counts stated beside it were re-measured at 351: 52 `Loop` tasks in 43 files, 6 files declare `sla:` (so 345 of 351 declare none), 7 Schedule flows, 17 Flow-trigger flows, 4 files write `CREATE_NEW_EXECUTION`; one prose count that had already drifted from its assert was corrected to the assert (88, 59). Kept as history: the historical deltas, and the W10 census sentences ("16 of 345", "248 of 345"). Left untouched on purpose: about 60 dated measurement lines in `oracle-exec/README.md`, because no test pins a "345" sentence there. The standalone numeral in `oracle-exec/driver.rs:857` was dropped ("the size of the corpus").
+
 ## 9. Roadmap corrections (D9)
 
 In `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, as dated notes, nothing deleted:
@@ -285,6 +320,8 @@ In `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, as dated n
 6. **Appendix B §4:** "Schedule.lateMaximumDelay | supported" is wrong: it is refused when the scheduler syncs the trigger (`trigger/schedule.rs:1368-1371`), and since #1 it is warned at publish. A dated correction note under the table.
 7. **The pin governs:** the schema export (rc13, built 2026-09-01) is newer than the source pin (2026-08-17); where they differ (`onChildFailure`), the pin decides. A note in §4 "Keeping this current".
 8. **Appendix B §8 item 15** ("unknown and unsupported properties … ignored on core tasks") is closed by #1: a dated note.
+
+**As built (2026-10-26), §9.** The eight corrections are written as dated notes in `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Items 6 and 8 target that roadmap's Appendix B, which the VI file does not carry (its header says so); they are recorded in EN under the Appendix B tables and, in VI, in §4 of the roadmap.
 
 ## 10. For later packages
 
@@ -305,3 +342,7 @@ One PR. TDD per task; unit tests in `spec::keys` for every table row class; DB-b
 - **Q3. `unsupported_loop_until_property` has no roadmap row.** This spec names #9 and adds it to #9's row (§9 item 1). The alternative is a new row.
 - **Q4. D5 asks for Kestra's warnings verbatim; the Flow-trigger one says "on your instance".** egret's listener is workspace-scoped, so the verbatim text would be false. This spec changes the phrase to "in this workspace" (§4).
 - **Q5. D1 lists flowables, triggers and inputs as the nested sites.** Kestra's strictness also covers retry, concurrency, SLA, checks, `checkFrequency`, the `Dag` node and `dependsOn`, and a typo in any of them is dropped today. This spec includes them (§3.7, plan Task 6). Dropping Task 6 leaves those keys silent and the goal unmet for them.
+
+**As built (2026-10-26), §12 (answers).**
+- **Q1: (b), per the user (2026-10-19).** Built as Task 8b (`Seam::Save`, see §6.2 note). The ratchet is 301 / 72 / 72 / 0.
+- **Q2 to Q5: the defaults this spec took were kept.** Q2: subflow `scheduleDate` warns (#12), it does not refuse. Q3: `unsupported_loop_until_property` is added to #9's row (roadmap note), not a new row. Q4: the Flow-trigger warning says "in this workspace" instead of "on your instance". Q5: the nested beans are checked (§3.7, Task 6).

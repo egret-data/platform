@@ -2,7 +2,7 @@
 
 > **Bản dịch tham khảo.** Bản tiếng Anh `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md` là bản chuẩn; khi hai bản khác nhau, bản tiếng Anh thắng. Bản này đi theo bản tiếng Anh từng mục một. Mã, tên khoá, mã lỗi và câu thông báo người dùng thấy được giữ nguyên tiếng Anh.
 
-**Trạng thái:** thiết kế ngày 2026-10-19. Dòng #1 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-19-workflow-no-silent-drops.md`. Một PR, nhánh `feat/workflow-no-silent-drops`.
+**Trạng thái:** đã xây và kiểm chứng ngày 2026-10-26 (PR nháp #756; các ghi chú "như đã xây" bên dưới đề ngày 2026-10-26 và chỉ nối thêm vào thiết kế, không xoá gì). Thiết kế ngày 2026-10-19. Dòng #1 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-19-workflow-no-silent-drops.md`. Một PR, nhánh `feat/workflow-no-silent-drops`.
 
 **Các khẳng định lấy từ đâu:** mọi khẳng định về mã egret được kiểm trong worktree `egret-nodrops` tại main `309405b1`. Mã được dẫn `path:line`, tương đối với `crates/egret-workflow/src/` trừ khi ghi gốc khác. Kestra là bản checkout `data-portal/kestra`, ghim tại `96893b589` (2.0.0-SNAPSHOT, 2026-08-17); đường dẫn tương đối với `core/src/main/java/io/kestra/`, viết tắt `k/`, trừ khi ghi gốc khác. Bảng kiểm kê khoá đứng sau §3 được đo trên đúng hai checkout đó (quét cả 351 tệp corpus bằng Ruby Psych; không build, không chạy gì). Khẳng định nào không kiểm tĩnh được thì ghi "đo ở Task N" và nêu task của kế hoạch sẽ đo nó.
 
@@ -34,6 +34,11 @@ D1–D10 do controller quyết ngày 2026-10-19; hướng đã cố định, l�
 - **D14. `tasks:` của `Pause` vẫn bị `executor::pause_gap` từ chối, cùng mã, với thông báo nói rằng đó không phải thuộc tính của Kestra.** `Pause` của Kestra không có trường `tasks` ở bản ghim (`k/plugin/core/flow/Pause.java:158`, `extends Task implements FlowableTask`; các trường là `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors`, `finally`). Lời từ chối là vĩnh viễn (thuộc tính lạ), và vẫn nằm trong `validate_for_run`, vì một phiên bản đã lưu có `tasks:` trên `Pause` sẽ treo (`executor/plan.rs:860-863`). Mã `unsupported_pause_property` được giữ, vì `REFUSED_BY_NAME` ở `measure.rs:77` và các nguyên nhân `PUBLISHED_BUT_REFUSED` đọc nó.
 - **D15. Khoá flow do máy chủ quản lý được nhận mà không có phát hiện nào**, như Kestra: `revision` (Kestra tự gán, `FlowService.java:506-508`), `updated`, `tenantId` (`@Hidden`) và `deleted` (`k/core/models/flows/AbstractFlow.java:41,44,65,76`). Kestra bỏ qua giá trị tác giả viết cho từng khoá; `deleted: true` sẽ đo ở Task 4 từ đường tạo của `FlowRepository` trong Kestra, và thành cảnh báo `not_honoured` nếu Kestra có hành động theo nó.
 - **D16. Một giá trị mặc định khác Kestra mà không cần viết khoá nào là một dòng lộ trình, không phải cảnh báo.** `allowConcurrent` của Schedule mặc định `false` trong Kestra và khoá trigger cho tới khi execution của nó kết thúc (`scheduler/src/main/java/io/kestra/scheduler/TriggerScheduler.java:345-349`); egret không bao giờ khoá. #1 chỉ cảnh báo khi viết rõ `allowConcurrent: false`, còn giá trị mặc định đi vào #11 (§9). `required` của input (mặc định `true`, `k/core/models/flows/Input.java:82`) cùng dạng; #3 đã liệt kê nó.
+
+**Như đã xây (2026-10-26), quyết định D15 và D17.**
+- **D17, những gì lúc rebase gặp.** Nhánh được rebase lên main `28fb8693`. #747 (KI-121, KI-122) đã ship `spec/properties.rs` (`property_warnings`) và `schedule_findings`. #1 gộp `property_warnings` vào `keys::findings` và xoá `properties.rs` (test của nó chuyển sang `keys.rs`). `unknown_property` thành **lỗi** (KI-121 chỉ cảnh báo); `ignored_property` thành `not_honoured`, và thông báo nêu gói sẽ gỡ nó. Khoá `when` và `lateMaximumDelay` của Schedule dùng lại đúng một cảnh báo `schedule_not_resolvable` của KI-122, nay ở path `triggers.<id>.when` / `.lateMaximumDelay` và nêu #11; không có cảnh báo thứ hai cho chúng. Test `a_not_honoured_warning_is_not_served` (`measure.rs`) ghim D3.
+- **D15, `deleted:` đo bằng cách đọc code (không chạy trên Kestra thật).** Kestra lưu `deleted: true` trong source thành tombstone: `FlowService.java:126-148` (create) gọi `AbstractJdbcFlowRepository.java:924-938` (`create`), rồi `save` (`:981-1020`); `GenericFlow` đã parse giữ `deleted` của YAML (một field của `AbstractFlow.java:65`; chỉ `revision` và `updated` bị ghi đè, quanh `:1008`) và lưu nó, còn cột là `GENERATED ALWAYS AS (CAST(value ->> 'deleted' AS BOOL))` (`jdbc-postgres/.../baseline-postgres.sql:117`). Vậy Kestra có hành động theo nó, và egret cảnh báo `not_honoured` với lý do egret xoá flow bằng action xoá của riêng nó, không bao giờ qua một khoá trong source (một dòng `KeptDesign`, test `flow_deleted_warns_because_kestra_acts_on_it`). Lưu ý: việc Jackson deserialize field Lombok ở mức field là suy ra, chưa chạy. `revision`, `updated` và `tenantId` vẫn im lặng, như D15 nói.
+- **Các sự thật khác từ Task 4.** Việc đi xuống con theo từng loại flowable (`child_lists`), nên một property của task lá tên `tasks` hay `errors` không bị duyệt như danh sách task. `unpaired(source, flow)` chứng minh bước duyệt fail open: trên corpus, 924 task của model được duyệt và 0 task không ghép được.
 
 ## 1. #1 bao những gì
 
@@ -154,6 +159,10 @@ Các khoá gốc mà bộ deserialize của `models::Trigger` đọc (`trigger.r
 
 Cảnh báo lúc publish cho một lời từ chối lúc đồng bộ hay lúc gọi gọi đúng vị từ mà lần đồng bộ hay route gọi, nên hai bên không thể vênh nhau. Giai đoạn 2 của `measure.rs` đã xếp các khoá này là `refused` (`measure.rs:722-727`); điều đó không đổi.
 
+**Như đã xây (2026-10-26), §3.4 (Task 5).** Một khoá trigger được chấp nhận khi nó nằm trong `TRIGGER_BASE_KEYS`, `trigger_keys(kind)` hoặc là `interval` của Schedule (Kestra `final = null`, vô hiệu); khoá có dòng `lift_of(Site::Trigger)` thì cảnh báo `not_honoured`; còn lại là `unknown_property`. Các khoá Webhook (`wait`, `returnOutputs`, `responseContentType`, `responseCode`) cảnh báo với mã `not_honoured` ("every call to this webhook answers 409. Roadmap package #11 lifts it"), trong khi `when`/`lateMaximumDelay` của Schedule giữ mã `schedule_not_resolvable` của KI-122 (D17): cùng một họ mà hai mã. `allowConcurrent` chỉ cảnh báo khi viết `false`, và `stopAfter` cảnh báo. §7 vẫn đúng: không predicate nào render (`ScheduleTrigger::resolve`, `trigger/schedule.rs:1340-1385`, đọc chuỗi `when` thô; `webhook::declared_unsupported`, `trigger/webhook.rs:345`, đọc model).
+
+**Như đã xây (2026-10-26), §3.5 (Task 5).** `INPUT_TYPES` có 20 tên wire, kèm `input_keys(ty)` theo từng kiểu. `the_input_rows_name_the_package_the_roadmap_gives` ghim 21 dòng input (#3, hoặc Enterprise cho `inputs` của FORM và `ref`/`namespace`/`revision` của REUSABLE_INPUTS) và 12 dòng trigger (#11). Lúc đo gặp một artefact của dụng cụ đo: schema của Kestra không có `REUSABLE_INPUTS` trong enum `type` của `ReusableInputsInput-1`, nên `measure.rs` lấy mẫu lớp đó như một input STRING và ba khoá của nó đổi từ `ignored` sang `refused` khi regenerate; mẫu nay dùng type `REUSABLE_INPUTS` và `property-treatment.json` giống từng byte. Corpus: không có lỗi nào ở trigger, input, output trong valids và invalids (chỉ 33 cảnh báo), nên 351 file không có khoá input sai kiểu.
+
 ### 3.5 Input và output (`models/input.rs:54-96`; Kestra `Input.java:62-98` cộng từng kiểu con)
 
 Một struct của egret phục vụ cả 20 kiểu input; Kestra có một lớp cho mỗi kiểu, nên khoá hợp lệ trên kiểu này là khoá lạ trên kiểu khác.
@@ -182,6 +191,8 @@ Output của flow: `FlowOutput` có đủ sáu trường của Kestra (`models/f
 
 Hành vi không đổi (D13). Thông báo của chúng nêu gói lộ trình (§5).
 
+**Như đã xây (2026-10-26), §3.6 (hồi quy giữa chừng).** Lần chạy toàn bộ suite sau Task 8 (không phải unit test) tìm ra một hồi quy từ Task 3 đến 7: `scripts_gate::the_w4_aliases_still_publish` fail vì bước duyệt từ chối khoá `image:` cũ mà `scripts::parse` chấp nhận trên alias W4. Bản sửa (`task()` bỏ qua kiểm tra khi `scripts::kind_of(row)` là `Some`; task plugin không có dòng trong bảng) khôi phục D13: script task và plugin task do cổng riêng của chúng xử lý, và `a_script_or_plugin_task_is_not_checked_for_unknown_keys_here` ghim điều đó. Lần chạy đó cũng cho thấy fixture `one_task_source` của `end_to_end` viết cả `message` lẫn `format` trên `Log` và `Return`. Kestra có `message` và `level` trên `Log` (`Log.java:79,85`) và chỉ `format` trên `Return` (`Return.java:91`), nên Kestra từ chối flow đó và lỗi từ chối là đúng; fixture nay chỉ viết `format` trên `Return`, và `a_log_key_on_a_return_and_a_return_key_on_a_log_are_refused` ghim cặp này.
+
 ### 3.7 Bean lồng
 
 Mỗi bean được đối chiếu với các trường wire của struct egret tương ứng và, chỗ Kestra có khoá mà egret bỏ, với `lift_of`:
@@ -191,6 +202,8 @@ Mỗi bean được đối chiếu với các trường wire của struct egret 
 - `Window` vốn đã `deny_unknown_fields` (`trigger.rs:266`) và không đổi.
 
 Bean nào có mô hình không phải struct derive thường thì có một hằng viết tay kèm file:line của Kestra; Task 6 liệt kê là những bean nào.
+
+**Như đã xây (2026-10-26), §3.7 (Task 6).** Các const theo từng kiểu, mỗi cái kèm `file:line` của Kestra, thay việc kiểm retry của bảng: `RETRY_COMMON_KEYS` và `retry_keys(ty)` (`AbstractRetry.java:31,34,37,40`; `Constant.java:26,29`; `Exponential.java:27,30,33,35`; `Random.java:27,30,33`) và `sla_keys(ty)` (`SLA.java:42,45,48,53`; `MaxDurationSLA.java:25`; `ExecutionAssertionSLA.java:27-28`). Hai unit test kiểm mọi khoá retry và mọi khoá SLA được liệt kê đều deserialize vào model. `Concurrency`, `Check`, `CheckFrequency` (LoopUntil), `DagNode` (Dag), `DependsOn` của input và `Dependency` của Flow trigger được kiểm theo wire field của struct. Hai quyết định của người cài: (1) một dòng lift `Site::Check` mới đưa `condition` đã deprecated của Check (Jackson chấp nhận qua `setCondition`, `Check.java:64-67`; egret chỉ đọc `when`) sang #16 dưới dạng cảnh báo `not_honoured`; (2) `flowRef` trên một mục `dependsOn` của Flow trigger bị từ chối là khoá không xác định, vì nó là field nội bộ của egret mà Kestra từ chối. `quotas` bị bỏ qua và `Window` giữ nguyên, như thiết kế. Sàn corpus, đã đo: valids 323 file, 322 parse được, 39 trigger, 106 input, 20 output, 94 bean lồng; invalids 28, 23, 4, 18, 1, 13. Khoảng trống đã biết: `retry_keys` trả `None` cho một kiểu retry không xác định nên fail open.
 
 ## 4. Cảnh báo lúc lưu của chính Kestra (D5)
 
@@ -202,6 +215,8 @@ Bean nào có mô hình không phải struct derive thường thì có một h�
 Mã `runnable_property_on_non_runnable`, đường dẫn `<đường dẫn task>.<khoá>`. Trên các task này không thêm cảnh báo #13/`Enterprise` của §3 nữa: Kestra cũng không tôn trọng khoá ở đó, nên không gói nào gỡ nó. Để cảnh báo đúng, egret không được tôn trọng `timeout` trên bất kỳ kiểu nào trong số này: `WorkingDirectory` và bốn kiểu cấp executor sẽ đo ở Task 7 (`worker/timeout.rs`); kiểu nào egret có tôn trọng thì bị loại khỏi cảnh báo, kèm một dòng doc.
 
 **Flow trigger không có `dependsOn`** (`FlowService.java:553-566`): khi `dependsOn` rỗng và `when` vắng hoặc là chuỗi `"true"`. Chữ của Kestra là `This flow will be triggered for EVERY execution of EVERY flow on your instance. We recommend adding the dependsOn property to the Flow trigger '<id>'.` Listener của egret bị giới hạn trong workspace (`flow_trigger/process.rs:575-585`, `WHERE l.workspace_id = $1`), nên chữ của egret thay "on your instance" bằng "in this workspace" và giữ nguyên phần còn lại. Mã `flow_trigger_without_depends_on`, đường dẫn `triggers.<id>`.
+
+**Như đã xây (2026-10-26), §4 (Task 7).** Cả hai cảnh báo đã có (`runnable_property_on_non_runnable`, `flow_trigger_without_depends_on`, văn bản như mục này; "on your instance" thành "in this workspace", Q4). Phép đo `timeout` mà §4 yêu cầu: **egret không thực thi `timeout` trên loại non-runnable nào**, nên không loại nào bị bỏ khỏi cảnh báo và `Pause` là ngoại lệ duy nhất (của chính Kestra, và egret có thực thi nó ở đó). Bằng chứng: `worker/claim.rs:425-432` `leaf()` chỉ trả timeout cho `TaskKind::Leaf`, còn block nhận `NotALeaf` và `Budget::Refused` (`claim.rs:278-296`); `worker/working_dir.rs` không có tham chiếu `timeout`; `executor/exit.rs` và `executor/update.rs` không bao giờ đọc `timeout`; `executor/plan.rs:1438` chỉ chép `timeout` vào plan cho `Pause`, và `executor/flowable/pause.rs:243` thực thi nó. Giá trị `null` coi như vắng mặt, như `!= null` của Kestra. Trên bốn loại chạy trong executor (`Exit`, `SetVariables`, `UnsetVariables`, `Labels`), `taskCache` và `workerSelector` nhận cảnh báo của Kestra chứ không phải cảnh báo #13, nên mỗi khoá chỉ có một phát hiện. Corpus: 0 phát hiện ở cả hai mã (mọi Flow trigger của corpus đều có `dependsOn` hoặc `when`; sáu `timeout` của corpus nằm trên task runnable hoặc `Pause`).
 
 ## 5. Các thông báo người dùng thấy được thay đổi
 
@@ -231,6 +246,8 @@ Cố ý không đổi: lời từ chối runner `Process`, `http()`, `secret()` 
 
 Các test ghim chữ cũ được cập nhật trong cùng task: `the_not_yet_enforced_list_is_pinned_in_both_directions` (`validate.rs:2906`), `tests/plugins_gate.rs:266` (ghim một tiền tố không đổi), `tests/publish.rs:770` (chuỗi con không đổi), và mọi unit test của `scripts` khẳng định "(W5a)". Lệnh quét của kế hoạch là `grep -rn "(W5a)\|(W5b)\|lands in\|a later package" src tests`.
 
+**Như đã xây (2026-10-26), §5 (Task 8).** Mọi dòng của bảng đã được áp dụng, với các khác biệt sau. (1) Hai thông báo script về biểu thức tại `scripts/mod.rs` (biểu thức boolean và list-of-strings, `not implemented by egret in W5a`) không có trong bảng; chúng bỏ " in W5a" và không nêu gói nào, vì không bịa gói. (2) Câu của `taskRunner` plugin có dấu chấm: `... (workflow.container_runner); remove it. Roadmap package #18 lifts it` (bảng ghi "the same, then ` Roadmap package #18 lifts it`" đọc thành không có dấu chấm). (3) Sửa D10: `ScheduleError::UnsupportedWhenCondition` và `UnsupportedLateMaximumDelay` thành biến thể unit, nên cả `Display` lẫn thông báo `schedule_not_resolvable` lúc lưu đều không còn lặp giá trị của tác giả; `Display` kết thúc bằng `; roadmap package #11 lifts it`, còn thông báo validate (vốn đã kết thúc bằng "Roadmap package #11 lifts it") chỉ dựng từ tên khoá để câu không bị nhân đôi. Các biến thể `UnknownTimezone` và `Cron` của `ScheduleError` vẫn lặp văn bản của tác giả (việc theo sau, không thuộc gói này). (4) Tài liệu sai được sửa bằng ghi chú có ngày: `models/task.rs` và `executor/plan.rs` từng nói `Pause.tasks` là field của Kestra. (5) `property-treatment.json` được regenerate: chỉ văn bản thông báo trong `refused_downstream` đổi (`when`/`lateMaximumDelay` của Schedule, bốn khoá Webhook). Test `no_message_names_a_w_package...` trong brief bỏ sót dòng cuối của một literal; test được commit kiểm từng dòng không phải comment nguyên vẹn.
+
 ## 6. Corpus và ratchet
 
 ### 6.1 Oracle nhìn vào đâu
@@ -255,9 +272,25 @@ Nếu controller trả lời Q1 bằng (b), Task 8b tuỳ chọn của kế ho�
 
 Mọi dịch chuyển thống kê khác là một phát hiện: một khoá input chéo kiểu (§3.5) hoặc một khoá bean lồng (§3.7) mà bảng kiểm kê chưa quét. Kế hoạch dừng lại ở đó và báo cáo, thay vì chỉnh hằng số.
 
+**Như đã xây (2026-10-26), §6.2 (đã đo; cột "dự kiến" của bảng sai hai số).** Nguồn: kết quả in ra của ratchet từ `cargo test -p egret-workflow --test executor -- --nocapture`, và các hằng số trong `oracle-exec/driver.rs` (`LIVE` `:853`, `UNKNOWN_TYPE_REFUSED` `:931`, `VALIDATE_REFUSED` `:979`).
+
+| số liệu | §6.2 dự kiến | đã đo | nguồn |
+|---|---|---|---|
+| ratchet (golden / mismatching / baselined / broken) | 301 / 73 / 73 / 0, hoặc 72 / 72 với Q1 (b) | **301 / 72 / 72 / 0** | kết quả in ra; `sixteen_banked` assert (301, 229, 72) |
+| `LIVE` | 294 | **295** (không đổi) | `driver.rs:853`; dòng `publish_corpus` "295 live" |
+| `VALIDATE_REFUSED` | 26 | **25** (không đổi) | `driver.rs:979` |
+| `UNKNOWN_TYPE_REFUSED` | 21 | 21 | `driver.rs:931` |
+| `PUBLISHED_BUT_REFUSED` | 6 | 6 | `executor/mod.rs` |
+
+Vì sao `LIVE` và `VALIDATE_REFUSED` không di chuyển: `invalids/invalid-property` là bên thua trong cuộc tranh tên. Nó dùng chung `id: duplicate` với `invalids/duplicate`, nên `publish_corpus` không bao giờ lưu nó (kết quả in ra ghi "4 name-contested"), và lỗi từ chối vô hình với census (Task 3 đo ra điều này trước; Task 2 đến 8 giữ nguyên các số). Vì thế nó cũng không còn trong `STILL_OVER_ACCEPTED` hay `UNATTRIBUTED`.
+
+Q1 (b) được xây thế nào, dưới dạng `Seam::Save` (Task 8b): mỗi `RefusalGroup` có một `Seam` (`Run` hoặc `Save`). Với một id nằm trong nhóm `Seam::Save`, oracle chạy `spec::validate_source` trên source của corpus và khớp một entry golden `refused` khi mã của một phát hiện lỗi bằng `message` của nhóm. Message của nhóm mới là `unknown_property`. `executor_matches_golden` có thêm nhánh `(Refused, Trace) if refused_at_save`, và test nhóm kiểm nhánh save cùng việc `build_plan` vẫn lên kế hoạch cho flow (D1). Một mutant chấp nhận mọi lỗi save cho mọi id làm ratchet vẫn xanh (không entry refused nào khác trong baseline có lỗi lúc save), nên `a_save_time_refusal_banks_only_for_its_own_group_and_code` được thêm. Các số dẫn xuất đổi theo 73 xuống 72: `sixteen_banked` (301, 229, 72), các khai báo timeout (2, 70, 72), guard của `handler_surface.py` cùng `handler-surface.txt` được regenerate (trần 262), và phần văn xuôi của `oracle-exec/README.md`. Điểm lệch nhỏ: `RefusalGroup.message` nghĩa là chuỗi con với `Run` và mã chính xác với `Save`.
+
 ### 6.3 `property-treatment.json`
 
 Sinh lại bằng `EGRET_WRITE_PROPERTY_TREATMENT=1` khi `measure.rs` gọi `validate_source`. Diff dự kiến: `io.kestra.plugin.core.flow.Parallel.onChildFailure` và `io.kestra.plugin.core.flow.Dag.onChildFailure` đi từ `ignored` sang `refused` (D12). Không dòng nào được thành `honoured` hay `warned` (D3). Dòng nào khác dịch chuyển thì phải giải thích trong báo cáo task, nếu không thì thay đổi sai.
+
+**Như đã xây (2026-10-26), §6.3.** Regenerate bằng `EGRET_WRITE_PROPERTY_TREATMENT=1`: diff chính xác là `Parallel.onChildFailure` và `Dag.onChildFailure`, `ignored` sang `refused` (2 dòng vào, 2 dòng ra trong diff file so với main `28fb8693`; `crates/egret-workflow/src/spec/schema/README.md` đếm: 1625 property, 1119 honoured, 4 warned, 378 ignored, 124 refused, đếm từ file). Không dòng nào thành `honoured` hay `warned`. Task 8 sau đó chỉ đổi văn bản thông báo (ghi chú §5).
 
 ## 7. Bảo mật (D10)
 
@@ -274,6 +307,8 @@ Corpus có 351 flow (`driver.rs:1042` khẳng định). Các con số ở thì h
 - Các câu nêu một số đếm khác đo trên 345 (`executor/mod.rs:2764` "52 `Loop` tasks across the 345", `worker/spawn.rs:1333` "43 of its 345 files", `worker/subflow.rs:990-1036` và `webhook_routes.rs:150,153` "16 of 345", "248 of 345") là lịch sử hoặc cần đếm lại. Kế hoạch tính lại số đếm ở chỗ có test tính nó, còn lại bỏ chữ số ("across the corpus"), như `driver.rs:859-869` đã làm cho `LIVE`.
 - Delta lịch sử giữ nguyên: `executor/mod.rs:2990,4387`, `driver.rs:1037`, và chú thích ở `tests/executor.rs:1474`.
 
+**Như đã xây (2026-10-26), §8 (Task 9).** Commit `a4928361`: "345" ở thì hiện tại thành 351 trong comment và trong hai thông báo assert (`trigger/depends_on.rs`, `trigger/flow.rs`); không có code nào khác đổi. Các số đứng cạnh nó được đo lại ở 351: 52 task `Loop` trong 43 file, 6 file khai báo `sla:` (nên 345 trên 351 không khai báo), 7 flow Schedule, 17 flow Flow-trigger, 4 file ghi `CREATE_NEW_EXECUTION`; một số trong văn xuôi đã lệch khỏi assert của nó được sửa theo assert (88, 59). Giữ làm lịch sử: các delta lịch sử, và các câu census W10 ("16 of 345", "248 of 345"). Cố ý để nguyên: khoảng 60 dòng đo có ngày trong `oracle-exec/README.md`, vì không test nào ghim một câu "345" ở đó. Con số đứng riêng ở `oracle-exec/driver.rs:857` được bỏ ("the size of the corpus").
+
 ## 9. Sửa lộ trình (D9)
 
 Trong `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, dưới dạng ghi chú có ngày, không xoá gì:
@@ -285,6 +320,8 @@ Trong `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, dưới
 6. **Phụ lục B §4:** "Schedule.lateMaximumDelay | supported" là sai: nó bị từ chối khi scheduler đồng bộ trigger (`trigger/schedule.rs:1368-1371`), và từ #1 thì bị cảnh báo lúc publish. Một ghi chú sửa có ngày dưới bảng.
 7. **Bản ghim quyết định:** bản export schema (rc13, dựng ngày 2026-09-01) mới hơn bản ghim mã nguồn (2026-08-17); chỗ hai bên khác nhau (`onChildFailure`), bản ghim quyết. Một ghi chú ở §4 "Keeping this current".
 8. **Mục 15 của Phụ lục B §8** ("unknown and unsupported properties … ignored on core tasks") được #1 đóng lại: một ghi chú có ngày.
+
+**Như đã xây (2026-10-26), §9.** Tám đính chính được ghi thành ghi chú có ngày trong `docs/{en,vi}/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Mục 6 và 8 nhắm vào Phụ lục B của lộ trình đó, mà bản VI không có (header của nó nói vậy); chúng được ghi bằng EN dưới các bảng của Phụ lục B và, ở bản VI, trong §4 của lộ trình.
 
 ## 10. Cho các gói sau
 
@@ -305,3 +342,7 @@ Một PR. TDD theo từng task; unit test trong `spec::keys` cho mọi loại d�
 - **Q3. `unsupported_loop_until_property` không có dòng lộ trình nào.** Spec này nêu #9 và thêm nó vào dòng #9 (§9 mục 1). Lựa chọn khác là một dòng mới.
 - **Q4. D5 đòi cảnh báo của Kestra nguyên văn; cảnh báo Flow-trigger nói "on your instance".** Listener của egret giới hạn trong workspace, nên chữ nguyên văn sẽ sai. Spec này đổi cụm đó thành "in this workspace" (§4).
 - **Q5. D1 liệt kê flowable, trigger và input là các vị trí lồng.** Tính nghiêm của Kestra còn phủ retry, concurrency, SLA, checks, `checkFrequency`, nút `Dag` và `dependsOn`, và một lỗi gõ ở bất kỳ chỗ nào trong số đó hiện bị bỏ im lặng. Spec này đưa chúng vào (§3.7, Task 6 của kế hoạch). Bỏ Task 6 thì các khoá đó vẫn im lặng và mục tiêu không đạt với chúng.
+
+**Như đã xây (2026-10-26), §12 (câu trả lời).**
+- **Q1: (b), theo người dùng (2026-10-19).** Đã xây thành Task 8b (`Seam::Save`, xem ghi chú §6.2). Ratchet là 301 / 72 / 72 / 0.
+- **Q2 đến Q5: giữ các mặc định mà spec này đã chọn.** Q2: `scheduleDate` của subflow cảnh báo (#12), không từ chối. Q3: `unsupported_loop_until_property` được thêm vào dòng #9 (ghi chú lộ trình), không thêm dòng mới. Q4: cảnh báo Flow-trigger ghi "in this workspace" thay cho "on your instance". Q5: các bean lồng được kiểm (§3.7, Task 6).

@@ -143,7 +143,20 @@ that writes an `ignored` property, or a key its object's row does not list
 at all, is told so when it is saved (`spec::validate_source`, package #1): the
 first as a `not_honoured` warning that names the package which lifts it, the
 second as an `unknown_property` error (KI-121 warned `ignored_property` /
-`unknown_property`).
+`unknown_property`). That KI-121 wording is superseded (2026-10-26): the codes
+`ignored_property` and `unknown_property`-as-warning no longer exist, and
+`spec/properties.rs` is deleted.
+
+A `not_honoured` warning does **not** make a key `warned` (2026-10-26,
+package #1, D3). `warned` means a new `not_yet_enforced` warning appeared, and
+only a `warned` key is served to the editor; `not_honoured` is a different code
+on purpose, so the key stays `ignored` (or `honoured`) and the editor does not
+start offering `logLevel` on every core task. The test
+`a_not_honoured_warning_is_not_served` pins it. The only rows package #1 moved
+are `io.kestra.plugin.core.flow.Parallel.onChildFailure` and
+`io.kestra.plugin.core.flow.Dag.onChildFailure`, from `ignored` to `refused`:
+rc13's schema has the key, the pinned Kestra source (`96893b589`) does not, so
+it is an `unknown_property` error and the pin governs.
 
 ### Passed through unfiltered
 
@@ -168,7 +181,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1625 properties over 97 rows: 1119 honoured, 4 warned, 380 ignored, 122 refused (counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
+1625 properties over 97 rows: 1119 honoured, 4 warned, 378 ignored, 124 refused (counted from `property-treatment.json`, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
@@ -179,11 +192,11 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 | `io.kestra.plugin.core.execution.Exit` | 10 | — | *base 7* | — |
 | `io.kestra.plugin.core.execution.Fail` | 11 | — | *base 7* | — |
 | `io.kestra.plugin.core.flow.AllowFailure` | 10 | — | *base 7*, `errors`, `finally` | — |
-| `io.kestra.plugin.core.flow.Dag` | 12 | — | *base 7*, `finally`, `onChildFailure` | — |
+| `io.kestra.plugin.core.flow.Dag` | 12 | — | *base 7*, `finally` | `onChildFailure` |
 | `io.kestra.plugin.core.flow.If` | 13 | — | *base 7*, `finally` | — |
 | `io.kestra.plugin.core.flow.Loop` | 13 | — | *base 7*, `errors`, `fetchType`, `finally`, `outputs` | — |
 | `io.kestra.plugin.core.flow.LoopUntil` | 13 | — | *base 7*, `errors`, `finally` | — |
-| `io.kestra.plugin.core.flow.Parallel` | 12 | — | *base 7*, `finally`, `onChildFailure` | — |
+| `io.kestra.plugin.core.flow.Parallel` | 12 | — | *base 7*, `finally` | `onChildFailure` |
 | `io.kestra.plugin.core.flow.Pause` | 10 | — | *base 7*, `finally`, `onResume` | `behavior`, `errors`, `onPause` |
 | `io.kestra.plugin.core.flow.Sequential` | 11 | — | *base 7*, `finally` | — |
 | `io.kestra.plugin.core.flow.Sleep` | 10 | — | *base 7* | — |

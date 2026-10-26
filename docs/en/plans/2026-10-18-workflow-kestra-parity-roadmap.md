@@ -24,6 +24,8 @@
 | refused at publish by validation (`VALIDATE_REFUSED`) | 27 | **25** |
 | Kestra runs them, egret refuses (`PUBLISHED_BUT_REFUSED`) | 18 | **6**: 3 `Pause` properties, 1 `AllowFailure` block `retry:`, 1 templated Subflow `namespace:`, 1 Flow-trigger `dependsOn` entry with only some keys |
 
+**Note, 2026-10-26 (package #1 "No silent drops", in review: PR #756, row #1 is marked done only after merge).** Measured on the package's branch, rebased onto main `28fb8693`. Source: the ratchet printout of `cargo test -p egret-workflow --test executor -- --nocapture` and the constants in `oracle-exec/driver.rs`. Mismatch, baselined with a cause: **72** (the 2026-10-19 column says 73; `invalids/invalid-property` is now counted as refused, through a save-time group, spec Q1 (b)). Ratchet: **301 / 72 / 72 / 0** (golden / mismatching / baselined / broken), so 229 match the golden (`sixteen_banked` asserts (301, 229, 72)). `LIVE` stays **295** (`driver.rs:853`) and `VALIDATE_REFUSED` stays **25** (`driver.rs:979`): the package's spec predicted 294 and 26, but `invalids/invalid-property` is a name-contest loser (it shares `id: duplicate` with `invalids/duplicate`) and `publish_corpus` never files it. `UNKNOWN_TYPE_REFUSED` 21 (`driver.rs:931`) and `PUBLISHED_BUT_REFUSED` 6 are unchanged. The rows above stay as the 2026-10-18 and 2026-10-19 record.
+
 In the 2026-10-18 count of 84, C2 accounted for 12 entries. The other 72, by cause: `finally:` 11, `afterExecution:` 9, renderer divergences 8, `sla: MAX_DURATION` 5, `Loop` own `outputs:` 5, timing/poller latency 4, order pairs a clockless driver cannot reach 4, invalid flows over-accepted 4, unattributed `Loop` divergences 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, Subflow retry 2, missing Pebble functions 2, single causes 4, deliberate 1.
 
 **Feature surface** (Kestra 2.0 OSS, beyond the corpus; Appendix B has the evidence):
@@ -88,6 +90,13 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 **Expected after #2:** the baseline falls from 73 to about 52.
 
+**Notes, 2026-10-26 (package #1's spec §9, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`; the rows above are not edited).** Corrections 6 and 8 are under Appendix B §4 and §8, and 7 is in §4 below.
+1. **#9:** `Pause` `tasks:` is not a Kestra property (`Pause.java:158`: its fields are `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors`, `finally`). It is removed from #9's scope and stays refused permanently, as an unknown property (code `unsupported_pause_property`, kept). #9 also gains `LoopUntil` non-literal `checkFrequency`/`failOnMaxReached` (`unsupported_loop_until_property`; spec Q3).
+2. **#11:** gains Schedule `allowConcurrent` (Kestra's default is `false` and locks the trigger until its execution ends, `TriggerScheduler.java:345-349`; egret never locks; package #1 warns only on an explicit `false`), `failOnTriggerError`, and Webhook `when`.
+3. **#2:** gains `LoopUntil` `errors:`, `WorkingDirectory` `errors:` and `WorkingDirectory` `finally:` (all `AbstractBranch`). A version published before #2 holds them only in `snapshot.source`, so #2 must re-derive the plan from the source (spec §10).
+4. **#3:** gains SELECT/MULTISELECT `isRadio` and `autoSelectFirst` as start-form hints, and SELECT/MULTISELECT `expression`.
+5. **#17:** gains the script `outputFiles` `**` and `[...]` patterns (`worker/commands.rs:3108-3124`).
+
 ## 3. What stays different, and why
 
 ### 3.1 Security divergences (kept)
@@ -122,6 +131,10 @@ These stay because matching Kestra would open a cross-workspace hole, an SSRF, o
 ## 4. Keeping this current
 
 Re-measure when a package merges: the ratchet's printout gives the corpus counts, and `python3 handler_surface.py` gives the handler surface. Update §1, mark the package done in §2 with its PR, and leave the appendices as the dated record of 2026-10-18. When a package's spec finds a gap that no row names, add it to a row or to §3 with its reason. Never leave it unlisted.
+
+**Note, 2026-10-26 (package #1, correction 7): the pin governs.** The committed schema export (rc13, built 2026-09-01) is newer than the source pin (`96893b589`, 2026-08-17). Where they differ, the pin decides: rc13 has `onChildFailure` on `Parallel` and `Dag`, the pin does not (`git log -S onChildFailure` is empty at the pin), so it is refused as an unknown property and its two `property-treatment.json` rows are `refused`. Re-measure against a newer pin before reading rc13 as authority.
+
+**Note, 2026-10-26 (package #1, corrections 6 and 8, which edit Appendix B):** see the notes under §4 and §8 of Appendix B below.
 
 ---
 
@@ -428,6 +441,8 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | Conditions | Kestra 2.0 has no condition classes. Their replacement, `when:` with the date functions, is refused on Schedule (above). The functions themselves exist in egret | runners/functions.rs |
 | Trigger unlock / restart (TriggerController) | missing. egret's claim model has no lock to release | – |
 
+**Correction, 2026-10-26 (package #1, item 6):** the row "Schedule.lateMaximumDelay | supported | trigger/schedule.rs:1368" is wrong. It is refused when the scheduler syncs the trigger (`trigger/schedule.rs:1368-1371`, shown as the trigger row's `last_error`), so the trigger never fires; since package #1 it is also warned at publish (`schedule_not_resolvable`, naming #11). The row above is left as the 2026-10-18 record.
+
 ---
 
 ### 5. Execution operations (Kestra `ExecutionController` and friends vs egret REST)
@@ -528,6 +543,8 @@ The engine side was measured in `oracle/name-surface.txt`: 63 filters, 37 functi
 14. A Dag node that is disabled is dropped together with its edges; Kestra hangs in that case (plan.rs flatten_list doc).
 15. Unknown and unsupported properties are refused by name on script and plugin tasks, but ignored on core tasks (scripts/mod.rs:194).
 16. Log lines stay in Postgres with retention, not object storage (§11 Q1).
+
+**Closed, 2026-10-26 (package #1, item 8):** item 15 above ("Unknown and unsupported properties are refused by name on script and plugin tasks, but ignored on core tasks") is closed by package #1. An unknown key on a core task, a flowable, the flow, a trigger, an input, an output or a nested bean is now an `unknown_property` error at publish, as Kestra refuses it; a key Kestra accepts and egret does not act on is a `not_honoured` warning naming the package that lifts it. The item above is left as the 2026-10-18 record.
 
 ---
 
