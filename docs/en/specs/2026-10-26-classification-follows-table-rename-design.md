@@ -875,3 +875,12 @@ Deviations the code forces are recorded here, per task, as they happen.
 13. **Purge on soft-delete warehouses runs only for a forced recursive drop** (F8 above); the KI docs should say so.
 14. **SQL Lab hides the deadline refusal behind its own 60 s timeout** (F7 above). Raising
     `engine.query_timeout_secs` above the hold's limit, or naming the hold in the timeout message, is a follow-up.
+
+### Final gate after the review and live-check fixes (2026-10-26, HEAD `bdcc941c`)
+
+- Rust: fmt OK; `clippy --workspace --all-targets -D warnings` OK; `just test-shipping-resolution` OK; `cargo test
+  --workspace --no-fail-fast` (per-process test DB, `EGRET_TEST_SHARED_STORE_URL` set): 8256 passed, 0 DB skips, the
+  only failing target `egret-workflow --test sql_starrocks_live` (7 tests, needs a live StarRocks, known);
+  `just test-ranger-gates` OK; `openapi.json` regenerates identical.
+- Frontend: `gen:api` with no diff, lint 0 errors, `tsc -b` OK, vitest 8500/8500, build OK, all ten `test:bundle*`
+  OK.
