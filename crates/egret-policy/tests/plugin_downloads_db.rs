@@ -6,8 +6,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_metastore::Db;
 use egret_policy::{
-    plugins_hold_tag_version, ranger_router, seed_tag, seed_trino, wait_for_tag_version,
-    PolicyStore, RangerState, WaitError, NO_PLUGIN_POLLED,
+    plugins_hold_policy_version, plugins_hold_tag_version, ranger_router, seed_starrocks, seed_tag,
+    seed_trino, wait_for_tag_version, wait_for_versions, PolicyStore, RangerState, WaitError,
+    NO_PLUGIN_POLLED,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -457,4 +458,134 @@ async fn stale_rows_are_pruned_on_upsert_and_fresh_ones_kept() {
         vec![("fresh".to_string(),), ("old-elsewhere".to_string(),)],
         "{svc}"
     );
+}
+
+/// A fresh StarRocks profile at `policy_version` `v`, on `store`.
+async fn starrocks_at(store: &PolicyStore, pool: &sqlx::PgPool, v: i64) -> (String, i64) {
+    seed_starrocks(store).await.expect("seed starrocks");
+    let name = format!("starrocks_{}", Uuid::new_v4().simple());
+    let id = store
+        .create_service(&name, "starrocks", &json!({}))
+        .await
+        .expect("create service")
+        .id;
+    sqlx::query("UPDATE policy.authz_services SET policy_version = $2 WHERE id = $1")
+        .bind(id)
+        .bind(v)
+        .execute(pool)
+        .await
+        .unwrap();
+    (name, id)
+}
+
+/// The poll a StarRocks plugin sends (`pluginId`, `lastKnownVersion`, E24).
+fn starrocks_poll(svc: &str, v: i64) -> String {
+    format!(
+        "/plugins/policies/download/{svc}?pluginId=starrocks@sr-fe-0-{svc}&lastKnownVersion={v}"
+    )
+}
+
+#[tokio::test]
+async fn a_starrocks_plugin_that_reported_the_policy_version_confirms_it() {
+    let Some(db) = db().await else { return };
+    let (store, pool, _trino, _) = setup(db).await;
+    let (svc, id) = starrocks_at(&store, &pool, 7).await;
+    let plugin = format!("starrocks@sr-fe-0-{svc}");
+
+    poll(&store, &starrocks_poll(&svc, 6)).await;
+    let s = plugins_hold_policy_version(&store, id, 7, RECENT)
+        .await
+        .unwrap();
+    assert!(!s.confirmed, "{s:?}");
+    assert_eq!(s.waiting_on, vec![plugin]);
+
+    assert_eq!(
+        poll(&store, &starrocks_poll(&svc, 7)).await,
+        StatusCode::NOT_MODIFIED
+    );
+    let s = plugins_hold_policy_version(&store, id, 7, RECENT)
+        .await
+        .unwrap();
+    assert!(s.confirmed, "{s:?}");
+}
+
+#[tokio::test]
+async fn a_tag_poll_does_not_confirm_a_policy_version() {
+    let Some(db) = db().await else { return };
+    let (store, _pool, svc, id) = setup(db).await;
+    let uri = format!("/tags/download/{svc}?pluginId=trino@h-{svc}&lastKnownVersion=99");
+    poll(&store, &uri).await;
+    let s = plugins_hold_policy_version(&store, id, 1, RECENT)
+        .await
+        .unwrap();
+    assert!(!s.confirmed, "{s:?}");
+    assert_eq!(s.waiting_on, vec![NO_PLUGIN_POLLED.to_string()]);
+}
+
+#[tokio::test]
+async fn wait_for_versions_waits_for_both_kinds() {
+    let Some(db) = db().await else { return };
+    let (store, pool, trino, trino_id) = setup(db).await;
+    let (sr, sr_id) = starrocks_at(&store, &pool, 4).await;
+    poll(
+        &store,
+        &format!("/tags/download/{trino}?pluginId=trino@h-{trino}&lastKnownVersion=1"),
+    )
+    .await;
+    poll(&store, &starrocks_poll(&sr, 3)).await;
+
+    // The StarRocks plugin never catches up: a timeout naming it alone.
+    let err = wait_for_versions(
+        &store,
+        &[(trino_id, 1)],
+        &[(sr_id, 4)],
+        Duration::from_millis(700),
+    )
+    .await
+    .unwrap_err();
+    match err {
+        WaitError::Timeout { waiting_on } => {
+            assert_eq!(waiting_on, vec![format!("starrocks@sr-fe-0-{sr}")])
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+
+    // It reports late: confirmed only after that poll.
+    let (s2, uri) = (store.clone(), starrocks_poll(&sr, 4));
+    let polled_at = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        poll(&s2, &uri).await;
+        Instant::now()
+    });
+    wait_for_versions(
+        &store,
+        &[(trino_id, 1)],
+        &[(sr_id, 4)],
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("both kinds confirmed");
+    let confirmed_at = Instant::now();
+    assert!(confirmed_at >= polled_at.await.unwrap());
+}
+
+#[tokio::test]
+async fn an_empty_list_is_skipped_but_an_empty_wait_is_still_a_timeout_for_the_tag_wait() {
+    let Some(db) = db().await else { return };
+    let (store, pool, _trino, _) = setup(db).await;
+    let (sr, sr_id) = starrocks_at(&store, &pool, 2).await;
+    poll(&store, &starrocks_poll(&sr, 2)).await;
+
+    // No Trino pair: only the policies are waited on (a StarRocks-only warehouse).
+    wait_for_versions(&store, &[], &[(sr_id, 2)], Duration::from_millis(700))
+        .await
+        .expect("an empty tag list is skipped, not a timeout");
+    wait_for_versions(&store, &[], &[], Duration::from_millis(100))
+        .await
+        .expect("nothing bound: nothing to wait for");
+    // The view hold's contract is unchanged.
+    assert!(matches!(
+        wait_for_tag_version(&store, &[], Duration::from_millis(100)).await,
+        Err(WaitError::Timeout { .. })
+    ));
 }

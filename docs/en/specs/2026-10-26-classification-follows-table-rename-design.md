@@ -560,3 +560,18 @@ Deviations the code forces are recorded here, per task, as they happen.
   and C6a stores the caller; C13 and §5.6 record that a plain namespace drop cannot remove dropped tables (E35, R9);
   C15 and §5.8 add the missing-columns finding and `missingColumns` (R8); §11 item 6 is KI-305 with the wait marked
   reusable (R6); new evidence E33–E36; §13 emptied.
+
+### Step 0: evidence re-checked (2026-10-26)
+
+- `origin/main` is still `28fb8693`; no rebase. Every Step 0 row holds as written (E1, E7/E8, E9, E10, E16, E19,
+  E20, E23/E24, E27, E33, E35 at the pinned rev `7916505`, the inverted test). E19's wording is exact only for
+  `[dependencies]`: `egret-bi` IS a dev-dependency of `egret-catalog-engine` (its race tests drive `CatalogTagRepo`).
+  E32: highest migration still `0209`; `gh pr list` could not be re-run (GitHub TLS timeout from this machine), so
+  open PRs' migrations are unchecked; no migration is added (C19), so nothing depends on it.
+
+### Task 1: the policy-version wait
+
+- As designed. `plugins_hold_tag_version` and `plugins_hold_policy_version` share one query with the kind bound as a
+  parameter. `wait_for_tag_version(&[])` now returns its `Timeout` at once instead of after the deadline; the view
+  hold refuses an empty set before calling it, so no caller sees the difference. `WaitError::Timeout`'s message says
+  "the version" rather than "the tag version".
