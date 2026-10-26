@@ -452,6 +452,69 @@ mod tests {
         out
     }
 
+    /// One flow's layout as D3 freezes it: index, id, kind, and the children
+    /// `Plan::children_of` returned before package #2.
+    fn layout(plan: &Plan) -> Vec<(usize, String, String, Vec<usize>)> {
+        (0..plan.tasks.len())
+            .map(|ix| {
+                let kind = format!("{:?}", plan.tasks[ix].kind);
+                let tag = kind.split([' ', '{', '(']).next().unwrap_or("").to_string();
+                (ix, plan.tasks[ix].id.clone(), tag, plan.children_of(ix))
+            })
+            .collect()
+    }
+
+    /// **D3: a plan built after package #2 starts with the layout every stored
+    /// `task_runs.task_ix` was written against** (`worker/claim.rs:538`, read
+    /// back at `:4393`). A list #2 adds may only be APPENDED: an execution that
+    /// was running at deploy time is re-planned from its own source at its next
+    /// claim, and a shifted index would hand its runs another task's spec.
+    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; that is allowed only in
+    /// Task A1, at `68c9f4de`, before any planner change.
+    #[test]
+    fn the_plan_before_end_hooks_is_a_prefix_of_every_plan_after() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/executor/plan_layout_pre_end_hooks.json"
+        );
+        let mut now = serde_json::Map::new();
+        for (id, source) in every_corpus_flow() {
+            if let Ok(plan) = plan::plan_stored(&source) {
+                now.insert(id, serde_json::to_value(layout(&plan)).unwrap());
+            }
+        }
+        if std::env::var("EGRET_WRITE_PLAN_LAYOUT").as_deref() == Ok("1") {
+            std::fs::write(path, serde_json::to_string_pretty(&now).unwrap()).unwrap();
+        }
+        let frozen: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(
+            frozen.len() >= 300,
+            "the fixture covers the corpus ({})",
+            frozen.len()
+        );
+        let mut moved = Vec::new();
+        for (id, old) in &frozen {
+            let old: Vec<(usize, String, String, Vec<usize>)> =
+                serde_json::from_value(old.clone()).unwrap();
+            let Some(new) = now.get(id) else {
+                moved.push(format!("{id}: planned before #2, not now"));
+                continue;
+            };
+            let new: Vec<(usize, String, String, Vec<usize>)> =
+                serde_json::from_value(new.clone()).unwrap();
+            for o in &old {
+                // A node keeps its index, id and kind, and every old child is still
+                // its child (a new `finally` or a loop's new `errors` only adds some).
+                match new.get(o.0) {
+                    Some(n) if n.1 == o.1 && n.2 == o.2 && o.3.iter().all(|c| n.3.contains(c)) => {}
+                    other => moved.push(format!("{id}: ix {} was {o:?}, is {other:?}", o.0)),
+                }
+            }
+        }
+        assert!(moved.is_empty(), "{moved:#?}");
+    }
+
     /// W7c Task 1: the topology graph over the whole corpus. For every flow
     /// that parses, `graph::flow_graph` answers `Ok`, and every task the
     /// executor's plan holds (`plan_stored`: parse + flatten, no validation,
