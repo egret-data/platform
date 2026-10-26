@@ -848,3 +848,30 @@ Deviations the code forces are recorded here, per task, as they happen.
   for a client deleted since), read from `detail.actor`. `actor` stays null: a client is no user. The frontend's Who
   column renders it as the sentence does ("Catalog client engine-tmtrino", "Catalog client egret_… (deleted)")
   instead of "egret". `openapi.json` and the client are regenerated (new schema `ClientParty`).
+
+### Live fix F9: every refusal of a held rename ends "Nothing was renamed."
+
+- The deadline refusal ("engines did not confirm the moved classifications within 90 s: …; check that the engines
+  are running and polling egret's Ranger endpoint, then retry. Nothing was renamed.") and the recycle-bin refusal
+  ("… undrop that table, purge it, or choose another name. Nothing was renamed.") now end like the move refusal;
+  `a_rename_no_plugin_confirms_is_refused_and_undone` and
+  `a_classified_rename_onto_a_dropped_tables_name_is_refused_at_once` pin the ending.
+
+### Recorded from the second live run (no code)
+
+- **A purge needs a forced drop on a soft-delete warehouse (F8):** Lakekeeper refuses `DELETE …/namespaces/{ns}?
+  recursive=true` with 400 ("Cannot recursively delete namespace with soft-deletion without force flag") unless
+  `force=true` is also sent, so on such a warehouse §5.6's purge runs only for a forced recursive drop. That is
+  correct: without force nothing is dropped, and the rows must stay. What Trino's or Spark's `DROP SCHEMA … CASCADE`
+  sends could not be told from this repository (their Iceberg REST clients are not vendored here); measure it in a
+  live run before documenting the user path.
+- **SQL Lab's 60 s query limit is shorter than the 90 s hold (F7):** `engine.query_timeout_secs` defaults to 60
+  (`egret-config`), so a rename issued from SQL Lab against a silent engine shows "timeout: the query ran longer than
+  the 60 s limit" instead of the 409's reason. egret still refuses at 90 s and undoes the copy (measured). A normal
+  held rename (about 55 s with StarRocks bound, §10) fits, with little margin.
+
+### §11 additions (second live run; append-only, so recorded here)
+
+13. **Purge on soft-delete warehouses runs only for a forced recursive drop** (F8 above); the KI docs should say so.
+14. **SQL Lab hides the deadline refusal behind its own 60 s timeout** (F7 above). Raising
+    `engine.query_timeout_secs` above the hold's limit, or naming the hold in the timeout message, is a follow-up.

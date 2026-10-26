@@ -1971,6 +1971,8 @@ async fn a_rename_no_plugin_confirms_is_refused_and_undone() {
         message.contains(egret_policy::NO_PLUGIN_POLLED),
         "{message}"
     );
+    // Live check F9: every refusal of a held rename ends the same way.
+    assert!(message.ends_with(". Nothing was renamed."), "{message}");
     assert_eq!(
         env.rows().await,
         sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
@@ -3339,6 +3341,7 @@ async fn a_classified_rename_onto_a_dropped_tables_name_is_refused_at_once() {
     assert!(started.elapsed() < Duration::from_secs(1));
     let message = body["error"]["message"].as_str().unwrap_or("");
     assert!(message.contains("recycle bin"), "{message}");
+    assert!(message.ends_with(". Nothing was renamed."), "{message}");
     assert_eq!(
         env.rows().await,
         sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])

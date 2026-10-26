@@ -1074,7 +1074,7 @@ impl TableHook {
             return Err(Refusal(format!(
                 "the new name {}.{dst} belongs to a dropped table in the recycle bin, and the \
                  catalog does not rename onto it; undrop that table, purge it, or choose another \
-                 name",
+                 name. Nothing was renamed.",
                 dst_ns.replace('\u{1f}', ".")
             )));
         }
@@ -1578,7 +1578,8 @@ impl TableHook {
             Ok(()) => Ok(()),
             Err(WaitError::Timeout { waiting_on }) => Err(Refusal(format!(
                 "engines did not confirm the moved classifications within {} s: {}; check that \
-                 the engines are running and polling egret's Ranger endpoint, then retry",
+                 the engines are running and polling egret's Ranger endpoint, then retry. Nothing \
+                 was renamed.",
                 seconds(self.limit),
                 waiting_on.join(", ")
             ))),
