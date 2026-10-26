@@ -108,6 +108,11 @@ pub(crate) enum Site<'a> {
 
 const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+/// D15, measured: Kestra persists a source `deleted: true` as a tombstone row
+/// (`AbstractJdbcFlowRepository.save` writes the parsed `GenericFlow`, and the
+/// `deleted` column is generated from the stored JSON, `baseline-postgres.sql:117`).
+const DELETED_REASON: &str =
+    "egret deletes a flow through its own delete action, never through a key in the source";
 const DRAFT_REASON: &str =
     "egret's draft and publish split replaces it: a published version runs whatever `draft:` says";
 
@@ -119,6 +124,7 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
         Site::Flow => match key {
             "workerSelector" | "policyRefs" => Some(Enterprise),
             "draft" => Some(Lift::KeptDesign(DRAFT_REASON)),
+            "deleted" => Some(Lift::KeptDesign(DELETED_REASON)),
             _ => None,
         },
         Site::Task(t) => {
@@ -301,13 +307,6 @@ pub(crate) fn trigger_keys(t: &str) -> Vec<&'static str> {
 // Objects checked: the flow document, every task at every depth (paths are
 // `spec::path`'s, `tasks.a.b`), a task's or the flow's `retry`, every trigger.
 
-/// The keys under which a task holds child tasks: a list of tasks, a
-/// `Switch`'s `cases` (a map of lists), a `Dag`'s `tasks` (a list of
-/// `{task, dependsOn}` nodes).
-const CHILD_LISTS: &[&str] = &[
-    "tasks", "then", "else", "errors", "finally", "defaults", "cases",
-];
-
 /// The flow's four root lists, as `spec::path::root_lists` names them.
 const ROOT_LISTS: &[&str] = &["tasks", "errors", "finally", "afterExecution"];
 
@@ -325,51 +324,134 @@ pub(crate) fn findings(source: &str, _flow: &Flow, report: &mut ValidationReport
     let Ok(Value::Object(flow)) = doc else {
         return;
     };
-    let mut w = Walk { report };
-    w.check(FLOW_ROW, Site::Flow, "the flow", &flow, "");
-    if let Some(retry) = flow.get("retry") {
-        w.retry(retry, "retry");
+    Walk {
+        report,
+        reached: Vec::new(),
     }
-    for list in ROOT_LISTS {
-        if let Some(Value::Array(tasks)) = flow.get(*list) {
-            for task in tasks {
-                w.task(task, list);
-            }
+    .flow(&flow);
+}
+
+/// The path of every model task that the raw walk of `source` does not reach
+/// (a raw entry missing, or a different `id` at that place). The walk fails
+/// open there, so this must be empty for every corpus flow.
+pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
+    let Ok(Value::Object(doc)) = serde_norway::from_str::<Value>(source) else {
+        return crate::spec::path::every_task(flow)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+    };
+    let mut scratch = ValidationReport::default();
+    let mut walk = Walk {
+        report: &mut scratch,
+        reached: Vec::new(),
+    };
+    walk.flow(&doc);
+    let reached = walk.reached;
+    crate::spec::path::every_task(flow)
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| !reached.contains(p))
+        .collect()
+}
+
+/// The raw lists a flowable holds child tasks in, in `Task::children()` then
+/// `Task::error_children()` order (`models/task.rs:122-201`), keyed by the
+/// canonical type. `errors` appears only where the model has it, so a `Loop`'s
+/// `errors:` (#2's) is not descended. Every other type holds none: a script or
+/// plugin property that merely looks like a task list is never walked.
+fn child_lists(canonical: &str) -> &'static [&'static str] {
+    match canonical {
+        "io.kestra.plugin.core.flow.Sequential" | "io.kestra.plugin.core.flow.Parallel" => {
+            &["tasks", "errors"]
         }
+        "io.kestra.plugin.core.flow.If" => &["then", "else", "errors"],
+        "io.kestra.plugin.core.flow.Switch" => &["cases", "defaults", "errors"],
+        "io.kestra.plugin.core.flow.Dag" => &["tasks", "errors"],
+        "io.kestra.plugin.core.flow.Loop"
+        | "io.kestra.plugin.core.flow.LoopUntil"
+        | "io.kestra.plugin.core.flow.WorkingDirectory" => &["tasks"],
+        "io.kestra.plugin.core.flow.AllowFailure" => &["tasks", "finally", "errors"],
+        "io.kestra.plugin.core.flow.Pause" => &["tasks", "onPause", "errors"],
+        _ => &[],
     }
-    if let Some(Value::Array(triggers)) = flow.get("triggers") {
-        for trigger in triggers {
-            let Some(t) = trigger.as_object() else {
-                continue;
-            };
-            let Some(id) = t.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Some(row) = t.get("type").and_then(Value::as_str).and_then(trigger_row) {
-                w.check(
-                    row,
-                    Site::Trigger(row),
-                    &format!("trigger '{id}'"),
-                    t,
-                    &format!("triggers.{id}"),
-                );
-            }
+}
+
+/// A flowable's own keys that #1 says nothing about. `finally` and `errors`
+/// are #2's (spec Rule 1); a `Pause` `tasks:` is `executor::pause_gap`'s
+/// (D14), so it is not reported a second time; `revision`, `updated` and
+/// `tenantId` are server-managed and Kestra ignores what an author writes
+/// (D15).
+fn silent(site: Option<Site<'_>>, key: &str) -> bool {
+    match site {
+        Some(Site::Flow) => matches!(key, "revision" | "updated" | "tenantId"),
+        Some(Site::Task(t)) if FLOWABLE_TYPES.iter().any(|(c, _)| *c == t) => {
+            matches!(key, "finally" | "errors")
+                || (t == "io.kestra.plugin.core.flow.Pause" && key == "tasks")
         }
+        _ => false,
     }
+}
+
+/// Keys of Kestra's newest release (rc13), not at the pin: `Parallel` and
+/// `Dag` `onChildFailure` is an unknown property here (D12).
+fn newer_than_the_pin(site: Option<Site<'_>>, key: &str) -> bool {
+    matches!(
+        site,
+        Some(Site::Task(
+            "io.kestra.plugin.core.flow.Parallel" | "io.kestra.plugin.core.flow.Dag"
+        ))
+    ) && key == "onChildFailure"
 }
 
 struct Walk<'a> {
     report: &'a mut ValidationReport,
+    /// The path of every task the walk reached (for [`unpaired`]).
+    reached: Vec<String>,
 }
 
 impl Walk<'_> {
+    fn flow(&mut self, flow: &serde_json::Map<String, Value>) {
+        self.check(FLOW_ROW, Site::Flow, "the flow", flow, "");
+        if let Some(retry) = flow.get("retry") {
+            self.retry(retry, "retry");
+        }
+        for list in ROOT_LISTS {
+            if let Some(Value::Array(tasks)) = flow.get(*list) {
+                for task in tasks {
+                    self.task(task, list);
+                }
+            }
+        }
+        if let Some(Value::Array(triggers)) = flow.get("triggers") {
+            for trigger in triggers {
+                let Some(t) = trigger.as_object() else {
+                    continue;
+                };
+                let Some(id) = t.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(row) = t.get("type").and_then(Value::as_str).and_then(trigger_row) {
+                    self.check(
+                        row,
+                        Site::Trigger(row),
+                        &format!("trigger '{id}'"),
+                        t,
+                        &format!("triggers.{id}"),
+                    );
+                }
+            }
+        }
+    }
+
     fn task(&mut self, task: &Value, prefix: &str) {
         let Some(t) = task.as_object() else { return };
         let Some(id) = t.get("id").and_then(Value::as_str) else {
             return;
         };
         let path = crate::spec::path::task_path(prefix, id);
-        match t.get("type").and_then(Value::as_str).and_then(task_row) {
+        let row = t.get("type").and_then(Value::as_str).and_then(task_row);
+        match row {
             // A core leaf is checked against the keys its handler reads (spec
             // 3.2), which say more than the committed table: a refined finding
             // replaces the table's for the same key, never a second one.
@@ -380,7 +462,9 @@ impl Walk<'_> {
         if let Some(retry) = t.get("retry") {
             self.retry(retry, &format!("{path}.retry"));
         }
-        for key in CHILD_LISTS {
+        self.reached.push(path.clone());
+        let Some(row) = row else { return };
+        for key in child_lists(row) {
             match t.get(*key) {
                 Some(Value::Array(children)) => {
                     for child in children {
@@ -398,6 +482,8 @@ impl Walk<'_> {
                         }
                     }
                 }
+                // `Pause.onPause` is one task.
+                Some(single @ Value::Object(_)) if *key == "onPause" => self.task(single, &path),
                 _ => {}
             }
         }
@@ -504,7 +590,15 @@ impl Walk<'_> {
             } else {
                 format!("{path}.{key}")
             };
-            match props.get(key) {
+            if silent(site, key) {
+                continue;
+            }
+            let treatment = if newer_than_the_pin(site, key) {
+                None
+            } else {
+                props.get(key)
+            };
+            match treatment {
                 None => self.report.errors.push(Finding {
                     code: "unknown_property",
                     message: format!(
@@ -833,6 +927,202 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    #[test]
+    fn an_unknown_top_level_key_is_refused_and_a_server_managed_one_is_not() {
+        let r = report("id: f\nnamespace: a.b\nrevision: 7\nupdated: 2026-01-01T00:00:00Z\ntenantId: x\nlabelz: {a: b}\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        let unknown: Vec<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "unknown_property")
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(unknown, ["labelz"]);
+        assert!(r.warnings.iter().all(|w| w.code != "not_honoured"), "{r:?}");
+    }
+
+    #[test]
+    fn flow_draft_and_worker_selector_warn_with_their_reason() {
+        let r = report("id: f\nnamespace: a.b\ndraft: true\nworkerSelector: {tags: [x]}\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        assert!(r.errors.is_empty(), "{r:?}");
+        let w: std::collections::BTreeMap<_, _> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| (w.path.as_str(), w.message.as_str()))
+            .collect();
+        assert!(w["draft"].ends_with("(roadmap \u{a7}3.2)"), "{w:?}");
+        assert!(w["workerSelector"].contains("Kestra Enterprise"), "{w:?}");
+        assert_eq!(w.len(), 2, "one finding per key: {w:?}");
+    }
+
+    /// D15 measured: a source `deleted: true` is persisted as a tombstone by
+    /// Kestra (`AbstractJdbcFlowRepository.save`, `deleted` is a column
+    /// generated from the stored JSON), so it is not silent here.
+    #[test]
+    fn flow_deleted_warns_because_kestra_acts_on_it() {
+        let r = report("id: f\nnamespace: a.b\ndeleted: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        assert!(r.errors.is_empty(), "{r:?}");
+        let w: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .collect();
+        assert_eq!(w.len(), 1, "{r:?}");
+        assert_eq!(w[0].path, "deleted");
+    }
+
+    /// Rule 1: `finally:` on a flowable and `errors:` on `Loop` go to #2, which
+    /// is next, so #1 says nothing about them -- not a refusal, not a warning.
+    #[test]
+    fn finally_and_the_errors_two_takes_draw_nothing() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n    finally:\n      - id: b\n        type: core.log\n        message: b\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n    errors:\n      - id: d\n        type: core.log\n        message: d\n");
+        assert!(
+            r.errors.is_empty()
+                && !r
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == "not_honoured" || w.code == "unknown_property"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn flowable_keys_kestra_has_warn_with_their_package_and_others_are_refused() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: x.y\n    flowId: g\n    inheritLabels: true\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    onChildFailure: FAILED\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n        mesage: typo\n");
+        assert!(
+            r.warnings.iter().any(|w| w.code == "not_honoured"
+                && w.path == "tasks.s.inheritLabels"
+                && w.message.ends_with("roadmap package #12 lifts it")),
+            "{r:?}"
+        );
+        let unknown: std::collections::BTreeSet<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "unknown_property")
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(
+            unknown,
+            std::collections::BTreeSet::from(["tasks.p.onChildFailure", "tasks.p.a.mesage"])
+        );
+        assert_eq!(r.errors.len(), 2, "one finding per key: {r:?}");
+    }
+
+    /// Loop `outputs`/`fetchType` are #6's; every flowable shares the
+    /// `Task.java` keys (spec 3.3).
+    #[test]
+    fn loop_outputs_and_a_task_java_key_on_a_flowable_warn() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    outputs: {x: y}\n    fetchType: STORE\n    logLevel: INFO\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n");
+        assert!(r.errors.is_empty(), "{r:?}");
+        let got: std::collections::BTreeMap<_, _> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| (w.path.as_str(), w.message.as_str()))
+            .collect();
+        assert!(
+            got["tasks.l.outputs"].ends_with("roadmap package #6 lifts it"),
+            "{got:?}"
+        );
+        assert!(
+            got["tasks.l.fetchType"].ends_with("roadmap package #6 lifts it"),
+            "{got:?}"
+        );
+        assert!(
+            got["tasks.l.logLevel"].ends_with("roadmap package #13 lifts it"),
+            "{got:?}"
+        );
+        assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn pause_on_resume_warns_and_pause_tasks_is_refused_once() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n");
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!(
+            r.warnings.iter().any(|w| w.path == "tasks.p.onResume"
+                && w.message.ends_with("roadmap package #9 lifts it")),
+            "{r:?}"
+        );
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n");
+        assert_eq!(
+            r.errors
+                .iter()
+                .filter(|e| e.path == "tasks.p.tasks")
+                .count(),
+            1,
+            "{r:?}"
+        );
+    }
+
+    /// A plugin property that merely holds `{id, type}` objects is not a task
+    /// list: the walk descends by kind, not by key name (spec 2.4).
+    #[test]
+    fn a_plugin_property_named_tasks_is_not_walked_as_tasks() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    errors:\n      - id: x\n        type: core.log\n        mesage: typo\n");
+        // `errors` on a leaf is itself unknown; its content is not descended.
+        assert_eq!(
+            r.errors
+                .iter()
+                .filter(|e| e.code == "unknown_property")
+                .count(),
+            1,
+            "{r:?}"
+        );
+    }
+
+    /// `core_leaf`'s `.expect` cannot panic: every `TASK_JAVA_UNREAD` key has a
+    /// lift row on every core leaf type (Task 3 review).
+    #[test]
+    fn every_task_java_unread_key_has_a_lift_row_on_every_core_leaf() {
+        let mut checked = 0;
+        for spec in crate::spec::registry::TASK_TYPES {
+            let Some(read) = leaf_keys(spec.r#type) else {
+                continue;
+            };
+            for key in TASK_JAVA_UNREAD {
+                if read.contains(key) || TASK_MODEL_KEYS.contains(key) {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    lift_of(Site::Task(spec.r#type), key).is_some(),
+                    "{} / {key}",
+                    spec.r#type
+                );
+            }
+        }
+        assert!(checked > 100, "only {checked} pairs");
+    }
+
+    /// The instrument fails open, and no corpus flow reaches that branch: every
+    /// model task of every corpus flow is reached by the raw walk.
+    #[test]
+    fn every_corpus_task_pairs_with_its_raw_map() {
+        let root = format!("{}/oracle-exec/corpus", env!("CARGO_MANIFEST_DIR"));
+        let mut unpaired = Vec::new();
+        let mut tasks = 0usize;
+        for dir in ["valids", "invalids"] {
+            for entry in std::fs::read_dir(format!("{root}/{dir}")).unwrap() {
+                let path = entry.unwrap().path();
+                let src = std::fs::read_to_string(&path).unwrap();
+                let Ok(flow) = crate::spec::parse(&src) else {
+                    continue;
+                };
+                tasks += crate::spec::path::every_task(&flow).len();
+                unpaired.extend(
+                    super::unpaired(&src, &flow)
+                        .into_iter()
+                        .map(|p| format!("{}: {p}", path.display())),
+                );
+            }
+        }
+        assert!(unpaired.is_empty(), "{unpaired:#?}");
+        // A zero would satisfy the assertion above while measuring nothing.
+        assert!(tasks >= 300, "only {tasks} corpus tasks were walked");
+        eprintln!("corpus tasks walked: {tasks}");
     }
 
     /// `null` is not a known key either (spec 3.2).

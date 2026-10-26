@@ -1126,6 +1126,34 @@ async fn the_validate_routes_report_the_key_census() {
     }
 }
 
+/// A draft's DTO carries the flow-level key census too: an unknown top-level
+/// key is an `unknown_property` ERROR in `validation.errors` (package #1).
+#[tokio::test]
+async fn a_draft_with_an_unknown_flow_key_shows_it_in_validation_errors() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = format!("{}labelz:\n  a: b\n", minimal_flow("a.labelz"));
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": source }),
+        )
+        .await,
+    )
+    .await;
+    let errors = created["validation"]["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "unknown_property" && e["path"] == "labelz"),
+        "{created}"
+    );
+}
+
 /// A source that does not parse is a 400 whose message carries the line and
 /// column, as on the by-id route.
 #[tokio::test]
