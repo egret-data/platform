@@ -575,3 +575,17 @@ Deviations the code forces are recorded here, per task, as they happen.
   parameter. `wait_for_tag_version(&[])` now returns its `Timeout` at once instead of after the deadline; the view
   hold refuses an empty set before calling it, so no caller sees the difference. `WaitError::Timeout`'s message says
   "the version" rather than "the tag version".
+
+### Task 2: field ids, and a moving coordinate counted once
+
+- `Leaving` is keyed by folded catalog NAME, not warehouse id: a compiled policy (and a `TaggedColumn`) names its
+  catalog only, so `leaving_via` resolves the overlay's warehouses through `registry.catalogs` (globally unique names).
+- `compile_rule`'s public signature is unchanged (46 call sites); it delegates to a crate-private
+  `compile_rule_counting` that takes the leaving set. The profile total subtracts the profile's desired policies on a
+  leaving coordinate (read from each body's resources), computed in `compile_desired` and passed to
+  `apply_diff_in_tx` (which now carries `#[allow(clippy::too_many_arguments)]`).
+- `current_fields_via` and `current_columns_batch_via` share one private query (`stored_current_schemas`); the
+  overlay is applied only by the latter. The drift test reads field ids from Lakekeeper's Iceberg REST load response
+  (`load_table_detail` carries no ids).
+- One test beyond the plan pins the profile-total site (`a_moving_table_is_counted_once_against_the_profile_total`);
+  the plan's two tests reach only the per-clearance ceiling.

@@ -29,6 +29,15 @@
 //! the columns the commit would leave each table with; inside that
 //! transaction those answer for their tables instead of the stored schema. A
 //! `LOCAL` setting dies with its transaction, so no other compile sees it.
+//!
+//! **Leaving coordinates (rename spec C8).** While the hook holds a rename,
+//! the source table (or a renamed column's old name) still exists and must
+//! stay protected, so both names compile. An overlay entry marks the source
+//! `leaving_table`, or lists the old column names in `leaving`; the expansion
+//! ceilings skip policies on those coordinates ([`Leaving`]), so a move is
+//! counted once. The policies are still emitted.
+
+use std::collections::HashSet;
 
 use egret_perm::CompileError;
 use egret_ranger_eval::resource::fold_identifier;
@@ -45,12 +54,125 @@ pub const PENDING_COLUMNS_SETTING: &str = "egret.pending_table_columns";
 
 /// One table's columns as a pending commit would leave them; `columns: None`
 /// when the commit leaves no table under that name (a rename's source).
+/// `leaving_table` and `leaving` mark what a held move is leaving (module
+/// doc); both default to nothing, so an overlay without them still parses.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingColumns {
     pub warehouse_id: Uuid,
     pub schema: String,
     pub table: String,
     pub columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub leaving: Vec<String>,
+    #[serde(default)]
+    pub leaving_table: bool,
+}
+
+/// The coordinates the current transaction's overlay marks as leaving, by
+/// folded catalog name (a compiled policy names its catalog, not its
+/// warehouse; `registry.catalogs.name` is globally unique).
+#[derive(Debug, Default)]
+pub struct Leaving {
+    tables: HashSet<(String, String, String)>,
+    columns: HashSet<(String, String, String, String)>,
+}
+
+impl Leaving {
+    /// Does a policy on `catalog.schema.table` (and `column`, when it names
+    /// one) count toward an expansion ceiling? Not when its table or its
+    /// column is leaving.
+    pub fn counts_toward_ceiling(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        column: Option<&str>,
+    ) -> bool {
+        if self.tables.is_empty() && self.columns.is_empty() {
+            return true;
+        }
+        let t = (
+            fold_identifier(catalog),
+            fold_identifier(schema),
+            fold_identifier(table),
+        );
+        if self.tables.contains(&t) {
+            return false;
+        }
+        match column {
+            Some(c) => !self.columns.contains(&(t.0, t.1, t.2, fold_identifier(c))),
+            None => true,
+        }
+    }
+
+    /// [`Self::counts_toward_ceiling`] for a compiled body, read from its
+    /// first value at each of `levels` (catalog, schema, table, column). A
+    /// body that names no table (a tag policy) always counts.
+    pub fn counts_body(&self, body: &Value, levels: &[&str]) -> bool {
+        let value = |level: &str| {
+            body.get("resources")?
+                .get(level)?
+                .get("values")?
+                .as_array()?
+                .first()?
+                .as_str()
+        };
+        let [catalog, schema, table, column, ..] = levels else {
+            return true;
+        };
+        match (value(catalog), value(schema), value(table)) {
+            (Some(c), Some(s), Some(t)) => self.counts_toward_ceiling(c, s, t, value(column)),
+            _ => true,
+        }
+    }
+}
+
+/// The leaving coordinates of the current transaction's overlay (module doc),
+/// empty outside a held move.
+pub async fn leaving_via(conn: &mut sqlx::PgConnection) -> Result<Leaving, CompileError> {
+    let pending: Vec<PendingColumns> = pending_columns(conn)
+        .await?
+        .into_iter()
+        .filter(|p| p.leaving_table || !p.leaving.is_empty())
+        .collect();
+    let mut out = Leaving::default();
+    if pending.is_empty() {
+        return Ok(out);
+    }
+    let warehouses: Vec<Uuid> = pending.iter().map(|p| p.warehouse_id).collect();
+    let catalogs: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT warehouse_id, name FROM registry.catalogs WHERE warehouse_id = ANY($1)",
+    )
+    .bind(&warehouses)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading the catalogs of a held move: {e}")))?;
+    for p in &pending {
+        for (_, catalog) in catalogs.iter().filter(|(w, _)| *w == p.warehouse_id) {
+            let t = (
+                fold_identifier(catalog),
+                fold_identifier(&p.schema),
+                fold_identifier(&p.table),
+            );
+            for c in &p.leaving {
+                out.columns
+                    .insert((t.0.clone(), t.1.clone(), t.2.clone(), fold_identifier(c)));
+            }
+            if p.leaving_table {
+                out.tables.insert(t);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A table's current top-level fields, `(field id, name)` in field-id order,
+/// every name in the catalog's spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableFields {
+    pub schema: String,
+    pub table: String,
+    pub fields: Vec<(i64, String)>,
 }
 
 /// A table's current top-level columns, every name in the catalog's spelling.
@@ -108,13 +230,40 @@ pub async fn current_columns_batch_via(
                 && fold_identifier(&p.table) == fold_identifier(&k.table)
         })
     };
+    let rows = stored_current_schemas(conn, keys).await?;
+    for (ord, schema, table, iceberg_schema) in rows {
+        let i = usize::try_from(ord - 1).expect("ordinality starts at 1");
+        out[i] = Some(TableColumns {
+            schema,
+            table,
+            columns: top_level_columns(&iceberg_schema),
+        });
+    }
+    for (i, k) in keys.iter().enumerate() {
+        if let Some(p) = overlaid(k) {
+            out[i] = p.columns.as_ref().map(|columns| TableColumns {
+                schema: p.schema.clone(),
+                table: p.table.clone(),
+                columns: columns.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The stored current schema of each of `keys` that is an active table, as
+/// `(1-based position in keys, schema, table, Iceberg schema JSON)`.
+async fn stored_current_schemas(
+    conn: &mut sqlx::PgConnection,
+    keys: &[TableKey],
+) -> Result<Vec<(i64, String, String, Value)>, CompileError> {
     let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
     let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
     let tables: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
     // `tabular.name` and `tabular_namespace_name` carry Lakekeeper's
     // `case_insensitive` collation; `lower()` on both sides keeps the fold
     // explicit rather than inherited from it.
-    let rows: Vec<(i64, String, String, Value)> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT q.ord, ti.tabular_namespace_name[1], ti.name, ts.schema \
            FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
                 AS q(warehouse_id, schema_name, table_name, ord) \
@@ -135,25 +284,32 @@ pub async fn current_columns_batch_via(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table columns from the catalog: {e}")))?;
-    for (ord, schema, table, iceberg_schema) in rows {
-        let i = usize::try_from(ord - 1).expect("ordinality starts at 1");
-        out[i] = Some(TableColumns {
+    .map_err(|e| CompileError::Db(format!("reading table columns from the catalog: {e}")))
+}
+
+/// The STORED current top-level fields of one table, `None` when it is not an
+/// active table of the catalog (as [`current_columns_via`]). The overlay is
+/// not applied: this is what the catalog holds now, which the table hook
+/// compares a commit's new schema with.
+pub async fn current_fields_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+) -> Result<Option<TableFields>, CompileError> {
+    let key = TableKey {
+        warehouse_id,
+        schema: schema.to_string(),
+        table: table.to_string(),
+    };
+    Ok(stored_current_schemas(conn, std::slice::from_ref(&key))
+        .await?
+        .pop()
+        .map(|(_, schema, table, iceberg_schema)| TableFields {
             schema,
             table,
-            columns: top_level_columns(&iceberg_schema),
-        });
-    }
-    for (i, k) in keys.iter().enumerate() {
-        if let Some(p) = overlaid(k) {
-            out[i] = p.columns.as_ref().map(|columns| TableColumns {
-                schema: p.schema.clone(),
-                table: p.table.clone(),
-                columns: columns.clone(),
-            });
-        }
-    }
-    Ok(out)
+            fields: top_level_fields(&iceberg_schema),
+        }))
 }
 
 /// The columns a SOFT-DELETED table would come back with if it were undropped:
@@ -239,11 +395,10 @@ pub async fn stored_schema_columns_via(
     Ok(found.as_ref().map(top_level_columns))
 }
 
-/// The top-level field names of an Iceberg schema, in field-id order. Two
-/// names that fold equal (Iceberg allows `Email` beside `email`) are one
-/// Ranger resource, so only the lower field id is kept. Public: the table hook
-/// reads a pending commit's columns from its request with it.
-pub fn top_level_columns(schema: &Value) -> Vec<String> {
+/// The top-level fields of an Iceberg schema, `(field id, name)` in field-id
+/// order, every field kept (two names folding equal included). Public: the
+/// table hook pairs a column rename by field id with it.
+pub fn top_level_fields(schema: &Value) -> Vec<(i64, String)> {
     let mut fields: Vec<(i64, String)> = schema
         .get("fields")
         .and_then(Value::as_array)
@@ -252,8 +407,16 @@ pub fn top_level_columns(schema: &Value) -> Vec<String> {
         .filter_map(|f| Some((f.get("id")?.as_i64()?, f.get("name")?.as_str()?.to_string())))
         .collect();
     fields.sort_by_key(|(id, _)| *id);
+    fields
+}
+
+/// The top-level field names of an Iceberg schema, in field-id order. Two
+/// names that fold equal (Iceberg allows `Email` beside `email`) are one
+/// Ranger resource, so only the lower field id is kept. Public: the table hook
+/// reads a pending commit's columns from its request with it.
+pub fn top_level_columns(schema: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for (_, name) in fields {
+    for (_, name) in top_level_fields(schema) {
         if !out
             .iter()
             .any(|c| fold_identifier(c) == fold_identifier(&name))
@@ -287,5 +450,32 @@ mod tests {
             {"id": 2, "name": "Email", "type": "string"},
         ]});
         assert_eq!(top_level_columns(&schema), vec!["Email"]);
+    }
+
+    #[test]
+    fn top_level_fields_keeps_ids_in_field_id_order() {
+        let schema = json!({"type": "struct", "fields": [
+            {"id": 7, "name": "email", "type": "string"},
+            {"id": 3, "name": "region", "type": "string"},
+            {"id": 2, "name": "Email", "type": "string"},
+        ]});
+        assert_eq!(
+            top_level_fields(&schema),
+            vec![
+                (2, "Email".to_string()),
+                (3, "region".to_string()),
+                (7, "email".to_string())
+            ]
+        );
+        assert_eq!(top_level_columns(&schema), vec!["Email", "region"]);
+    }
+
+    #[test]
+    fn an_overlay_without_leaving_still_parses() {
+        let raw = r#"[{"warehouse_id": "00000000-0000-0000-0000-000000000001",
+                       "schema": "sales", "table": "orders", "columns": ["id"]}]"#;
+        let parsed: Vec<PendingColumns> = serde_json::from_str(raw).expect("a #755 overlay");
+        assert!(parsed[0].leaving.is_empty());
+        assert!(!parsed[0].leaving_table);
     }
 }

@@ -287,6 +287,38 @@ impl Env {
         .map(|c| c.columns)
     }
 
+    /// What the field source answers for `sales.{table}`: `(id, name)`.
+    async fn source_fields(&self, table: &str) -> Option<Vec<(i64, String)>> {
+        let mut conn = self.db.pool.acquire().await.expect("acquire");
+        egret_perm_compile::table_columns::current_fields_via(
+            &mut conn,
+            self.warehouse_id,
+            "sales",
+            table,
+        )
+        .await
+        .expect("field source")
+        .map(|f| f.fields)
+    }
+
+    /// The current schema's top-level `(id, name)` pairs of `sales.{table}`,
+    /// as Lakekeeper's Iceberg REST load returns them.
+    async fn loaded_fields(&self, table: &str) -> Vec<(i64, String)> {
+        let (status, body) = self
+            .call_raw("GET", &format!("namespaces/sales/tables/{table}"), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "load {table}: {body}");
+        let metadata = &body["metadata"];
+        let current = &metadata["current-schema-id"];
+        let schema = metadata["schemas"]
+            .as_array()
+            .expect("schemas")
+            .iter()
+            .find(|s| &s["schema-id"] == current)
+            .expect("the current schema");
+        egret_perm_compile::table_columns::top_level_fields(schema)
+    }
+
     /// The top-level column names Lakekeeper itself loads for `sales.{table}`.
     async fn loaded(&self, table: &str) -> Vec<String> {
         load_table_detail(
@@ -374,6 +406,10 @@ async fn the_column_source_reads_what_lakekeeper_loads() {
     assert_eq!(status, StatusCode::OK, "create: {body}");
     assert_eq!(env.source("orders").await, Some(env.loaded("orders").await));
     assert_eq!(
+        env.source_fields("orders").await,
+        Some(env.loaded_fields("orders").await)
+    );
+    assert_eq!(
         env.source("orders").await,
         Some(vec!["id".into(), "email".into(), "region".into()])
     );
@@ -405,7 +441,24 @@ async fn the_column_source_reads_what_lakekeeper_loads() {
             Some(want),
             "{what}: column source"
         );
+        let want: Vec<(i64, String)> = fields.iter().map(|(i, n)| (*i, n.to_string())).collect();
+        assert_eq!(
+            env.loaded_fields("orders").await,
+            want,
+            "{what}: lakekeeper"
+        );
+        assert_eq!(
+            env.source_fields("orders").await,
+            Some(want),
+            "{what}: field source"
+        );
     }
+    // The rename kept field 3's id under its new name.
+    assert!(env
+        .source_fields("orders")
+        .await
+        .expect("orders")
+        .contains(&(3, "area".to_string())));
     // The lookup folds case; the answer is the catalog's spelling.
     assert_eq!(env.source("ORDERS").await, env.source("orders").await);
 
@@ -424,6 +477,11 @@ async fn the_column_source_reads_what_lakekeeper_loads() {
         env.source("orders").await,
         None,
         "the old name after a rename"
+    );
+    assert_eq!(env.source_fields("orders").await, None);
+    assert_eq!(
+        env.source_fields("orders_v2").await,
+        Some(env.loaded_fields("orders_v2").await)
     );
     assert_eq!(
         env.source("orders_v2").await,
@@ -452,6 +510,11 @@ async fn the_column_source_reads_what_lakekeeper_loads() {
         "the drop must be soft for this step to test anything"
     );
     assert_eq!(env.source("orders_v2").await, None, "a dropped table");
+    assert_eq!(
+        env.source_fields("orders_v2").await,
+        None,
+        "a dropped table"
+    );
 
     // A view of a table's name is no table.
     let (status, body) = env
@@ -474,6 +537,7 @@ async fn the_column_source_reads_what_lakekeeper_loads() {
         .await;
     assert_eq!(status, StatusCode::OK, "create view: {body}");
     assert_eq!(env.source("v_orders").await, None, "a view");
+    assert_eq!(env.source_fields("v_orders").await, None, "a view");
 
     // A staged create has no metadata location until its committing update.
     let (status, body) = env

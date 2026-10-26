@@ -118,7 +118,7 @@ use egret_policy::{
 };
 
 use crate::grants::compile_grant;
-use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TableTarget};
+use crate::rules::{stamp_service_type, ResolvedNames, TableTarget};
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
 ///
@@ -391,6 +391,9 @@ async fn compile_desired(
         .map_err(db_err)?;
     let catalog_names: HashMap<Uuid, String> =
         catalogs.into_iter().map(|c| (c.id, c.name)).collect();
+    // A held rename's leaving coordinates (rename spec C8): emitted, never
+    // counted against a ceiling.
+    let leaving = crate::table_columns::leaving_via(conn).await?;
 
     // The services this recompile may write into, by the NAME a compiled body
     // stamps on itself: the profile always, and its tag service when the
@@ -549,6 +552,7 @@ async fn compile_desired(
             service_id,
             &catalog_names,
             &writable,
+            &leaving,
             &mut desired,
             &mut skipped,
         )
@@ -574,6 +578,7 @@ async fn compile_desired(
         service_id,
         &svc.name,
         tag_service.as_deref(),
+        &leaving,
     )
     .await?;
     skipped.extend(clearances.skipped);
@@ -673,12 +678,18 @@ async fn compile_desired(
     )
     .await?;
 
+    let levels = crate::grants::resource_level_names(engine);
+    let uncounted = desired
+        .iter()
+        .filter(|((sid, _), dp)| *sid == service_id && !leaving.counts_body(&dp.body, &levels))
+        .count();
     Ok(Some(Compiled {
         desired,
         skipped,
         sweep,
         profile_name: svc.name,
         largest: whole_tables,
+        uncounted,
     }))
 }
 
@@ -784,6 +795,9 @@ struct Compiled {
     profile_name: String,
     /// The largest whole-table classified tables (D2), for the same refusal.
     largest: Vec<egret_perm::TableCount>,
+    /// The profile's desired policies on a held rename's leaving coordinates,
+    /// which the profile total does not count (rename spec C8).
+    uncounted: usize,
 }
 
 /// Fold one priority-1 clearance mask per classified column into `desired`
@@ -887,6 +901,7 @@ async fn compile_one_rule(
     service_id: i64,
     catalog_names: &HashMap<Uuid, String>,
     writable: &HashMap<String, i64>,
+    leaving: &crate::table_columns::Leaving,
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
 ) -> Result<(), CompileError> {
@@ -936,7 +951,7 @@ async fn compile_one_rule(
         tag_name: tag_name.as_deref(),
     };
 
-    let bodies = compile_rule(
+    let bodies = crate::rules::compile_rule_counting(
         r,
         engine,
         service_name,
@@ -944,6 +959,7 @@ async fn compile_one_rule(
         &resolved,
         &tagged,
         DEFAULT_EXPANSION_CEILING,
+        leaving,
     );
     match bodies {
         Ok(bodies) => {
@@ -1077,11 +1093,13 @@ struct ExistingPolicyRow {
 /// (`egret-policy/src/ranger/api/download.rs`): a tag-only change that left
 /// the profile's version alone would answer that plugin `304 Not Modified`
 /// and the new mask would never reach it.
+#[allow(clippy::too_many_arguments)]
 async fn apply_diff_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     profile_service_id: i64,
     profile_name: &str,
     largest: &[egret_perm::TableCount],
+    uncounted: usize,
     sweep: &[i64],
     desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
@@ -1163,10 +1181,12 @@ async fn apply_diff_in_tx(
         .iter()
         .filter(|row| row.service_id == profile_service_id)
         .count();
+    // A held rename's leaving coordinates are emitted but not counted (C8).
     let new_total = desired
         .keys()
         .filter(|(service_id, _)| *service_id == profile_service_id)
-        .count();
+        .count()
+        - uncounted;
     if new_total > PROFILE_EXPANSION_CEILING && new_total > current_stored_total {
         return Err(CompileError::ProfileExpansionCeiling {
             profile: profile_name.to_string(),
@@ -1468,6 +1488,7 @@ async fn recompile_locked_service_in_tx(
         service_id,
         &compiled.profile_name,
         &compiled.largest,
+        compiled.uncounted,
         &compiled.sweep,
         compiled.desired,
         compiled.skipped,

@@ -100,6 +100,7 @@ use crate::grants::{
     ensure_scope_levels_are_named, level, resource_level_names, scope_to_resources,
     validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
 };
+use crate::table_columns::Leaving;
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
 /// this compiler does no I/O and cannot itself know which columns carry
@@ -433,6 +434,32 @@ pub fn compile_rule(
     tagged: &[TableTarget],
     ceiling: usize,
 ) -> Result<Vec<Value>, CompileError> {
+    compile_rule_counting(
+        r,
+        e,
+        service,
+        tag_service,
+        resolved,
+        tagged,
+        ceiling,
+        &Leaving::default(),
+    )
+}
+
+/// [`compile_rule`], whose ceiling does not count a policy on one of
+/// `leaving`'s coordinates (a held rename's source, rename spec C8). The
+/// policy is still emitted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_rule_counting(
+    r: &Rule,
+    e: EngineType,
+    service: &str,
+    tag_service: Option<&str>,
+    resolved: &ResolvedNames,
+    tagged: &[TableTarget],
+    ceiling: usize,
+    leaving: &Leaving,
+) -> Result<Vec<Value>, CompileError> {
     // Validated up front, before any engine/selector branching, so a rule
     // that cannot compile on ANY path is refused the same way regardless of
     // which one is taken.
@@ -503,10 +530,16 @@ pub fn compile_rule(
             let mut out = Vec::new();
             match target {
                 PolicyTarget::RowFilter => {
-                    if tagged.len() > ceiling {
+                    let count = tagged
+                        .iter()
+                        .filter(|t| {
+                            leaving.counts_toward_ceiling(&t.catalog, &t.schema, &t.table, None)
+                        })
+                        .count();
+                    if count > ceiling {
                         return Err(CompileError::ExpansionCeiling {
                             rule: r.name.clone(),
-                            count: tagged.len(),
+                            count,
                             ceiling,
                         });
                     }
@@ -523,10 +556,21 @@ pub fn compile_rule(
                     for t in tagged {
                         columns.extend(t.tagged_columns()?);
                     }
-                    if columns.len() > ceiling {
+                    let count = columns
+                        .iter()
+                        .filter(|c| {
+                            leaving.counts_toward_ceiling(
+                                &c.catalog,
+                                &c.schema,
+                                &c.table,
+                                Some(&c.column),
+                            )
+                        })
+                        .count();
+                    if count > ceiling {
                         return Err(CompileError::ExpansionCeiling {
                             rule: r.name.clone(),
-                            count: columns.len(),
+                            count,
                             ceiling,
                         });
                     }

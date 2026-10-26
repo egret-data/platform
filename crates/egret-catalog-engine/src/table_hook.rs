@@ -356,6 +356,8 @@ impl TableHook {
             schema: ns.to_string(),
             table: table.to_string(),
             columns,
+            leaving: Vec::new(),
+            leaving_table: false,
         };
         let mut out = Vec::new();
         match target {
@@ -570,6 +572,8 @@ impl TableHook {
             schema: dropped.schema,
             table: dropped.table,
             columns: Some(dropped.columns),
+            leaving: Vec::new(),
+            leaving_table: false,
         }];
         Ok((profiles, pending))
     }

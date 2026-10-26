@@ -2199,3 +2199,196 @@ async fn the_profile_ceiling_names_the_largest_tables() {
     }
     assert!(message.contains("400"), "{message}");
 }
+
+// ── Classifications follow a rename, Task 2: a moving table counted once (C8) ──
+
+/// Recompile the profile in one committed transaction whose column source has
+/// `overlay` set, as the table hook's copy transaction does.
+async fn recompile_with_overlay(
+    db: &Db,
+    service_id: i64,
+    overlay: Value,
+) -> Result<(), egret_perm::CompileError> {
+    let mut tx = db.pool.begin().await.expect("begin");
+    sqlx::query("SELECT set_config($1, $2, true)")
+        .bind(egret_perm_compile::table_columns::PENDING_COLUMNS_SETTING)
+        .bind(overlay.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("set the overlay");
+    egret_perm_compile::recompile_service_in_tx(&mut tx, service_id).await?;
+    tx.commit().await.expect("commit");
+    Ok(())
+}
+
+/// One overlay entry for `sales.{table}`.
+fn pending(
+    f: &Fixture,
+    table: &str,
+    columns: &[String],
+    leaving: &[&str],
+    leaving_table: bool,
+) -> Value {
+    serde_json::json!({
+        "warehouse_id": f.warehouse_id, "schema": "sales", "table": table,
+        "columns": columns, "leaving": leaving, "leaving_table": leaving_table,
+    })
+}
+
+/// C8: while a rename is held, the source table still exists and both names
+/// compile; a 300-column whole-table classification would count 602 against
+/// the per-clearance ceiling of 500 and refuse a rename that fits once it is
+/// done. With the source marked `leaving_table` it counts once (1 + 300), and
+/// the download still protects BOTH names: the `*` deny and 300 NULL masks
+/// each.
+#[tokio::test]
+async fn a_moving_table_is_counted_once_against_the_ceiling() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let cols = many_columns(300);
+    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "wide", &refs).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "wide").await;
+    tag_table(&db, tag_id, f.warehouse_id, "wide_v2").await;
+    cleared_pair(&db, tag_id).await;
+    grant_select_to_everyone(&db, &f).await;
+
+    let err = recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([pending(&f, "wide_v2", &cols, &[], false)]),
+    )
+    .await
+    .expect_err("without the mark both names count");
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::ClearanceExpansionCeiling { count: 602, .. }
+        ),
+        "{err:?}"
+    );
+
+    recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([
+            pending(&f, "wide_v2", &cols, &[], false),
+            pending(&f, "wide", &cols, &[], true),
+        ]),
+    )
+    .await
+    .expect("the moving table is counted once");
+
+    let c = &f.catalog_name;
+    let denies: Vec<String> = clearance_policies(&db, f.service_id, tag_id)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let deny = |t: &str| format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-{c}.sales.{t}.*");
+    assert_eq!(denies, vec![deny("wide"), deny("wide_v2")]);
+    let masks = clearance_masks(&db, f.service_id, tag_id).await;
+    use engine_eval::{denied, mask_type, starrocks_decides, starrocks_mask};
+    let uncleared = unique("nobody");
+    for table in ["wide", "wide_v2"] {
+        let prefix = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-mask-{c}.sales.{table}.");
+        assert_eq!(
+            masks.iter().filter(|(n, _)| n.starts_with(&prefix)).count(),
+            300,
+            "{table}"
+        );
+        let column = column_of(&f, table, "c150");
+        let d = starrocks_decides(&db, f.service_id, &uncleared, "select", &column).await;
+        assert!(denied(&d), "{table}: {d:?}");
+        let m = starrocks_mask(&db, f.service_id, &uncleared, &column).await;
+        assert_eq!(mask_type(&m).as_deref(), Some("MASK_NULL"), "{table}");
+    }
+}
+
+/// C8 for a column rename: during the hold the table has its old and its new
+/// column names (`old ∪ new`), and the old one is `leaving`. A 499-column
+/// whole-table classification counts 1 + 499 = 500, at the ceiling; its
+/// overlay with one column renamed lists 500 names and counts 501 unless the
+/// old name is marked.
+#[tokio::test]
+async fn renamed_columns_marked_leaving_are_not_counted() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let cols = many_columns(499);
+    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &refs).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_table(&db, tag_id, f.warehouse_id, "orders").await;
+    cleared_pair(&db, tag_id).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("1 + 499 is at the ceiling");
+
+    let mut both = cols.clone();
+    both.push("renamed".to_string());
+    let err = recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([pending(&f, "orders", &both, &[], false)]),
+    )
+    .await
+    .expect_err("without the mark the old column counts too");
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::ClearanceExpansionCeiling { count: 501, .. }
+        ),
+        "{err:?}"
+    );
+    recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([pending(&f, "orders", &both, &["C7"], false)]),
+    )
+    .await
+    .expect("the leaving column (any spelling) is not counted");
+    assert!(
+        clearance_mask(&db, f.service_id, tag_id, &f.catalog_name, "orders", "c7")
+            .await
+            .is_some(),
+        "the leaving column is still masked"
+    );
+}
+
+/// C8 at the profile total: a 400-column table moving (two names, 802
+/// policies) beside another classified 300-column table would hold 1103 + the
+/// MV deny, over the profile ceiling of 1000; counted once it is 703.
+#[tokio::test]
+async fn a_moving_table_is_counted_once_against_the_profile_total() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let wide = many_columns(400);
+    let refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "wide", &refs).await;
+    let other = many_columns(300);
+    let other_refs: Vec<&str> = other.iter().map(String::as_str).collect();
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "other", &other_refs).await;
+    let (moving, _) = new_tag(&db).await;
+    tag_table(&db, moving, f.warehouse_id, "wide").await;
+    tag_table(&db, moving, f.warehouse_id, "wide_v2").await;
+    cleared_pair(&db, moving).await;
+    let (staying, _) = new_tag(&db).await;
+    tag_table(&db, staying, f.warehouse_id, "other").await;
+    cleared_pair(&db, staying).await;
+
+    recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([
+            pending(&f, "wide_v2", &wide, &[], false),
+            pending(&f, "wide", &wide, &[], true),
+        ]),
+    )
+    .await
+    .expect("the moving table is counted once in the profile total");
+    assert_eq!(clearance_masks(&db, f.service_id, moving).await.len(), 800);
+}
