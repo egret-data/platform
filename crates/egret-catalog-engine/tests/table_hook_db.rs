@@ -2007,10 +2007,7 @@ impl Env {
         let mut conn = sqlx::PgConnection::connect(&egret_test_db::url().await.expect("url"))
             .await
             .expect("connect");
-        let key = format!(
-            "egret-view-hold\u{1e}{}\u{1e}sales\u{1e}{table}",
-            self.prefix
-        );
+        let key = egret_catalog_engine::view_lock_key(&self.prefix, "sales", table);
         let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
             .bind(key)
             .fetch_one(&mut conn)
@@ -3141,4 +3138,52 @@ async fn a_column_rename_keeps_the_rows_a_dropped_twin_needs() {
             row(b, "orders", "mail"),
         ])
     );
+}
+
+// ── Review fix 2: catalog-tag writes during a hold ──
+
+/// Review finding 2: a classification write on a table whose rename is held
+/// is refused (409, `table_change_held`) instead of landing on the name the
+/// move is about to leave; in any spelling of the name. Once the rename has
+/// finished, the write goes through.
+#[tokio::test]
+async fn a_catalog_tag_write_during_a_held_rename_is_refused() {
+    use axum::response::IntoResponse as _;
+    let Some(env) = env().await else { return };
+    let env = Arc::new(env);
+    env.classified_orders().await;
+    let pii = env.new_gated_tag().await;
+    let trino = env.start_trino_plugin();
+    let starrocks = env.start_starrocks_plugin(POLL * 5);
+    trino.polled().await;
+    starrocks.polled().await;
+    let repo = egret_bi::catalog_tags::CatalogTagRepo::new(env.db.clone());
+
+    let rename = {
+        let env = env.clone();
+        tokio::spawn(async move { env.rename("orders", "orders_v2").await })
+    };
+    for _ in 0..200 {
+        if env.rows().await.iter().any(|r| r.2 == "orders_v2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!rename.is_finished(), "the rename is still held");
+    let refused = repo
+        .assign_catalog(pii, env.warehouse_id, "Sales", "ORDERS", "email", None)
+        .await
+        .expect_err("refused while held");
+    let resp = refused.into_response();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], "table_change_held", "{body}");
+    assert!(!env.rows().await.iter().any(|r| r.0 == pii));
+
+    let (status, body) = rename.await.expect("rename");
+    assert!(status.is_success(), "rename: {status} {body}");
+    repo.assign_catalog(pii, env.warehouse_id, "sales", "orders_v2", "email", None)
+        .await
+        .expect("free once the rename has finished");
 }

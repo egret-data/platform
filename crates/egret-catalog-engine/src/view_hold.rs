@@ -2186,10 +2186,9 @@ pub fn view_lock_key(prefix: &str, ns: &str, name: &str) -> String {
     lock_key(prefix, ns, name)
 }
 
+/// The name lock's key, folded (`egret_perm_compile::view_tags::name_lock_key`).
 pub(crate) fn lock_key(prefix: &str, ns: &str, name: &str) -> String {
-    // A NUL cannot be sent as Postgres text; `\u{1e}` occurs in no name Trino
-    // sends.
-    format!("egret-view-hold\u{1e}{prefix}\u{1e}{ns}\u{1e}{name}")
+    egret_perm_compile::view_tags::name_lock_key(prefix, ns, name)
 }
 
 #[cfg(test)]

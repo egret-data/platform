@@ -722,3 +722,14 @@ Deviations the code forces are recorded here, per task, as they happen.
   source table's name; if one does, that source's rows are copied, not moved: they stay on the old name, so an undrop
   restores the dropped table classified. This applies to column renames too (a dropped twin of the table may still
   have the old column). The `tag:move` event says so: `"source_kept": true`.
+
+### Review fix 2: catalog-tag writes are serialized with a hold (review findings 2 and 6)
+
+- The name-lock key moved to `egret_perm_compile::view_tags::name_lock_key` and is now case-folded (prefix,
+  namespace, name); the view hold, the lineage sweep and the table hook all use it, so `Orders` and `orders` are one
+  lock (finding 6, from the LOW list, landed here because the catalog-tag write must compute the same key).
+- `assign_catalog` and `unassign_catalog` first try that lock on their own transaction
+  (`try_name_lock_in_tx`, `pg_try_advisory_xact_lock`, released at their end). While a hold holds the name (the
+  rename's wait, its forward and `finish`), the write is refused at once: 409 `{"code": "table_change_held"}`. A write
+  holding the lock also makes a rename that starts meanwhile refuse ("being held"), so neither side can interleave.
+  The `egret-table-hook` profile lock is not needed: the name lock already covers the whole hold.

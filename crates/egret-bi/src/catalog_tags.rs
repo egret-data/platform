@@ -155,6 +155,7 @@ impl CatalogTagRepo {
         // View governance B3: the views that read this table are re-tagged in
         // this same transaction, and their warehouses join the bump and the
         // recompile, so the base and its views move in ONE tag version.
+        refuse_while_held(&mut tx, warehouse_id, schema, table).await?;
         let reach = ViewReach::of(&mut tx, warehouse_id, schema, table)
             .await
             .map_err(reach_error)?;
@@ -223,6 +224,7 @@ impl CatalogTagRepo {
             .begin()
             .await
             .map_err(crate::error::BiError::from)?;
+        refuse_while_held(&mut tx, warehouse_id, schema, table).await?;
         let reach = ViewReach::of(&mut tx, warehouse_id, schema, table)
             .await
             .map_err(reach_error)?;
@@ -310,6 +312,36 @@ impl CatalogTagRepo {
                 .map_err(crate::error::BiError::from)?,
         )
     }
+}
+
+/// Refuse (409, code `table_change_held`) a write on `schema.table` while a
+/// hold holds the table's name: a rename of the table that is waiting for the
+/// engines would leave this write on the old name, or put back on the new one
+/// a classification just removed (rename review finding 2). A try-lock on
+/// this transaction, released at its end, so no hold can start meanwhile.
+async fn refuse_while_held(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+) -> Result<(), BiApiError> {
+    let free = egret_perm_compile::view_tags::try_name_lock_in_tx(tx, warehouse_id, schema, table)
+        .await
+        .map_err(crate::error::BiError::from)?;
+    if free {
+        return Ok(());
+    }
+    Err(crate::error::BiError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        body: serde_json::json!({
+            "error": format!(
+                "a change to {schema}.{table} (a rename, or a view commit) is being held while \
+                 the engines confirm it; retry when it has finished (at most 90 s)"
+            ),
+            "code": "table_change_held",
+        }),
+    }
+    .into())
 }
 
 /// A [`ViewReach`] refusal as this write answers it: a database error, a

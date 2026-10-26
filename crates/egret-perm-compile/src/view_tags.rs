@@ -69,6 +69,48 @@ pub async fn lock_view_tags_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), s
     Ok(())
 }
 
+/// The advisory-lock key of one table or view NAME of a Lakekeeper warehouse
+/// (`prefix`): the view hold's and the table hook's name locks, and the
+/// catalog-tag write's try-lock, all use it (rename spec C17, review findings
+/// 2 and 6). Folded, as Lakekeeper's names are case-insensitive, so `Orders`
+/// and `orders` are one lock.
+pub fn name_lock_key(prefix: &str, ns: &str, name: &str) -> String {
+    // A NUL cannot be sent as Postgres text; `\u{1e}` occurs in no name Trino
+    // sends.
+    format!(
+        "egret-view-hold\u{1e}{}\u{1e}{}\u{1e}{}",
+        prefix.to_lowercase(),
+        ns.to_lowercase(),
+        name.to_lowercase()
+    )
+}
+
+/// Try, on the caller's transaction, the name lock of `schema.table` in
+/// `warehouse_id` ([`name_lock_key`]), released at commit or rollback. `false`
+/// while a hold (a table move or a view hold) holds the name; `true` when it
+/// is free or the warehouse is not an embedded catalog. A catalog-tag write
+/// takes it so a write made while a rename of the table is held does not land
+/// on a name the move is about to leave (review finding 2).
+pub async fn try_name_lock_in_tx(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    let prefix: Option<Option<String>> =
+        sqlx::query_scalar("SELECT lakekeeper_warehouse_id FROM catalog.warehouses WHERE id = $1")
+            .bind(warehouse_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(prefix) = prefix.flatten() else {
+        return Ok(true);
+    };
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(name_lock_key(&prefix, schema, table))
+        .fetch_one(&mut *conn)
+        .await
+}
+
 /// The `LISTEN` channel a classification write notifies after it commits
 /// (`egret_catalog_engine::spawn_classification_sweeps`).
 pub const CLASSIFICATION_CHANNEL: &str = "egret_view_lineage_sweep";
