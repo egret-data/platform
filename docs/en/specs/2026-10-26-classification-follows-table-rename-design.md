@@ -841,3 +841,10 @@ Deviations the code forces are recorded here, per task, as they happen.
 - The StarRocks plugin reports a policy version in `lastKnownVersion` on the poll AFTER the one that downloaded it,
   so a held rename on a warehouse with StarRocks bound costs about two policy polls: 56 s, 50 s and 36 s measured
   with a 30 s poll. The 90 s deadline covers it.
+
+### Live fix F6: the feed's Who column names the catalog client
+
+- `ChangeEntry` gains `actorClient: {clientId, label}` (omitted unless the actor was a catalog client; `label` null
+  for a client deleted since), read from `detail.actor`. `actor` stays null: a client is no user. The frontend's Who
+  column renders it as the sentence does ("Catalog client engine-tmtrino", "Catalog client egret_… (deleted)")
+  instead of "egret". `openapi.json` and the client are regenerated (new schema `ClientParty`).

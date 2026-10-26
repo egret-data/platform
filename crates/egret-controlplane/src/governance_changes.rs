@@ -43,12 +43,26 @@ pub struct Party {
     pub label: Option<String>,
 }
 
+/// A catalog client that acted (rename spec C6a: an Iceberg caller is no
+/// user). `label` is its name, `null` when it has been deleted since (the
+/// `client_id` is kept).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientParty {
+    pub client_id: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeEntry {
     pub id: i64,
     pub at: DateTime<Utc>,
     pub actor: Option<Party>,
+    /// Set when the actor was a catalog client, not a user (`actor` is then
+    /// `null`): the Iceberg caller of a classification move or purge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_client: Option<ClientParty>,
     /// Set when an administrator acted as `actor`.
     pub impersonator: Option<Party>,
     pub action: String,
@@ -77,7 +91,10 @@ pub(crate) fn router() -> Router<CpState> {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(changes), components(schemas(ChangesPage, ChangeEntry, Party)))]
+#[openapi(
+    paths(changes),
+    components(schemas(ChangesPage, ChangeEntry, Party, ClientParty))
+)]
 pub(crate) struct ControlPlaneGovernanceChangesApi;
 
 fn parse_cursor(s: &str) -> Option<(DateTime<Utc>, i64)> {
@@ -307,6 +324,17 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
         .detail
         .get("actor")
         .filter(|a| s(a, "kind") == "catalog_client");
+    let actor_client = match (&actor, client) {
+        (None, Some(c)) => Some(ClientParty {
+            client_id: s(c, "client_id").to_string(),
+            label: c
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|_| !c["id"].is_null())
+                .map(str::to_string),
+        }),
+        _ => None,
+    };
     let who = |p: &Option<Party>| match (p, client) {
         (Some(Party { label: Some(l), .. }), _) => l.clone(),
         (Some(_), _) => "A deleted user".to_string(),
@@ -665,6 +693,7 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
         id: row.id,
         at: row.ts,
         actor,
+        actor_client,
         impersonator,
         action: row.action,
         sentence,

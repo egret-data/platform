@@ -114,6 +114,7 @@ export * from './clearedScope';
 export * from './clearedVia';
 export * from './clearedViaKind';
 export * from './clientDto';
+export * from './clientParty';
 export * from './cluster';
 export * from './clusterDto';
 export * from './clusterKind';

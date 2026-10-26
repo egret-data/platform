@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ClientParty } from './clientParty';
 import type { Party } from './party';
 import type { Ref } from './ref';
 
@@ -12,6 +13,7 @@ export interface ChangeEntry {
   id: number;
   at: string;
   actor?: null | Party;
+  actorClient?: null | ClientParty;
   impersonator?: null | Party;
   action: string;
   /** One sentence, built here per action. */

@@ -1041,6 +1041,28 @@ async fn classification_moves_read_with_their_catalog_client() {
         ]
     );
 
+    // Live check F6: the Who column names the catalog client too, not
+    // "egret" (`actor` stays null: a client is no user).
+    let clients: Vec<&Value> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["actorClient"])
+        .collect();
+    assert_eq!(
+        clients,
+        vec![
+            &json!({"clientId": "trino-main-7f3a", "label": "spark-etl"}),
+            &json!({"clientId": "trino-main-7f3a", "label": null}),
+            &json!({"clientId": "trino-main-7f3a", "label": "trino-main"}),
+        ]
+    );
+    assert!(body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["actor"].is_null()));
+
     let (status, body) = changes(&st, &policy_reader, "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(actions(&body).is_empty(), "family Tag: {body}");

@@ -40296,6 +40296,17 @@
               }
             ]
           },
+          "actorClient": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClientParty",
+                "description": "Set when the actor was a catalog client, not a user (`actor` is then\n`null`): the Iceberg caller of a classification move or purge."
+              }
+            ]
+          },
           "impersonator": {
             "oneOf": [
               {
@@ -40813,6 +40824,24 @@
           },
           "clientId": {
             "type": "string"
+          }
+        }
+      },
+      "ClientParty": {
+        "type": "object",
+        "description": "A catalog client that acted (rename spec C6a: an Iceberg caller is no\nuser). `label` is its name, `null` when it has been deleted since (the\n`client_id` is kept).",
+        "required": [
+          "clientId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
