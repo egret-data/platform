@@ -615,3 +615,16 @@ Deviations the code forces are recorded here, per task, as they happen.
   than the Trino one. At equal cadence it passed on the Task 3 code too (StarRocks happened to report within the
   Trino wait), so it could not tell the wait apart from its absence. The Task 3 tests now start both fake plugins: a
   bound StarRocks profile whose plugin never polls refuses the move (R5).
+
+### Task 5: the rename defaults
+
+- C2 and C10 were red on the Task 4 code and are implemented here. C1 (union), C3 (cross-namespace) and C18 (folded
+  match, destination spelling) were already green: the set formulation (`Target`, `Before`) and the folded row
+  selection came with Task 3, because the move cannot be written without them. Their tests, and the guards, were
+  mutation-checked instead (compensation deleting `Target`, an exact-match row read, no name lock, no profile lock,
+  no live-table check, no empty-source check: each turns its test red).
+- `a_case_only_rename_is_not_held` asserts the Trino tag version and the rows unchanged, not every version: a
+  case-only rename of a whole-table-classified table still takes #755's path, whose after-commit recompile respells
+  the StarRocks policies as the catalog now spells the table, so the StarRocks `policy_version` moves. That is #755's
+  behaviour, not a move.
+- A rename refused by C2 or a check error is answered before any lock; `move_plan_for_rename` returns the refusal.

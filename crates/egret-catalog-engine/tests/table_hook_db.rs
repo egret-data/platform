@@ -1949,3 +1949,286 @@ async fn a_rename_with_nothing_bound_moves_at_once() {
         sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
     );
 }
+
+// ── Task 5: the rename defaults (C1-C3, C9, C10, C17, #755 interplay) ──
+
+impl Env {
+    async fn rename_across(
+        &self,
+        from: (&[&str], &str),
+        to: (&[&str], &str),
+    ) -> (StatusCode, Value) {
+        self.call(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": from.0, "name": from.1},
+                "destination": {"namespace": to.0, "name": to.1},
+            })),
+        )
+        .await
+    }
+
+    /// Hold the view hold's name lock (C17) on `sales.{table}` from a
+    /// connection of the test's own, as another hold would.
+    async fn hold_name(&self, table: &str) -> sqlx::PgConnection {
+        use sqlx::Connection as _;
+        let mut conn = sqlx::PgConnection::connect(&egret_test_db::url().await.expect("url"))
+            .await
+            .expect("connect");
+        let key = format!(
+            "egret-view-hold\u{1e}{}\u{1e}sales\u{1e}{table}",
+            self.prefix
+        );
+        let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+            .bind(key)
+            .fetch_one(&mut conn)
+            .await
+            .expect("lock");
+        assert!(got, "the test's lock");
+        conn
+    }
+}
+
+/// C1: renaming onto a name that already carries rows unions them; a failed
+/// rename's compensation leaves the rows that were there.
+#[tokio::test]
+async fn a_rename_onto_a_name_with_rows_unions_them() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let c = env.new_gated_tag().await;
+    env.assign(c, "orders_v2", "").await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    // The failing variant first: a live `orders_v2` makes lakekeeper refuse.
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![
+            row(a, "orders", ""),
+            row(b, "orders", "email"),
+            row(c, "orders_v2", ""),
+        ])
+    );
+    let (status, body) = env
+        .call_raw("DELETE", "namespaces/sales/tables/orders_v2", None)
+        .await;
+    assert!(status.is_success(), "drop: {status} {body}");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![
+            row(a, "orders_v2", ""),
+            row(b, "orders_v2", "email"),
+            row(c, "orders_v2", ""),
+        ])
+    );
+}
+
+/// C2: no row can be stored under a multi-level name, so a classified table
+/// may not move into one.
+#[tokio::test]
+async fn a_classified_rename_into_a_multi_level_namespace_is_refused() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let rows = env.rows().await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["sales", "eu"], "orders"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("more than one level"), "{message}");
+    assert_eq!(env.rows().await, rows, "nothing written");
+    assert!(env.source("orders").await.is_some(), "not renamed");
+}
+
+/// C3: a rename into another single-level namespace moves the rows.
+#[tokio::test]
+async fn a_cross_namespace_rename_moves_the_rows() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces",
+            Some(json!({"namespace": ["archive"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "archive: {body}");
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["archive"], "orders"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let archived = |tag: Uuid, column: &str| -> Row {
+        (tag, "archive".into(), "orders".into(), column.into())
+    };
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![archived(a, ""), archived(b, "email")])
+    );
+}
+
+/// C18: source rows are matched folded; the copies take the request's
+/// destination spelling.
+#[tokio::test]
+async fn a_rename_into_a_name_spelled_differently_writes_the_destination_spelling() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let a = env.new_gated_tag().await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'Sales','Orders','Email')",
+    )
+    .bind(a)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign");
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.rows().await, vec![row(a, "orders_v2", "Email")]);
+}
+
+/// C10: a case-only rename changes no name any engine matches: no lock, no
+/// row written, no tag version bumped.
+#[tokio::test]
+async fn a_case_only_rename_is_not_held() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+    let (rows, tag_version) = (env.rows().await, env.tag_version().await);
+    let _held = env.hold_name("orders").await;
+
+    let (status, body) = env.rename("orders", "Orders").await;
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(!message.starts_with("egret refused"), "{status} {body}");
+    assert_eq!(env.rows().await, rows);
+    // No move bumped the tag version. #755's own after-commit recompile still
+    // runs (the StarRocks policies are spelled as the catalog spells the
+    // table), so the StarRocks policy version may move.
+    assert_eq!(env.tag_version().await, tag_version);
+}
+
+/// R1: a source that carries no row is not held: nothing copied, no version
+/// bumped.
+#[tokio::test]
+async fn an_unclassified_rename_is_not_held() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let versions = env.versions().await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert!(env.rows().await.is_empty());
+    assert_eq!(env.versions().await, versions);
+}
+
+/// C9: a view sent to the TABLE rename endpoint is not moved here (its rows
+/// move with the view hold); lakekeeper answers it.
+#[tokio::test]
+async fn a_view_sent_to_the_table_rename_endpoint_is_not_moved() {
+    let Some(env) = env().await else { return };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales/views",
+            Some(json!({
+                "name": "v",
+                "schema": schema(0, &[(1, "id")]),
+                "view-version": {
+                    "version-id": 1, "schema-id": 0,
+                    "timestamp-ms": 1_700_000_000_000_i64,
+                    "summary": {"engine-name": "trino"},
+                    "default-namespace": ["sales"],
+                    "representations": [{"type": "sql", "sql": "SELECT 1 AS id", "dialect": "trino"}]
+                },
+                "properties": {}
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create view: {body}");
+    let a = env.classify_column("v", "id").await;
+    let versions = env.versions().await;
+
+    let (status, body) = env.rename("v", "v2").await;
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(!message.starts_with("egret refused"), "{status} {body}");
+    assert_eq!(env.rows().await, vec![row(a, "v", "id")]);
+    assert_eq!(env.versions().await, versions);
+}
+
+/// C17: a name held by another change refuses the rename at once.
+#[tokio::test]
+async fn a_held_name_refuses_a_second_rename_at_once() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let _held = env.hold_name("orders_v2").await;
+    let started = Instant::now();
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("being held"),
+        "{body}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(env.source("orders").await.is_some(), "not renamed");
+}
+
+/// C7: a column add on another whole-table-classified table of the warehouse,
+/// sent while a rename waits, waits for the rename's profile locks: it reaches
+/// lakekeeper only after the rename's after-commit step removed the old rows.
+#[tokio::test]
+async fn a_held_rename_and_a_column_add_on_the_same_profile_run_one_after_the_other() {
+    let Some(env) = env().await else { return };
+    let env = Arc::new(env);
+    env.classified_orders().await;
+    env.create_table("events", &[(1, "id")]).await;
+    env.classify_table("events").await;
+    let trino = env.start_trino_plugin();
+    // Slow, so the rename waits long enough for the column add to arrive.
+    let starrocks = env.start_starrocks_plugin(POLL * 5);
+    trino.polled().await;
+    starrocks.polled().await;
+
+    let rename = {
+        let env = env.clone();
+        tokio::spawn(async move { env.rename("orders", "orders_v2").await })
+    };
+    // The copy has committed once the new name carries rows.
+    for _ in 0..200 {
+        if env.rows().await.iter().any(|r| r.2 == "orders_v2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!rename.is_finished(), "the rename is still held");
+    env.probe_reach("namespaces/sales/tables/events");
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/events",
+            Some(schema_commit(schema(1, &[(1, "id"), (2, "kind")]))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "column add: {body}");
+    let (status, body) = rename.await.expect("rename");
+    assert!(status.is_success(), "rename: {status} {body}");
+    let reached = env.reached();
+    assert_eq!(
+        reached.tables,
+        vec!["events", "orders_v2"],
+        "the column add reached lakekeeper after the rename finished"
+    );
+}

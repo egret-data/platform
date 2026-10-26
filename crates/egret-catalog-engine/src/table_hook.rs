@@ -951,39 +951,56 @@ impl NameLocks {
 
 impl TableHook {
     /// The move a table rename makes (rename spec §5.2), or `None` when
-    /// nothing moves: the source is multi-level (it carries nothing) or
-    /// carries no row, or is not a live table (C9).
+    /// nothing moves: the source is multi-level (it carries nothing), the
+    /// rename changes case only (C10), the source carries no row, or it is
+    /// not a live table (C9). A classified source going into a multi-level
+    /// namespace is refused (C2).
     async fn move_plan_for_rename(
         &self,
         prefix: &str,
         body: &Value,
-    ) -> Result<Option<MovePlan>, String> {
+    ) -> Result<Option<MovePlan>, Refusal> {
+        let check = |e: &dyn std::fmt::Display| {
+            Refusal(format!(
+                "egret could not check which classifications the table carries ({e}); retry"
+            ))
+        };
         let Some(((src_ns, src), (dst_ns, dst))) = rename_of(body) else {
             return Ok(None);
         };
         if is_multi_level(&src_ns) {
             return Ok(None);
         }
-        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
-        let Some((warehouse_id, _)) = resolve(&mut conn, prefix)
-            .await
-            .map_err(|e| e.to_string())?
+        // Every engine and resolver folds case: a case-only rename changes no
+        // name any of them matches, so it is not worth a hold.
+        if fold(&src_ns) == fold(&dst_ns) && fold(&src) == fold(&dst) {
+            return Ok(None);
+        }
+        let mut conn = self.db.pool.acquire().await.map_err(|e| check(&e))?;
+        let Some((warehouse_id, _)) = resolve(&mut conn, prefix).await.map_err(|e| check(&e))?
         else {
             return Ok(None);
         };
         let source = [(src_ns.clone(), src.clone())];
         let rows = rows_of(&mut conn, warehouse_id, &source)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| check(&e))?;
         if rows.is_empty() {
             return Ok(None);
         }
         let Some(current) = current_columns_via(&mut conn, warehouse_id, &src_ns, &src)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| check(&e))?
         else {
             return Ok(None);
         };
+        if is_multi_level(&dst_ns) {
+            return Err(Refusal(
+                "the table carries classifications and its new namespace has more than one \
+                 level, where egret cannot keep them; use a single-level schema"
+                    .to_string(),
+            ));
+        }
         let pending = |schema: &str, table: &str, leaving_table: bool| PendingColumns {
             warehouse_id,
             schema: schema.to_string(),
@@ -1373,7 +1390,7 @@ pub async fn hook_table_commits(
                     .await
             }
             Ok(None) => {}
-            Err(e) => return refuse_check(e),
+            Err(refusal) => return refusal.into_response(),
         }
     }
     let tables = tables_of(&target, &body);
