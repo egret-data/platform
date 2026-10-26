@@ -477,3 +477,89 @@ async fn tag_read_or_policy_read_and_a_known_tag() {
         StatusCode::NOT_FOUND
     );
 }
+
+// ── Classifications follow a rename, Task 11: state and missing columns ──
+
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
+
+/// The tables of the usage answer by name.
+fn table<'a>(body: &'a Value, name: &str) -> &'a Value {
+    body["data"]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["table"] == name)
+        .unwrap_or_else(|| panic!("{name} in {body}"))
+}
+
+/// C15: each table of an embedded catalog says whether the catalog has it; a
+/// table whose warehouse is not an embedded catalog carries no `state`.
+#[tokio::test]
+async fn where_used_says_which_tables_are_missing_or_dropped() {
+    let f = setup().await;
+    let t = tag(&f).await;
+    let (_, _, wh) = catalog(&f).await;
+    let lk = lakekeeper_stub::link_warehouse(&f.db, wh).await;
+    lakekeeper_stub::add_table(&f.db, lk, &["s"], "orders", &["id"]).await;
+    let gone = lakekeeper_stub::add_table(&f.db, lk, &["s"], "gone", &["id"]).await;
+    lakekeeper_stub::soft_drop(&f.db, lk, gone).await;
+    for table in ["orders", "gone", "ghost"] {
+        data_tag(&f, t, wh, table, "").await;
+    }
+    let (_, _, plain) = catalog(&f).await;
+    data_tag(&f, t, plain, "elsewhere", "").await;
+    let admin = session(&f, &["platform_admin"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = usage(&st, &admin, t).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(table(&body, "orders")["state"], "live");
+    assert_eq!(table(&body, "gone")["state"], "dropped");
+    assert_eq!(table(&body, "ghost")["state"], "missing");
+    assert!(table(&body, "elsewhere").get("state").is_none(), "{body}");
+}
+
+/// R8: a live table lists the tagged columns it lacks, with the likely new
+/// name; a table that lacks none carries no `missingColumns`.
+#[tokio::test]
+async fn where_used_lists_missing_columns_with_their_new_name() {
+    let f = setup().await;
+    let t = tag(&f).await;
+    let (_, _, wh) = catalog(&f).await;
+    let lk = lakekeeper_stub::link_warehouse(&f.db, wh).await;
+    let orders = lakekeeper_stub::add_table(&f.db, lk, &["s"], "orders", &["id", "email"]).await;
+    lakekeeper_stub::set_schema(
+        &f.db,
+        lk,
+        orders,
+        1,
+        json!({"type": "struct", "schema-id": 1, "fields": [
+            {"id": 1, "name": "id", "type": "string", "required": false},
+            {"id": 2, "name": "mail", "type": "string", "required": false},
+        ]}),
+    )
+    .await;
+    lakekeeper_stub::add_table(&f.db, lk, &["s"], "fine", &["id"]).await;
+    for (table, column) in [
+        ("orders", "email"),
+        ("orders", "ghost"),
+        ("orders", "id"),
+        ("fine", "id"),
+    ] {
+        data_tag(&f, t, wh, table, column).await;
+    }
+    let admin = session(&f, &["platform_admin"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = usage(&st, &admin, t).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        table(&body, "orders")["missingColumns"],
+        json!([{"column": "email", "renamedTo": "mail"}, {"column": "ghost", "renamedTo": null}])
+    );
+    assert!(
+        table(&body, "fine").get("missingColumns").is_none(),
+        "{body}"
+    );
+}

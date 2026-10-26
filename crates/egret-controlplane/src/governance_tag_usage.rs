@@ -18,6 +18,10 @@ use egret_core::http::ErrorBody;
 use serde::Serialize;
 use uuid::Uuid;
 
+use egret_perm_compile::table_columns::{
+    missing_columns_via, table_states_via, TableKey, TableState,
+};
+
 use crate::governance_browse::require_governance_read;
 use crate::{CpError, CpState};
 
@@ -36,7 +40,15 @@ pub(crate) fn router() -> Router<CpState> {
 #[openapi(
     paths(tag_usage),
     components(schemas(
-        TagUsage, UsageTag, DataUsage, TableUsage, BiUsage, BiObject, Unreadable
+        TagUsage,
+        UsageTag,
+        DataUsage,
+        TableUsage,
+        TableState,
+        MissingColumn,
+        BiUsage,
+        BiObject,
+        Unreadable
     ))
 )]
 pub(crate) struct ControlPlaneTagUsageApi;
@@ -65,6 +77,25 @@ pub struct TableUsage {
     pub on_table: bool,
     /// Tagged columns, sorted.
     pub columns: Vec<String>,
+    /// What the embedded catalog holds under the table's name (rename spec
+    /// C15): `live`, `dropped` (only soft-deleted, an undrop restores it) or
+    /// `missing` (renamed away, purged, or classified before it existed).
+    /// Absent when the warehouse is not an embedded catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<TableState>,
+    /// Tagged columns a live table does not have, sorted; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_columns: Vec<MissingColumn>,
+}
+
+/// A tagged column its live table does not have (rename spec R8).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingColumn {
+    pub column: String,
+    /// The current name of the field that last carried this name, when it is
+    /// still in the table: a candidate a steward confirms, never applied.
+    pub renamed_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -128,6 +159,56 @@ fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
     }
 }
 
+/// Fill in each table's [`TableState`] and missing columns, for the tables
+/// of warehouses the embedded catalog serves: one state query and one schema
+/// query per request.
+async fn table_states(
+    conn: &mut sqlx::PgConnection,
+    tables: &mut [TableUsage],
+) -> Result<(), egret_perm::CompileError> {
+    let warehouses: Vec<Uuid> = tables.iter().map(|t| t.warehouse_id).collect();
+    let embedded: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM catalog.warehouses \
+          WHERE id = ANY($1) AND lakekeeper_warehouse_id IS NOT NULL",
+    )
+    .bind(&warehouses)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+    let at: Vec<usize> = (0..tables.len())
+        .filter(|&i| embedded.contains(&tables[i].warehouse_id))
+        .collect();
+    if at.is_empty() {
+        return Ok(());
+    }
+    let key = |t: &TableUsage| TableKey {
+        warehouse_id: t.warehouse_id,
+        schema: t.schema.clone(),
+        table: t.table.clone(),
+    };
+    let keys: Vec<TableKey> = at.iter().map(|&i| key(&tables[i])).collect();
+    let states = table_states_via(conn, &keys).await?;
+    let mut asked = Vec::new();
+    for (&i, state) in at.iter().zip(states) {
+        tables[i].state = Some(state);
+        if state == TableState::Live && !tables[i].columns.is_empty() {
+            asked.push((key(&tables[i]), tables[i].columns.clone()));
+        }
+    }
+    for m in missing_columns_via(conn, &asked).await? {
+        if let Some(t) = tables.iter_mut().find(|t| key(t) == m.key) {
+            t.missing_columns.push(MissingColumn {
+                column: m.column,
+                renamed_to: m.renamed_to,
+            });
+        }
+    }
+    for t in tables.iter_mut() {
+        t.missing_columns.sort_by(|a, b| a.column.cmp(&b.column));
+    }
+    Ok(())
+}
+
 /// Where a classification is used.
 #[utoipa::path(
     get,
@@ -139,8 +220,11 @@ fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
                    and the BI objects carrying it: each is checked with the caller's read \
                    permission, in workspace, kind, id order, up to 500 per request; readable ones \
                    are listed, unreadable ones only counted (no name, no workspace), the rest \
-                   reported as `remaining`, and assignments to deleted objects counted. Requires \
-                   tag:read or policy:read.",
+                   reported as `remaining`, and assignments to deleted objects counted. Each \
+                   table of an embedded catalog says whether the catalog has it (`state`: live, \
+                   dropped or missing) and which of its tagged columns it lacks, with the \
+                   column's likely new name (`missingColumns`). Requires tag:read or \
+                   policy:read.",
     responses(
         (status = 200, description = "Where the classification is used", body = TagUsage),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -194,6 +278,8 @@ async fn tag_usage(
                 table,
                 on_table: false,
                 columns: Vec::new(),
+                state: None,
+                missing_columns: Vec::new(),
             });
         if column.is_empty() {
             entry.on_table = true;
@@ -203,13 +289,18 @@ async fn tag_usage(
             column_count += 1;
         }
     }
-    let tables: Vec<TableUsage> = tables
+    let mut tables: Vec<TableUsage> = tables
         .into_values()
         .map(|mut t| {
             t.columns.sort();
             t
         })
         .collect();
+    let mut conn = pool.acquire().await.map_err(db("acquire"))?;
+    table_states(&mut conn, &mut tables).await.map_err(|e| {
+        tracing::error!(error = %e, "classification usage: read the table states");
+        CpError::Internal
+    })?;
 
     // ── BI ──
     // Each assignment's workspace, so the checks run in a fixed order; a NULL

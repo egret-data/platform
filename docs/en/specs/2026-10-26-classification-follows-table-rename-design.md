@@ -687,3 +687,11 @@ Deviations the code forces are recorded here, per task, as they happen.
 - A sample's detail is plain text ("renamed to mail", "not in the table"), as Task 7's sentences: the frontend
   renders it as text, so §5.8's backticks would show literally. The sentence omits a zero part ("…: they were
   renamed …" / "…: it was dropped or never existed.").
+
+### Task 11: "Where used" carries state and missing columns
+
+- As designed (§8). `TableUsage` keeps its exact `(schema, table)` grouping; the state and missing-columns lookups
+  run only for tables whose warehouse has a Lakekeeper warehouse (one `table_states_via` and one
+  `missing_columns_via` per request), so a request with none runs no `lakekeeper.*` query.
+- The justfile has no OpenAPI recipe; `openapi.json` was regenerated with the plan's `cargo run … -- openapi`, the
+  client with `npm run gen:api` (after `npm ci`, the worktree had no `node_modules`).
