@@ -99,6 +99,51 @@ describe("Where used: Data", () => {
   });
 });
 
+// Classifications follow a rename (spec 2026-10-26 §5.8, C15, R8): a table the catalog
+// no longer has, or has only dropped, and a classified column its table lacks, say so in
+// words (FE-A11Y-4) on a status badge (FE-VISUAL-8).
+describe("Where used: stale tables and columns", () => {
+  const STALE: TagUsage["data"]["tables"] = [
+    { catalogId: "c", catalogName: "lake", warehouseId: "w", schema: "sales", table: "phantom", onTable: true, columns: [], state: "missing" },
+    { catalogId: "c", catalogName: "lake", warehouseId: "w", schema: "sales", table: "gone", onTable: true, columns: [], state: "dropped" },
+    {
+      catalogId: "c",
+      catalogName: "lake",
+      warehouseId: "w",
+      schema: "sales",
+      table: "orders",
+      onTable: false,
+      columns: ["email", "ghost", "id"],
+      state: "live",
+      missingColumns: [
+        { column: "email", renamedTo: "mail" },
+        { column: "ghost", renamedTo: null },
+      ],
+    },
+    { catalogId: "x", catalogName: "ext", warehouseId: "x", schema: "s", table: "plain", onTable: true, columns: [] },
+  ];
+  const row = (name: string) => within(data()).getByRole("link", { name }).closest("tr") as HTMLElement;
+  const badges = (el: HTMLElement) =>
+    [...el.querySelectorAll("[data-status-tone]")].map((b) => b.textContent);
+
+  it("badges a table the catalog does not have and a dropped one, and nothing else", async () => {
+    open(usage({ data: { tables: STALE, tableCount: 3, columnCount: 3 } }));
+    await screen.findByRole("link", { name: "phantom" }, T);
+    expect(badges(within(row("phantom")).getAllByRole("cell")[0])).toEqual(["Not in the catalog"]);
+    expect(badges(within(row("gone")).getAllByRole("cell")[0])).toEqual(["Dropped"]);
+    expect(badges(within(row("orders")).getAllByRole("cell")[0])).toEqual([]);
+    expect(badges(row("plain"))).toEqual([]);
+  });
+
+  it("badges each classified column its table lacks, with the column's likely new name", async () => {
+    open(usage({ data: { tables: STALE, tableCount: 3, columnCount: 3 } }));
+    await screen.findByRole("link", { name: "orders" }, T);
+    const attached = within(row("orders")).getAllByRole("cell")[1];
+    expect(badges(attached)).toEqual(["Renamed to mail", "Not in the table"]);
+    expect(attached.textContent).toBe("Columns: emailRenamed to mail, ghostNot in the table, id");
+  });
+});
+
 describe("Where used: BI", () => {
   const READABLE: TagUsage["bi"]["readable"] = [
     { kind: "saved_query", id: "q1", name: "Weekly pull", workspaceSlug: "w1" },

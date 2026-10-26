@@ -7,6 +7,7 @@ import { useControlPlaneGovernanceTagUsage } from "@/api/generated/control-plane
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { IconButton } from "@/components/ui/icon-button";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useCanEditCatalogTags } from "@/routes/governance/ClassificationChip";
 import { useRemoveClassification, type RemoveTarget } from "@/routes/governance/RemoveClassificationDialog";
@@ -49,6 +50,30 @@ function groupTables(tables: TableUsage[]): { label: string; rows: TableUsage[] 
   return [...groups].map(([label, rows]) => ({ label, rows }));
 }
 
+/**
+ * What the catalog holds under the table's name (spec 2026-10-26 C15), when it is
+ * not a live table: a name the catalog does not have (renamed away, purged, or
+ * classified before it existed) is worth a look; a dropped table's rows apply
+ * again if it is restored. A live table, or one outside an embedded catalog,
+ * shows nothing.
+ */
+function TableStateBadge({ t }: { t: TableUsage }) {
+  if (t.state === "missing") return <StatusBadge tone="highlight" className="ml-2">Not in the catalog</StatusBadge>;
+  if (t.state === "dropped") return <StatusBadge tone="inactive" className="ml-2">Dropped</StatusBadge>;
+  return null;
+}
+
+/** A classified column its live table lacks (R8): its likely new name, or that it is not there. */
+function MissingColumnBadge({ t, column }: { t: TableUsage; column: string }) {
+  const missing = t.missingColumns?.find((m) => m.column === column);
+  if (!missing) return null;
+  return (
+    <StatusBadge tone="highlight" className="ml-1">
+      {missing.renamedTo ? `Renamed to ${missing.renamedTo}` : "Not in the table"}
+    </StatusBadge>
+  );
+}
+
 function Carries({ t }: { t: TableUsage }) {
   const columns = [...t.columns].sort(byText);
   const parts: ReactNode[] = [];
@@ -66,6 +91,7 @@ function Carries({ t }: { t: TableUsage }) {
             >
               {c}
             </Link>
+            <MissingColumnBadge t={t} column={c} />
           </Fragment>
         ))}
       </span>,
@@ -224,6 +250,7 @@ export function WhereUsedTab({ tagId }: { tagId: string }) {
                           >
                             {t.table}
                           </Link>
+                          <TableStateBadge t={t} />
                         </TableCell>
                         <TableCell data-label="Attached to" className="whitespace-normal">
                           <Carries t={t} />

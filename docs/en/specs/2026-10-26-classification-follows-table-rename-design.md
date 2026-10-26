@@ -695,3 +695,11 @@ Deviations the code forces are recorded here, per task, as they happen.
   `missing_columns_via` per request), so a request with none runs no `lakekeeper.*` query.
 - The justfile has no OpenAPI recipe; `openapi.json` was regenerated with the plan's `cargo run … -- openapi`, the
   client with `npm run gen:api` (after `npm ci`, the worktree had no `node_modules`).
+
+### Task 12: frontend
+
+- As designed. Tones: "Not in the catalog" and the missing-column badges are `highlight` (worth a look: the renamed
+  table or column may be unclassified under its new name); "Dropped" is `inactive` (switched off; an undrop brings it
+  back). Badges sit beside the table link and after each missing column's link; nothing changes for live tables,
+  present columns or tables outside an embedded catalog.
+- Not verified in a browser here (FE-TEST-2): the painted result is Task 14's live check (step 9).
