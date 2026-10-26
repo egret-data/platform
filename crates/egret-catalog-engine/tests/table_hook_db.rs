@@ -9,7 +9,11 @@
 //!   DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 //!     cargo test -p egret-catalog-engine --test table_hook_db
 
+#[path = "common/plugins.rs"]
+mod plugins;
+
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -29,6 +33,11 @@ use tower::ServiceExt as _;
 use uuid::Uuid;
 
 const SYSTEM_USER: &str = "egret-system";
+
+/// The hook's move deadline in these tests.
+const LIMIT: Duration = Duration::from_secs(5);
+/// How often the fake plugins poll.
+const POLL: Duration = Duration::from_millis(200);
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
@@ -64,10 +73,29 @@ struct Env {
     catalog: String,
     /// The StarRocks profile bound to the catalog.
     profile_id: i64,
+    profile_name: String,
+    /// The Trino profile bound to the catalog (with its tag service).
+    trino_id: i64,
+    trino_name: String,
+    policy: PolicyStore,
     on_commit: OnCommit,
     on_reach: OnReach,
+    rows_at_reach: RowsAtReach,
     stall: Stall,
     hook: Arc<TableHook>,
+}
+
+/// What the catalog held when a request reached lakekeeper: armed with
+/// `(METHOD /path, warehouse, None)`, [`observe`] fills in the moment, the
+/// tables the warehouse's classification rows name, and the Trino profile's
+/// tag version.
+type RowsAtReach = Arc<Mutex<Option<(String, Uuid, i64, Option<AtReach>)>>>;
+
+#[derive(Debug, Clone)]
+struct AtReach {
+    at: Instant,
+    tables: Vec<String>,
+    tag_version: i64,
 }
 
 /// Armed with `(METHOD /path, signal)`: [`observe`] signals when that request
@@ -88,11 +116,47 @@ type OnCommit = Arc<Mutex<Option<(String, &'static str, Uuid)>>>;
 /// Runs the armed [`OnCommit`] write after lakekeeper commits — a change the
 /// hook's pre-commit work cannot have seen.
 async fn observe(
-    State((on_commit, on_reach, stall, db)): State<(OnCommit, OnReach, Stall, Db)>,
+    State((on_commit, on_reach, rows_at_reach, stall, db)): State<(
+        OnCommit,
+        OnReach,
+        RowsAtReach,
+        Stall,
+        Db,
+    )>,
     req: Request,
     next: Next,
 ) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
+    let at = Instant::now();
+    let armed = rows_at_reach
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(w, _, _, seen)| *w == what && seen.is_none())
+        .map(|(_, warehouse, trino, _)| (*warehouse, *trino));
+    if let Some((warehouse, trino)) = armed {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT table_name FROM catalog_tag_assignments WHERE warehouse_id = $1 \
+             ORDER BY 1",
+        )
+        .bind(warehouse)
+        .fetch_all(&db.pool)
+        .await
+        .expect("rows at reach");
+        let tag_version: i64 =
+            sqlx::query_scalar("SELECT tag_version FROM policy.authz_services WHERE id = $1")
+                .bind(trino)
+                .fetch_one(&db.pool)
+                .await
+                .expect("tag version at reach");
+        if let Some(slot) = rows_at_reach.lock().unwrap().as_mut() {
+            slot.3 = Some(AtReach {
+                at,
+                tables,
+                tag_version,
+            });
+        }
+    }
     let stalled = {
         let mut slot = stall.lock().unwrap();
         match slot.as_ref() {
@@ -192,6 +256,27 @@ async fn env() -> Option<Env> {
     egret_policy::seed_starrocks(&policy)
         .await
         .expect("seed starrocks");
+    egret_policy::seed_trino(&policy).await.expect("seed trino");
+    egret_policy::seed_tag(&policy).await.expect("seed tag");
+    let trino_name = unique("trino_th");
+    let tag_service = format!("{trino_name}_tag");
+    policy
+        .create_service(&tag_service, "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let trino = policy
+        .create_service(&trino_name, "trino", &json!({"tagService": tag_service}))
+        .await
+        .expect("trino profile");
+    let trino_engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("th-trino"))
+    .bind(trino.id)
+    .fetch_one(pool)
+    .await
+    .expect("trino engine");
     let profile = policy
         .create_service(&unique("sr_th"), "starrocks", &json!({}))
         .await
@@ -219,29 +304,34 @@ async fn env() -> Option<Env> {
     .fetch_one(pool)
     .await
     .expect("catalog");
-    sqlx::query(
-        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
-    )
-    .bind(engine)
-    .bind(catalog_id)
-    .execute(pool)
-    .await
-    .expect("attach");
+    for engine in [engine, trino_engine] {
+        sqlx::query(
+            "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) \
+             VALUES ($1,$2)",
+        )
+        .bind(engine)
+        .bind(catalog_id)
+        .execute(pool)
+        .await
+        .expect("attach");
+    }
 
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let on_commit: OnCommit = Arc::default();
     let on_reach: OnReach = Arc::default();
+    let rows_at_reach: RowsAtReach = Arc::default();
     let stall: Stall = Arc::default();
     let inner = catalog_engine_router(state.clone()).layer(axum::middleware::from_fn_with_state(
         (
             on_commit.clone(),
             on_reach.clone(),
+            rows_at_reach.clone(),
             stall.clone(),
             db.clone(),
         ),
         observe,
     ));
-    let hook = Arc::new(TableHook::new(db.clone()));
+    let hook = Arc::new(TableHook::new(db.clone()).with_limit(LIMIT));
     let app = front_catalog_router(table_hook::layer(inner, hook.clone()), None, None);
     let env = Env {
         db,
@@ -252,8 +342,13 @@ async fn env() -> Option<Env> {
         warehouse_id,
         catalog,
         profile_id: profile.id,
+        profile_name: profile.name,
+        trino_id: trino.id,
+        trino_name,
+        policy,
         on_commit,
         on_reach,
+        rows_at_reach,
         stall,
         hook,
     };
@@ -878,31 +973,14 @@ async fn a_column_add_within_the_ceiling_commits() {
     );
 }
 
-/// A rename is dry-run with the source's columns under the destination name:
-/// within the ceiling it commits; a destination whose whole-table
+/// A rename onto a name that carries a whole-table classification, from a
+/// source that carries none, takes #755's path: it is dry-run with the
+/// source's columns under the destination name, and a destination whose
 /// classification the moved columns would push over the ceiling is refused
-/// before the commit (review finding 7: this test must fail without the dry
-/// run).
+/// before the commit (review finding 7).
 #[tokio::test]
-async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
+async fn a_rename_onto_a_classified_name_still_dry_runs() {
     let Some(env) = env().await else { return };
-    env.create_table("orders", &[(1, "id")]).await;
-    let tag = env.classify_table("orders").await;
-    let (status, body) = env
-        .call(
-            "POST",
-            "tables/rename",
-            Some(json!({
-                "source": {"namespace": ["sales"], "name": "orders"},
-                "destination": {"namespace": ["sales"], "name": "orders_v2"},
-            })),
-        )
-        .await;
-    assert!(status.is_success(), "rename: {status} {body}");
-    // The classification stays on the old name (spec §11.1): its masks go.
-    assert!(env.masked_columns(tag, "orders").await.is_empty());
-    assert!(env.has_table_deny(tag, "orders").await);
-
     // `big` (1 + 497) and the not-yet-existing `target` (1 + 0) carry tag B:
     // 499. Renaming `small` (5 columns) onto `target` would make it 504.
     let big = fields(497);
@@ -920,16 +998,7 @@ async fn a_rename_of_a_classified_table_is_dry_run_and_commits() {
     .await
     .expect("assign target");
     env.recompile().await;
-    let (status, body) = env
-        .call(
-            "POST",
-            "tables/rename",
-            Some(json!({
-                "source": {"namespace": ["sales"], "name": "small"},
-                "destination": {"namespace": ["sales"], "name": "target"},
-            })),
-        )
-        .await;
+    let (status, body) = env.rename("small", "target").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
         body["error"]["message"]
@@ -1334,4 +1403,401 @@ async fn concurrent_column_adds_that_cross_the_ceiling_together_do_not_wedge() {
         Some("ok"),
         "the profile is not wedged"
     );
+}
+
+// ── Classifications follow a rename, Task 3: the move (R1, spec §5.1-§5.3) ──
+
+/// A classification row: `(tag, schema, table, column)`.
+type Row = (Uuid, String, String, String);
+
+impl Env {
+    async fn rename(&self, from: &str, to: &str) -> (StatusCode, Value) {
+        self.call(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": from},
+                "destination": {"namespace": ["sales"], "name": to},
+            })),
+        )
+        .await
+    }
+
+    /// A classification with a role-bearing clearance on `sales.{table}.{column}`
+    /// (not recompiled: the caller does).
+    async fn classify_column(&self, table: &str, column: &str) -> Uuid {
+        let tag = self.new_gated_tag().await;
+        self.assign(tag, table, column).await;
+        tag
+    }
+
+    async fn new_gated_tag(&self) -> Uuid {
+        let tag: Uuid =
+            sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+                .bind(unique("th-tag"))
+                .fetch_one(&self.db.pool)
+                .await
+                .expect("tag");
+        sqlx::query(
+            "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+             VALUES ($1, $2, '{}')",
+        )
+        .bind(tag)
+        .bind(vec![unique("th-role")])
+        .execute(&self.db.pool)
+        .await
+        .expect("gate");
+        tag
+    }
+
+    async fn assign(&self, tag: Uuid, table: &str, column: &str) {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+             column_name) VALUES ($1,$2,'sales',$3,$4)",
+        )
+        .bind(tag)
+        .bind(self.warehouse_id)
+        .bind(table)
+        .bind(column)
+        .execute(&self.db.pool)
+        .await
+        .expect("assign");
+    }
+
+    /// Every classification row of the warehouse, sorted.
+    async fn rows(&self) -> Vec<Row> {
+        sqlx::query_as(
+            "SELECT tag_id, schema_name, table_name, column_name FROM catalog_tag_assignments \
+              WHERE warehouse_id = $1 ORDER BY 1, 2, 3, 4",
+        )
+        .bind(self.warehouse_id)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("rows")
+    }
+
+    async fn versions(&self) -> Vec<(i64, i64, i64)> {
+        sqlx::query_as(
+            "SELECT id, tag_version, policy_version FROM policy.authz_services \
+              WHERE id = ANY($1) ORDER BY id",
+        )
+        .bind(vec![self.trino_id, self.profile_id])
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("versions")
+    }
+
+    async fn tag_version(&self) -> i64 {
+        sqlx::query_scalar("SELECT tag_version FROM policy.authz_services WHERE id = $1")
+            .bind(self.trino_id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("tag version")
+    }
+
+    fn ranger(&self) -> axum::Router {
+        egret_policy::ranger_router(egret_policy::RangerState {
+            store: self.policy.clone(),
+            auth_token: Arc::from(plugins::RANGER_TOKEN),
+            mode: egret_policy::ranger::AuthMode::Required,
+            verifier: None,
+        })
+    }
+
+    async fn ranger_get(&self, uri: String) -> Value {
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", plugins::RANGER_TOKEN))
+            .body(Body::empty())
+            .unwrap();
+        let resp = self.ranger().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).expect("download")
+    }
+
+    /// `(table, column)` of every resource the Trino plugin's tag download
+    /// serves (a table-level row has no column: `""`).
+    async fn served_trino_resources(&self) -> Vec<(String, String)> {
+        let tags = self
+            .ranger_get(format!(
+                "/tags/download/{}?lastKnownVersion=-1",
+                self.trino_name
+            ))
+            .await;
+        let first = |r: &Value, level: &str| {
+            r["resourceElements"][level]["values"][0]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let mut out: Vec<(String, String)> = tags["serviceResources"]
+            .as_array()
+            .expect("serviceResources")
+            .iter()
+            .map(|r| (first(r, "table"), first(r, "column")))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The names of every policy the StarRocks plugin's download serves.
+    async fn served_starrocks_policies(&self) -> Vec<String> {
+        let download = self
+            .ranger_get(format!(
+                "/plugins/policies/download/{}?lastKnownVersion=-1",
+                self.profile_name
+            ))
+            .await;
+        download["policies"]
+            .as_array()
+            .expect("policies")
+            .iter()
+            .map(|p| p["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    fn start_trino_plugin(&self) -> plugins::Plugin {
+        plugins::start_trino(self.policy.clone(), self.trino_name.clone(), POLL)
+    }
+
+    /// Arm [`observe`] to record what the catalog held when `what` reached
+    /// lakekeeper.
+    fn probe_reach(&self, what: &str) {
+        *self.rows_at_reach.lock().unwrap() = Some((
+            format!("{} /{}/{}", "POST", self.prefix, what),
+            self.warehouse_id,
+            self.trino_id,
+            None,
+        ));
+    }
+
+    fn reached(&self) -> AtReach {
+        self.rows_at_reach
+            .lock()
+            .unwrap()
+            .take()
+            .and_then(|(_, _, _, seen)| seen)
+            .expect("the observer saw the request reach lakekeeper")
+    }
+
+    /// `orders(id, email)` with tag A on the table and tag B on `email`, both
+    /// compiled into every bound profile.
+    async fn classified_orders(&self) -> (Uuid, Uuid) {
+        self.create_table("orders", &[(1, "id"), (2, "email")])
+            .await;
+        let a = self.classify_table("orders").await;
+        let b = self.classify_column("orders", "email").await;
+        self.recompile_all().await;
+        (a, b)
+    }
+
+    async fn recompile_all(&self) {
+        let mut tx = self.db.pool.begin().await.expect("begin");
+        let mut ids = vec![self.profile_id, self.trino_id];
+        ids.sort_unstable();
+        egret_perm_compile::recompile_services_in_tx(&mut tx, &ids)
+            .await
+            .expect("recompile");
+        tx.commit().await.expect("commit");
+    }
+}
+
+fn row(tag: Uuid, table: &str, column: &str) -> Row {
+    (tag, "sales".into(), table.into(), column.into())
+}
+
+fn sorted(mut rows: Vec<Row>) -> Vec<Row> {
+    rows.sort();
+    rows
+}
+
+/// R1: a renamed table keeps its classifications, on both engines, and the old
+/// name loses them.
+#[tokio::test]
+async fn a_renamed_table_keeps_its_classifications() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let plugin = env.start_trino_plugin();
+    plugin.polled().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
+    );
+    let served = env.served_trino_resources().await;
+    assert!(
+        served.contains(&("orders_v2".into(), String::new()))
+            && served.contains(&("orders_v2".into(), "email".into())),
+        "{served:?}"
+    );
+    assert!(served.iter().all(|(t, _)| t != "orders"), "{served:?}");
+    let policies = env.served_starrocks_policies().await;
+    let clearance = egret_policy::COMPILER_CLEARANCE_PREFIX;
+    let c = &env.catalog;
+    // One mask per column, named after the lower of its tags (D2 C5).
+    for name in [
+        format!("{clearance}{a}-{c}.sales.orders_v2.*"),
+        format!("{clearance}{}-mask-{c}.sales.orders_v2.email", a.min(b)),
+        format!("{clearance}{a}-mask-{c}.sales.orders_v2.id"),
+    ] {
+        assert!(policies.contains(&name), "{name} not in {policies:?}");
+    }
+    assert!(
+        policies.iter().all(|p| !p.contains(".sales.orders.")),
+        "{policies:?}"
+    );
+}
+
+/// R1: the rename reaches lakekeeper only once the rows are on both names
+/// and the Trino plugin has reported the tag version the copy left.
+#[tokio::test]
+async fn the_rename_reaches_lakekeeper_only_after_trino_serves_the_moved_tags() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let plugin = env.start_trino_plugin();
+    plugin.polled().await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let reached = env.reached();
+    assert_eq!(reached.tables, vec!["orders", "orders_v2"]);
+    let reported = plugin.report_of(reached.tag_version).await;
+    assert!(
+        reported < reached.at,
+        "the plugin reported the copy's version {} only after the rename reached lakekeeper",
+        reached.tag_version
+    );
+}
+
+/// R1: a move the overlap check refuses answers 409 and renames nothing. A
+/// tag-addressed mask on tag B and a path mask on `sales.orders_v2.email`
+/// that decides differently are a pair the move would complete.
+#[tokio::test]
+async fn a_rename_whose_move_is_refused_answers_409_and_does_not_rename() {
+    let Some(env) = env().await else { return };
+    let (_, b) = env.classified_orders().await;
+    let b_key: String = sqlx::query_scalar("SELECT key FROM tags WHERE id = $1")
+        .bind(b)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("key");
+    let catalog_id: Uuid = sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
+        .bind(&env.catalog)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("catalog id");
+    let perm = egret_perm::PermStore::new(env.db.pool.clone());
+    let mask = |name: String, mask_type: &str, selector: egret_perm::Selector| egret_perm::Rule {
+        id: Uuid::nil(),
+        name,
+        kind: egret_perm::RuleKind::Mask {
+            mask_type: mask_type.into(),
+            value_expr: None,
+        },
+        selector,
+        exempt: egret_perm::PrincipalSet::default(),
+    };
+    perm.create_rule(&mask(
+        unique("th-tag-mask"),
+        "MASK",
+        egret_perm::Selector::Tag { key: b_key },
+    ))
+    .await
+    .expect("tag rule");
+    perm.create_rule(&mask(
+        unique("th-path-mask"),
+        "MASK_NULL",
+        egret_perm::Selector::Path(egret_perm::Scope {
+            catalog_id,
+            schema: Some("sales".into()),
+            table: Some("orders_v2".into()),
+            column: Some("email".into()),
+        }),
+    ))
+    .await
+    .expect("path rule");
+    env.recompile_all().await;
+    let plugin = env.start_trino_plugin();
+    plugin.polled().await;
+    let (rows, versions) = (env.rows().await, env.versions().await);
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with(
+            "egret refused the table change: the table's classifications cannot move to"
+        ),
+        "{message}"
+    );
+    assert!(env.source("orders").await.is_some(), "not renamed");
+    assert!(env.source("orders_v2").await.is_none());
+    assert_eq!(env.rows().await, rows);
+    assert_eq!(env.versions().await, versions);
+}
+
+/// R1: a rename lakekeeper refuses (the destination exists) undoes the copy:
+/// its answer is returned as it is, no row is left on the new name, and the
+/// tag version moved twice (copy, compensation).
+#[tokio::test]
+async fn a_failed_rename_undoes_the_copy() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let plugin = env.start_trino_plugin();
+    plugin.polled().await;
+    let before = env.tag_version().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    // Lakekeeper answers a rename onto an existing table 404 ("Error getting
+    // tabular from catalog"), not 409.
+    assert!(!status.is_success(), "{status} {body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("egret refused"),
+        "lakekeeper's own answer: {body}"
+    );
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+    assert_eq!(env.tag_version().await, before + 2);
+}
+
+/// R4: only classification rows move; a path deny grant on `sales.orders`
+/// stays where it is (spec §11 item 1, recorded, not fixed).
+#[tokio::test]
+async fn a_rename_moves_classifications_only() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let catalog_id: Uuid = sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
+        .bind(&env.catalog)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("catalog id");
+    let grant: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
+         VALUES ('deny', ARRAY['read'], $1, 'sales', 'orders') RETURNING id",
+    )
+    .bind(catalog_id)
+    .fetch_one(&env.db.pool)
+    .await
+    .expect("deny grant");
+    let plugin = env.start_trino_plugin();
+    plugin.polled().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let table: String = sqlx::query_scalar("SELECT table_name FROM perm.grants WHERE id = $1")
+        .bind(grant)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("grant");
+    assert_eq!(table, "orders");
 }

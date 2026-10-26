@@ -204,7 +204,7 @@ impl ViewHold {
 /// One `catalog_tag_assignments` row: tag, schema, table, column, and
 /// whether the lineage derived it (`from_lineage`, migration 0188). Every row
 /// the hold derives is `true`; a rename carries each row's own flag.
-type Assignment = (Uuid, String, String, String, bool);
+pub(crate) type Assignment = (Uuid, String, String, String, bool);
 
 /// What a hold wrote in step 3, so that compensation removes exactly it.
 struct Written {
@@ -742,7 +742,7 @@ pub(crate) async fn profile_has_classified_column(
 /// `(profile id, tag version)` of every Trino engine bound to the view's
 /// warehouse. Trino polls tags under its RESOURCE service, and
 /// `download_tags` serves that service's own counter (`plugin_downloads`).
-async fn trino_tag_versions(
+pub(crate) async fn trino_tag_versions(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,
 ) -> Result<Vec<(i64, i64)>, sqlx::Error> {
@@ -801,7 +801,7 @@ async fn assignments_of(
 
 /// The shortest lock wait a hold's write allows itself, even past its
 /// deadline (fix round 2, N4).
-const MIN_LOCK_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const MIN_LOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// A database error in a hold's write. A lock wait that ran past the
 /// deadline (`lock_timeout`, SQLSTATE 55P03) is the busy refusal; anything
@@ -1957,7 +1957,7 @@ impl ViewHold {
 ///   manual tags) cannot have been flipped by an admin, since `assign_catalog`
 ///   leaves a manual row as it is, so it is still the hold's own and goes
 ///   (fix round 2, N1).
-async fn delete_inserted_rows(
+pub(crate) async fn delete_inserted_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     warehouse_id: Uuid,
     rows: &[Assignment],
@@ -1983,7 +1983,7 @@ async fn delete_inserted_rows(
 }
 
 /// Delete exactly `rows` from `warehouse_id`.
-async fn delete_rows(
+pub(crate) async fn delete_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     warehouse_id: Uuid,
     rows: &[Assignment],
@@ -2074,7 +2074,7 @@ async fn record_failed_if_free(db: Db, key: String, view: ViewRef) -> Result<boo
 /// does not cancel its task, so the wait, the commit, any compensation and
 /// the record still run, under the lock and the permit the task owns. The
 /// task runs in the request's tracing span (re-review N-5).
-async fn uncancellable<F>(work: F) -> Response
+pub(crate) async fn uncancellable<F>(work: F) -> Response
 where
     F: std::future::Future<Output = Response> + Send + 'static,
 {
@@ -2104,7 +2104,7 @@ fn view_ref(catalog: &str, schema: &str, name: &str) -> ViewRef {
 }
 
 /// `60` for 60 s; one decimal below a whole second.
-fn seconds(d: Duration) -> String {
+pub(crate) fn seconds(d: Duration) -> String {
     if d.subsec_millis() == 0 {
         d.as_secs().to_string()
     } else {

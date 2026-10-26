@@ -589,3 +589,20 @@ Deviations the code forces are recorded here, per task, as they happen.
   (`load_table_detail` carries no ids).
 - One test beyond the plan pins the profile-total site (`a_moving_table_is_counted_once_against_the_profile_total`);
   the plan's two tests reach only the per-clearance ceiling.
+
+### Task 3: the table rename moves its classifications
+
+- `ViewReach`'s errors are a typed `ViewReachError { Db, Compile, ViewChanged }` instead of `CompileError`: a
+  database error, a compile refusal and "a view changed while this tag write ran" each map in `egret-bi` exactly as
+  before (500, the compiler's refusal, 409); folding them into `CompileError` would have changed two of the three
+  responses. `ViewReach` gained `of_tables` (a column move in a multi-table commit reaches several tables of one
+  warehouse; one lock pass, ascending). `egret-bi`'s private bump and recompile helpers moved with it; `cargo test -p
+  egret-bi` passes 222/222 before and after.
+- The copy always runs its compile and the after-2xx/compensation transactions always re-tag, bump and recompile,
+  also when no row was inserted or removed: the copy's compile may change StarRocks masks through the overlay alone,
+  and compensation must undo that. §5.3 step 5.2's "nothing to insert → skip to step 7 with no wait" is therefore not
+  a separate path: with nothing inserted the Trino pair list is empty and nothing is waited on for Trino.
+- Lakekeeper answers a rename onto an existing table `404 NoSuchTableException` ("Error getting tabular from
+  catalog"), not 409; `a_failed_rename_undoes_the_copy` asserts a non-2xx carrying Lakekeeper's own body.
+- Found, not fixed: `view_hold::lock_key` (shared by the view hold and now the move, C17) does not fold case, so a
+  hold on `Orders` and one on `orders` do not exclude each other, although Lakekeeper's names are case-insensitive.

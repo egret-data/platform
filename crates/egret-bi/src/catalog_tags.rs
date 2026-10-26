@@ -11,7 +11,7 @@
 //!
 //! A write here also recompiles every SP4a `perm` policy profile bound to the
 //! warehouse, in the SAME transaction as the write (Task 7, D5; fix round 1)
-//! — see [`CatalogTagRepo::recompile_bound_services_in_tx`].
+//! — see `egret_perm_compile::view_tags::ViewReach::retag_bump_and_recompile`.
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -20,6 +20,8 @@ use egret_auth::principal::Auth;
 use egret_metastore::Db;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use egret_perm_compile::view_tags::{ViewReach, ViewReachError};
 
 use crate::error::BiApiError;
 use crate::routes::BiState;
@@ -59,10 +61,10 @@ impl CatalogTagRepo {
     /// (ON CONFLICT DO NOTHING on the composite primary key). `column = ""` tags
     /// the whole table.
     ///
-    /// Bumps `tag_version` on every policy service bound to this warehouse (see
-    /// [`Self::bump_bound_tag_versions`]) and recompiles those same services'
-    /// `perm` profiles (see [`Self::recompile_bound_services_in_tx`], SP4a
-    /// Task 7 fix round 1), all in the SAME transaction — the Ranger
+    /// Bumps `tag_version` on every policy service bound to this warehouse and
+    /// recompiles those same services' `perm` profiles (see
+    /// [`ViewReach::retag_bump_and_recompile`], SP4a Task 7 fix round 1), all
+    /// in the SAME transaction — the Ranger
     /// tag-download plugin re-polls `download_tags` instead of 304-ing
     /// forever, and the compiled StarRocks masking policy set is never
     /// visible in a state this transaction hasn't fully applied yet.
@@ -153,7 +155,9 @@ impl CatalogTagRepo {
         // View governance B3: the views that read this table are re-tagged in
         // this same transaction, and their warehouses join the bump and the
         // recompile, so the base and its views move in ONE tag version.
-        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table).await?;
+        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table)
+            .await
+            .map_err(reach_error)?;
         let overlaps_before =
             egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &reach.services)
                 .await
@@ -178,7 +182,10 @@ impl CatalogTagRepo {
         .execute(&mut *tx)
         .await
         .map_err(crate::error::BiError::from)?;
-        reach.retag_bump_and_recompile(&mut tx).await?;
+        reach
+            .retag_bump_and_recompile(&mut tx)
+            .await
+            .map_err(reach_error)?;
         egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
             .await
             .map_err(|e| {
@@ -216,7 +223,9 @@ impl CatalogTagRepo {
             .begin()
             .await
             .map_err(crate::error::BiError::from)?;
-        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table).await?;
+        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table)
+            .await
+            .map_err(reach_error)?;
         sqlx::query(
             "DELETE FROM catalog_tag_assignments \
              WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
@@ -230,98 +239,11 @@ impl CatalogTagRepo {
         .execute(&mut *tx)
         .await
         .map_err(crate::error::BiError::from)?;
-        reach.retag_bump_and_recompile(&mut tx).await?;
+        reach
+            .retag_bump_and_recompile(&mut tx)
+            .await
+            .map_err(reach_error)?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
-        Ok(())
-    }
-
-    /// Recompile every policy profile `warehouse_id`'s engine(s) are bound
-    /// through (SP4a Task 7, D5): a catalog-tag write can add or remove a
-    /// column from a StarRocks tag rule's compile-time enumeration, and
-    /// StarRocks has no tag service to resolve that itself the way Trino's
-    /// plugin does — egret must recompile, or the new/removed column stays
-    /// un(un)masked until something else happens to trigger a recompile.
-    ///
-    /// **Fix round 1: runs INSIDE the tag write's own transaction**, on the
-    /// SAME connection (`egret_perm_compile::recompile_service_in_tx`), not
-    /// after it commits. Round 1 opened `recompile_service`'s own,
-    /// SEPARATELY-connected transaction after this one committed, reasoning
-    /// that its `policy_version` bump would otherwise block on the row
-    /// `bump_bound_tag_versions` had already locked in the still-open outer
-    /// transaction — true, but the fix for that is to stop opening a SECOND
-    /// connection, not to defer the write past the boundary the brief asked
-    /// for one transaction to cover. `recompile_service_in_tx` takes `&mut
-    /// Transaction` directly (the same shape `sync_assignment_grants_in_tx`
-    /// already established) and does every read AND write against it, so a
-    /// crash between "the tag committed" and "the recompile committed" can no
-    /// longer happen — there is only one commit. Any recompile FAILURE now
-    /// rolls the tag write back too (via `?` before `tx.commit()`), rather
-    /// than leaving a committed tag with a stale compiled policy set behind
-    /// it; it still surfaces as a real error to the caller (`BiError::Engine`,
-    /// see `crate::error`'s `From<egret_perm::CompileError>`), not a
-    /// swallowed 500.
-    ///
-    /// A recompile that SKIPPED something (a `WorkspaceMembers` grant this
-    /// compiler cannot yet expand — see `egret_perm_compile::trigger`'s
-    /// module doc) is not itself a failure and does not roll anything back;
-    /// `recompile_service_in_tx` already logs each skip via `tracing::warn!`,
-    /// and this call site logs once more per service with the affected
-    /// `warehouse_id`, since `CatalogTagRepo` is the one place that knows
-    /// which tag write triggered it.
-    ///
-    /// View governance B3 (Task 9): `warehouse_ids` is the written warehouse
-    /// and the warehouses of the views that read the written table
-    /// ([`ViewReach`]); `service_ids` is the union of their bound services.
-    async fn recompile_bound_services_in_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        warehouse_ids: &[Uuid],
-        service_ids: &[i64],
-    ) -> Result<(), BiApiError> {
-        // SP4a Task 11, defect 2: a recompile now also locks and writes the
-        // profile's TAG service, whose id can be lower than the profile's. Take
-        // the whole expanded lock set ascending up front rather than letting
-        // service N's tag service be locked after service N+1's profile —
-        // `lock_services_in_tx` documents why that ordering is what keeps two
-        // overlapping recompiles queueing instead of deadlocking.
-        egret_perm_compile::lock_services_in_tx(tx, service_ids)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        for &service_id in service_ids {
-            let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id)
-                .await
-                .map_err(crate::error::BiError::from)?;
-            if !summary.skipped.is_empty() {
-                tracing::warn!(
-                    warehouse_ids = ?warehouse_ids,
-                    service_id,
-                    skipped_count = summary.skipped.len(),
-                    "catalog-tag write's recompile skipped some grants/rules for this service"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Bump the `tag_version` of every policy service that serves
-    /// `warehouse_id`'s catalog tags, so the Ranger tag plugin stops 304ing and
-    /// re-downloads. Runs on the caller's transaction (cross-seam, same DB).
-    ///
-    /// The resolution itself — the registry∪legacy `profiles` union and the
-    /// `tagService` fan-out the plugin actually polls — lives in
-    /// `egret_catalog_registry::bump_bound_tag_versions` (SP3
-    /// catalog-registry review C1/I1/N1/F-1). One implementation, two
-    /// callers (assign and unassign), no drift: read that function for why
-    /// each branch is there.
-    ///
-    /// View governance B3 (Task 9): over the written warehouse and the
-    /// dependent views' warehouses together, each service bumped once.
-    async fn bump_bound_tag_versions(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        warehouse_ids: &[Uuid],
-    ) -> Result<(), BiApiError> {
-        egret_catalog_registry::bump_tag_versions_for_warehouses(tx, warehouse_ids)
-            .await
-            .map_err(crate::error::BiError::from)?;
         Ok(())
     }
 
@@ -390,103 +312,16 @@ impl CatalogTagRepo {
     }
 }
 
-/// What a catalog-tag write on `schema.table` reaches (view governance B3):
-/// the written warehouse, the views whose lineage reads that table and their
-/// warehouses, and the services bound to any of them. Computed ONCE, before the
-/// write and after [`egret_perm_compile::view_tags::lock_view_tags_in_tx`], so
-/// no lineage can commit in between (Task 9 fix round 1, I2), and the overlap
-/// snapshot covers every profile the write can recompile.
-struct ViewReach {
-    warehouse_id: Uuid,
-    views: Vec<egret_perm_compile::lineage::ViewRef>,
-    warehouses: Vec<Uuid>,
-    services: Vec<i64>,
-}
-
-impl ViewReach {
-    /// Takes the view-tag lock, so call it FIRST in the transaction.
-    async fn of(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        warehouse_id: Uuid,
-        schema: &str,
-        table: &str,
-    ) -> Result<Self, BiApiError> {
-        egret_perm_compile::view_tags::lock_view_tags_in_tx(tx)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        let tables =
-            egret_perm_compile::view_tags::tables_of_warehouse(tx, warehouse_id, schema, table)
-                .await
-                .map_err(crate::error::BiError::from)?;
-        let views = egret_perm_compile::view_tags::dependent_views(tx, &tables)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        let mut warehouses = egret_perm_compile::view_tags::warehouses_of_views(tx, &views)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        warehouses.push(warehouse_id);
-        warehouses.sort();
-        warehouses.dedup();
-        let services = egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &warehouses)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        // Before the base write, whose `assigned_by` holds `FOR KEY SHARE` on
-        // the assigning user: the profile locks, then the compile-mint lock
-        // the recompile mints under. Taken after that write, a concurrent
-        // compile minting the same user would wait on this transaction while
-        // it waited on that compile (`egret_perm_compile::lock_compile_mints_in_tx`).
-        // The recompile's own set is a subset of `services` (its warehouses
-        // are, `retag_bump_and_recompile` refuses otherwise), so it re-takes
-        // only locks already held.
-        if !services.is_empty() {
-            egret_perm_compile::lock_services_in_tx(tx, &services)
-                .await
-                .map_err(crate::error::BiError::from)?;
-            egret_perm_compile::lock_compile_mints_in_tx(tx)
-                .await
-                .map_err(crate::error::BiError::from)?;
+/// A [`ViewReach`] refusal as this write answers it: a database error, a
+/// compile refusal (an overlap, a ceiling) and a view that changed underneath
+/// (409) each as before the reach moved to `egret-perm-compile`.
+fn reach_error(e: ViewReachError) -> BiApiError {
+    match e {
+        ViewReachError::Db(e) => crate::error::BiError::from(e).into(),
+        ViewReachError::Compile(e) => crate::error::BiError::from(e).into(),
+        changed @ ViewReachError::ViewChanged(_) => {
+            crate::error::BiError::Conflict(changed.to_string()).into()
         }
-        Ok(Self {
-            warehouse_id,
-            views,
-            warehouses,
-            services,
-        })
-    }
-
-    /// After the base write: re-tag the dependent views, then ONE bump over
-    /// the written warehouse and the warehouses the re-tag actually changed,
-    /// one recompile of their services, and a request, delivered at commit,
-    /// for the sweep of the views that have no computed lineage yet.
-    async fn retag_bump_and_recompile(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> Result<(), BiApiError> {
-        let summary = egret_perm_compile::view_tags::retag_views_in_tx(tx, &self.views)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        let mut touched: Vec<Uuid> = summary.warehouses.into_iter().collect();
-        // The lock keeps the views from changing since `of`, so the re-tag
-        // stays inside the snapshot. Refuse rather than leave a write the
-        // snapshot and the bump did not cover.
-        if let Some(outside) = touched.iter().find(|w| !self.warehouses.contains(w)) {
-            return Err(crate::error::BiError::Conflict(format!(
-                "a view in warehouse {outside} changed while this tag write ran; retry"
-            ))
-            .into());
-        }
-        touched.push(self.warehouse_id);
-        touched.sort();
-        touched.dedup();
-        let services = egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &touched)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        CatalogTagRepo::bump_bound_tag_versions(tx, &touched).await?;
-        CatalogTagRepo::recompile_bound_services_in_tx(tx, &touched, &services).await?;
-        egret_perm_compile::view_tags::notify_classification_in_tx(tx, &[self.warehouse_id])
-            .await
-            .map_err(crate::error::BiError::from)?;
-        Ok(())
     }
 }
 

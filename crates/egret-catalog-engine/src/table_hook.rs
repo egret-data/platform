@@ -64,9 +64,30 @@
 //!    the recompile lands, the `*` deny refuses an uncleared direct read of a
 //!    new column; only its view protection waits.
 //!
-//! The hook does not move a table's classifications on a rename or a drop
-//! (spec §11.1): after a rename, the recompile reports the old name as not a
-//! table in the catalog and the new name carries no classification.
+//! # A classified rename moves its classifications (rename spec §5)
+//!
+//! A table rename whose source carries classification rows does not take the
+//! path above. Its rows are moved to the new name BEFORE the commit, under a
+//! hold modelled on the view hold ([`crate::view_hold`]):
+//!
+//! 1. a permit of the hook's own cap ([`DEFAULT_MAX_HOLDS`]), then
+//!    `pg_try_advisory_lock` on both table names in the view hold's keyspace
+//!    (busy refuses at once), then the per-profile locks over every profile
+//!    bound to the warehouse;
+//! 2. uncancellable from here: one transaction copies the rows to the new name
+//!    (`ON CONFLICT DO NOTHING`, so it unions with rows already there), re-tags
+//!    the views that read the new name, bumps the tag version and recompiles
+//!    every bound profile with the source marked leaving in the column overlay
+//!    (counted once against the ceilings), and refuses a pair it creates. A
+//!    refusal is a 409 and nothing is renamed. This transaction is the
+//!    pre-commit compile; no dry run runs;
+//! 3. wait, within one deadline ([`crate::view_hold::default_hold_limit`]), for
+//!    the Trino plugins bound to the warehouse to report the new tag version;
+//! 4. forward. A non-2xx undoes exactly the rows the copy inserted; a 2xx
+//!    deletes the source's rows, re-tags the views that read the old name, and
+//!    recompiles with no overlay.
+//!
+//! A drop keeps its rows (an undrop restores the name).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,8 +108,15 @@ use egret_perm_compile::table_columns::{
 use uuid::Uuid;
 
 use crate::view_hold::{
-    compile_is_lock_timeout, decode_segment, is_multi_level, rename_of, request_metadata, resolve,
+    compile_is_lock_timeout, decode_segment, default_hold_limit, delete_inserted_rows, delete_rows,
+    is_lock_timeout, is_multi_level, lock_key, rename_of, request_metadata, resolve, seconds,
+    trino_tag_versions, uncancellable, Assignment, DEFAULT_MAX_HOLDS, MIN_LOCK_WAIT,
 };
+use egret_perm_compile::view_tags::{ViewReach, ViewReachError};
+use egret_policy::{wait_for_versions, PolicyStore, WaitError};
+use sqlx::Connection as _;
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 /// Largest table request body the hook reads.
 const MAX_BODY: usize = 16 << 20;
@@ -101,16 +129,33 @@ pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct TableHook {
     db: Db,
+    policy: PolicyStore,
     lock_wait: Duration,
+    /// The deadline of one held move, from the request's arrival.
+    limit: Duration,
+    /// The cap on moves in flight, of the hook's own (rename spec C16).
+    holds: Arc<Semaphore>,
 }
 
 impl TableHook {
-    /// A hook whose recompiles wait at most [`DEFAULT_LOCK_WAIT`] for a lock.
+    /// A hook whose recompiles wait at most [`DEFAULT_LOCK_WAIT`] for a lock,
+    /// whose moves are held at most [`default_hold_limit`], at most
+    /// [`DEFAULT_MAX_HOLDS`] at once.
     pub fn new(db: Db) -> Self {
         Self {
+            policy: PolicyStore::new(db.clone()),
             db,
             lock_wait: DEFAULT_LOCK_WAIT,
+            limit: default_hold_limit(),
+            holds: Arc::new(Semaphore::new(DEFAULT_MAX_HOLDS)),
         }
+    }
+
+    /// The same hook with another move deadline (tests).
+    #[must_use]
+    pub fn with_limit(mut self, limit: Duration) -> Self {
+        self.limit = limit;
+        self
     }
 
     /// The same hook with another lock wait (tests).
@@ -712,6 +757,549 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
+/// The fold every engine and resolver matches names with
+/// (`egret_ranger_eval::resource::fold_identifier`, SQL `lower()`).
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+}
+
+/// One coordinate a move re-points: a whole table, or one of its columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Coordinate {
+    schema: String,
+    table: String,
+    column: Option<String>,
+}
+
+impl Coordinate {
+    /// Does `row` sit on this coordinate (rename spec C18: folded)? A table
+    /// coordinate holds every row of the table, at either level.
+    fn holds(&self, row: &Assignment) -> bool {
+        fold(&row.1) == fold(&self.schema)
+            && fold(&row.2) == fold(&self.table)
+            && self.column.as_ref().is_none_or(|c| fold(&row.3) == fold(c))
+    }
+
+    fn label(&self) -> String {
+        match &self.column {
+            Some(c) => format!("{}.{}.{c}", self.schema, self.table),
+            None => format!("{}.{}", self.schema, self.table),
+        }
+    }
+}
+
+/// The moves one request makes (rename spec §5.2), each `from → to`.
+struct MovePlan {
+    warehouse_id: Uuid,
+    moves: Vec<(Coordinate, Coordinate)>,
+    /// The column source the copy's compile sees: the destinations' columns,
+    /// the sources marked leaving (C8).
+    overlay: Vec<PendingColumns>,
+}
+
+impl MovePlan {
+    /// The tables on either side of the moves, each once (folded).
+    fn tables(&self) -> Vec<(String, String)> {
+        let mut out = self.sources();
+        for (schema, table) in self.destinations() {
+            push_table(&mut out, schema, table);
+        }
+        out
+    }
+
+    fn sources(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (from, _) in &self.moves {
+            push_table(&mut out, from.schema.clone(), from.table.clone());
+        }
+        out
+    }
+
+    fn destinations(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (_, to) in &self.moves {
+            push_table(&mut out, to.schema.clone(), to.table.clone());
+        }
+        out
+    }
+
+    fn destination_labels(&self) -> String {
+        let labels: Vec<String> = self.moves.iter().map(|(_, to)| to.label()).collect();
+        labels.join(", ")
+    }
+}
+
+fn push_table(out: &mut Vec<(String, String)>, schema: String, table: String) {
+    if !out
+        .iter()
+        .any(|(s, t)| fold(s) == fold(&schema) && fold(t) == fold(&table))
+    {
+        out.push((schema, table));
+    }
+}
+
+/// The target state (rename spec §5.2): every row on a move's source
+/// re-pointed to its destination, each copy keeping its column spelling (for a
+/// table move) and its `from_lineage`; every other row as it is. One row per
+/// exact key; a moved row that lands on a row already there is that row (C1).
+fn target_of(before: &[Assignment], moves: &[(Coordinate, Coordinate)]) -> Vec<Assignment> {
+    let mut out: Vec<Assignment> = before
+        .iter()
+        .filter(|row| !moves.iter().any(|(from, _)| from.holds(row)))
+        .cloned()
+        .collect();
+    for row in before {
+        let Some((_, to)) = moves.iter().find(|(from, _)| from.holds(row)) else {
+            continue;
+        };
+        let moved = (
+            row.0,
+            to.schema.clone(),
+            to.table.clone(),
+            to.column.clone().unwrap_or_else(|| row.3.clone()),
+            row.4,
+        );
+        if !out.iter().any(|r| same_key(r, &moved)) {
+            out.push(moved);
+        }
+    }
+    out
+}
+
+fn same_key(a: &Assignment, b: &Assignment) -> bool {
+    a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
+}
+
+/// `rows` minus every row whose key is in `minus`.
+fn without(rows: &[Assignment], minus: &[Assignment]) -> Vec<Assignment> {
+    rows.iter()
+        .filter(|r| !minus.iter().any(|m| same_key(r, m)))
+        .cloned()
+        .collect()
+}
+
+/// The classification rows of `tables` in `warehouse_id`, matched folded.
+async fn rows_of(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    tables: &[(String, String)],
+) -> Result<Vec<Assignment>, sqlx::Error> {
+    let (schemas, names): (Vec<String>, Vec<String>) = tables.iter().cloned().unzip();
+    sqlx::query_as(
+        "SELECT a.tag_id, a.schema_name, a.table_name, a.column_name, a.from_lineage \
+           FROM catalog_tag_assignments a \
+          WHERE a.warehouse_id = $1 \
+            AND EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[]) AS t(s, n) \
+                         WHERE lower(t.s) = lower(a.schema_name) \
+                           AND lower(t.n) = lower(a.table_name)) \
+          ORDER BY a.tag_id, a.schema_name, a.table_name, a.column_name",
+    )
+    .bind(warehouse_id)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// What the copy transaction wrote and must be waited for.
+struct Copied {
+    /// The rows on the plan's tables before the copy, read under its locks.
+    before: Vec<Assignment>,
+    /// The rows the copy inserted (`Target \ Before`, less what existed).
+    inserted: Vec<Assignment>,
+    /// `Target`, which the after-commit step keeps.
+    target: Vec<Assignment>,
+    /// `(Trino profile, its tag version)` to wait for.
+    tags: Vec<(i64, i64)>,
+}
+
+/// The name locks of one move, on a connection detached from the pool;
+/// closing it releases them.
+struct NameLocks(sqlx::PgConnection);
+
+impl NameLocks {
+    async fn release(self) {
+        let _ = self.0.close().await;
+    }
+}
+
+impl TableHook {
+    /// The move a table rename makes (rename spec §5.2), or `None` when
+    /// nothing moves: the source is multi-level (it carries nothing) or
+    /// carries no row, or is not a live table (C9).
+    async fn move_plan_for_rename(
+        &self,
+        prefix: &str,
+        body: &Value,
+    ) -> Result<Option<MovePlan>, String> {
+        let Some(((src_ns, src), (dst_ns, dst))) = rename_of(body) else {
+            return Ok(None);
+        };
+        if is_multi_level(&src_ns) {
+            return Ok(None);
+        }
+        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
+        let Some((warehouse_id, _)) = resolve(&mut conn, prefix)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let source = [(src_ns.clone(), src.clone())];
+        let rows = rows_of(&mut conn, warehouse_id, &source)
+            .await
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let Some(current) = current_columns_via(&mut conn, warehouse_id, &src_ns, &src)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let pending = |schema: &str, table: &str, leaving_table: bool| PendingColumns {
+            warehouse_id,
+            schema: schema.to_string(),
+            table: table.to_string(),
+            columns: Some(current.columns.clone()),
+            leaving: Vec::new(),
+            leaving_table,
+        };
+        Ok(Some(MovePlan {
+            warehouse_id,
+            overlay: vec![pending(&dst_ns, &dst, false), pending(&src_ns, &src, true)],
+            moves: vec![(
+                Coordinate {
+                    schema: src_ns,
+                    table: src,
+                    column: None,
+                },
+                Coordinate {
+                    schema: dst_ns,
+                    table: dst,
+                    column: None,
+                },
+            )],
+        }))
+    }
+
+    /// The hold (module doc, "A classified rename"): cap, name locks, profile
+    /// locks, then the uncancellable copy, wait, forward and finish.
+    async fn hold_move(
+        self: Arc<Self>,
+        deadline: Instant,
+        prefix: &str,
+        plan: MovePlan,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let Ok(permit) = self.holds.clone().try_acquire_owned() else {
+            return Refusal(format!(
+                "egret is holding {DEFAULT_MAX_HOLDS} classified table changes already, its \
+                 maximum; retry in a minute"
+            ))
+            .into_response();
+        };
+        let names = match self.lock_names(prefix, &plan.tables()).await {
+            Ok(n) => n,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let profiles = match egret_catalog_registry::services_bound_to_warehouse(
+            &self.db.pool,
+            plan.warehouse_id,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                names.release().await;
+                return Refusal(format!("egret could not lock the change ({e}); retry"))
+                    .into_response();
+            }
+        };
+        let locks = match self.lock_profiles(&profiles).await {
+            Ok(l) => l,
+            Err(refusal) => {
+                names.release().await;
+                return refusal.into_response();
+            }
+        };
+        let this = self.clone();
+        uncancellable(async move {
+            let response = this.run_move(deadline, &plan, &profiles, req, next).await;
+            locks.release().await;
+            names.release().await;
+            drop(permit);
+            response
+        })
+        .await
+    }
+
+    /// `pg_try_advisory_lock` on every table name of the move, in the view
+    /// hold's keyspace (C17), sorted. Busy refuses at once.
+    async fn lock_names(
+        &self,
+        prefix: &str,
+        tables: &[(String, String)],
+    ) -> Result<NameLocks, Refusal> {
+        let internal =
+            |e: sqlx::Error| Refusal(format!("egret could not lock the change ({e}); retry"));
+        let mut keys: Vec<String> = tables
+            .iter()
+            .map(|(ns, name)| lock_key(prefix, ns, name))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let mut conn = self.db.pool.acquire().await.map_err(internal)?.detach();
+        for key in &keys {
+            let got: bool =
+                match sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+                    .bind(key)
+                    .fetch_one(&mut conn)
+                    .await
+                {
+                    Ok(got) => got,
+                    Err(e) => {
+                        NameLocks(conn).release().await;
+                        return Err(internal(e));
+                    }
+                };
+            if !got {
+                NameLocks(conn).release().await;
+                return Err(Refusal(format!(
+                    "another change to this table or its new name is being held; retry when it \
+                     has finished (at most {} s)",
+                    seconds(self.limit)
+                )));
+            }
+        }
+        Ok(NameLocks(conn))
+    }
+
+    /// Copy, wait, forward, then finish or compensate, under the locks.
+    async fn run_move(
+        &self,
+        deadline: Instant,
+        plan: &MovePlan,
+        profiles: &[i64],
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let copied = match self.copy(deadline, plan).await {
+            Ok(c) => c,
+            Err(refusal) => return refusal.into_response(),
+        };
+        if let Err(refusal) = self.wait(deadline, &copied).await {
+            self.compensate(plan, &copied).await;
+            return refusal.into_response();
+        }
+        let response = next.run(req).await;
+        if !response.status().is_success() {
+            self.compensate(plan, &copied).await;
+            return response;
+        }
+        self.finish(plan, &copied, profiles).await;
+        response
+    }
+
+    /// The copy transaction (rename spec §5.3 step 5): the pre-commit compile.
+    async fn copy(&self, deadline: Instant, plan: &MovePlan) -> Result<Copied, Refusal> {
+        let busy = || {
+            Refusal(
+                "egret could not move the table's classifications in time, because other \
+                 permission changes were being written; retry"
+                    .to_string(),
+            )
+        };
+        let db = |e: sqlx::Error| {
+            if is_lock_timeout(&e) {
+                busy()
+            } else {
+                Refusal(format!(
+                    "egret could not move the table's classifications ({e}); retry"
+                ))
+            }
+        };
+        let refused = |e: &dyn std::fmt::Display| {
+            Refusal(format!(
+                "the table's classifications cannot move to {}: {e}; resolve it, then retry",
+                plan.destination_labels()
+            ))
+        };
+        let reach_refusal = |e: ViewReachError| match e {
+            ViewReachError::Db(e) => db(e),
+            ViewReachError::Compile(e) if compile_is_lock_timeout(&e) => busy(),
+            other => refused(&other),
+        };
+        let mut tx = self.db.pool.begin().await.map_err(db)?;
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(MIN_LOCK_WAIT);
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", wait.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        let reach = ViewReach::of_tables(&mut tx, plan.warehouse_id, &plan.destinations())
+            .await
+            .map_err(reach_refusal)?;
+        let before = rows_of(&mut tx, plan.warehouse_id, &plan.tables())
+            .await
+            .map_err(db)?;
+        let target = target_of(&before, &plan.moves);
+        let overlaps_before =
+            egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &reach.services)
+                .await
+                .map_err(|e| refused(&e))?;
+        let mut inserted = Vec::new();
+        for row in without(&target, &before) {
+            let (tag, schema, table, column, from_lineage) = &row;
+            let new: Option<Uuid> = sqlx::query_scalar(
+                "INSERT INTO catalog_tag_assignments \
+                     (tag_id, warehouse_id, schema_name, table_name, column_name, from_lineage) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) \
+                 DO NOTHING RETURNING tag_id",
+            )
+            .bind(tag)
+            .bind(plan.warehouse_id)
+            .bind(schema)
+            .bind(table)
+            .bind(column)
+            .bind(from_lineage)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
+                // 0177's CHECK: a destination name holding `*` or `?`.
+                Some(c) if c == "23514" => refused(&e),
+                _ => db(e),
+            })?;
+            if new.is_some() {
+                inserted.push(row);
+            }
+        }
+        let overlay = serde_json::to_string(&plan.overlay).map_err(|e| refused(&e))?;
+        sqlx::query("SELECT set_config($1, $2, true)")
+            .bind(PENDING_COLUMNS_SETTING)
+            .bind(overlay)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        reach
+            .retag_bump_and_recompile(&mut tx)
+            .await
+            .map_err(reach_refusal)?;
+        egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
+            .await
+            .map_err(|e| refused(&e))?;
+        // Read after the bump, in the same transaction: the versions the
+        // plugins must report are the ones the copy is served under.
+        let tags = if inserted.is_empty() {
+            Vec::new()
+        } else {
+            trino_tag_versions(&mut tx, plan.warehouse_id)
+                .await
+                .map_err(db)?
+        };
+        tx.commit().await.map_err(db)?;
+        Ok(Copied {
+            before,
+            inserted,
+            target,
+            tags,
+        })
+    }
+
+    /// Wait until the plugins serve the copy (rename spec §5.3 step 6).
+    async fn wait(&self, deadline: Instant, copied: &Copied) -> Result<(), Refusal> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match wait_for_versions(&self.policy, &copied.tags, &[], left).await {
+            Ok(()) => Ok(()),
+            Err(WaitError::Timeout { waiting_on }) => Err(Refusal(format!(
+                "engines did not confirm the moved classifications within {} s: {}; check that \
+                 the engines are running and polling egret's Ranger endpoint, then retry",
+                seconds(self.limit),
+                waiting_on.join(", ")
+            ))),
+            Err(WaitError::Store(e)) => Err(Refusal(format!(
+                "egret could not read the plugin download ledger ({e}); retry"
+            ))),
+        }
+    }
+
+    /// Undo the copy (rename spec §5.3, compensation): delete exactly the rows
+    /// it inserted that still carry the provenance they were inserted with,
+    /// and recompile with no overlay. A failure leaves them (over-tag) and is
+    /// logged.
+    async fn compensate(&self, plan: &MovePlan, copied: &Copied) {
+        let result: Result<(), String> = async {
+            let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", self.lock_wait.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            let reach = ViewReach::of_tables(&mut tx, plan.warehouse_id, &plan.destinations())
+                .await
+                .map_err(|e| e.to_string())?;
+            delete_inserted_rows(&mut tx, plan.warehouse_id, &copied.inserted)
+                .await
+                .map_err(|e| e.to_string())?;
+            reach
+                .retag_bump_and_recompile(&mut tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e, destinations = %plan.destination_labels(),
+                "table hook could not undo a classification move; the copied rows remain on a \
+                 name that did not get the table");
+        }
+    }
+
+    /// After the 2xx (rename spec §5.3 step 8): delete `Before \ Target` (the
+    /// sources' rows), re-tag the views that read the old names, recompile
+    /// with no overlay. A failure is logged and recorded as each profile's
+    /// failed compile: the old rows stay, which over-tags and never
+    /// under-tags.
+    async fn finish(&self, plan: &MovePlan, copied: &Copied, profiles: &[i64]) {
+        let result: Result<(), String> = async {
+            let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", self.lock_wait.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            let reach = ViewReach::of_tables(&mut tx, plan.warehouse_id, &plan.sources())
+                .await
+                .map_err(|e| e.to_string())?;
+            delete_rows(
+                &mut tx,
+                plan.warehouse_id,
+                &without(&copied.before, &copied.target),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            reach
+                .retag_bump_and_recompile(&mut tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(error = %e, destinations = %plan.destination_labels(),
+                "a table change committed, but removing the classifications from the old name \
+                 failed; they stay there until removed");
+            self.record_failure(profiles, &egret_perm::CompileError::Db(e))
+                .await;
+        }
+    }
+}
+
 /// The axum middleware (module doc). Every request it does not handle passes
 /// through unchanged.
 pub async fn hook_table_commits(
@@ -722,6 +1310,7 @@ pub async fn hook_table_commits(
     let Some((prefix, target)) = classify(req.method(), req.uri().path()) else {
         return next.run(req).await;
     };
+    let deadline = Instant::now() + hook.limit;
     let (req, body) = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
@@ -736,6 +1325,24 @@ pub async fn hook_table_commits(
     } else {
         (req, Value::Null)
     };
+    let refuse_check = |e: String| {
+        Refusal(format!(
+            "egret could not check which classifications the table carries ({e}); retry"
+        ))
+        .into_response()
+    };
+    if target == Target::Rename {
+        match hook.move_plan_for_rename(&prefix, &body).await {
+            Ok(Some(plan)) => {
+                return hook
+                    .clone()
+                    .hold_move(deadline, &prefix, plan, req, next)
+                    .await
+            }
+            Ok(None) => {}
+            Err(e) => return refuse_check(e),
+        }
+    }
     let tables = tables_of(&target, &body);
     // The Ranger resource has one schema level: a multi-level namespace is
     // never addressed by a compiled policy.
@@ -746,12 +1353,6 @@ pub async fn hook_table_commits(
     if tables.is_empty() {
         return next.run(req).await;
     }
-    let refuse_check = |e: String| {
-        Refusal(format!(
-            "egret could not check which classifications the table carries ({e}); retry"
-        ))
-        .into_response()
-    };
     let (warehouse_id, profiles) = match hook.affected(&prefix, &tables).await {
         Ok(Some((w, p))) if !p.is_empty() => (w, p),
         Ok(_) => return next.run(req).await,
