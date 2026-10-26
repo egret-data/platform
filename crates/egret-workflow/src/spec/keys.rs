@@ -520,6 +520,37 @@ fn child_lists(canonical: &str) -> &'static [&'static str] {
     }
 }
 
+/// Kestra's runnable-only `Task.java` properties (`FlowService.warnings`,
+/// `FlowService.java:574-582`): said once on a task that is not runnable, by
+/// [`non_runnable_properties`], so the generic #13 / Enterprise `not_honoured`
+/// warning for `taskCache` and `workerSelector` is not said a second time there.
+const RUNNABLE_ONLY: &[&str] = &["timeout", "taskCache", "workerSelector"];
+
+/// A task type Kestra's worker never runs (`!(task instanceof RunnableTask)`):
+/// the 11 flowables, and the executor-level `Exit`, `SetVariables`,
+/// `UnsetVariables` and `Labels`.
+///
+/// **Measured 2026-10-26: egret enforces `timeout` on none of them, so none is
+/// left out of the `timeout` warning** (the warning is true for egret too).
+/// `claim::leaf` (`worker/claim.rs:425-432`) hands a budget only to a
+/// `TaskKind::Leaf`, so a `WorkingDirectory` or `AllowFailure` block's claim
+/// resolves none (it is `NotALeaf`, `claim.rs:278-296`, and
+/// `worker/working_dir.rs` never reads `timeout`); `executor/exit.rs` and
+/// `executor/update.rs` never read it; `build_plan` copies a `timeout` into the
+/// plan for a `Pause` alone (`executor/plan.rs:1438`, enforced at
+/// `executor/flowable/pause.rs:243`), and a `Pause` is the type Kestra itself
+/// exempts.
+fn is_non_runnable(canonical: &str) -> bool {
+    FLOWABLE_TYPES.iter().any(|(c, _)| *c == canonical)
+        || matches!(
+            canonical,
+            crate::executor::exit::TYPE_ID
+                | crate::executor::update::SET_VARIABLES
+                | crate::executor::update::UNSET_VARIABLES
+                | crate::executor::update::LABELS
+        )
+}
+
 /// A flowable's own keys that #1 says nothing about. `finally` and `errors`
 /// are #2's (spec Rule 1); a `Pause` `tasks:` is `executor::pause_gap`'s
 /// (D14), so it is not reported a second time; `revision`, `updated` and
@@ -529,7 +560,7 @@ fn silent(site: Option<Site<'_>>, key: &str) -> bool {
     match site {
         Some(Site::Flow) => matches!(key, "revision" | "updated" | "tenantId"),
         Some(Site::Task(t)) if FLOWABLE_TYPES.iter().any(|(c, _)| *c == t) => {
-            matches!(key, "finally" | "errors")
+            matches!(key, "finally" | "errors" | "taskCache" | "workerSelector")
                 || (t == "io.kestra.plugin.core.flow.Pause" && key == "tasks")
         }
         _ => false,
@@ -681,6 +712,7 @@ impl Walk<'_> {
         // egret's own, filled at publish, and not a key Kestra has. `window`
         // is `deny_unknown_fields` already and is left to it.
         if row == FLOW_TRIGGER {
+            self.unfiltered_flow_trigger(id, t, &path);
             if let Some(Value::Array(deps)) = t.get("dependsOn") {
                 let read: Vec<&str> = wire_fields_of::<models::Dependency>()
                     .into_iter()
@@ -689,9 +721,50 @@ impl Walk<'_> {
                 for (i, dep) in deps.iter().enumerate() {
                     let Some(o) = dep.as_object() else { continue };
                     let at = format!("{path}.dependsOn[{i}]");
-                    self.bean(&format!("trigger '{id}': dependsOn[{i}]"), &at, o, &read, None);
+                    self.bean(
+                        &format!("trigger '{id}': dependsOn[{i}]"),
+                        &at,
+                        o,
+                        &read,
+                        None,
+                    );
                 }
             }
+        }
+    }
+
+    /// Kestra's warning for a Flow trigger that listens to everything
+    /// (`FlowService.java:557-568`): no `dependsOn` entry, and `when` absent or
+    /// the literal `"true"`. Kestra's text (`FlowService.java:564`) ends "for
+    /// EVERY execution of EVERY flow on your instance"; egret's listeners hear
+    /// the executions of their own workspace only (`flow_trigger/process.rs:572-578`,
+    /// the listener query, `WHERE l.workspace_id = $1`), so "on your instance"
+    /// is "in this workspace" here, the one word-group that differs.
+    fn unfiltered_flow_trigger(
+        &mut self,
+        id: &str,
+        t: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        let no_depends_on = match t.get("dependsOn") {
+            None | Some(Value::Null) => true,
+            Some(Value::Array(deps)) => deps.is_empty(),
+            Some(_) => false,
+        };
+        let unfiltered_when = match t.get("when") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(w)) => w == "true",
+            Some(Value::Bool(b)) => *b,
+            Some(_) => false,
+        };
+        if no_depends_on && unfiltered_when {
+            self.report.warnings.push(Finding {
+                code: "flow_trigger_without_depends_on",
+                message: format!(
+                    "This flow will be triggered for EVERY execution of EVERY flow in this workspace. We recommend adding the dependsOn property to the Flow trigger '{id}'."
+                ),
+                path: path.to_string(),
+            });
         }
     }
 
@@ -842,6 +915,9 @@ impl Walk<'_> {
         if let Some(retry) = t.get("retry") {
             self.retry(retry, &format!("{path}.retry"));
         }
+        if let Some(row) = row.filter(|r| is_non_runnable(r)) {
+            self.non_runnable_properties(row, id, t, &path);
+        }
         self.reached.push(path.clone());
         let Some(row) = row else { return };
         // `LoopUntil.CheckFrequency` (`LoopUntil.java:245-264`).
@@ -849,7 +925,13 @@ impl Walk<'_> {
             if let Some(Value::Object(freq)) = t.get("checkFrequency") {
                 let read = wire_fields_of::<models::CheckFrequency>();
                 let at = format!("{path}.checkFrequency");
-                self.bean(&format!("task '{id}': checkFrequency"), &at, freq, &read, None);
+                self.bean(
+                    &format!("task '{id}': checkFrequency"),
+                    &at,
+                    freq,
+                    &read,
+                    None,
+                );
             }
         }
         for key in child_lists(row) {
@@ -862,10 +944,9 @@ impl Walk<'_> {
                         // (`{dag}.tasks[{i}]`).
                         match child.get("task") {
                             Some(inner) if child.get("type").is_none() => {
-                                if let (true, Some(node)) = (
-                                    row == "io.kestra.plugin.core.flow.Dag",
-                                    child.as_object(),
-                                ) {
+                                if let (true, Some(node)) =
+                                    (row == "io.kestra.plugin.core.flow.Dag", child.as_object())
+                                {
                                     let read = wire_fields_of::<models::DagNode>();
                                     let at = format!("{path}.{key}[{i}]");
                                     self.bean(
@@ -896,6 +977,35 @@ impl Walk<'_> {
         }
     }
 
+    /// Kestra's own save-time warning for a runnable-only property on a task
+    /// that is not runnable (`FlowService.java:574-582`, texts verbatim): `timeout`
+    /// (not on a `Pause`, which Kestra exempts), `taskCache` and `workerSelector`.
+    /// A key written `null` is absent for Kestra (`getX() != null`). One finding
+    /// per key: the generic #13 / Enterprise warning is suppressed on these
+    /// types (`silent`, `core_leaf`).
+    fn non_runnable_properties(
+        &mut self,
+        canonical: &str,
+        id: &str,
+        task: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        for key in RUNNABLE_ONLY {
+            if task.get(*key).is_none_or(Value::is_null)
+                || (*key == "timeout" && canonical == "io.kestra.plugin.core.flow.Pause")
+            {
+                continue;
+            }
+            self.report.warnings.push(Finding {
+                code: "runnable_property_on_non_runnable",
+                message: format!(
+                    "The task '{id}' cannot use the '{key}' property as it's only relevant for runnable tasks."
+                ),
+                path: format!("{path}.{key}"),
+            });
+        }
+    }
+
     /// A core leaf task's keys (spec 3.2): the handler's own and the task
     /// model's are read; `Task.java`'s are accepted by Kestra and not acted on
     /// (a warning naming the package that lifts them); any other key, `null`
@@ -918,6 +1028,9 @@ impl Walk<'_> {
             }
             let at = format!("{path}.{key}");
             if TASK_JAVA_UNREAD.contains(&key) {
+                if is_non_runnable(canonical) && matches!(key, "taskCache" | "workerSelector") {
+                    continue;
+                }
                 let lift = lift_of(Site::Task(canonical), key)
                     .expect("every TASK_JAVA_UNREAD key has a lift row");
                 self.report.warnings.push(Finding {
@@ -947,11 +1060,7 @@ impl Walk<'_> {
     /// in its own words.
     fn retry(&mut self, retry: &Value, path: &str) {
         let Some(r) = retry.as_object() else { return };
-        let Some(read) = r
-            .get("type")
-            .and_then(Value::as_str)
-            .and_then(retry_keys)
-        else {
+        let Some(read) = r.get("type").and_then(Value::as_str).and_then(retry_keys) else {
             return;
         };
         self.seen.beans += 1;
@@ -993,14 +1102,7 @@ impl Walk<'_> {
     /// on (`lift_of` names the package: `not_honoured`), or unknown to both
     /// (`unknown_property`, as Kestra's Jackson refuses it). Both messages are
     /// egret's own and name the key, never a value (D10).
-    fn key_of(
-        &mut self,
-        read: &[&str],
-        what: &str,
-        path: &str,
-        key: &str,
-        site: Option<Site<'_>>,
-    ) {
+    fn key_of(&mut self, read: &[&str], what: &str, path: &str, key: &str, site: Option<Site<'_>>) {
         if read.contains(&key) {
             return;
         }
@@ -2036,10 +2138,14 @@ mod tests {
     #[test]
     fn each_retry_type_accepts_its_own_keys_and_refuses_another_types() {
         let task = |retry: &str| {
-            format!("{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n{retry}")
+            format!(
+                "{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n{retry}"
+            )
         };
         let common = "      maxAttempts: 2\n      maxDuration: PT1M\n      behavior: RETRY_FAILED_TASK\n      warningOnRetry: false\n";
-        silent_census(&task(&format!("      type: constant\n      interval: PT1S\n{common}")));
+        silent_census(&task(&format!(
+            "      type: constant\n      interval: PT1S\n{common}"
+        )));
         silent_census(&task(&format!(
             "      type: exponential\n      interval: PT1S\n      maxInterval: PT9S\n      delayFactor: 2.0\n{common}"
         )));
@@ -2086,7 +2192,9 @@ mod tests {
             "concurrency.limt",
             "unknown_property",
         );
-        silent_census(&format!("{HEAD}concurrency:\n  limit: 1\n  behavior: QUEUE\n{LOG}"));
+        silent_census(&format!(
+            "{HEAD}concurrency:\n  limit: 1\n  behavior: QUEUE\n{LOG}"
+        ));
     }
 
     #[test]
@@ -2122,11 +2230,17 @@ mod tests {
     /// `condition` an accepted name that sets `when`; egret reads `when` only.
     #[test]
     fn the_deprecated_check_condition_warns_with_its_package() {
-        let r = report(&format!("{HEAD}checks:\n  - condition: x\n    message: m\n{LOG}"));
+        let r = report(&format!(
+            "{HEAD}checks:\n  - condition: x\n    message: m\n{LOG}"
+        ));
         let f = at(&r, "checks[0].condition");
         assert_eq!(f.len(), 1, "{r:?}");
         assert_eq!(f[0].code, "not_honoured");
-        assert!(f[0].message.contains("roadmap package #16"), "{}", f[0].message);
+        assert!(
+            f[0].message.contains("roadmap package #16"),
+            "{}",
+            f[0].message
+        );
     }
 
     #[test]
@@ -2149,7 +2263,11 @@ mod tests {
         let dag = |second: &str| {
             format!("{HEAD}tasks:\n  - id: d\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: a\n          type: core.log\n          message: hi\n      - task:\n          id: b\n          type: core.log\n          message: hi\n{second}")
         };
-        only(&dag("        dependOn: [a]\n"), "tasks.d.tasks[1].dependOn", "unknown_property");
+        only(
+            &dag("        dependOn: [a]\n"),
+            "tasks.d.tasks[1].dependOn",
+            "unknown_property",
+        );
         silent_census(&dag("        dependsOn: [a]\n"));
     }
 
@@ -2163,7 +2281,9 @@ mod tests {
             "inputs.i.dependsOn.inpts",
             "unknown_property",
         );
-        silent_census(&input("      inputs: [a]\n      condition: \"{{ true }}\"\n"));
+        silent_census(&input(
+            "      inputs: [a]\n      condition: \"{{ true }}\"\n",
+        ));
     }
 
     #[test]
@@ -2206,7 +2326,9 @@ mod tests {
     fn round_trip(model_yaml: &str, listed: &[&str], serialised_as: fn(&Value) -> Value) {
         let v: Value = serde_norway::from_str(model_yaml).unwrap();
         let out = serialised_as(&v);
-        let Value::Object(o) = out else { panic!("{out:?}") };
+        let Value::Object(o) = out else {
+            panic!("{out:?}")
+        };
         let mut got: Vec<&str> = o.keys().map(String::as_str).collect();
         let mut want: Vec<&str> = listed.to_vec();
         got.sort_unstable();
@@ -2217,7 +2339,8 @@ mod tests {
     #[test]
     fn every_listed_retry_key_deserializes_into_the_model() {
         let as_retry = |v: &Value| {
-            serde_json::to_value(serde_json::from_value::<models::Retry>(v.clone()).unwrap()).unwrap()
+            serde_json::to_value(serde_json::from_value::<models::Retry>(v.clone()).unwrap())
+                .unwrap()
         };
         for (ty, yaml) in [
             ("constant", "type: constant\ninterval: PT1S\nmaxDuration: PT1M\nmaxAttempts: 2\nwarningOnRetry: true\nbehavior: CREATE_NEW_EXECUTION\n"),
@@ -2243,6 +2366,180 @@ mod tests {
             &sla_keys("EXECUTION_ASSERTION").unwrap(),
             as_sla,
         );
+    }
+
+    // ---------- Kestra's own save-time warnings (Task 7, spec 4) ----------
+
+    fn kestra(r: &ValidationReport, path: &str) -> Vec<(&'static str, String)> {
+        r.warnings
+            .iter()
+            .filter(|w| w.path == path)
+            .map(|w| (w.code, w.message.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn kestra_warns_on_timeout_on_a_flowable_but_not_on_a_pause() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    timeout: PT1M\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    timeout: PT1M\n");
+        let w: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "runnable_property_on_non_runnable")
+            .collect();
+        assert_eq!(w.len(), 1, "{r:?}");
+        assert_eq!(w[0].path, "tasks.s.timeout");
+        assert_eq!(
+            w[0].message,
+            "The task 's' cannot use the 'timeout' property as it's only relevant for runnable tasks."
+        );
+    }
+
+    #[test]
+    fn task_cache_on_a_flowable_gets_kestras_warning_and_not_the_13_one() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    taskCache: {enabled: true}\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n");
+        let at: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.path == "tasks.p.taskCache")
+            .collect();
+        assert_eq!(at.len(), 1, "{r:?}");
+        assert_eq!(at[0].code, "runnable_property_on_non_runnable");
+        assert_eq!(
+            at[0].message,
+            "The task 'p' cannot use the 'taskCache' property as it's only relevant for runnable tasks."
+        );
+    }
+
+    #[test]
+    fn every_non_runnable_type_has_one_finding_per_runnable_property() {
+        let bodies = [
+            (
+                "io.kestra.plugin.core.flow.Sequential",
+                "    tasks:\n      - id: a\n        type: core.log\n        message: a\n",
+            ),
+            (
+                "io.kestra.plugin.core.flow.WorkingDirectory",
+                "    tasks:\n      - id: a\n        type: core.log\n        message: a\n",
+            ),
+            (
+                "io.kestra.plugin.core.flow.AllowFailure",
+                "    tasks:\n      - id: a\n        type: core.log\n        message: a\n",
+            ),
+            (
+                "io.kestra.plugin.core.execution.Exit",
+                "    state: SUCCESS\n",
+            ),
+            (
+                "io.kestra.plugin.core.execution.SetVariables",
+                "    variables: {a: b}\n",
+            ),
+            (
+                "io.kestra.plugin.core.execution.UnsetVariables",
+                "    variables: [a]\n",
+            ),
+            (
+                "io.kestra.plugin.core.execution.Labels",
+                "    labels: {a: b}\n",
+            ),
+        ];
+        for (ty, body) in bodies {
+            let src = format!("id: f\nnamespace: a.b\ntasks:\n  - id: x\n    type: {ty}\n    timeout: PT1M\n    taskCache: {{enabled: true}}\n    workerSelector: {{tags: [a]}}\n{body}");
+            let r = report(&src);
+            for key in ["timeout", "taskCache", "workerSelector"] {
+                let got = kestra(&r, &format!("tasks.x.{key}"));
+                assert_eq!(got.len(), 1, "{ty} {key}: {r:?}");
+                assert_eq!(got[0].0, "runnable_property_on_non_runnable", "{ty} {key}");
+                assert_eq!(
+                    got[0].1,
+                    format!("The task 'x' cannot use the '{key}' property as it's only relevant for runnable tasks.")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_runnable_task_keeps_the_13_and_enterprise_warnings_and_draws_no_kestra_one() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: a\n    timeout: PT1M\n    taskCache: {enabled: true}\n    workerSelector: {tags: [a]}\n");
+        assert!(
+            r.warnings
+                .iter()
+                .all(|w| w.code != "runnable_property_on_non_runnable"),
+            "{r:?}"
+        );
+        assert_eq!(kestra(&r, "tasks.t.taskCache").len(), 1, "{r:?}");
+        assert_eq!(kestra(&r, "tasks.t.taskCache")[0].0, "not_honoured");
+        assert_eq!(kestra(&r, "tasks.t.workerSelector")[0].0, "not_honoured");
+    }
+
+    #[test]
+    fn a_null_runnable_property_on_a_flowable_is_not_warned() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    timeout: null\n    taskCache: null\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n");
+        assert!(
+            r.warnings
+                .iter()
+                .all(|w| w.code != "runnable_property_on_non_runnable"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_nested_flowable_and_an_error_handler_are_reached() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: in\n        type: io.kestra.plugin.core.flow.Parallel\n        timeout: PT1M\n        tasks:\n          - id: a\n            type: core.log\n            message: a\nerrors:\n  - id: e\n    type: io.kestra.plugin.core.flow.Sequential\n    timeout: PT1M\n    tasks:\n      - id: b\n        type: core.log\n        message: a\n");
+        assert_eq!(kestra(&r, "tasks.s.in.timeout").len(), 1, "{r:?}");
+        assert_eq!(kestra(&r, "errors.e.timeout").len(), 1, "{r:?}");
+    }
+
+    const LISTENER: &str = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\ntriggers:\n  - id: l\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\n";
+
+    #[test]
+    fn a_flow_trigger_with_no_depends_on_warns_in_kestras_words_scoped_to_the_workspace() {
+        let r = report(LISTENER);
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.code == "flow_trigger_without_depends_on")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(w.path, "triggers.l");
+        assert_eq!(
+            w.message,
+            "This flow will be triggered for EVERY execution of EVERY flow in this workspace. \
+             We recommend adding the dependsOn property to the Flow trigger 'l'."
+        );
+    }
+
+    #[test]
+    fn a_flow_trigger_with_depends_on_or_a_when_does_not_warn() {
+        for extra in [
+            "    dependsOn:\n      - namespace: a.b\n        flowId: g\n",
+            "    when: \"{{ trigger.namespace == 'a.b' }}\"\n",
+        ] {
+            let r = report(&format!("{LISTENER}{extra}"));
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|w| w.code == "flow_trigger_without_depends_on"),
+                "{extra}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_literal_true_when_or_an_empty_depends_on_still_warns() {
+        for extra in [
+            "    when: \"true\"\n",
+            "    dependsOn: []\n",
+            "    when: null\n",
+        ] {
+            let r = report(&format!("{LISTENER}{extra}"));
+            assert_eq!(
+                r.warnings
+                    .iter()
+                    .filter(|w| w.code == "flow_trigger_without_depends_on")
+                    .count(),
+                1,
+                "{extra}: {r:?}"
+            );
+        }
     }
 }
 
@@ -2309,6 +2606,42 @@ mod corpus {
         assert!(v.outputs >= 18, "valids outputs {v:?}");
         assert!(v.beans >= 85, "valids nested beans {v:?}");
         let i = seen[1];
-        assert!(i.triggers >= 3 && i.inputs >= 15 && i.beans >= 10, "invalids {i:?}");
+        assert!(
+            i.triggers >= 3 && i.inputs >= 15 && i.beans >= 10,
+            "invalids {i:?}"
+        );
+    }
+
+    /// Kestra's two save-time warnings are warnings only: no corpus flow Kestra
+    /// accepts is refused by them. The counts are printed for the report.
+    #[test]
+    fn kestras_own_warnings_never_refuse_a_corpus_flow() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/corpus");
+        let mut by_code = std::collections::BTreeMap::<&str, usize>::new();
+        for dir in ["valids", "invalids"] {
+            for entry in std::fs::read_dir(format!("{root}/{dir}")).expect("the corpus") {
+                let src = std::fs::read_to_string(entry.expect("an entry").path()).expect("a flow");
+                let Ok(flow) = crate::spec::parse(&src) else {
+                    continue;
+                };
+                let report = crate::spec::validate_source(&src, &flow);
+                for w in &report.warnings {
+                    if matches!(
+                        w.code,
+                        "runnable_property_on_non_runnable" | "flow_trigger_without_depends_on"
+                    ) {
+                        *by_code.entry(w.code).or_default() += 1;
+                    }
+                }
+                assert!(
+                    !report.errors.iter().any(|e| matches!(
+                        e.code,
+                        "runnable_property_on_non_runnable" | "flow_trigger_without_depends_on"
+                    )),
+                    "{dir}: {report:?}"
+                );
+            }
+        }
+        eprintln!("corpus Kestra warnings {by_code:?}");
     }
 }
