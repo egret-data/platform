@@ -375,3 +375,12 @@ Each question is the user's to answer: a change of scope, a behaviour change for
 - **Q3. A kill cannot stop `afterExecution:` (D9).** Kestra answers 409 and force-executes the list after a kill. **Default: follow Kestra.** A runaway after-task ends only at its `timeout:`. The alternative is a safety divergence (roadmap §3.1 style): a kill on a terminal execution with live after-runs kills those runs and leaves the execution's state alone. It costs about one task in #2b and diverges from roadmap #20's goal of aligning the 409.
 - **Q4. `WorkingDirectory` `finally:` after success (D7).** Kestra's code reads as never starting it, and the block never ending (not run). **Default: egret runs it, treating Kestra's behaviour as a bug.** The alternative is to refuse `WorkingDirectory` `finally:` with a named refusal until a live Kestra probe settles it.
 - **Q5. `Pause` `finally:` moves from #2 to #9 (D14)**, where `Pause` `errors:` and `onPause:` already are, because all three need the same "resumed `Pause` re-enters `RUNNING`" mechanism. **Default: yes.** Until then it is refused at publish and at start, naming #9 (today it is silently dropped). Corpus: the one flow that has it is already refused.
+
+### Answers (user, 2026-10-27)
+
+- **Q1: yes.** Two PRs: #2a (Part A of the plan), then #2b (Part B).
+- **Q2: yes** (default taken).
+- **Q3: the user chose the safety divergence, NOT Kestra's behaviour.** A kill stops `afterExecution:` runs. This diverges from Kestra (which answers 409 and force-executes the list after a kill) so that a tenant cannot create a task that no one can kill; it goes into the roadmap §3.1 list as a security divergence in #2b. Plan Task B3 builds it: a kill of a terminal execution that still has live after-tasks is accepted (not 409), moves those runs to KILLING/KILLED through the existing kill path, and never changes the execution's own final state. Task B3's brief must carry this; the plan text below that says "follow Kestra" for D9 is superseded.
+- **Q4: default** (egret runs `WorkingDirectory` `finally:`; Kestra's behaviour is treated as a bug).
+- **Q5: yes.** `Pause` `finally:` moves to #9 and is refused naming #9 until then.
+
