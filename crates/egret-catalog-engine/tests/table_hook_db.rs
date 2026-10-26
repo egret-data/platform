@@ -1375,8 +1375,9 @@ async fn a_staged_create_is_masked_at_its_committing_update() {
     assert_eq!(env.masked_columns(tag, "orders").await, vec!["email", "id"]);
 }
 
-/// A namespace drop takes every table in it: their masks are reaped and the
-/// `*` deny stays.
+/// A recursive namespace drop takes every table in it: their masks are
+/// reaped, and (rename spec C13) so is the `*` deny, because the drop, which
+/// cannot be undropped, removes the classification rows under it.
 #[tokio::test]
 async fn a_namespace_drop_reaps_the_masks_of_its_tables() {
     let Some(env) = env().await else { return };
@@ -1388,7 +1389,7 @@ async fn a_namespace_drop_reaps_the_masks_of_its_tables() {
         .await;
     assert!(status.is_success(), "drop namespace: {status} {body}");
     assert!(env.masked_columns(tag, "orders").await.is_empty());
-    assert!(env.has_table_deny(tag, "orders").await);
+    assert!(!env.has_table_deny(tag, "orders").await);
 }
 
 // ── D2 review fix 6: concurrent schema changes are serialized per profile ──
@@ -2666,4 +2667,210 @@ async fn a_refused_or_undone_move_records_nothing() {
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(!status.is_success(), "{status} {body}");
     assert!(env.move_events("orders").await.is_empty());
+}
+
+// ── Task 8: drops (R2, R9, C13) ──
+
+impl Env {
+    /// Record `columns` and a computed lineage reading `bases` for the view
+    /// `{schema}.{name}` of the env's catalog, with the view's derived rows.
+    async fn lineage_view(
+        &self,
+        schema: &str,
+        name: &str,
+        bases: &[(&str, &str)],
+        columns: &[&str],
+    ) -> egret_perm_compile::lineage::ViewRef {
+        let view = egret_perm_compile::lineage::ViewRef {
+            catalog: self.catalog.clone(),
+            schema: schema.into(),
+            name: name.into(),
+        };
+        let tables: std::collections::BTreeSet<egret_perm_compile::lineage::LineageTable> = bases
+            .iter()
+            .map(|(s, t)| (self.catalog.clone(), s.to_string(), t.to_string()))
+            .collect();
+        let columns: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+        let mut tx = self.db.pool.begin().await.expect("begin");
+        egret_perm_compile::lineage::write_lineage(&mut tx, &view, &tables)
+            .await
+            .expect("lineage");
+        egret_perm_compile::lineage::set_view_columns(&mut tx, &view, Some(&columns))
+            .await
+            .expect("columns");
+        egret_perm_compile::retag_view_in_tx(&mut tx, &view)
+            .await
+            .expect("derive");
+        tx.commit().await.expect("commit");
+        view
+    }
+
+    /// Every classification row of the warehouse in any spelling of `schema`.
+    async fn rows_in(&self, schema: &str) -> Vec<Row> {
+        sqlx::query_as(
+            "SELECT tag_id, schema_name, table_name, column_name FROM catalog_tag_assignments \
+              WHERE warehouse_id = $1 AND lower(schema_name) = lower($2) ORDER BY 1, 2, 3, 4",
+        )
+        .bind(self.warehouse_id)
+        .bind(schema)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("rows")
+    }
+}
+
+/// C13: a recursive namespace drop (which cannot be undropped) deletes every
+/// classification row under it in any spelling, the lineage of its views,
+/// and the rows its tables gave views elsewhere; one `tag:purge` event, by
+/// the caller.
+#[tokio::test]
+async fn a_recursive_namespace_drop_deletes_its_classifications() {
+    let Some(env) = env().await else { return };
+    let (a, _) = env.classified_orders().await;
+    env.create_table("events", &[(1, "id")]).await;
+    env.classify_table("events").await;
+    let shouting = env.new_gated_tag().await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'SALES','Events','')",
+    )
+    .bind(shouting)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign");
+    let in_sales = env
+        .lineage_view("sales", "v_orders", &[("sales", "orders")], &["id"])
+        .await;
+    let elsewhere = env
+        .lineage_view("other", "v_orders", &[("sales", "orders")], &["id"])
+        .await;
+    assert!(
+        env.rows()
+            .await
+            .contains(&(a, "other".into(), "v_orders".into(), "id".into())),
+        "the view elsewhere carries the base's classification"
+    );
+    let (client, client_id) = env.catalog_client("spark-etl").await;
+    *env.caller.lock().unwrap() = client_id.clone();
+    let tag_version = env.tag_version().await;
+
+    let (status, body) = env
+        .call("DELETE", "namespaces/sales?recursive=true", None)
+        .await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    assert!(
+        env.rows_in("sales").await.is_empty(),
+        "{:?}",
+        env.rows_in("sales").await
+    );
+    assert!(
+        env.rows_in("other").await.is_empty(),
+        "the view elsewhere is re-tagged"
+    );
+    let mut conn = env.db.pool.acquire().await.unwrap();
+    assert_eq!(
+        egret_perm_compile::lineage::recorded_lineage(&mut conn, &in_sales)
+            .await
+            .unwrap(),
+        egret_perm_compile::lineage::RecordedLineage::Missing
+    );
+    assert_ne!(
+        egret_perm_compile::lineage::recorded_lineage(&mut conn, &elsewhere)
+            .await
+            .unwrap(),
+        egret_perm_compile::lineage::RecordedLineage::Missing,
+        "a view elsewhere keeps its lineage"
+    );
+    let events: Vec<Value> = sqlx::query_scalar(
+        "SELECT detail FROM audit.audit_log WHERE action = 'tag:purge' AND resource_id = $1",
+    )
+    .bind(format!("{}:sales", env.warehouse_id))
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["actor"]["id"], json!(client));
+    // orders (A, B on email), events, Events in another spelling, and the
+    // sales view's derived rows (A, B on `id`).
+    assert_eq!(events[0]["rows"], json!(6));
+    assert_eq!(events[0]["views"], json!(1));
+    assert!(env.tag_version().await > tag_version);
+}
+
+/// R9: a plain namespace drop removes only an empty namespace; a row placed
+/// on it beforehand stays (the stale-row report shows it).
+#[tokio::test]
+async fn a_plain_namespace_drop_keeps_rows() {
+    let Some(env) = env().await else { return };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces",
+            Some(json!({"namespace": ["empty_ns"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let a = env.new_gated_tag().await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'empty_ns','later','')",
+    )
+    .bind(a)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .expect("assign");
+
+    let (status, body) = env.call("DELETE", "namespaces/empty_ns", None).await;
+    assert!(status.is_success(), "drop: {status} {body}");
+    assert_eq!(env.rows_in("empty_ns").await.len(), 1);
+}
+
+/// R9, E35: lakekeeper refuses a plain drop of a namespace that still holds a
+/// soft-deleted table, so a plain drop never removes a dropped table's rows.
+/// If this ever passes the drop, R9's purge must be built.
+#[tokio::test]
+async fn a_plain_drop_of_a_namespace_with_a_dropped_table_is_refused() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.soft_drop("orders").await;
+
+    let (status, body) = env.call("DELETE", "namespaces/sales", None).await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+}
+
+/// R2: a dropped table keeps its rows; an undrop brings its classifications
+/// back on both engines.
+#[tokio::test]
+async fn a_dropped_table_keeps_its_rows_and_an_undrop_restores_them() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let id = env.soft_drop("orders").await;
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+
+    env.undrop(id).await.expect("undrop");
+    let served = env.served_trino_resources().await;
+    assert!(
+        served.contains(&("orders".into(), String::new())),
+        "{served:?}"
+    );
+    assert!(
+        served.contains(&("orders".into(), "email".into())),
+        "{served:?}"
+    );
+    let policies = env.served_starrocks_policies().await;
+    let mask = format!(
+        "{}{a}-mask-{}.sales.orders.id",
+        egret_policy::COMPILER_CLEARANCE_PREFIX,
+        env.catalog
+    );
+    assert!(policies.contains(&mask), "{policies:?}");
 }

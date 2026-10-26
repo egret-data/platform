@@ -653,3 +653,16 @@ Deviations the code forces are recorded here, per task, as they happen.
 - `a_rename_with_nothing_bound_moves_at_once` bounds the move at half the test deadline (2.5 s), not 1 s: with the
   whole binary running in parallel the copy and the after-commit step took 1.1-1.3 s. A wait on a silent engine
   would run to the 5 s deadline.
+
+### Task 8: drops
+
+- `classify` takes the query string; `Target::DropNamespace` gained `recursive`. The middleware's body became
+  `handle_table_commit`; a recursive single-level namespace drop runs it and then the purge inside one
+  uncancellable task, so a disconnecting client cannot skip the purge after Lakekeeper committed.
+- The namespace's tables the purge reaches with `ViewReach` are those that carry rows and those a recorded lineage
+  reads (`view_lineage.base_*`); the views in the namespace are found in `view_lineage_state` (computed or failed).
+  `tag:purge` is recorded only when a row or a view lineage went.
+- #755's `a_namespace_drop_reaps_the_masks_of_its_tables` asserted that the `*` deny stays after a recursive drop;
+  with C13 the classification rows go, so the deny goes too, and the test now asserts that.
+- R9's premise holds on the pinned Lakekeeper: a plain drop of a namespace whose only table is soft-deleted is
+  refused (`a_plain_drop_of_a_namespace_with_a_dropped_table_is_refused`).

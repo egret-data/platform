@@ -99,7 +99,13 @@
 //! with its old and new column names, the old ones leaving. A field id that
 //! vanished (a dropped column) keeps its rows dormant.
 //!
-//! A drop keeps its rows (an undrop restores the name).
+//! A table drop keeps its rows (an undrop restores the name). A recursive
+//! namespace drop (`?recursive=true`), which hard-deletes every tabular in it
+//! and cannot be undropped, removes them: after its 2xx, one transaction
+//! deletes every row under the namespace, the lineage of its views, and the
+//! rows its tables gave views elsewhere, and records `tag:purge`. A plain
+//! namespace drop only ever removes an empty namespace (lakekeeper refuses
+//! one that holds any tabular, live or soft-deleted), so it changes nothing.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,17 +198,31 @@ pub fn layer(inner: axum::Router, hook: Arc<TableHook>) -> axum::Router {
 /// The table request a path names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
-    Create { ns: String },
-    Register { ns: String },
-    TableCommit { ns: String, table: String },
+    Create {
+        ns: String,
+    },
+    Register {
+        ns: String,
+    },
+    TableCommit {
+        ns: String,
+        table: String,
+    },
     Transaction,
     Rename,
-    Drop { ns: String, table: String },
-    DropNamespace { ns: String },
+    Drop {
+        ns: String,
+        table: String,
+    },
+    /// `recursive=true` hard-deletes every tabular in it (rename spec E13).
+    DropNamespace {
+        ns: String,
+        recursive: bool,
+    },
 }
 
 /// `(prefix, target)` for a request the hook handles, else `None`.
-fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
+fn classify(method: &Method, path: &str, query: Option<&str>) -> Option<(String, Target)> {
     let segs: Vec<&str> = path
         .trim_start_matches('/')
         .split('/')
@@ -218,7 +238,16 @@ fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
                     table: d(table)?,
                 },
             )),
-            [prefix, "namespaces", ns] => Some((d(prefix)?, Target::DropNamespace { ns: d(ns)? })),
+            [prefix, "namespaces", ns] => Some((
+                d(prefix)?,
+                Target::DropNamespace {
+                    ns: d(ns)?,
+                    recursive: query
+                        .into_iter()
+                        .flat_map(|q| q.split('&'))
+                        .any(|kv| kv.eq_ignore_ascii_case("recursive=true")),
+                },
+            )),
             _ => None,
         };
     }
@@ -301,7 +330,7 @@ fn tables_of(target: &Target, body: &Value) -> Vec<(String, Option<String>)> {
             .map(|(s, d)| vec![(s.0, Some(s.1)), (d.0, Some(d.1))])
             .unwrap_or_default(),
         Target::Drop { ns, table } => vec![(ns.clone(), Some(table.clone()))],
-        Target::DropNamespace { ns } => vec![(ns.clone(), None)],
+        Target::DropNamespace { ns, .. } => vec![(ns.clone(), None)],
     }
 }
 
@@ -1511,6 +1540,110 @@ impl TableHook {
     }
 }
 
+impl TableHook {
+    /// After a recursive namespace drop's 2xx (rename spec §5.6, C13), one
+    /// transaction: the views in the namespace lose their lineage, every row
+    /// whose folded schema is the namespace goes (any table, any column,
+    /// manual or derived), the views elsewhere that read its tables are
+    /// re-tagged, and the change is bumped, recompiled and recorded as
+    /// `tag:purge` by `caller`. A failure is logged; the rows stay, and the
+    /// stale-row report shows them.
+    async fn purge_namespace(&self, prefix: &str, ns: &str, caller: Option<&CatalogCaller>) {
+        let result: Result<(), String> = async {
+            let err = |e: &dyn std::fmt::Display| e.to_string();
+            let mut tx = self.db.pool.begin().await.map_err(|e| err(&e))?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", self.lock_wait.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| err(&e))?;
+            let Some((warehouse_id, _)) = resolve(&mut tx, prefix).await.map_err(|e| err(&e))?
+            else {
+                return Ok(());
+            };
+            // The namespace's tables any view may read: those with rows and
+            // those a lineage records.
+            let tables: Vec<String> = sqlx::query_scalar(
+                "SELECT table_name FROM catalog_tag_assignments \
+                  WHERE warehouse_id = $1 AND lower(schema_name) = lower($2) \
+                 UNION \
+                 SELECT l.base_table FROM view_lineage l \
+                   JOIN registry.catalogs c ON c.name = l.base_catalog \
+                  WHERE c.warehouse_id = $1 AND lower(l.base_schema) = lower($2)",
+            )
+            .bind(warehouse_id)
+            .bind(ns)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| err(&e))?;
+            let tables: Vec<(String, String)> =
+                tables.into_iter().map(|t| (ns.to_string(), t)).collect();
+            let reach = ViewReach::of_tables(&mut tx, warehouse_id, &tables)
+                .await
+                .map_err(|e| err(&e))?;
+            let views: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT s.view_catalog, s.view_schema, s.view_name FROM view_lineage_state s \
+                   JOIN registry.catalogs c ON c.name = s.view_catalog \
+                  WHERE c.warehouse_id = $1 AND lower(s.view_schema) = lower($2)",
+            )
+            .bind(warehouse_id)
+            .bind(ns)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| err(&e))?;
+            for (catalog, schema, name) in &views {
+                let view = egret_perm_compile::lineage::ViewRef {
+                    catalog: catalog.clone(),
+                    schema: schema.clone(),
+                    name: name.clone(),
+                };
+                egret_perm_compile::lineage::delete_lineage(&mut tx, &view)
+                    .await
+                    .map_err(|e| err(&e))?;
+            }
+            let rows = sqlx::query(
+                "DELETE FROM catalog_tag_assignments \
+                  WHERE warehouse_id = $1 AND lower(schema_name) = lower($2)",
+            )
+            .bind(warehouse_id)
+            .bind(ns)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| err(&e))?
+            .rows_affected();
+            reach
+                .retag_bump_and_recompile(&mut tx)
+                .await
+                .map_err(|e| err(&e))?;
+            if rows > 0 || !views.is_empty() {
+                let caller = Caller::resolve(&mut tx, caller)
+                    .await
+                    .map_err(|e| err(&e))?;
+                egret_audit::governance::record_change_by(
+                    &mut tx,
+                    caller.actor(),
+                    egret_audit::governance::action::CATALOG_TAG_PURGE,
+                    egret_audit::governance::resource::CATALOG,
+                    format!("{warehouse_id}:{ns}"),
+                    serde_json::json!({
+                        "schema": ns, "rows": rows, "views": views.len(),
+                        "trigger": "iceberg_drop_namespace",
+                    }),
+                )
+                .await
+                .map_err(|e| err(&e))?;
+            }
+            tx.commit().await.map_err(|e| err(&e))
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(namespace = %ns, error = %e,
+                "a namespace was dropped, but removing its classifications failed; they stay \
+                 until removed");
+        }
+    }
+}
+
 /// Who made a change, resolved from the Iceberg caller (rename spec §5.7, R7,
 /// C6a): a catalog client by its `client_id` (one deleted since keeps it), a
 /// user by id (no catalog token names one today), or egret when no guard ran.
@@ -1667,10 +1800,52 @@ pub async fn hook_table_commits(
     req: Request,
     next: Next,
 ) -> Response {
-    let Some((prefix, target)) = classify(req.method(), req.uri().path()) else {
+    let Some((prefix, target)) = classify(req.method(), req.uri().path(), req.uri().query()) else {
         return next.run(req).await;
     };
     let deadline = Instant::now() + hook.limit;
+    // A recursive namespace drop cannot be undropped: after its 2xx the rows
+    // under it go too (rename spec C13). A multi-level namespace carries none.
+    if let Target::DropNamespace {
+        ns,
+        recursive: true,
+    } = &target
+    {
+        if !is_multi_level(ns) {
+            let ns = ns.clone();
+            let caller = req.extensions().get::<CatalogCaller>().cloned();
+            return uncancellable(async move {
+                let response = handle_table_commit(
+                    hook.clone(),
+                    loader,
+                    prefix.clone(),
+                    target,
+                    deadline,
+                    req,
+                    next,
+                )
+                .await;
+                if response.status().is_success() {
+                    hook.purge_namespace(&prefix, &ns, caller.as_ref()).await;
+                }
+                response
+            })
+            .await;
+        }
+    }
+    handle_table_commit(hook, loader, prefix, target, deadline, req, next).await
+}
+
+/// The hook's work for one classified request (module doc).
+async fn handle_table_commit(
+    hook: Arc<TableHook>,
+    loader: axum::Router,
+    prefix: String,
+    target: Target,
+    deadline: Instant,
+    req: Request,
+    next: Next,
+) -> Response {
     let (req, body) = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
@@ -1796,7 +1971,7 @@ mod tests {
     use serde_json::json;
 
     fn post(path: &str) -> Option<(String, Target)> {
-        classify(&Method::POST, path)
+        classify(&Method::POST, path, None)
     }
 
     #[test]
@@ -1826,7 +2001,7 @@ mod tests {
         );
         assert_eq!(post("/wh/tables/rename"), Some((p.into(), Target::Rename)));
         assert_eq!(
-            classify(&Method::DELETE, "/wh/namespaces/sales/tables/orders"),
+            classify(&Method::DELETE, "/wh/namespaces/sales/tables/orders", None),
             Some((
                 p.into(),
                 Target::Drop {
@@ -1836,23 +2011,46 @@ mod tests {
             ))
         );
         assert_eq!(
-            classify(&Method::DELETE, "/wh/namespaces/sales"),
-            Some((p.into(), Target::DropNamespace { ns: "sales".into() }))
+            classify(&Method::DELETE, "/wh/namespaces/sales", None),
+            Some((
+                p.into(),
+                Target::DropNamespace {
+                    ns: "sales".into(),
+                    recursive: false
+                }
+            ))
+        );
+        assert_eq!(
+            classify(
+                &Method::DELETE,
+                "/wh/namespaces/sales",
+                Some("force=true&recursive=true")
+            ),
+            Some((
+                p.into(),
+                Target::DropNamespace {
+                    ns: "sales".into(),
+                    recursive: true
+                }
+            ))
         );
     }
 
     #[test]
     fn reads_and_view_requests_are_not_this_hooks() {
         assert_eq!(
-            classify(&Method::GET, "/wh/namespaces/sales/tables/orders"),
+            classify(&Method::GET, "/wh/namespaces/sales/tables/orders", None),
             None
         );
-        assert_eq!(classify(&Method::GET, "/wh/namespaces/sales/tables"), None);
+        assert_eq!(
+            classify(&Method::GET, "/wh/namespaces/sales/tables", None),
+            None
+        );
         assert_eq!(post("/wh/namespaces/sales/views"), None);
         assert_eq!(post("/wh/namespaces/sales/views/v"), None);
         assert_eq!(post("/wh/views/rename"), None);
         assert_eq!(
-            classify(&Method::DELETE, "/wh/namespaces/sales/views/v"),
+            classify(&Method::DELETE, "/wh/namespaces/sales/views/v", None),
             None
         );
         assert_eq!(post("/wh/namespaces/sales/tables/orders/metrics"), None);
@@ -1907,7 +2105,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            tables_of(&Target::DropNamespace { ns: "sales".into() }, &Value::Null),
+            tables_of(
+                &Target::DropNamespace {
+                    ns: "sales".into(),
+                    recursive: false
+                },
+                &Value::Null
+            ),
             vec![("sales".to_string(), None)]
         );
     }
