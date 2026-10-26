@@ -784,3 +784,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   catalog; it does not track what happened between (a name renamed back carries the classifications again and drops
   out). A rename whose source rows were kept (fix 1, `source_kept`) leaves the classifications on the old name, so
   it is not reported either.
+
+### Live fix F1: a classified rename onto a dropped table's name is refused at once
+
+- Lakekeeper refuses a rename onto a name a soft-deleted tabular holds, answering `404 NoSuchTableException` ("Error
+  getting tabular from catalog"), also with no egret hook in front (pinned by the test through the raw router). A held
+  rename used to pay the whole wait (57 s live) before learning it, then compensated. `move_plan_for_rename` now
+  checks the destination's state first (`table_states_via` = `dropped`) and answers 409 at once: "the new name
+  sales.x belongs to a dropped table in the recycle bin, and the catalog does not rename onto it; undrop that table,
+  purge it, or choose another name". An unclassified rename is not held and still gets Lakekeeper's own answer.

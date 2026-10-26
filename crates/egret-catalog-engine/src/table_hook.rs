@@ -121,8 +121,8 @@ use tracing::Instrument as _;
 
 use egret_perm_compile::table_columns::{
     column_names, current_columns_via, current_fields_via, has_dropped_tabular_via,
-    live_tabular_id_via, stored_schema_fields_via, top_level_columns, top_level_fields,
-    PendingColumns, TableKey, PENDING_COLUMNS_SETTING,
+    live_tabular_id_via, stored_schema_fields_via, table_states_via, top_level_columns,
+    top_level_fields, PendingColumns, TableKey, TableState, PENDING_COLUMNS_SETTING,
 };
 use uuid::Uuid;
 
@@ -1057,6 +1057,27 @@ impl TableHook {
         let tabular_id = live_tabular_id_via(&mut conn, warehouse_id, &src_ns, &src)
             .await
             .map_err(|e| check(&e))?;
+        // Lakekeeper refuses a rename onto a name a soft-deleted tabular holds
+        // (with a 404 "Error getting tabular"): say so at once, instead of
+        // after the whole hold (live check F1).
+        let dst_key = TableKey {
+            warehouse_id,
+            schema: dst_ns.clone(),
+            table: dst.clone(),
+        };
+        if !is_multi_level(&dst_ns)
+            && table_states_via(&mut conn, std::slice::from_ref(&dst_key))
+                .await
+                .map_err(|e| check(&e))?
+                == [TableState::Dropped]
+        {
+            return Err(Refusal(format!(
+                "the new name {}.{dst} belongs to a dropped table in the recycle bin, and the \
+                 catalog does not rename onto it; undrop that table, purge it, or choose another \
+                 name",
+                dst_ns.replace('\u{1f}', ".")
+            )));
+        }
         if is_multi_level(&dst_ns) {
             return Err(Refusal(
                 "the table carries classifications and its new namespace has more than one \

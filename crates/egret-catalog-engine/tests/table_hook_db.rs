@@ -3299,3 +3299,45 @@ async fn an_error_after_a_committed_column_rename_finishes_the_move() {
         sorted(vec![row(a, "orders", ""), row(b, "orders", "mail")])
     );
 }
+
+// ── Live check F1: a rename onto a dropped table's name ──
+
+/// Live check F1: lakekeeper refuses a rename onto a name a soft-deleted table
+/// holds (pinned here without egret's hook), with a misleading 404, and a
+/// classified rename used to learn that only after the whole hold. egret
+/// refuses it at once with a 409 that names the cause; nothing is written.
+#[tokio::test]
+async fn a_classified_rename_onto_a_dropped_tables_name_is_refused_at_once() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.create_table("binned", &[(1, "id")]).await;
+    env.soft_drop("binned").await;
+    env.create_table("plain", &[(1, "id")]).await;
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "plain"},
+                "destination": {"namespace": ["sales"], "name": "binned"},
+            })),
+        )
+        .await;
+    assert!(
+        !status.is_success(),
+        "lakekeeper refuses it: {status} {body}"
+    );
+    let tag_version = env.tag_version().await;
+
+    let started = Instant::now();
+    let (status, body) = env.rename("orders", "binned").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("recycle bin"), "{message}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+    assert_eq!(env.tag_version().await, tag_version);
+}
