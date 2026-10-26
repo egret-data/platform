@@ -450,7 +450,8 @@ mismatch between egret's state and what an engine returns is a defect, not a not
    `classifications_on_dropped_tables`); undrop from the recovery page → on both engines the restored table is
    classified again on its first read (refused/NULL for `granted-u`, hashed for `cleared-u`).
 6. **Stale report:** pre-place `tm-pii` on `sales.ghost` → `classifications_on_missing_tables` names it; Where used
-   shows "Not in the catalog". Then rename `region`→`area` from Trino (unclassified, so not held) and insert a row on
+   shows "Not in the catalog". Then rename `region`→`area` from Trino (no column row, but held all the same: the
+   table carries a whole-table classification and StarRocks is bound, spec C12) and insert a row on
    `sales.orders_v2.region` directly in SQL, as a pre-fix rename left rows → `classifications_on_missing_columns`
    reads "renamed to `area`"; Where used shows it beside the column.
 7. **Silent engine:** stop the StarRocks FE, wait 100 s, rename a classified table → 409 after 90 s naming the

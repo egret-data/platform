@@ -800,3 +800,9 @@ Deviations the code forces are recorded here, per task, as they happen.
   sales.x: <compile message>. Nothing was renamed." The compile message carries its own advice ("resolve the rule
   masks on that column"), so the hold's "; resolve it, then retry" repeated it. §8's example message ends the old
   way; this note supersedes it.
+
+### Live fix F5: plan prose
+
+- The plan's Task 14 step 6 called the `region`→`area` rename "unclassified, so not held". It is held, as C12
+  specifies: the table carries a whole-table classification and a StarRocks engine is bound (StarRocks masks per
+  column name). The live run measured it held for 36 s. The plan text is corrected.
