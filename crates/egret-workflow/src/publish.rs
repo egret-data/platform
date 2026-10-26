@@ -6,7 +6,7 @@
 //!    missing or foreign flow, the same status every refusal below answers
 //!    with);
 //! 2. `parse(source)` -- a parse failure is `InvalidInput`;
-//! 3. `validate(&flow)`, plus `spec::unrunnable` against this deployment's
+//! 3. `validate_source(source, &flow)` (`validate` plus the key census), plus `spec::unrunnable` against this deployment's
 //!    `runtime::served()` set (`task_type_not_served`) -- any **error** is
 //!    `InvalidInput`; warnings are carried into the snapshot but never block
 //!    publish (a flow declaring `concurrency` must still publish -- it is
@@ -99,7 +99,7 @@ use crate::plugins;
 use crate::repo::{FlowRepo, FlowVersionRow};
 use crate::scripts::{self, RunnerKind};
 use crate::spec::path::task_path;
-use crate::spec::{parse, registry, validate, Finding};
+use crate::spec::{parse, registry, validate_source, Finding};
 use egret_config::PluginConfigurations;
 use egret_workflow_api::WorkflowRefPort;
 
@@ -308,13 +308,10 @@ pub async fn publish_gated(
     // with no runner, a script or plugin task is refused once, as
     // `task_type_not_served`, and the gates' runner refusals stay for a
     // deployment that has a runner.
-    let mut report = validate(&parsed);
+    let mut report = validate_source(&draft.source, &parsed);
     report
         .errors
         .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
-    report
-        .warnings
-        .extend(crate::spec::property_warnings(&draft.source));
     if !report.errors.is_empty() {
         return Err(Error::InvalidInput(crate::spec::describe(&report.errors)));
     }

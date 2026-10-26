@@ -26,6 +26,8 @@
 | bị validation từ chối lúc publish (`VALIDATE_REFUSED`) | 27 | **25** |
 | Kestra chạy được, egret từ chối (`PUBLISHED_BUT_REFUSED`) | 18 | **6**: 3 thuộc tính của `Pause`, 1 `retry:` trong block `AllowFailure`, 1 `namespace:` dạng template của Subflow, 1 mục `dependsOn` của Flow trigger chỉ có một số key |
 
+**Ghi chú, 2026-10-26 (gói #1 "Không bỏ qua im lặng", đang review: PR #756, dòng #1 chỉ đánh dấu xong sau khi merge).** Đo trên nhánh của gói, đã rebase lên main `28fb8693`. Nguồn: kết quả in ra của ratchet từ `cargo test -p egret-workflow --test executor -- --nocapture` và các hằng số trong `oracle-exec/driver.rs`. Lệch, đã đưa vào baseline kèm nguyên nhân: **72** (cột 2026-10-19 ghi 73; `invalids/invalid-property` nay được tính là bị từ chối, qua một nhóm lúc lưu, spec Q1 (b)). Ratchet: **301 / 72 / 72 / 0** (golden / lệch / baselined / hỏng), nên 229 khớp golden (`sixteen_banked` assert (301, 229, 72)). `LIVE` vẫn **295** (`driver.rs:853`) và `VALIDATE_REFUSED` vẫn **25** (`driver.rs:979`): spec của gói dự đoán 294 và 26, nhưng `invalids/invalid-property` là bên thua trong cuộc tranh tên (dùng chung `id: duplicate` với `invalids/duplicate`) và `publish_corpus` không bao giờ lưu nó. `UNKNOWN_TYPE_REFUSED` 21 (`driver.rs:931`) và `PUBLISHED_BUT_REFUSED` 6 không đổi. Các cột ở trên vẫn là bản ghi của 2026-10-18 và 2026-10-19.
+
 Trong 84 trường hợp lệch đo ngày 2026-10-18, C2 chiếm 12. 72 trường hợp còn lại theo nguyên nhân: `finally:` 11, `afterExecution:` 9, renderer lệch 8, `sla: MAX_DURATION` 5, `outputs:` riêng của `Loop` 5, độ trễ timing/poller 4, các cặp thứ tự mà driver không có đồng hồ không thể đạt tới 4, flow invalid bị chấp nhận thừa 4, các lệch `Loop` chưa quy được nguyên nhân 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, retry của Subflow 2, thiếu hàm Pebble 2, nguyên nhân đơn lẻ 4, cố ý 1.
 
 **Bề mặt tính năng** (Kestra 2.0 OSS, ngoài corpus; bằng chứng ở Phụ lục B):
@@ -90,6 +92,13 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 
 **Kỳ vọng sau #2:** baseline giảm từ 73 xuống khoảng 52.
 
+**Ghi chú, 2026-10-26 (§9 của spec gói #1, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`; các dòng ở trên không bị sửa).** Đính chính 6 và 8 nằm dưới Phụ lục B §4 và §8 (bản EN), và 7 ở §4 bên dưới.
+1. **#9:** `tasks:` của `Pause` không phải property của Kestra (`Pause.java:158`: field của nó là `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors`, `finally`). Nó bị bỏ khỏi phạm vi của #9 và vẫn bị từ chối vĩnh viễn, như một property không xác định (mã `unsupported_pause_property` được giữ). #9 còn thêm `checkFrequency`/`failOnMaxReached` không phải literal của `LoopUntil` (`unsupported_loop_until_property`; spec Q3).
+2. **#11:** thêm `allowConcurrent` của Schedule (mặc định của Kestra là `false` và khoá trigger đến khi execution của nó xong, `TriggerScheduler.java:345-349`; egret không bao giờ khoá; gói #1 chỉ cảnh báo khi viết `false` tường minh), `failOnTriggerError`, và `when` của Webhook.
+3. **#2:** thêm `errors:` của `LoopUntil`, `errors:` của `WorkingDirectory` và `finally:` của `WorkingDirectory` (đều là `AbstractBranch`). Một version publish trước #2 giữ chúng chỉ trong `snapshot.source`, nên #2 phải suy lại plan từ source (spec §10).
+4. **#3:** thêm `isRadio` và `autoSelectFirst` của SELECT/MULTISELECT như gợi ý cho form start, và `expression` của SELECT/MULTISELECT.
+5. **#17:** thêm các pattern `**` và `[...]` của `outputFiles` trong script (`worker/commands.rs:3108-3124`).
+
 ## 3. Những gì vẫn khác, và vì sao
 
 ### 3.1 Khác biệt vì bảo mật (giữ lại)
@@ -124,3 +133,9 @@ Những điểm này được giữ vì làm giống Kestra sẽ mở lỗ hổn
 ## 4. Giữ cho tài liệu luôn cập nhật
 
 Đo lại mỗi khi một gói merge: kết quả in ra của ratchet cho số liệu corpus, và `python3 handler_surface.py` cho bề mặt handler. Cập nhật §1, đánh dấu gói đã xong ở §2 kèm PR của nó, và giữ nguyên các phụ lục như bản ghi có ngày của 2026-10-18. Khi spec của một gói tìm ra một khoảng trống mà không dòng nào nêu tên, thêm nó vào một dòng hoặc vào §3 kèm lý do. Đừng bao giờ để nó nằm ngoài danh sách.
+
+**Ghi chú, 2026-10-26 (gói #1, đính chính 7): bản pin quyết định.** Bản xuất schema đã commit (rc13, dựng 2026-09-01) mới hơn bản pin của source (`96893b589`, 2026-08-17). Chỗ nào hai bản khác nhau, bản pin quyết định: rc13 có `onChildFailure` trên `Parallel` và `Dag`, bản pin không có (`git log -S onChildFailure` rỗng ở bản pin), nên nó bị từ chối như property không xác định và hai dòng của nó trong `property-treatment.json` là `refused`. Hãy đo lại với một bản pin mới hơn trước khi coi rc13 là thẩm quyền.
+
+**Ghi chú, 2026-10-26 (gói #1, đính chính 6 và 8, vốn sửa Phụ lục B; bản VI không có phụ lục, nên ghi ở đây):**
+- **Đính chính 6 (Phụ lục B §4):** dòng "Schedule.lateMaximumDelay | supported | trigger/schedule.rs:1368" là sai. Nó bị từ chối khi scheduler đồng bộ trigger (`trigger/schedule.rs:1368-1371`, hiện ở `last_error` của dòng trigger), nên trigger không bao giờ chạy; từ gói #1 nó còn được cảnh báo lúc publish (`schedule_not_resolvable`, nêu #11). Bản EN giữ dòng cũ làm bản ghi 2026-10-18.
+- **Đính chính 8 (Phụ lục B §8, mục 15):** mục 15 ("Các property không xác định và không được hỗ trợ bị từ chối theo tên trên script task và plugin task, nhưng bị bỏ qua trên core task") được gói #1 đóng. Một khoá không xác định trên core task, flowable, flow, trigger, input, output hay bean lồng nay là lỗi `unknown_property` lúc publish, như Kestra từ chối; một khoá Kestra chấp nhận mà egret không hành động theo là cảnh báo `not_honoured` nêu gói sẽ gỡ nó.

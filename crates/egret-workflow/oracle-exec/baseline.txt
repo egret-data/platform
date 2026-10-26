@@ -566,7 +566,7 @@
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
-invalids/invalid-property
+# `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
 invalids/loop-switch-failed
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
 valids/after-execution

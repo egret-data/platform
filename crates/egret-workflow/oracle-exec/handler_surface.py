@@ -1002,8 +1002,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # 73 since group C2 Task 5 banked eleven entries `SetVariables`,
     # `UnsetVariables` and `Labels` held (executor-level now;
     # `task-runif-taskswithstate` stays, on the flow-level `finally:`).
-    if len(baseline) != 73:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 73; the split "
+    # 72 since no-silent-drops Task 8b (2026-10-26) banked
+    # `invalids/invalid-property` (refused at save, `Seam::Save`).
+    if len(baseline) != 72:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 72; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1653,8 +1655,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 73",
-         "not 73",
+    case("baseline.txt is no longer 72",
+         "not 72",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

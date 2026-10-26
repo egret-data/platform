@@ -85,8 +85,8 @@ pub(super) struct Surface {
     ///
     /// `load` already parsed it to build `inputs`, `vars`, `flow` and `labels`
     /// and then threw it away, so `claim::sla_terminal` parsed the same source
-    /// a second time on **every settle of every execution** — 339 of the
-    /// corpus's 345 flows declare no `sla:` at all, and every one of them paid
+    /// a second time on **every settle of every execution** — 345 of the
+    /// corpus's 351 flows declare no `sla:` at all, and every one of them paid
     /// for a parse to be told so. Keeping it also fixes a subtler thing: it
     /// lets that guard ask *"is the SLA list empty"* **before** anything else,
     /// which is the order `ExecutorService.handleExecutionChangedSLA` asks its

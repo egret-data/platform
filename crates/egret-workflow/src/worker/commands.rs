@@ -3107,7 +3107,7 @@ pub(crate) fn output_problem(rel: &str) -> Option<String> {
     if rel.contains('[') || rel.contains("**") {
         return Some(format!(
             "{rel:?}: `**` and `[...]` in `outputFiles` are not implemented by egret \
-             (W5a); `*` and `?` in the file name are"
+             (roadmap package #17); `*` and `?` in the file name are"
         ));
     }
     let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
@@ -3121,7 +3121,7 @@ pub(crate) fn output_problem(rel: &str) -> Option<String> {
     if is_pattern(dir) {
         return Some(format!(
             "{rel:?}: a wildcard in a directory of `outputFiles` is not implemented by \
-             egret (W5a); only the file name may be a pattern"
+             egret (roadmap package #17); only the file name may be a pattern"
         ));
     }
     let literal = file.replace(['*', '?'], "x");
@@ -4729,6 +4729,21 @@ mod tests {
         }
         assert_eq!(relative_problem("plain name-1.txt"), None);
         assert_eq!(relative_problem("d/caf\u{e9}.csv"), None);
+    }
+
+    /// Spec §5 / D4: the two `outputFiles` refusals name the roadmap package.
+    #[test]
+    fn an_unsupported_output_pattern_names_roadmap_package_17() {
+        assert_eq!(
+            output_problem("**/x").unwrap(),
+            "\"**/x\": `**` and `[...]` in `outputFiles` are not implemented by egret \
+             (roadmap package #17); `*` and `?` in the file name are"
+        );
+        assert_eq!(
+            output_problem("*/x.csv").unwrap(),
+            "\"*/x.csv\": a wildcard in a directory of `outputFiles` is not implemented by \
+             egret (roadmap package #17); only the file name may be a pattern"
+        );
     }
 
     #[test]

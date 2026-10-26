@@ -25,7 +25,7 @@
 //! blind to. See `oracle-exec/README.md`, *The coverage statement* → the W6
 //! section.
 //!
-//! Seven of the 345 corpus flows declare a cron, six of them are comparable
+//! Seven of the 351 corpus flows declare a cron, six of them are comparable
 //! golden entries, and **none of the six is baselined** — `zero` reachable
 //! either way. *(This doc said "one of those is baselined", inherited from the
 //! design spec's §1 table, which was measured before the package: the one

@@ -854,7 +854,7 @@ const LIVE: usize = 295;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
-/// finding, and the reason [`LIVE`] is not 345.
+/// finding, and the reason [`LIVE`] is not the size of the corpus.
 ///
 /// (It read *"the reason `LIVE` is 16 and not 295"* until W8 Task 3 fix round
 /// 1, and *"is 21 and not 295"* until W10 Task 6 fix round 2 — **three lines

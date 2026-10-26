@@ -798,7 +798,7 @@ fn terminated_in_error(state: RunState) -> bool {
 ///
 /// The inversion this repairs was **SUCCESS where Kestra says FAILED** — a
 /// silent over-acceptance the oracle cannot catch, because no corpus flow puts
-/// a `CREATE_NEW_EXECUTION` retry inside a `Loop` (measured over all 345).
+/// a `CREATE_NEW_EXECUTION` retry inside a `Loop` (measured over all 351).
 fn as_the_loop_reads_it(child: RunState) -> RunState {
     match child {
         RunState::Retried => RunState::Failed,
@@ -1331,7 +1331,7 @@ mod tests {
         }
         assert_eq!(
             checked, 52,
-            "every `Loop` the corpus declares, over 43 of its 345 files. Derived \
+            "every `Loop` the corpus declares, over 43 of its 351 files. Derived \
              independently by `grep -c 'type: io.kestra.plugin.core.flow.Loop'` \
              over the same directory, which finds the same 52 -- so this walk \
              loses none of them to a nesting the parser reaches and it does not."

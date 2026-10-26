@@ -44,7 +44,7 @@
 //!
 //! # No oracle coverage either, and for the same measured reason
 //!
-//! Zero of the 345 corpus flows declare a script task type
+//! Zero of the 351 corpus flows declare a script task type
 //! ([`handlers::container`](super::container) carries the measurement). This
 //! file's instruments are its own unit tests over a fake
 //! [`TaskRunner`](crate::worker::commands::TaskRunner) and

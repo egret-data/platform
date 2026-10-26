@@ -139,7 +139,8 @@ pub enum Treatment {
     /// nothing is dropped silently.
     Warned,
     /// Accepted and not acted on. Never served, and a draft that writes one
-    /// gets an `ignored_property` warning (`spec::property_warnings`, KI-121).
+    /// gets a `not_honoured` warning that names the package which lifts it
+    /// (`spec::keys::findings`, package #1).
     Ignored,
     /// Refused at save or publish. Never served.
     Refused,

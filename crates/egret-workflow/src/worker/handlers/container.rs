@@ -17,7 +17,7 @@
 //!
 //! # No oracle coverage, measured
 //!
-//! `oracle-exec/corpus/` holds **345** flows and **zero** of them declare a
+//! `oracle-exec/corpus/` holds **351** flows and **zero** of them declare a
 //! script, container, shell or command task type (`grep -rhoE 'type:\s*\S+'
 //! corpus | sort -u | grep -iE 'script|container|shell|command|docker|bash|python|node'`
 //! matches nothing). The execution ratchet cannot move for script tasks in
