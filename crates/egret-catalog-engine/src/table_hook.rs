@@ -90,6 +90,15 @@
 //!    deletes the source's rows, re-tags the views that read the old name, and
 //!    recompiles with no overlay.
 //!
+//! A schema commit (an update or a multi-table commit) that renames a
+//! classified column moves that column's rows the same way. A rename is a field
+//! id present in both the stored current schema and the commit's new one under
+//! another folded name; it is classified when the old name carries a column
+//! row, or when the table carries a whole-table row and a StarRocks engine is
+//! bound (StarRocks masks per column name). During the hold the table compiles
+//! with its old and new column names, the old ones leaving. A field id that
+//! vanished (a dropped column) keeps its rows dormant.
+//!
 //! A drop keeps its rows (an undrop restores the name).
 
 use std::sync::Arc;
@@ -105,8 +114,8 @@ use serde_json::Value;
 use tracing::Instrument as _;
 
 use egret_perm_compile::table_columns::{
-    current_columns_via, stored_schema_columns_via, top_level_columns, PendingColumns,
-    PENDING_COLUMNS_SETTING,
+    column_names, current_columns_via, current_fields_via, stored_schema_fields_via,
+    top_level_columns, top_level_fields, PendingColumns, PENDING_COLUMNS_SETTING,
 };
 use uuid::Uuid;
 
@@ -295,18 +304,18 @@ fn tables_of(target: &Target, body: &Value) -> Vec<(String, Option<String>)> {
     }
 }
 
-/// The top-level columns a table commit's `updates` leave current, replayed
-/// as the table builder applies them: `set-current-schema -1` is the schema
-/// added last before it, an explicit id an added schema of that id or else a
-/// stored one. `None` when the commit leaves the current schema alone, or
-/// names one that does not exist (lakekeeper refuses that).
-async fn new_current_columns(
+/// The top-level fields `(id, name)` a table commit's `updates` leave
+/// current, replayed as the table builder applies them: `set-current-schema
+/// -1` is the schema added last before it, an explicit id an added schema of
+/// that id or else a stored one. `None` when the commit leaves the current
+/// schema alone, or names one that does not exist (lakekeeper refuses that).
+async fn new_current_fields(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,
     ns: &str,
     table: &str,
     updates: Option<&Value>,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<Vec<(i64, String)>>, String> {
     let mut added: Vec<&Value> = Vec::new();
     let mut current: Option<i64> = None;
     let mut current_is_last_added: Option<usize> = None;
@@ -332,7 +341,7 @@ async fn new_current_columns(
         }
     }
     if let Some(i) = current_is_last_added {
-        return Ok(Some(top_level_columns(added[i])));
+        return Ok(Some(top_level_fields(added[i])));
     }
     let Some(id) = current else {
         return Ok(None);
@@ -341,9 +350,9 @@ async fn new_current_columns(
         .iter()
         .find(|s| s.get("schema-id").and_then(Value::as_i64) == Some(id))
     {
-        return Ok(Some(top_level_columns(schema)));
+        return Ok(Some(top_level_fields(schema)));
     }
-    stored_schema_columns_via(conn, warehouse_id, ns, table, id)
+    stored_schema_fields_via(conn, warehouse_id, ns, table, id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -420,11 +429,11 @@ impl TableHook {
                 }
             }
             Target::TableCommit { ns, table } => {
-                if let Some(cols) =
-                    new_current_columns(&mut conn, warehouse_id, ns, table, body.get("updates"))
+                if let Some(fields) =
+                    new_current_fields(&mut conn, warehouse_id, ns, table, body.get("updates"))
                         .await?
                 {
-                    out.push(entry(ns, table, Some(cols)));
+                    out.push(entry(ns, table, Some(column_names(&fields))));
                 }
             }
             Target::Transaction => {
@@ -437,7 +446,7 @@ impl TableHook {
                     let Some((ns, table)) = change.get("identifier").and_then(identifier) else {
                         continue;
                     };
-                    if let Some(cols) = new_current_columns(
+                    if let Some(fields) = new_current_fields(
                         &mut conn,
                         warehouse_id,
                         &ns,
@@ -446,7 +455,7 @@ impl TableHook {
                     )
                     .await?
                     {
-                        out.push(entry(&ns, &table, Some(cols)));
+                        out.push(entry(&ns, &table, Some(column_names(&fields))));
                     }
                 }
             }
@@ -1027,6 +1036,143 @@ impl TableHook {
         }))
     }
 
+    /// The moves a schema commit makes (rename spec §5.2, column plan, C12):
+    /// for each table change that sets a new current schema, the field ids
+    /// present in both the stored current schema and the new one whose folded
+    /// name changed, kept when the old name carries a column row, or when the
+    /// table carries a whole-table row and a StarRocks engine is bound
+    /// (StarRocks masks per column name). `None` when nothing moves; a field
+    /// id that vanished keeps its rows dormant.
+    async fn move_plan_for_columns(
+        &self,
+        prefix: &str,
+        target: &Target,
+        body: &Value,
+    ) -> Result<Option<MovePlan>, Refusal> {
+        let check = |e: &dyn std::fmt::Display| {
+            Refusal(format!(
+                "egret could not check which classifications the table carries ({e}); retry"
+            ))
+        };
+        let changes: Vec<(String, String, Option<&Value>)> = match target {
+            Target::TableCommit { ns, table } => {
+                vec![(ns.clone(), table.clone(), body.get("updates"))]
+            }
+            Target::Transaction => body
+                .get("table-changes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    let (ns, table) = identifier(c.get("identifier")?)?;
+                    Some((ns, table, c.get("updates")))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let changes: Vec<_> = changes
+            .into_iter()
+            .filter(|(ns, _, updates)| changes_schema(*updates) && !is_multi_level(ns))
+            .collect();
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let mut conn = self.db.pool.acquire().await.map_err(|e| check(&e))?;
+        let Some((warehouse_id, _)) = resolve(&mut conn, prefix).await.map_err(|e| check(&e))?
+        else {
+            return Ok(None);
+        };
+        let mut starrocks_bound: Option<bool> = None;
+        let mut moves = Vec::new();
+        let mut overlay = Vec::new();
+        for (ns, table, updates) in changes {
+            let Some(new) = new_current_fields(&mut conn, warehouse_id, &ns, &table, updates)
+                .await
+                .map_err(|e| check(&e))?
+            else {
+                continue;
+            };
+            let Some(old) = current_fields_via(&mut conn, warehouse_id, &ns, &table)
+                .await
+                .map_err(|e| check(&e))?
+            else {
+                continue;
+            };
+            let renames: Vec<(String, String)> = old
+                .fields
+                .iter()
+                .filter_map(|(id, old_name)| {
+                    let (_, new_name) = new.iter().find(|(i, _)| i == id)?;
+                    (fold(old_name) != fold(new_name)).then(|| (old_name.clone(), new_name.clone()))
+                })
+                .collect();
+            if renames.is_empty() {
+                continue;
+            }
+            let rows = rows_of(&mut conn, warehouse_id, &[(ns.clone(), table.clone())])
+                .await
+                .map_err(|e| check(&e))?;
+            let whole_table = rows.iter().any(|r| r.3.is_empty());
+            let masks_per_column = whole_table && {
+                if starrocks_bound.is_none() {
+                    starrocks_bound = Some(
+                        !starrocks_policy_versions(&mut conn, warehouse_id)
+                            .await
+                            .map_err(|e| check(&e))?
+                            .is_empty(),
+                    );
+                }
+                starrocks_bound == Some(true)
+            };
+            let classified: Vec<&(String, String)> = renames
+                .iter()
+                .filter(|(old_name, _)| {
+                    masks_per_column || rows.iter().any(|r| fold(&r.3) == fold(old_name))
+                })
+                .collect();
+            if classified.is_empty() {
+                continue;
+            }
+            for (old_name, new_name) in classified {
+                let at = |column: &str| Coordinate {
+                    schema: ns.clone(),
+                    table: table.clone(),
+                    column: Some(column.to_string()),
+                };
+                moves.push((at(old_name), at(new_name)));
+            }
+            // During the hold the table still has its old columns: both
+            // names compile, the old ones no longer in the schema leaving.
+            let old_names = column_names(&old.fields);
+            let new_names = column_names(&new);
+            let mut columns = old_names.clone();
+            for name in &new_names {
+                if !columns.iter().any(|c| fold(c) == fold(name)) {
+                    columns.push(name.clone());
+                }
+            }
+            overlay.push(PendingColumns {
+                warehouse_id,
+                schema: ns.clone(),
+                table: table.clone(),
+                columns: Some(columns),
+                leaving: old_names
+                    .into_iter()
+                    .filter(|o| !new_names.iter().any(|n| fold(n) == fold(o)))
+                    .collect(),
+                leaving_table: false,
+            });
+        }
+        if moves.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(MovePlan {
+            warehouse_id,
+            moves,
+            overlay,
+        }))
+    }
+
     /// The hold (module doc, "A classified rename"): cap, name locks, profile
     /// locks, then the uncancellable copy, wait, forward and finish.
     async fn hold_move(
@@ -1381,17 +1527,22 @@ pub async fn hook_table_commits(
         ))
         .into_response()
     };
-    if target == Target::Rename {
-        match hook.move_plan_for_rename(&prefix, &body).await {
-            Ok(Some(plan)) => {
-                return hook
-                    .clone()
-                    .hold_move(deadline, &prefix, plan, req, next)
-                    .await
-            }
-            Ok(None) => {}
-            Err(refusal) => return refusal.into_response(),
+    let plan = match target {
+        Target::Rename => hook.move_plan_for_rename(&prefix, &body).await,
+        Target::TableCommit { .. } | Target::Transaction => {
+            hook.move_plan_for_columns(&prefix, &target, &body).await
         }
+        _ => Ok(None),
+    };
+    match plan {
+        Ok(Some(plan)) => {
+            return hook
+                .clone()
+                .hold_move(deadline, &prefix, plan, req, next)
+                .await
+        }
+        Ok(None) => {}
+        Err(refusal) => return refusal.into_response(),
     }
     let tables = tables_of(&target, &body);
     // The Ranger resource has one schema level: a multi-level namespace is

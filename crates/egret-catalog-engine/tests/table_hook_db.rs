@@ -2232,3 +2232,237 @@ async fn a_held_rename_and_a_column_add_on_the_same_profile_run_one_after_the_ot
         "the column add reached lakekeeper after the rename finished"
     );
 }
+
+// ── Task 6: a column rename follows by field id (R3, C12) ──
+
+impl Env {
+    /// Trino's `ALTER TABLE … RENAME COLUMN`: a new schema with the same field
+    /// ids, made current.
+    async fn commit_schema(
+        &self,
+        table: &str,
+        id: i64,
+        fields: &[(i64, &str)],
+    ) -> (StatusCode, Value) {
+        self.call(
+            "POST",
+            &format!("namespaces/sales/tables/{table}"),
+            Some(schema_commit(schema(id, fields))),
+        )
+        .await
+    }
+
+    /// The policies the StarRocks profile held when the armed request reached
+    /// lakekeeper ([`OnReach`]).
+    fn arm_policies_at_reach(&self, what: &str) {
+        *self.on_reach.lock().unwrap() = Some((
+            format!("POST /{}/{what}", self.prefix),
+            self.profile_id,
+            None,
+        ));
+    }
+
+    fn policies_at_reach(&self) -> Vec<String> {
+        let (policies, _) = self
+            .on_reach
+            .lock()
+            .unwrap()
+            .take()
+            .and_then(|(_, _, seen)| seen)
+            .expect("the observer saw the request reach lakekeeper");
+        policies
+            .as_array()
+            .expect("policies")
+            .iter()
+            .map(|p| p[0].as_str().expect("name").to_string())
+            .collect()
+    }
+}
+
+/// R3: a renamed column keeps its classification, on Trino before the commit.
+#[tokio::test]
+async fn a_renamed_column_keeps_its_classification() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let (trino, _starrocks) = env.start_plugins().await;
+    env.probe_reach("namespaces/sales/tables/orders");
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "mail")])
+    );
+    let served = env.served_trino_resources().await;
+    assert!(
+        served.contains(&("orders".into(), "mail".into())),
+        "{served:?}"
+    );
+    assert!(
+        !served.contains(&("orders".into(), "email".into())),
+        "{served:?}"
+    );
+    let reached = env.reached();
+    assert!(trino.report_of(reached.tag_version).await < reached.at);
+}
+
+/// C12: a whole-table classification names its StarRocks masks per column,
+/// so a column rename is held until StarRocks serves the new name's mask;
+/// while held both names are masked, after it only the new one.
+#[tokio::test]
+async fn a_column_rename_on_a_whole_table_classification_waits_for_starrocks() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let a = env.classify_table("orders").await;
+    env.recompile_all().await;
+    let trino = env.start_trino_plugin();
+    let starrocks = env.start_starrocks_plugin(POLL * 5);
+    trino.polled().await;
+    starrocks.polled().await;
+    env.probe_reach("namespaces/sales/tables/orders");
+    env.arm_policies_at_reach("namespaces/sales/tables/orders");
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reached = env.reached();
+    assert!(starrocks.report_of(reached.policy_version).await < reached.at);
+    let prefix = format!(
+        "{}{a}-mask-{}.sales.orders.",
+        egret_policy::COMPILER_CLEARANCE_PREFIX,
+        env.catalog
+    );
+    let at_reach = env.policies_at_reach();
+    for column in ["mail", "email"] {
+        assert!(
+            at_reach.contains(&format!("{prefix}{column}")),
+            "{column} at reach: {at_reach:?}"
+        );
+    }
+    assert_eq!(env.masked_columns(a, "orders").await, vec!["id", "mail"]);
+}
+
+/// R3: two columns swapping names in one commit swap their classifications.
+#[tokio::test]
+async fn swapped_column_names_swap_their_classifications() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    let b_tag = env.classify_column("orders", "a").await;
+    let c_tag = env.classify_column("orders", "b").await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "b"), (3, "a")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(b_tag, "orders", "b"), row(c_tag, "orders", "a")])
+    );
+}
+
+/// R3: a multi-table commit moves each table's renamed columns.
+#[tokio::test]
+async fn a_multi_table_commit_moves_each_tables_renamed_columns() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.create_table("events", &[(1, "id"), (2, "kind")]).await;
+    let b = env.classify_column("orders", "email").await;
+    let k = env.classify_column("events", "kind").await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let change = |table: &str, fields: &[(i64, &str)]| {
+        json!({
+            "identifier": {"namespace": ["sales"], "name": table},
+            "requirements": [],
+            "updates": [
+                {"action": "add-schema", "schema": schema(1, fields)},
+                {"action": "set-current-schema", "schema-id": -1}
+            ]
+        })
+    };
+    let (status, body) = env
+        .call(
+            "POST",
+            "transactions/commit",
+            Some(json!({"table-changes": [
+                change("orders", &[(1, "id"), (2, "mail")]),
+                change("events", &[(1, "id"), (2, "type")]),
+            ]})),
+        )
+        .await;
+    assert!(status.is_success(), "commit: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(b, "orders", "mail"), row(k, "events", "type")])
+    );
+}
+
+/// R3: a dropped column's rows stay dormant on its name; nothing is held.
+#[tokio::test]
+async fn a_dropped_column_keeps_its_rows_dormant() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+    let tag_version = env.tag_version().await;
+    let _held = env.hold_name("orders").await;
+
+    let (status, body) = env.commit_schema("orders", 1, &[(1, "id")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+    assert_eq!(env.tag_version().await, tag_version);
+}
+
+/// C12: a commit that changes no schema takes no lock and writes nothing
+/// (#755's `a_commit_on_an_unclassified_table_runs_no_compile`, extended).
+#[tokio::test]
+async fn an_append_is_not_held() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let (rows, versions) = (env.rows().await, env.versions().await);
+    let _held = env.hold_name("orders").await;
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/tables/orders",
+            Some(json!({"requirements": [], "updates": [
+                {"action": "set-properties", "updates": {"owner": "x"}}
+            ]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.rows().await, rows);
+    assert_eq!(env.versions().await, versions);
+}
+
+/// C12: a column add that renames nothing takes #755's path: no copy, no
+/// name lock, and the new column is masked after the commit.
+#[tokio::test]
+async fn a_column_add_without_a_rename_takes_the_755_path() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let a = env.classify_table("orders").await;
+    let (rows, tag_version) = (env.rows().await, env.tag_version().await);
+    let _held = env.hold_name("orders").await;
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "email"), (3, "phone")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.rows().await, rows);
+    assert_eq!(env.tag_version().await, tag_version);
+    assert_eq!(
+        env.masked_columns(a, "orders").await,
+        vec!["email", "id", "phone"]
+    );
+}

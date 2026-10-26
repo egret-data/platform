@@ -373,6 +373,21 @@ pub async fn stored_schema_columns_via(
     table: &str,
     schema_id: i64,
 ) -> Result<Option<Vec<String>>, CompileError> {
+    Ok(
+        stored_schema_fields_via(conn, warehouse_id, schema, table, schema_id)
+            .await?
+            .map(|fields| column_names(&fields)),
+    )
+}
+
+/// [`stored_schema_columns_via`] as `(field id, name)` pairs.
+pub async fn stored_schema_fields_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+    schema_id: i64,
+) -> Result<Option<Vec<(i64, String)>>, CompileError> {
     let found: Option<Value> = sqlx::query_scalar(
         "SELECT ts.schema \
            FROM catalog.warehouses w \
@@ -392,7 +407,7 @@ pub async fn stored_schema_columns_via(
     .fetch_optional(&mut *conn)
     .await
     .map_err(|e| CompileError::Db(format!("reading a stored table schema: {e}")))?;
-    Ok(found.as_ref().map(top_level_columns))
+    Ok(found.as_ref().map(top_level_fields))
 }
 
 /// The top-level fields of an Iceberg schema, `(field id, name)` in field-id
@@ -415,13 +430,19 @@ pub fn top_level_fields(schema: &Value) -> Vec<(i64, String)> {
 /// Ranger resource, so only the lower field id is kept. Public: the table hook
 /// reads a pending commit's columns from its request with it.
 pub fn top_level_columns(schema: &Value) -> Vec<String> {
+    column_names(&top_level_fields(schema))
+}
+
+/// The column names of `fields` (in field-id order), two names that fold
+/// equal collapsed to the first (as [`top_level_columns`]).
+pub fn column_names(fields: &[(i64, String)]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for (_, name) in top_level_fields(schema) {
+    for (_, name) in fields {
         if !out
             .iter()
-            .any(|c| fold_identifier(c) == fold_identifier(&name))
+            .any(|c| fold_identifier(c) == fold_identifier(name))
         {
-            out.push(name);
+            out.push(name.clone());
         }
     }
     out

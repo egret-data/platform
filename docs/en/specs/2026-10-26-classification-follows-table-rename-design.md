@@ -628,3 +628,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   the StarRocks policies as the catalog now spells the table, so the StarRocks `policy_version` moves. That is #755's
   behaviour, not a move.
 - A rename refused by C2 or a check error is answered before any lock; `move_plan_for_rename` returns the refusal.
+
+### Task 6: a column rename follows by field id
+
+- As designed. `new_current_columns` became `new_current_fields` (field ids kept); #755's overlay takes its names
+  through the new `table_columns::column_names` (the fold-collapse `top_level_columns` always did), and
+  `stored_schema_fields_via` backs `stored_schema_columns_via`. The column plan reads, per renaming table, the stored
+  fields, the table's rows, and (only when a whole-table row exists) whether a StarRocks engine is bound.
+- The guards (dropped column, append, column add without a rename) pin behaviour that existed before this task; they
+  hold a test-owned name lock during the commit, so a hook that took one would refuse.
