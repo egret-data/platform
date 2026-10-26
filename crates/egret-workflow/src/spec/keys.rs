@@ -909,6 +909,9 @@ impl Walk<'_> {
             // 3.2), which say more than the committed table: a refined finding
             // replaces the table's for the same key, never a second one.
             Some(row) if leaf_keys(row).is_some() => self.core_leaf(row, id, t, &path),
+            // Script and plugin tasks keep their own gates
+            // (`script_property_unknown`, `plugin_property_unknown`; spec D13).
+            Some(row) if crate::scripts::kind_of(row).is_some() => {}
             Some(row) => self.check(row, Site::Task(row), &format!("task '{id}'"), t, &path),
             None => {}
         }
@@ -1489,6 +1492,49 @@ mod tests {
         assert_eq!(e.path, "tasks.t.invalid");
         assert_eq!(e.message, "task 't': unknown property 'invalid' on io.kestra.plugin.core.debug.Return: neither Kestra nor egret accepts it");
         assert_eq!(r.errors.len(), 1, "one finding per key: {r:?}");
+    }
+
+    /// D13: a script task is gated by `script_property_unknown` and a plugin
+    /// task by `plugin_property_unknown`, not by this walker. The W4 legacy
+    /// aliases carry `image:`, which those gates accept and the property table
+    /// has no row for.
+    #[test]
+    fn a_script_or_plugin_task_is_not_checked_for_unknown_keys_here() {
+        for ty in [
+            "egret.container",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "egret.script.python",
+            "kestra.some.Plugin",
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: {ty}\n    image: ubuntu\n"
+            );
+            let r = report(&src);
+            assert!(
+                r.errors.iter().all(|e| e.code != "unknown_property"),
+                "{ty}: {r:?}"
+            );
+        }
+    }
+
+    /// Kestra's `Log` has no `format` and its `Return` has no `message`
+    /// (`Log.java:79,85`, `Return.java:91`): each key is refused on the other.
+    #[test]
+    fn a_log_key_on_a_return_and_a_return_key_on_a_log_are_refused() {
+        for (ty, key) in [
+            ("io.kestra.plugin.core.log.Log", "format"),
+            ("io.kestra.plugin.core.debug.Return", "message"),
+        ] {
+            let r = report(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: {ty}\n    {key}: x\n"
+            ));
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.code == "unknown_property" && e.path == format!("tasks.t.{key}")),
+                "{ty}: {r:?}"
+            );
+        }
     }
 
     /// The alias spelling is checked against the canonical row, and a typo of a

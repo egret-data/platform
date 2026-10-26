@@ -596,14 +596,11 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
 
 // ── The vocabulary, pinned in both directions ───────────────────────────────
 
-/// The inert canary `Log` ignores and `Return` renders.
+/// The canary only `Return` reads (as `format:`) and emits (as `{"value": …}`).
 ///
-/// `handlers::log::Log`'s `Spec` deserializes only `message`/`level` and does
-/// not deny unknown fields, so a `format:` on a `Log` task is dead weight —
-/// **unless the task reached `Return` instead**, which is the only one of the
-/// four that reads `format:` and the only one that emits an output at all. So
-/// a `Log` run that comes back carrying `{"value": …}` is a run that reached
-/// the wrong handler, and it says which one.
+/// A `Log` run that comes back carrying an output is a run that reached the
+/// wrong handler. (`Log` itself never carries `format:`: Kestra rejects it, and
+/// so does publish, spec D1.)
 const WRONG_HANDLER_CANARY: &str = "this-came-out-of-Return-not-Log";
 
 /// **Both spellings publish, and both DISPATCH — dispatch measured by what the
@@ -731,15 +728,26 @@ async fn the_canary_is_a_real_discriminator_and_not_a_field_nothing_reads(pool: 
     );
 }
 
-/// The one-task flow both vocabulary tests run, carrying [`WRONG_HANDLER_CANARY`]
-/// as `format:` and a `message:` for the handler that reads one.
+/// The one-task flow both vocabulary tests run: [`WRONG_HANDLER_CANARY`] as
+/// `format:` on a `Return`, and a `message:` on every other type.
 fn one_task_source(name: &str, type_id: &str) -> String {
+    // Each type carries ONLY keys Kestra accepts on it (`Log`: `message`;
+    // `Return`: `format`). Before save-time refusal of unknown keys (spec D1)
+    // both carried both, which Kestra itself rejects (`Unrecognized field`).
+    // The discrimination does not need the cross-key: a `Log` that dispatched
+    // to `Return` has no `format` to render, so it fails or emits an output,
+    // and either is caught.
+    let body = if type_id == "io.kestra.plugin.core.debug.Return" {
+        format!("format: {WRONG_HANDLER_CANARY}")
+    } else {
+        "message: hi".to_string()
+    };
     // One flat literal, no `\`-continuations: `cargo fmt` reflowed an earlier
     // draft of this string and baked the source's own indentation into the
     // YAML, so `create` answered 400 from the PARSER -- a refusal that looks
     // exactly like the one these tests are about.
     format!(
-        "id: vocab-{name}\nnamespace: a.e2e\ntasks:\n\x20 - id: greet\n\x20   type: {type_id}\n\x20   message: hi\n\x20   format: {WRONG_HANDLER_CANARY}\n"
+        "id: vocab-{name}\nnamespace: a.e2e\ntasks:\n\x20 - id: greet\n\x20   type: {type_id}\n\x20   {body}\n"
     )
 }
 
