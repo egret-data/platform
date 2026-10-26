@@ -501,22 +501,21 @@ pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
 
 /// The raw lists a flowable holds child tasks in, in `Task::children()` then
 /// `Task::error_children()` order (`models/task.rs:122-201`), keyed by the
-/// canonical type. `errors` appears only where the model has it, so a `Loop`'s
-/// `errors:` (#2's) is not descended. Every other type holds none: a script or
+/// canonical type. `errors` and `finally` appear where the model has them (A2). Every other type holds none: a script or
 /// plugin property that merely looks like a task list is never walked.
 fn child_lists(canonical: &str) -> &'static [&'static str] {
     match canonical {
         "io.kestra.plugin.core.flow.Sequential" | "io.kestra.plugin.core.flow.Parallel" => {
-            &["tasks", "errors"]
+            &["tasks", "errors", "finally"]
         }
-        "io.kestra.plugin.core.flow.If" => &["then", "else", "errors"],
-        "io.kestra.plugin.core.flow.Switch" => &["cases", "defaults", "errors"],
-        "io.kestra.plugin.core.flow.Dag" => &["tasks", "errors"],
+        "io.kestra.plugin.core.flow.If" => &["then", "else", "errors", "finally"],
+        "io.kestra.plugin.core.flow.Switch" => &["cases", "defaults", "errors", "finally"],
+        "io.kestra.plugin.core.flow.Dag" => &["tasks", "errors", "finally"],
         "io.kestra.plugin.core.flow.Loop"
         | "io.kestra.plugin.core.flow.LoopUntil"
-        | "io.kestra.plugin.core.flow.WorkingDirectory" => &["tasks"],
+        | "io.kestra.plugin.core.flow.WorkingDirectory" => &["tasks", "errors", "finally"],
         "io.kestra.plugin.core.flow.AllowFailure" => &["tasks", "finally", "errors"],
-        "io.kestra.plugin.core.flow.Pause" => &["tasks", "onPause", "errors"],
+        "io.kestra.plugin.core.flow.Pause" => &["tasks", "onPause", "errors", "finally"],
         _ => &[],
     }
 }

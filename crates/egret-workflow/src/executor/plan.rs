@@ -866,6 +866,9 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.errors.is_empty() {
         return Some("errors");
     }
+    if !p.finally.is_empty() {
+        return Some("finally");
+    }
     // **Any `behavior:`, literal or expression, and rounds 2-3 MEASURED why.**
     // Fix round 1 narrowed this to literals on the theory that an expression
     // always fails at resume. It does not. Re-measured on the pinned artifact
@@ -1768,6 +1771,22 @@ mod working_directory_plan_tests {
         assert!(
             tasks.iter().all(|ix| *ix > block),
             "pre-order: a child's index is greater than its parent's"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pause_finally_tests {
+    use super::*;
+
+    #[test]
+    fn a_pause_finally_is_refused_and_names_package_nine() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    finally: [{id: z, type: core.log, message: m}]\n";
+        let e = build_plan(src).unwrap_err().message;
+        assert!(e.starts_with("unsupported_pause_property"), "{e}");
+        assert!(
+            e.contains("'finally'") && e.contains("Roadmap package #9 lifts it"),
+            "{e}"
         );
     }
 }

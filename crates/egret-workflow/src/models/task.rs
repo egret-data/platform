@@ -121,14 +121,20 @@ impl Task {
     /// typed while leaves are opaque.
     pub fn children(&self) -> Vec<&Task> {
         match &self.kind {
-            TaskKind::Sequential(s) => s.tasks.iter().collect(),
-            TaskKind::Parallel(p) => p.tasks.iter().collect(),
-            TaskKind::If(i) => i.then.iter().chain(i.r#else.iter()).collect(),
+            TaskKind::Sequential(s) => s.tasks.iter().chain(s.finally.iter()).collect(),
+            TaskKind::Parallel(p) => p.tasks.iter().chain(p.finally.iter()).collect(),
+            TaskKind::If(i) => i
+                .then
+                .iter()
+                .chain(i.r#else.iter())
+                .chain(i.finally.iter())
+                .collect(),
             TaskKind::Switch(s) => s
                 .cases
                 .values()
                 .flatten()
                 .chain(s.defaults.iter())
+                .chain(s.finally.iter())
                 .collect(),
             // `filter_map`, not `map`: `DagNode::task` is `Option<Task>` (Task
             // 4 fix round 3 -- `@NotNull` in Java, bean validation not
@@ -136,13 +142,18 @@ impl Task {
             // `spec::validate` reports the missing task as its own error
             // separately; this just has to not panic while walking a flow
             // that hasn't been validated yet.
-            TaskKind::Dag(d) => d.tasks.iter().filter_map(|n| n.task.as_ref()).collect(),
-            TaskKind::Loop(l) => l.tasks.iter().collect(),
-            TaskKind::LoopUntil(l) => l.tasks.iter().collect(),
+            TaskKind::Dag(d) => d
+                .tasks
+                .iter()
+                .filter_map(|n| n.task.as_ref())
+                .chain(d.finally.iter())
+                .collect(),
+            TaskKind::Loop(l) => l.tasks.iter().chain(l.finally.iter()).collect(),
+            TaskKind::LoopUntil(l) => l.tasks.iter().chain(l.finally.iter()).collect(),
             // `finally` is a control-flow child like `tasks`: it runs, so the
             // walks that find children (validation, claiming) must see it.
             TaskKind::AllowFailure(a) => a.tasks.iter().chain(a.finally.iter()).collect(),
-            TaskKind::WorkingDirectory(w) => w.tasks.iter().collect(),
+            TaskKind::WorkingDirectory(w) => w.tasks.iter().chain(w.finally.iter()).collect(),
             // **2026-10-26 correction (no-silent-drops D14):** `Pause.tasks` is
             // NOT a Kestra property -- `Pause.java:158` is `extends Task
             // implements FlowableTask`, with no `tasks` field. An earlier
@@ -154,7 +165,7 @@ impl Task {
             // The two answers differ on purpose: this walk is
             // `spec::validate`'s, and a child invisible to it is a child
             // nothing checks.
-            TaskKind::Pause(p) => p.tasks.iter().collect(),
+            TaskKind::Pause(p) => p.tasks.iter().chain(p.finally.iter()).collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
@@ -192,14 +203,13 @@ impl Task {
             // in it must be findable by `worker::claim::leaf_spec`.
             TaskKind::Pause(p) => p.errors.iter().collect(),
             TaskKind::AllowFailure(a) => a.errors.iter().collect(),
+            TaskKind::Loop(l) => l.errors.iter().collect(),
+            TaskKind::LoopUntil(l) => l.errors.iter().collect(),
+            TaskKind::WorkingDirectory(w) => w.errors.iter().collect(),
             // Every kind with no `errors:` is named, not `_` (PR-2 final
             // review): a kind that grows one, or a new kind, fails to compile
             // here AND in `error_children_mut` until both say what it walks.
-            TaskKind::Loop(_)
-            | TaskKind::LoopUntil(_)
-            | TaskKind::WorkingDirectory(_)
-            | TaskKind::Subflow(_)
-            | TaskKind::Leaf { .. } => Vec::new(),
+            TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
 
@@ -211,21 +221,34 @@ impl Task {
     /// `children_mut_walks_exactly_what_children_walks` pins the contents.
     pub fn children_mut(&mut self) -> Vec<&mut Task> {
         match &mut self.kind {
-            TaskKind::Sequential(s) => s.tasks.iter_mut().collect(),
-            TaskKind::Parallel(p) => p.tasks.iter_mut().collect(),
-            TaskKind::If(i) => i.then.iter_mut().chain(i.r#else.iter_mut()).collect(),
+            TaskKind::Sequential(s) => s.tasks.iter_mut().chain(s.finally.iter_mut()).collect(),
+            TaskKind::Parallel(p) => p.tasks.iter_mut().chain(p.finally.iter_mut()).collect(),
+            TaskKind::If(i) => i
+                .then
+                .iter_mut()
+                .chain(i.r#else.iter_mut())
+                .chain(i.finally.iter_mut())
+                .collect(),
             TaskKind::Switch(s) => s
                 .cases
                 .values_mut()
                 .flatten()
                 .chain(s.defaults.iter_mut())
+                .chain(s.finally.iter_mut())
                 .collect(),
-            TaskKind::Dag(d) => d.tasks.iter_mut().filter_map(|n| n.task.as_mut()).collect(),
-            TaskKind::Loop(l) => l.tasks.iter_mut().collect(),
-            TaskKind::LoopUntil(l) => l.tasks.iter_mut().collect(),
+            TaskKind::Dag(d) => d
+                .tasks
+                .iter_mut()
+                .filter_map(|n| n.task.as_mut())
+                .chain(d.finally.iter_mut())
+                .collect(),
+            TaskKind::Loop(l) => l.tasks.iter_mut().chain(l.finally.iter_mut()).collect(),
+            TaskKind::LoopUntil(l) => l.tasks.iter_mut().chain(l.finally.iter_mut()).collect(),
             TaskKind::AllowFailure(a) => a.tasks.iter_mut().chain(a.finally.iter_mut()).collect(),
-            TaskKind::WorkingDirectory(w) => w.tasks.iter_mut().collect(),
-            TaskKind::Pause(p) => p.tasks.iter_mut().collect(),
+            TaskKind::WorkingDirectory(w) => {
+                w.tasks.iter_mut().chain(w.finally.iter_mut()).collect()
+            }
+            TaskKind::Pause(p) => p.tasks.iter_mut().chain(p.finally.iter_mut()).collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
@@ -241,11 +264,10 @@ impl Task {
             TaskKind::Dag(d) => d.errors.iter_mut().collect(),
             TaskKind::Pause(p) => p.errors.iter_mut().collect(),
             TaskKind::AllowFailure(a) => a.errors.iter_mut().collect(),
-            TaskKind::Loop(_)
-            | TaskKind::LoopUntil(_)
-            | TaskKind::WorkingDirectory(_)
-            | TaskKind::Subflow(_)
-            | TaskKind::Leaf { .. } => Vec::new(),
+            TaskKind::Loop(l) => l.errors.iter_mut().collect(),
+            TaskKind::LoopUntil(l) => l.errors.iter_mut().collect(),
+            TaskKind::WorkingDirectory(w) => w.errors.iter_mut().collect(),
+            TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
 }
@@ -314,6 +336,15 @@ pub struct Sequential {
     /// (`Execution.findTaskDependingFlowState`).
     #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: Parallel.java -- `AbstractBranch` + `concurrent` (0 = unlimited).
@@ -337,6 +368,15 @@ pub struct Parallel {
     pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: If.java. `condition` is a plain `String`, NOT `Property<String>`,
@@ -372,6 +412,15 @@ pub struct If {
     /// `FlowableUtils.resolveSequentialNexts`. See `Sequential::errors`.
     #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: Switch.java. `value` is `@NotNull` in Java (Task 4 owes a check);
@@ -389,6 +438,15 @@ pub struct Switch {
     /// `Switch.java:112`, the same field `If` carries and for the same reason.
     #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: Dag.java -- `tasks` is a list of `(task, dependsOn)` pairs, not a
@@ -409,6 +467,15 @@ pub struct Dag {
     pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: Dag.DagTask (inner class). Named `DagNode` here per this task's
@@ -469,6 +536,22 @@ pub struct Loop {
     pub concurrency_limit: Option<i32>,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+    /// `AbstractBranch.errors`: the list driven when a child of `tasks` fails.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: LoopUntil.java -- a second `AbstractBranch` sibling of `Loop` this
@@ -505,6 +588,22 @@ pub struct LoopUntil {
     pub fail_on_max_reached: Option<Property<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_frequency: Option<CheckFrequency>,
+    /// `AbstractBranch.errors`: the list driven when a child of `tasks` fails.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: `LoopUntil.CheckFrequency`. Three fields, all `Property<…>` in Java
@@ -606,6 +705,15 @@ pub struct Pause {
     pub behavior: Option<Property<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_pause: Option<Box<Task>>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: AllowFailure.java -- `extends Sequential` with no fields of its
@@ -671,6 +779,22 @@ pub struct WorkingDirectory {
     /// Kept verbatim (spec §5.1, plan Task 2); restored and saved by the block's claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<serde_json::Value>,
+    /// `AbstractBranch.errors`: the list driven when a child of `tasks` fails.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub errors: Vec<Task>,
+    /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
+    /// run after the block has ended, whatever its state.
+    #[serde(
+        default,
+        rename = "finally",
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // Used only for the `#[serde(default = "...")]` case: the key is *absent*,
@@ -994,6 +1118,76 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TaskKind, serde_jso
 #[cfg(test)]
 mod tests {
     use super::{Retry, RetryBehavior, Task, TaskKind};
+
+    #[test]
+    fn every_flowable_reads_finally_and_lists_it_last_among_its_children() {
+        for (ty, body) in [
+            (
+                "io.kestra.plugin.core.flow.Sequential",
+                "tasks: [{id: a, type: core.log, message: m}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Parallel",
+                "tasks: [{id: a, type: core.log, message: m}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.If",
+                "condition: 'true'\nthen: [{id: a, type: core.log, message: m}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Switch",
+                "value: x\ncases: {x: [{id: a, type: core.log, message: m}]}",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Dag",
+                "tasks: [{task: {id: a, type: core.log, message: m}}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Loop",
+                "values: [1]\ntasks: [{id: a, type: core.log, message: m}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.LoopUntil",
+                "condition: 'true'\ntasks: [{id: a, type: core.log, message: m}]",
+            ),
+            (
+                "io.kestra.plugin.core.flow.WorkingDirectory",
+                "tasks: [{id: a, type: io.kestra.plugin.scripts.shell.Commands, commands: [x]}]",
+            ),
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: b\n    type: {ty}\n    {}\n    finally: [{{id: z, type: core.log, message: m}}]\n",
+                body.replace('\n', "\n    ")
+            );
+            let flow = crate::spec::parse(&src).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let ids: Vec<&str> = flow.tasks[0]
+                .children()
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect();
+            assert_eq!(ids.last(), Some(&"z"), "{ty}: {ids:?}");
+        }
+    }
+
+    #[test]
+    fn loop_loop_until_and_working_directory_read_errors() {
+        for (ty, body) in [
+            ("io.kestra.plugin.core.flow.Loop", "values: [1]"),
+            ("io.kestra.plugin.core.flow.LoopUntil", "condition: 'true'"),
+            ("io.kestra.plugin.core.flow.WorkingDirectory", ""),
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: b\n    type: {ty}\n    {body}\n    tasks: [{{id: a, type: core.log, message: m}}]\n    errors: [{{id: e, type: core.log, message: m}}]\n"
+            );
+            let flow = crate::spec::parse(&src).unwrap();
+            let ids: Vec<&str> = flow.tasks[0]
+                .error_children()
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect();
+            assert_eq!(ids, ["e"], "{ty}");
+        }
+    }
 
     /// A leaf task egret owns. The model must NOT understand what egret.sql is --
     /// a state machine that knows what SQL is has stopped being a state machine.
