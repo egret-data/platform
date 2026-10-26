@@ -373,6 +373,40 @@ pub async fn table_states_via(
         .collect())
 }
 
+/// Whether each of `keys` names a SOFT-DELETED tabular (any number may share
+/// a name beside one live one, rename spec E4). Rows are keyed by name, so a
+/// dropped twin still needs the name's rows: an undrop restores it under that
+/// name (review finding 1). In `keys`' order, in one query.
+pub async fn has_dropped_tabular_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[TableKey],
+) -> Result<Vec<bool>, CompileError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
+    let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
+    let tables: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM catalog.warehouses w \
+                          JOIN lakekeeper.tabular t \
+                            ON t.warehouse_id::text = w.lakekeeper_warehouse_id \
+                         WHERE w.id = q.warehouse_id AND t.deleted_at IS NOT NULL \
+                           AND cardinality(t.tabular_namespace_name) = 1 \
+                           AND lower(t.tabular_namespace_name[1]) = lower(q.schema_name) \
+                           AND lower(t.name) = lower(q.table_name)) \
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, schema_name, table_name, ord) \
+          ORDER BY q.ord",
+    )
+    .bind(&warehouses)
+    .bind(&schemas)
+    .bind(&tables)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading dropped tables from the catalog: {e}")))
+}
+
 /// A classified column a live table does not have (rename spec R8, §5.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingColumn {

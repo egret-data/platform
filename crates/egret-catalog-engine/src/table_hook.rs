@@ -120,8 +120,9 @@ use serde_json::Value;
 use tracing::Instrument as _;
 
 use egret_perm_compile::table_columns::{
-    column_names, current_columns_via, current_fields_via, stored_schema_fields_via,
-    top_level_columns, top_level_fields, PendingColumns, PENDING_COLUMNS_SETTING,
+    column_names, current_columns_via, current_fields_via, has_dropped_tabular_via,
+    stored_schema_fields_via, top_level_columns, top_level_fields, PendingColumns, TableKey,
+    PENDING_COLUMNS_SETTING,
 };
 use uuid::Uuid;
 
@@ -1513,18 +1514,43 @@ impl TableHook {
             let reach = ViewReach::of_tables(&mut tx, plan.warehouse_id, &plan.sources())
                 .await
                 .map_err(|e| e.to_string())?;
-            delete_rows(
-                &mut tx,
-                plan.warehouse_id,
-                &without(&copied.before, &copied.target),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            // A soft-deleted tabular under a source table's name still needs
+            // its rows: an undrop brings it back under that name, classified
+            // (review finding 1). Its source rows are copied, not moved.
+            let sources = plan.sources();
+            let keys: Vec<TableKey> = sources
+                .iter()
+                .map(|(schema, table)| TableKey {
+                    warehouse_id: plan.warehouse_id,
+                    schema: schema.clone(),
+                    table: table.clone(),
+                })
+                .collect();
+            let dropped = has_dropped_tabular_via(&mut tx, &keys)
+                .await
+                .map_err(|e| e.to_string())?;
+            let kept: Vec<(String, String)> = sources
+                .into_iter()
+                .zip(dropped)
+                .filter(|(_, d)| *d)
+                .map(|(t, _)| t)
+                .collect();
+            let is_kept = |row: &Assignment| {
+                kept.iter()
+                    .any(|(s, t)| fold(s) == fold(&row.1) && fold(t) == fold(&row.2))
+            };
+            let leaving: Vec<Assignment> = without(&copied.before, &copied.target)
+                .into_iter()
+                .filter(|row| !is_kept(row))
+                .collect();
+            delete_rows(&mut tx, plan.warehouse_id, &leaving)
+                .await
+                .map_err(|e| e.to_string())?;
             reach
                 .retag_bump_and_recompile(&mut tx)
                 .await
                 .map_err(|e| e.to_string())?;
-            record_moves(&mut tx, plan, copied, caller)
+            record_moves(&mut tx, plan, copied, &kept, caller)
                 .await
                 .map_err(|e| e.to_string())?;
             tx.commit().await.map_err(|e| e.to_string())
@@ -1734,6 +1760,7 @@ async fn record_moves(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &MovePlan,
     copied: &Copied,
+    kept: &[(String, String)],
     caller: Option<&CatalogCaller>,
 ) -> Result<(), sqlx::Error> {
     use egret_audit::governance::{action, record_change_by, resource};
@@ -1759,7 +1786,7 @@ async fn record_moves(
         let mut tags: Vec<Uuid> = moved.iter().map(|r| r.0).collect();
         tags.sort();
         tags.dedup();
-        let kept: Vec<serde_json::Value> = copied
+        let kept_rows: Vec<serde_json::Value> = copied
             .before
             .iter()
             .filter(|r| to.holds(r))
@@ -1768,6 +1795,9 @@ async fn record_moves(
                 serde_json::json!({"tag": tag(r.0), "column": column})
             })
             .collect();
+        let source_kept = kept
+            .iter()
+            .any(|(s, t)| fold(s) == fold(&from.schema) && fold(t) == fold(&from.table));
         let trigger = if from.column.is_some() {
             "iceberg_column_rename"
         } else {
@@ -1784,7 +1814,8 @@ async fn record_moves(
                 "after": coordinate(to),
                 "tags": tags.into_iter().map(tag).collect::<Vec<_>>(),
                 "rows": moved.len(),
-                "kept": kept,
+                "kept": kept_rows,
+                "source_kept": source_kept,
                 "trigger": trigger,
             }),
         )

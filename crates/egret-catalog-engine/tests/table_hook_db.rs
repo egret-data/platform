@@ -3070,3 +3070,75 @@ async fn missing_columns_follow_the_schema_history() {
         vec![("region".to_string(), Some("area".to_string()))]
     );
 }
+
+// ── Review fix 1: a soft-deleted twin keeps the source name's rows ──
+
+/// Review finding 1: `orders` dropped (soft) and created again share the
+/// name's rows. Renaming the live one away copies them; it does not take them
+/// from the dropped one, which an undrop brings back classified on both
+/// engines.
+#[tokio::test]
+async fn a_rename_keeps_the_rows_a_dropped_twin_of_the_source_needs() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let old = env.soft_drop("orders").await;
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![
+            row(a, "orders", ""),
+            row(a, "orders_v2", ""),
+            row(b, "orders", "email"),
+            row(b, "orders_v2", "email"),
+        ])
+    );
+    let events = env.move_events("orders").await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1["source_kept"], json!(true));
+
+    env.undrop(old).await.expect("undrop");
+    let served = env.served_trino_resources().await;
+    assert!(
+        served.contains(&("orders".into(), String::new())),
+        "{served:?}"
+    );
+    assert!(
+        served.contains(&("orders".into(), "email".into())),
+        "{served:?}"
+    );
+    let deny = format!(
+        "{}{a}-{}.sales.orders.*",
+        egret_policy::COMPILER_CLEARANCE_PREFIX,
+        env.catalog
+    );
+    assert!(env.served_starrocks_policies().await.contains(&deny));
+}
+
+/// Review finding 1, column variant: a column renamed on the live table keeps
+/// its old row while a dropped twin of the table (which still has the column)
+/// can come back.
+#[tokio::test]
+async fn a_column_rename_keeps_the_rows_a_dropped_twin_needs() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.soft_drop("orders").await;
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![
+            row(a, "orders", ""),
+            row(b, "orders", "email"),
+            row(b, "orders", "mail"),
+        ])
+    );
+}

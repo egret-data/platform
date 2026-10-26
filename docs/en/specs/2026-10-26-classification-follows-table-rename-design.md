@@ -714,3 +714,11 @@ Deviations the code forces are recorded here, per task, as they happen.
 - Frontend: `gen:api` (no change), lint (0 errors), `tsc -b`, build and all ten bundle tests pass; `npm run test`
   passed 8492/8499 while the Ranger differential loaded the machine, and the 7 failures (4 files this package does
   not touch: OutputsTree, EngineRegister, ScheduleDetail, EndpointCreate) pass 100/100 rerun alone.
+
+### Review fix 1: a soft-deleted twin keeps the source name's rows (review finding 1)
+
+- Lakekeeper admits any number of soft-deleted tabulars beside one live one under a name, and rows are keyed by name.
+  `finish` now asks (`table_columns::has_dropped_tabular_via`, one query) whether a soft-deleted tabular carries a
+  source table's name; if one does, that source's rows are copied, not moved: they stay on the old name, so an undrop
+  restores the dropped table classified. This applies to column renames too (a dropped twin of the table may still
+  have the old column). The `tag:move` event says so: `"source_kept": true`.
