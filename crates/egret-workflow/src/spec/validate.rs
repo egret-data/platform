@@ -170,14 +170,27 @@ pub struct ValidationReport {
 /// wrong row fail from now on — the reported finding was not only that the row
 /// was stale but that **no test pinned it**, so a false claim could sit here
 /// indefinitely.
+///
+/// **2026-10-26 (no-silent-drops Task 8, spec D4):** the second column is no
+/// longer a package name but the closing clause of the warning, taken from the
+/// roadmap (`docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`): `concurrency`
+/// is package #8, `sla` and `checks` #16, `quotas` is Kestra Enterprise only,
+/// and the `triggers` row names #11 and #18. The old "W8" and "a later package"
+/// named a package that no longer exists, or none. The prose above is history
+/// and still speaks of W-numbers.
 const NOT_YET_ENFORCED: &[(&str, &str)] = &[
-    ("concurrency", "W8"),
-    ("sla", "W8"),
-    ("checks", "W8"),
-    ("quotas", "W8"),
+    ("concurrency", "roadmap package #8 lifts it"),
+    ("sla", "roadmap package #16 lifts it"),
+    ("checks", "roadmap package #16 lifts it"),
+    (
+        "quotas",
+        "it is Kestra Enterprise only, and Kestra OSS ignores it too (roadmap \u{a7}3.3)",
+    ),
     (
         "triggers",
-        "a later package; egret fires only Schedule, Webhook and Flow triggers",
+        "egret fires only Schedule, Webhook and Flow triggers; roadmap package #11 lifts \
+         ScheduleOnDates and http.Trigger, #18 lifts plugin triggers, and McpToolTrigger is not \
+         engine scope (roadmap \u{a7}3.3)",
     ),
 ];
 
@@ -385,12 +398,14 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
 
 /// The warning for a Schedule `when` or `lateMaximumDelay`: Kestra accepts and
 /// honours the key, egret's scheduler refuses it when it syncs the trigger.
-/// egret's own words; the error's `Display` is the scheduler's.
-fn sync_refusal(id: &str, key: &str, e: &crate::trigger::ScheduleError) -> Finding {
+/// egret's own words, and key names only (spec D10): the author's value is
+/// never echoed. It does not embed `ScheduleError`'s `Display` because that one
+/// ends in the same package clause (it is the trigger row's `last_error`).
+fn sync_refusal(id: &str, key: &str) -> Finding {
     Finding {
         code: "schedule_not_resolvable",
         message: format!(
-            "trigger '{id}': {e}; egret refuses it when it syncs the trigger, so this Schedule trigger will not fire. Roadmap package #11 lifts it"
+            "trigger '{id}': core.schedule `{key}` is not supported: egret refuses it when it syncs the trigger, so this Schedule trigger will not fire. Roadmap package #11 lifts it"
         ),
         path: format!("triggers.{id}.{key}"),
     }
@@ -422,18 +437,18 @@ fn schedule_findings(flow: &Flow, report: &mut ValidationReport) {
         // each of `when` and `lateMaximumDelay` is said once, at its own key
         // (no-silent-drops D6/D17), and `keys.rs` leaves both keys to this.
         let mut refusal = ScheduleTrigger::resolve(trigger);
-        if let Err(e @ ScheduleError::UnsupportedWhenCondition(_)) = &refusal {
-            report.warnings.push(sync_refusal(&trigger.id, "when", e));
+        if let Err(ScheduleError::UnsupportedWhenCondition) = &refusal {
+            report.warnings.push(sync_refusal(&trigger.id, "when"));
             let mut without_when = trigger.clone();
             without_when.when = None;
             refusal = ScheduleTrigger::resolve(&without_when);
         }
         match refusal {
             Ok(_) | Err(ScheduleError::MissingCron) => {}
-            Err(e @ ScheduleError::UnsupportedLateMaximumDelay(_)) => {
+            Err(ScheduleError::UnsupportedLateMaximumDelay) => {
                 report
                     .warnings
-                    .push(sync_refusal(&trigger.id, "lateMaximumDelay", &e));
+                    .push(sync_refusal(&trigger.id, "lateMaximumDelay"));
             }
             Err(e) => report.warnings.push(Finding {
                 code: "schedule_not_resolvable",
@@ -1618,7 +1633,8 @@ fn walk_task(
                         "task '{}' is a loopUntil whose '{field}' is not a literal, which egret \
                          does not support: egret reads it when the flow is planned, before \
                          anything is rendered, so it cannot run this task and the flow cannot \
-                         be published or started. '{field}' must be a literal value",
+                         be published or started. '{field}' must be a literal value. Roadmap package #9 \
+                         lifts it",
                         task.id
                     ),
                     path: format!("{path}.{field}"),
@@ -1729,7 +1745,8 @@ fn walk_task(
                     code: "unsupported_allow_failure_retry",
                     message: format!(
                         "task '{}' has type '{}': a retry on an AllowFailure block is not \
-                         supported; put `retry:` on the child task that should be retried",
+                         supported; put `retry:` on the child task that should be retried. Roadmap \
+                         package #9 lifts it",
                         task.id, task.r#type
                     ),
                     path: format!("{path}.retry"),
@@ -1751,15 +1768,28 @@ fn walk_task(
         // `worker::start_execution_in_on` and the `Subflow` target's plan).
         TaskKind::Pause(p) => {
             if let Some(property) = crate::executor::pause_gap(p) {
-                report.errors.push(Finding {
-                    code: "unsupported_pause_property",
-                    message: format!(
+                // D14: Kestra's Pause has no `tasks` (`Pause.java:158`), so no
+                // package lifts it; the others are #9's (`keys::lift_of`).
+                let message = if property == "tasks" {
+                    format!(
+                        "task '{}' is a pause with 'tasks', which Kestra's Pause does not \
+                         have: it is an unknown property, refused on egret as Kestra refuses \
+                         it. Put the tasks after the Pause instead",
+                        task.id
+                    )
+                } else {
+                    format!(
                         "task '{}' is a pause with '{property}', which egret does not \
                          support: egret cannot run this task, so the flow cannot be \
                          published or started. Remove '{property}', or use a plain Pause \
-                         (optionally bounded by pauseDuration or timeout)",
+                         (optionally bounded by pauseDuration or timeout). Roadmap package \
+                         #9 lifts it",
                         task.id
-                    ),
+                    )
+                };
+                report.errors.push(Finding {
+                    code: "unsupported_pause_property",
+                    message,
                     path: format!("{path}.{property}"),
                 });
             }
@@ -2189,15 +2219,14 @@ fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationRepo
         if !is_present {
             continue;
         }
-        let (_, package) = NOT_YET_ENFORCED
+        let (_, lift) = NOT_YET_ENFORCED
             .iter()
             .find(|(n, _)| *n == name)
             .expect("every feature name here has a NOT_YET_ENFORCED entry");
         report.warnings.push(Finding {
             code: "not_yet_enforced",
             message: format!(
-                "`{name}` is declared in this flow but is not yet enforced by any package in \
-                 this branch; enforcement lands in {package}"
+                "`{name}` is declared in this flow but egret does not enforce it yet; {lift}"
             ),
             path: name.to_string(),
         });
@@ -2221,6 +2250,35 @@ mod tests {
             }
         }
         out
+    }
+
+    /// **No user-visible text names a retired package** (spec D4).
+    #[test]
+    fn no_message_names_a_w_package_or_a_later_package() {
+        const STALE: &[&str] = &["(W5a)", "(W5b)", "lands in W", "a later package"];
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut offenders = Vec::new();
+        for path in walk_rs(root) {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let prod = text.split("#[cfg(test)]").next().unwrap();
+            for (n, line) in prod.lines().enumerate() {
+                let code = line.trim_start();
+                // Doc comments and `//` lines are history; only text a user can
+                // receive is checked, which is what sits inside a string literal.
+                if code.starts_with("//") {
+                    continue;
+                }
+                // Any other line is checked whole, up to a trailing `//`: a
+                // literal's last line (`... (W5a); only the name"`) has one
+                // quote only, so splitting on quotes would miss it.
+                let code = code.split(" // ").next().unwrap_or(code);
+                let stale = STALE.iter().any(|s| code.contains(s));
+                if stale {
+                    offenders.push(format!("{path}:{}: {code}", n + 1));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "{offenders:#?}");
     }
 
     /// **No production caller reports on a saved flow without the key census**
@@ -2522,6 +2580,38 @@ mod tests {
             codes(&bad_cron),
             vec![("schedule_not_resolvable", "triggers.s".to_string())]
         );
+        // D10 + spec §5: the save-time message for a `when` / `lateMaximumDelay`
+        // names the key and the package and carries none of the author's value.
+        let sentinel = "SENTINEL-value-1d2f";
+        for (key, line, want) in [
+            (
+                "when",
+                format!("    when: \"{{{{ '{sentinel}' }}}}\"\n"),
+                "trigger 's': core.schedule `when` is not supported: egret refuses it when it \
+                 syncs the trigger, so this Schedule trigger will not fire. Roadmap package \
+                 #11 lifts it",
+            ),
+            (
+                "lateMaximumDelay",
+                format!("    lateMaximumDelay: {sentinel}\n"),
+                "trigger 's': core.schedule `lateMaximumDelay` is not supported: egret \
+                 refuses it when it syncs the trigger, so this Schedule trigger will not \
+                 fire. Roadmap package #11 lifts it",
+            ),
+        ] {
+            let r = validate(&schedule(&format!("    cron: \"0 * * * *\"\n{line}")));
+            let m = &r
+                .warnings
+                .iter()
+                .find(|w| w.path == format!("triggers.s.{key}"))
+                .unwrap_or_else(|| panic!("{key}: {r:?}"))
+                .message;
+            assert_eq!(m, want, "{key}");
+            assert!(
+                !m.contains(sentinel),
+                "{key}: the author's value leaked: {m}"
+            );
+        }
         let w = &bad_cron
             .warnings
             .iter()
@@ -3083,10 +3173,11 @@ mod tests {
             .find(|w| w.code == "not_yet_enforced")
             .unwrap_or_else(|| panic!("no not_yet_enforced warning: {r:?}"));
         assert!(w.message.contains("concurrency"), "{}", w.message);
-        assert!(
-            w.message.contains("W8"),
-            "the warning must name the package: {}",
-            w.message
+        assert_eq!(
+            w.message,
+            "`concurrency` is declared in this flow but egret does not enforce it yet; \
+             roadmap package #8 lifts it",
+            "the warning must name the roadmap package"
         );
         assert!(
             r.errors.is_empty(),
@@ -3109,13 +3200,18 @@ mod tests {
         assert_eq!(
             NOT_YET_ENFORCED,
             &[
-                ("concurrency", "W8"),
-                ("sla", "W8"),
-                ("checks", "W8"),
-                ("quotas", "W8"),
+                ("concurrency", "roadmap package #8 lifts it"),
+                ("sla", "roadmap package #16 lifts it"),
+                ("checks", "roadmap package #16 lifts it"),
+                (
+                    "quotas",
+                    "it is Kestra Enterprise only, and Kestra OSS ignores it too (roadmap \u{a7}3.3)"
+                ),
                 (
                     "triggers",
-                    "a later package; egret fires only Schedule, Webhook and Flow triggers"
+                    "egret fires only Schedule, Webhook and Flow triggers; roadmap package #11 \
+                     lifts ScheduleOnDates and http.Trigger, #18 lifts plugin triggers, and \
+                     McpToolTrigger is not engine scope (roadmap \u{a7}3.3)"
                 ),
             ],
             "a row added here is a claim that egret does NOT enforce that \
@@ -3374,13 +3470,32 @@ mod tests {
                     "{spelling}/{property}: the error must name the property: {}",
                     e.message
                 );
-                // What to do: remove it, or use a plain pause.
-                assert!(
-                    e.message.contains(&format!("Remove '{property}'")),
-                    "{spelling}/{property}: {}",
-                    e.message
-                );
-                assert!(e.message.contains("plain Pause"), "{spelling}/{property}: {}", e.message);
+                if property == "tasks" {
+                    // D14: not a Kestra property, refused permanently, no package.
+                    assert_eq!(
+                        e.message,
+                        "task 'gate' is a pause with 'tasks', which Kestra's Pause does not \
+                         have: it is an unknown property, refused on egret as Kestra refuses \
+                         it. Put the tasks after the Pause instead",
+                        "{spelling}/{property}"
+                    );
+                    assert!(!e.message.contains("Roadmap package"), "{}", e.message);
+                } else {
+                    // What to do: remove it, or use a plain pause; and who lifts it.
+                    assert!(
+                        e.message.contains(&format!("Remove '{property}'")),
+                        "{spelling}/{property}: {}",
+                        e.message
+                    );
+                    assert!(
+                        e.message.ends_with(
+                            "or use a plain Pause (optionally bounded by pauseDuration or \
+                             timeout). Roadmap package #9 lifts it"
+                        ),
+                        "{spelling}/{property}: {}",
+                        e.message
+                    );
+                }
                 // The stalling-run sentence of the old warning is gone: the
                 // flow can no longer reach a run, so it would be false.
                 assert!(!e.message.contains("stalls"), "{spelling}/{property}: {}", e.message);
@@ -5053,7 +5168,7 @@ mod tests {
             ],
             body: allow_failure_retry_body,
             suffix: ".retry",
-            hints: &["put `retry:` on the child task that should be retried"],
+            hints: &["put `retry:` on the child task that should be retried. Roadmap package #9 lifts it"],
         },
         Refused {
             code: "unsupported_loop_until_property",
@@ -5067,7 +5182,7 @@ mod tests {
             ],
             body: loop_until_gap_body,
             suffix: ".checkFrequency.maxIterations",
-            hints: &["'checkFrequency.maxIterations'", "literal"],
+            hints: &["'checkFrequency.maxIterations'", "must be a literal value. Roadmap package #9 lifts it"],
         },
         Refused {
             code: "unsupported_flow_task",
@@ -5264,7 +5379,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{field}: {r:?}"));
             assert_eq!(e.path, format!("tasks.lu.{field}"));
             assert!(e.message.contains(&format!("'{field}'")), "{}", e.message);
-            assert!(e.message.contains("literal"), "{}", e.message);
+            assert!(
+                e.message
+                    .ends_with("must be a literal value. Roadmap package #9 lifts it"),
+                "{}",
+                e.message
+            );
         }
         let literal = "id: f\nnamespace: a.b\ntasks:\n  - id: lu\n    type: core.loopuntil\n    \
                        condition: \"{{ true }}\"\n    checkFrequency:\n      interval: PT1S\n      \

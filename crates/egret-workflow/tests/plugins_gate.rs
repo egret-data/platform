@@ -259,11 +259,20 @@ fn task_runner_and_the_seven_base_properties_are_refused() {
     assert_eq!(plugins::REFUSED_BASE_PROPERTIES.len(), 7);
     for (key, value) in seven {
         let errs = refusals(PG_QUERY, pg(json!({ key: value })));
-        assert_refused(
-            &errs,
-            key,
-            plugins::CODE_PROPERTY_NOT_IMPLEMENTED,
-            &format!("property '{key}' is accepted by Kestra on {PG_QUERY} but is not implemented by egret"),
+        let lift = match key {
+            "policyRefs" | "workerSelector" => {
+                "Kestra Enterprise only, ignored by Kestra OSS too, roadmap \u{a7}3.3"
+            }
+            _ => "roadmap package #13",
+        };
+        let r = errs.iter().find(|r| r.path == key).expect("a refusal");
+        assert_eq!(r.code, plugins::CODE_PROPERTY_NOT_IMPLEMENTED, "{r:?}");
+        assert_eq!(
+            r.message,
+            format!(
+                "property '{key}' is accepted by Kestra on {PG_QUERY} but is not implemented by \
+                 egret ({lift}); remove it"
+            )
         );
     }
     let errs = refusals(
@@ -275,6 +284,18 @@ fn task_runner_and_the_seven_base_properties_are_refused() {
         "taskRunner",
         plugins::CODE_PROPERTY_NOT_IMPLEMENTED,
         "workflow.container_runner",
+    );
+    let r = errs
+        .iter()
+        .find(|r| r.path == "taskRunner")
+        .expect("a refusal");
+    assert_eq!(
+        r.message,
+        format!(
+            "property 'taskRunner' is not accepted on {PG_QUERY}: plugin tasks run on the \
+             runner this egret is configured with (workflow.container_runner); remove it. \
+             Roadmap package #18 lifts it"
+        )
     );
 }
 

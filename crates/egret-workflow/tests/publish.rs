@@ -769,7 +769,10 @@ tasks:
     match err {
         egret_core::Error::InvalidInput(m) => {
             assert!(m.contains("(tasks.wd.outputFiles)"), "{m}");
-            assert!(m.contains("not implemented by egret"), "{m}");
+            assert!(
+                m.contains("not implemented by egret (roadmap package #17)"),
+                "{m}"
+            );
         }
         other => panic!("{other:?}"),
     }

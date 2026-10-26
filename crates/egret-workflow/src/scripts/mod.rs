@@ -510,8 +510,11 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                 key,
                 format!(
                     "property '{key}' is accepted by Kestra on {} but is not implemented by \
-                     egret (W5a); remove it",
-                    kind.fqcn()
+                     egret ({}); remove it",
+                    kind.fqcn(),
+                    crate::spec::keys::lift_of(crate::spec::keys::Site::Task(kind.fqcn()), key)
+                        .expect("every refused script property has a lift_of row")
+                        .short()
                 ),
             ));
             continue;
@@ -705,7 +708,7 @@ fn parse_runner(value: &Value, errs: &mut Vec<ScriptRefusal>) -> Option<RunnerSp
             let (code, why) = match kind {
                 RunnerKind::Docker if DOCKER_REFUSED.contains(&key) => (
                     CODE_RUNNER_PROPERTY_NOT_IMPLEMENTED,
-                    "is accepted by Kestra but is not implemented by egret (W5a)",
+                    "is accepted by Kestra but is not implemented by egret (roadmap package #17)",
                 ),
                 RunnerKind::Docker => (
                     CODE_RUNNER_PROPERTY_UNKNOWN,
@@ -713,7 +716,7 @@ fn parse_runner(value: &Value, errs: &mut Vec<ScriptRefusal>) -> Option<RunnerSp
                 ),
                 RunnerKind::Kubernetes => (
                     CODE_RUNNER_PROPERTY_NOT_IMPLEMENTED,
-                    "is not implemented by egret (W5a); the Kubernetes runner accepts only \
+                    "is not implemented by egret (roadmap package #17); the Kubernetes runner accepts only \
                      pullPolicy, resources and delete",
                 ),
             };
@@ -795,7 +798,7 @@ fn closed_object(
             errs.push(refusal(
                 CODE_RUNNER_PROPERTY_NOT_IMPLEMENTED,
                 sub.clone(),
-                format!("'{sub}' is accepted by Kestra but is not implemented by egret (W5a)"),
+                format!("'{sub}' is accepted by Kestra but is not implemented by egret (roadmap package #17)"),
             ));
         } else {
             errs.push(refusal(
@@ -829,7 +832,7 @@ fn parse_resources(value: &Value, errs: &mut Vec<ScriptRefusal>) -> Option<Resou
                     CODE_RUNNER_PROPERTY_NOT_IMPLEMENTED,
                     side_path.clone(),
                     format!(
-                        "'{side_path}' is not implemented by egret (W5a); resources accepts \
+                        "'{side_path}' is not implemented by egret (roadmap package #17); resources accepts \
                          exactly request.cpu, request.memory, limit.cpu and limit.memory"
                     ),
                 ));
@@ -860,7 +863,7 @@ fn parse_resources(value: &Value, errs: &mut Vec<ScriptRefusal>) -> Option<Resou
                         CODE_RUNNER_PROPERTY_NOT_IMPLEMENTED,
                         res_path.clone(),
                         format!(
-                            "'{res_path}' is not implemented by egret (W5a); resources \
+                            "'{res_path}' is not implemented by egret (roadmap package #17); resources \
                              accepts exactly request.cpu, request.memory, limit.cpu and \
                              limit.memory"
                         ),
@@ -912,7 +915,7 @@ fn boolean(value: &Value, path: &str, errs: &mut Vec<ScriptRefusal>) -> Option<b
         other => {
             errs.push(invalid(
                 path,
-                "a boolean (an expression is not implemented by egret in W5a)",
+                "a boolean (an expression is not implemented by egret)",
                 other,
             ));
             None
@@ -924,7 +927,7 @@ fn string_list(value: &Value, path: &str, errs: &mut Vec<ScriptRefusal>) -> Vec<
     let Value::Array(items) = value else {
         errs.push(invalid(
             path,
-            "a list of strings (a single expression is not implemented by egret in W5a)",
+            "a list of strings (a single expression is not implemented by egret)",
             value,
         ));
         return Vec::new();
@@ -984,6 +987,94 @@ mod tests {
         assert!(t.fail_fast);
         assert_eq!(t.task_runner, None);
         assert_eq!(t.commands, vec!["echo hi"]);
+    }
+
+    /// Spec §5 / D4: a refusal names the roadmap package that lifts it, from
+    /// `keys::lift_of`, and never a retired W-number.
+    #[test]
+    fn a_refused_script_property_names_the_package_that_lifts_it() {
+        use crate::spec::keys::{lift_of, Site};
+        let cases: [(&str, &str, &str); 5] = [
+            (SHELL_COMMANDS, "logLevel", "roadmap package #13"),
+            (SHELL_COMMANDS, "runner", "roadmap package #17"),
+            (
+                SHELL_COMMANDS,
+                "workerSelector",
+                "Kestra Enterprise only, ignored by Kestra OSS too, roadmap \u{a7}3.3",
+            ),
+            (PYTHON_SCRIPT, "pythonVersion", "roadmap package #17"),
+            (PYTHON_COMMANDS, "assets", "roadmap package #13"),
+        ];
+        for (ty, key, lift) in cases {
+            let body = kind_of(ty).expect("a script type").body_property();
+            let body_value = if body == "commands" {
+                json!(["x"])
+            } else {
+                json!("x")
+            };
+            let errs =
+                parse(ty, &json!({body: body_value, key: "v"})).expect_err("a refused property");
+            assert_eq!(errs.len(), 1, "{key}: {errs:?}");
+            assert_eq!(errs[0].code, CODE_NOT_IMPLEMENTED);
+            assert_eq!(
+                errs[0].message,
+                format!(
+                    "property '{key}' is accepted by Kestra on {ty} but is not implemented by \
+                     egret ({lift}); remove it"
+                ),
+                "{key}"
+            );
+            assert_eq!(lift_of(Site::Task(ty), key).unwrap().short(), lift);
+        }
+    }
+
+    /// Spec §5: the runner properties, `resources` and the Kubernetes closed
+    /// set say `(roadmap package #17)`.
+    #[test]
+    fn a_refused_runner_property_names_roadmap_package_17() {
+        let run = |runner: serde_json::Value| {
+            parse(
+                SHELL_COMMANDS,
+                &json!({"commands": ["x"], "taskRunner": runner}),
+            )
+            .expect_err("refused")
+        };
+        let errs = run(json!({"type": DOCKER_RUNNER, "volumes": ["/a:/b"]}));
+        assert_eq!(
+            errs[0].message,
+            format!(
+                "task runner property 'volumes' on {DOCKER_RUNNER} is accepted by Kestra but is \
+                 not implemented by egret (roadmap package #17)"
+            )
+        );
+        let errs = run(json!({"type": DOCKER_RUNNER, "memory": {"kernelMemory": "1"}}));
+        assert_eq!(
+            errs[0].message,
+            "'taskRunner.memory.kernelMemory' is accepted by Kestra but is not implemented by \
+             egret (roadmap package #17)"
+        );
+        let errs = run(json!({"type": KUBERNETES_RUNNER, "namespace": "x"}));
+        assert_eq!(
+            errs[0].message,
+            format!(
+                "task runner property 'namespace' on {KUBERNETES_RUNNER} is not implemented by \
+                 egret (roadmap package #17); the Kubernetes runner accepts only pullPolicy, \
+                 resources and delete"
+            )
+        );
+        let errs = run(json!({"type": KUBERNETES_RUNNER, "resources": {"extra": {}}}));
+        assert_eq!(
+            errs[0].message,
+            "'taskRunner.resources.extra' is not implemented by egret (roadmap package #17); \
+             resources accepts exactly request.cpu, request.memory, limit.cpu and limit.memory"
+        );
+        let errs = run(json!({"type": KUBERNETES_RUNNER, "resources": {"limit": {"gpu": "1"}}}));
+        assert_eq!(
+            errs[0].message,
+            "'taskRunner.resources.limit.gpu' is not implemented by egret (roadmap package \
+             #17); resources accepts exactly request.cpu, request.memory, limit.cpu and \
+             limit.memory"
+        );
     }
 
     #[test]

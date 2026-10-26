@@ -834,9 +834,11 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 /// Each of the four is a real construct with a measured trace this executor
 /// does not produce, and the order is declaration order in `Pause.java`:
 ///
-/// * `tasks:` — the list a pause runs **after** it is resumed. No baselined
-///   corpus entry writes one, so a rule here would be a rule nothing can
-///   exercise.
+/// * `tasks:` — **not a Kestra property** (`Pause.java:158`: `extends Task
+///   implements FlowableTask`, no `tasks` field; corrected 2026-10-26, spec
+///   D14). It is an unknown property, refused permanently and by name, and no
+///   roadmap package lifts it. It stays here rather than in the save-time key
+///   census because a stored version carrying one would otherwise stall.
 /// * `errors:` — `valids/pause-errors-finally-after-execution` writes one, and
 ///   its golden run history is `CREATED RUNNING PAUSED RUNNING FAILED`: the
 ///   pause re-enters `RUNNING` to drive the handler. Nothing else in this

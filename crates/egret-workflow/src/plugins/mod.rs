@@ -363,7 +363,8 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<PluginTask, Vec<PluginRefusa
                 key,
                 format!(
                     "property 'taskRunner' is not accepted on {fqcn}: plugin tasks run on the \
-                     runner this egret is configured with (workflow.container_runner); remove it"
+                     runner this egret is configured with (workflow.container_runner); remove it. \
+                     Roadmap package #18 lifts it"
                 ),
             ));
             continue;
@@ -374,7 +375,10 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<PluginTask, Vec<PluginRefusa
                 key,
                 format!(
                     "property '{key}' is accepted by Kestra on {fqcn} but is not implemented by \
-                     egret (W5b); remove it"
+                     egret ({}); remove it",
+                    crate::spec::keys::lift_of(crate::spec::keys::Site::Task(fqcn), key)
+                        .expect("every refused base property has a lift_of row")
+                        .short()
                 ),
             ));
             continue;

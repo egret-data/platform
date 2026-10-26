@@ -2529,6 +2529,8 @@ mod tests {
             "    when: \"true\"\n",
             "    dependsOn: []\n",
             "    when: null\n",
+            // A YAML boolean is Kestra's string "true" too.
+            "    when: true\n",
         ] {
             let r = report(&format!("{LISTENER}{extra}"));
             assert_eq!(
@@ -2540,6 +2542,15 @@ mod tests {
                 "{extra}: {r:?}"
             );
         }
+        // `when: false` is a condition (`!"true".equals("false")`): it filters,
+        // so there is nothing to warn about.
+        let r = report(&format!("{LISTENER}    when: false\n"));
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "flow_trigger_without_depends_on"),
+            "{r:?}"
+        );
     }
 }
 

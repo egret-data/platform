@@ -377,19 +377,22 @@ impl Unsupported {
             Self::Wait => format!(
                 "webhook trigger '{trigger_id}' declares wait: true, which egret does not \
                  implement yet -- the response would have to be held open until the execution \
-                 terminates"
+                 terminates (roadmap package #11)"
             ),
             Self::ReturnOutputs => format!(
                 "webhook trigger '{trigger_id}' declares returnOutputs: true, which egret does \
-                 not implement yet -- it needs the same held-open response wait: true does"
+                 not implement yet -- it needs the same held-open response wait: true does \
+                 (roadmap package #11)"
             ),
             Self::ResponseContentType => format!(
                 "webhook trigger '{trigger_id}' declares responseContentType, which egret does \
-                 not implement yet -- it describes the body of a held-open response"
+                 not implement yet -- it describes the body of a held-open response \
+                 (roadmap package #11)"
             ),
             Self::ResponseCode => format!(
                 "webhook trigger '{trigger_id}' declares responseCode, which egret does not \
-                 implement yet -- it is the status of a held-open response"
+                 implement yet -- it is the status of a held-open response \
+                 (roadmap package #11)"
             ),
         }
     }
@@ -998,6 +1001,36 @@ pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, Inp
 mod tests {
     use super::*;
     use crate::spec::parse;
+
+    /// Spec §5: the four refusals a parity gap causes name roadmap package #11;
+    /// the two that are a deployment's configuration do not.
+    #[test]
+    fn the_unsupported_messages_name_the_package_that_lifts_them() {
+        assert_eq!(
+            Unsupported::Wait.message("w"),
+            "webhook trigger 'w' declares wait: true, which egret does not implement yet -- \
+             the response would have to be held open until the execution terminates \
+             (roadmap package #11)"
+        );
+        assert_eq!(
+            Unsupported::ReturnOutputs.message("w"),
+            "webhook trigger 'w' declares returnOutputs: true, which egret does not implement \
+             yet -- it needs the same held-open response wait: true does (roadmap package #11)"
+        );
+        assert_eq!(
+            Unsupported::ResponseContentType.message("w"),
+            "webhook trigger 'w' declares responseContentType, which egret does not implement \
+             yet -- it describes the body of a held-open response (roadmap package #11)"
+        );
+        assert_eq!(
+            Unsupported::ResponseCode.message("w"),
+            "webhook trigger 'w' declares responseCode, which egret does not implement yet -- \
+             it is the status of a held-open response (roadmap package #11)"
+        );
+        for u in [Unsupported::StoreBody, Unsupported::Multipart] {
+            assert!(!u.message("w").contains("roadmap package"), "{u:?}");
+        }
+    }
 
     fn flow_of(yaml: &str) -> crate::models::Flow {
         parse(yaml).unwrap_or_else(|e| panic!("fixture does not parse: {}", e.message))

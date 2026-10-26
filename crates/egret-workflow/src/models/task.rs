@@ -143,14 +143,17 @@ impl Task {
             // walks that find children (validation, claiming) must see it.
             TaskKind::AllowFailure(a) => a.tasks.iter().chain(a.finally.iter()).collect(),
             TaskKind::WorkingDirectory(w) => w.tasks.iter().collect(),
-            // `Pause.tasks` is Kestra's own field -- the list a pause runs
-            // AFTER it is resumed -- so it is a control-flow child like any
-            // other and this walk has to see it. `executor::build_plan` does
-            // NOT descend into it; see `executor::plan::TaskKind::Pause` for
-            // why a `Pause` that declares one is planned opaque instead.
+            // **2026-10-26 correction (no-silent-drops D14):** `Pause.tasks` is
+            // NOT a Kestra property -- `Pause.java:158` is `extends Task
+            // implements FlowableTask`, with no `tasks` field. An earlier
+            // version of this note called it Kestra's own field; it is an
+            // unknown property that egret reads only so a stored `Pause` that
+            // declares one is still walked (duplicate ids, cycles,
+            // `is_runnable_child`) and refused by `pause_gap`. `build_plan`
+            // does NOT descend into it; the `Pause` is planned opaque.
             // The two answers differ on purpose: this walk is
-            // `spec::validate`'s (duplicate ids, cycles, `is_runnable_child`),
-            // and a child invisible to it is a child nothing checks.
+            // `spec::validate`'s, and a child invisible to it is a child
+            // nothing checks.
             TaskKind::Pause(p) => p.tasks.iter().collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
@@ -567,8 +570,14 @@ pub struct Subflow {
 }
 
 // kestra: core/src/main/java/io/kestra/plugin/core/flow/Pause.java --
-// `extends Sequential`, so `tasks` and `errors` are `AbstractBranch`'s, plus
-// four of its own.
+// `extends Task implements FlowableTask` (`Pause.java:158`); its own fields are
+// `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors` and `finally`.
+//
+// **2026-10-26 correction (no-silent-drops D14):** this note used to say
+// `extends Sequential`, so `tasks` and `errors` were `AbstractBranch`'s. That
+// was wrong: Kestra's `Pause` has no `tasks` at all. The `tasks` field below is
+// egret's own, kept only so a flow that writes one is parsed, walked and then
+// refused by `executor::pause_gap` (`unsupported_pause_property`, permanent).
 //
 // **`finally` is dropped here, exactly as `Sequential` drops it**, and that
 // is the same decision rather than a new loss: no `models` type carries the

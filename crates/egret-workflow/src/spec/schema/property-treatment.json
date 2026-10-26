@@ -1871,7 +1871,7 @@
   },
   "refused_downstream": {
     "io.kestra.plugin.core.trigger.Schedule": {
-      "lateMaximumDelay": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `lateMaximumDelay` is not supported: \"PT1H\"",
+      "lateMaximumDelay": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it",
       "timezone=\"ACT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"ACT\"",
       "timezone=\"AET\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AET\"",
       "timezone=\"AGT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AGT\"",
@@ -1910,14 +1910,14 @@
       "timezone=\"SystemV/YST9\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"SystemV/YST9\"",
       "timezone=\"SystemV/YST9YDT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"SystemV/YST9YDT\"",
       "timezone=\"VST\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"VST\"",
-      "when": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `when` conditions are not supported: \"x\""
+      "when": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
     },
     "io.kestra.plugin.core.trigger.Webhook": {
       "fetchType=\"STORE\"": "trigger::webhook::build_output (409 at firing): webhook trigger 't' declares fetchType: STORE, which egret does not implement yet -- the request body would have to be written to internal storage and reach the flow as `trigger.uri`",
-      "responseCode": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseCode, which egret does not implement yet -- it is the status of a held-open response",
-      "responseContentType": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseContentType, which egret does not implement yet -- it describes the body of a held-open response",
-      "returnOutputs": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares returnOutputs: true, which egret does not implement yet -- it needs the same held-open response wait: true does",
-      "wait": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares wait: true, which egret does not implement yet -- the response would have to be held open until the execution terminates"
+      "responseCode": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseCode, which egret does not implement yet -- it is the status of a held-open response (roadmap package #11)",
+      "responseContentType": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseContentType, which egret does not implement yet -- it describes the body of a held-open response (roadmap package #11)",
+      "returnOutputs": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares returnOutputs: true, which egret does not implement yet -- it needs the same held-open response wait: true does (roadmap package #11)",
+      "wait": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares wait: true, which egret does not implement yet -- the response would have to be held open until the execution terminates (roadmap package #11)"
     }
   }
 }
