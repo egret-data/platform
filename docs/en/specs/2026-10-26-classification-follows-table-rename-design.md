@@ -740,3 +740,14 @@ Deviations the code forces are recorded here, per task, as they happen.
   (its new columns, nothing leaving). A held commit's copy compile is therefore also #755's dry run for those
   tables: a ceiling they would cross is refused 409 before the commit, instead of the commit landing and `finish`
   failing (which left the source rows behind and wedged the profile).
+
+### Review fix 4: a non-2xx is checked before the copy is undone (review finding 4)
+
+- Each plan carries what the catalog shows once the change committed: for a rename, the destination is an active
+  table with the source's `tabular_id` (read at plan time, `table_columns::live_tabular_id_via`; a rename keeps the
+  id); for a column move, the table's stored current fields equal the commit's new ones. When Lakekeeper answers
+  non-2xx, egret compensates only if none of these holds; if one holds it runs `finish` (the change committed, so the
+  move completes) and logs a warning; if the check itself fails it leaves the rows on both names (over-tag) and logs
+  an error. Lakekeeper's answer is returned as it is in every case.
+- Provoked in tests with an observer that answers 500 after Lakekeeper committed. No such post-commit error path was
+  found in the pinned Lakekeeper, so the case is defensive.

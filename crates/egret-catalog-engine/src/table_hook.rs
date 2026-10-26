@@ -121,8 +121,8 @@ use tracing::Instrument as _;
 
 use egret_perm_compile::table_columns::{
     column_names, current_columns_via, current_fields_via, has_dropped_tabular_via,
-    stored_schema_fields_via, top_level_columns, top_level_fields, PendingColumns, TableKey,
-    PENDING_COLUMNS_SETTING,
+    live_tabular_id_via, stored_schema_fields_via, top_level_columns, top_level_fields,
+    PendingColumns, TableKey, PENDING_COLUMNS_SETTING,
 };
 use uuid::Uuid;
 
@@ -838,6 +838,26 @@ struct MovePlan {
     /// The column source the copy's compile sees: the destinations' columns,
     /// the sources marked leaving (C8).
     overlay: Vec<PendingColumns>,
+    /// What the catalog holds once the change has committed: read when
+    /// lakekeeper answers non-2xx, before the copy is undone (review
+    /// finding 4).
+    committed_if: Vec<Committed>,
+}
+
+/// One sign that a held change committed.
+enum Committed {
+    /// The destination is an active table with the source's table id.
+    Renamed {
+        schema: String,
+        table: String,
+        tabular_id: Uuid,
+    },
+    /// The table's stored current schema is the commit's new one.
+    Schema {
+        schema: String,
+        table: String,
+        fields: Vec<(i64, String)>,
+    },
 }
 
 impl MovePlan {
@@ -1034,6 +1054,9 @@ impl TableHook {
         else {
             return Ok(None);
         };
+        let tabular_id = live_tabular_id_via(&mut conn, warehouse_id, &src_ns, &src)
+            .await
+            .map_err(|e| check(&e))?;
         if is_multi_level(&dst_ns) {
             return Err(Refusal(
                 "the table carries classifications and its new namespace has more than one \
@@ -1052,6 +1075,14 @@ impl TableHook {
         Ok(Some(MovePlan {
             warehouse_id,
             overlay: vec![pending(&dst_ns, &dst, false), pending(&src_ns, &src, true)],
+            committed_if: tabular_id
+                .map(|tabular_id| Committed::Renamed {
+                    schema: dst_ns.clone(),
+                    table: dst.clone(),
+                    tabular_id,
+                })
+                .into_iter()
+                .collect(),
             moves: vec![(
                 Coordinate {
                     schema: src_ns,
@@ -1121,6 +1152,7 @@ impl TableHook {
         // ceiling they cross is a 409 before the commit, as #755's dry run
         // would answer.
         let mut others = Vec::new();
+        let mut committed_if = Vec::new();
         for (ns, table, updates) in changes {
             let Some(new) = new_current_fields(&mut conn, warehouse_id, &ns, &table, updates)
                 .await
@@ -1179,6 +1211,11 @@ impl TableHook {
                 others.push(unmoved);
                 continue;
             }
+            committed_if.push(Committed::Schema {
+                schema: ns.clone(),
+                table: table.clone(),
+                fields: new.clone(),
+            });
             for (old_name, new_name) in classified {
                 let at = |column: &str| Coordinate {
                     schema: ns.clone(),
@@ -1217,6 +1254,7 @@ impl TableHook {
             warehouse_id,
             moves,
             overlay,
+            committed_if,
         }))
     }
 
@@ -1336,11 +1374,65 @@ impl TableHook {
         }
         let response = next.run(req).await;
         if !response.status().is_success() {
-            self.compensate(plan, &copied).await;
+            // A non-2xx is not proof that nothing committed (review finding
+            // 4): undo the copy only when the catalog shows the change absent.
+            match self.committed(plan).await {
+                Ok(false) => self.compensate(plan, &copied).await,
+                Ok(true) => {
+                    tracing::warn!(status = %response.status(),
+                        destinations = %plan.destination_labels(),
+                        "lakekeeper answered a held table change with an error, but the change \
+                         committed: finishing the move");
+                    self.finish(plan, &copied, profiles, caller).await;
+                }
+                Err(e) => tracing::error!(error = %e,
+                    destinations = %plan.destination_labels(),
+                    "lakekeeper answered a held table change with an error, and egret could not \
+                     tell whether it committed: the classifications stay on both names"),
+            }
             return response;
         }
         self.finish(plan, &copied, profiles, caller).await;
         response
+    }
+
+    /// Does the catalog show the held change committed (any of the plan's
+    /// signs)? Read after lakekeeper answered non-2xx.
+    async fn committed(&self, plan: &MovePlan) -> Result<bool, String> {
+        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
+        for sign in &plan.committed_if {
+            let seen = match sign {
+                Committed::Renamed {
+                    schema,
+                    table,
+                    tabular_id,
+                } => {
+                    live_tabular_id_via(&mut conn, plan.warehouse_id, schema, table)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        == Some(*tabular_id)
+                }
+                Committed::Schema {
+                    schema,
+                    table,
+                    fields,
+                } => current_fields_via(&mut conn, plan.warehouse_id, schema, table)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_some_and(|current| {
+                        current.fields.len() == fields.len()
+                            && current
+                                .fields
+                                .iter()
+                                .zip(fields)
+                                .all(|((i, a), (j, b))| i == j && fold(a) == fold(b))
+                    }),
+            };
+            if seen {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The copy transaction (rename spec §5.3 step 5): the pre-commit compile.

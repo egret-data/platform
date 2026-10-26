@@ -373,6 +373,32 @@ pub async fn table_states_via(
         .collect())
 }
 
+/// The Lakekeeper `tabular_id` (the Iceberg table uuid, which a rename keeps)
+/// of the active table `schema.table`, `None` when there is none. The table
+/// hook compares it before and after a rename Lakekeeper answered non-2xx, to
+/// tell whether the rename committed anyway (review finding 4).
+pub async fn live_tabular_id_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+) -> Result<Option<Uuid>, CompileError> {
+    sqlx::query_scalar(
+        "SELECT ti.tabular_id FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+          WHERE w.id = $1 AND ti.typ = 'table' AND ti.deleted_at IS NULL \
+            AND ti.metadata_location IS NOT NULL \
+            AND cardinality(ti.tabular_namespace_name) = 1 \
+            AND lower(ti.tabular_namespace_name[1]) = lower($2) AND lower(ti.name) = lower($3)",
+    )
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(table)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(format!("reading a table id from the catalog: {e}")))
+}
+
 /// Whether each of `keys` names a SOFT-DELETED tabular (any number may share
 /// a name beside one live one, rename spec E4). Rows are keyed by name, so a
 /// dropped twin still needs the name's rows: an undrop restores it under that

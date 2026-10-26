@@ -19,7 +19,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use egret_catalog_engine::{
     build_state, catalog_engine_router, create_memory_warehouse, ensure_bootstrapped,
     front_catalog_router, load_table_detail, run_lakekeeper_migrations, set_delete_profile,
@@ -91,6 +91,7 @@ struct Env {
     on_reach: OnReach,
     rows_at_reach: RowsAtReach,
     stall: Stall,
+    fail_after_commit: FailAfterCommit,
     hook: Arc<TableHook>,
 }
 
@@ -123,14 +124,19 @@ type OnReach = Arc<Mutex<Option<(String, i64, Option<Reached>)>>>;
 /// request 2xx, before the hook sees the answer: `(METHOD /path, SQL, tag)`.
 type OnCommit = Arc<Mutex<Option<(String, &'static str, Uuid)>>>;
 
+/// Armed with `METHOD /path`: [`observe`] answers that request 500 once
+/// lakekeeper has committed it (an error after the commit, review finding 4).
+type FailAfterCommit = Arc<Mutex<Option<String>>>;
+
 /// Runs the armed [`OnCommit`] write after lakekeeper commits — a change the
 /// hook's pre-commit work cannot have seen.
 async fn observe(
-    State((on_commit, on_reach, rows_at_reach, stall, db)): State<(
+    State((on_commit, on_reach, rows_at_reach, stall, fail_after, db)): State<(
         OnCommit,
         OnReach,
         RowsAtReach,
         Stall,
+        FailAfterCommit,
         Db,
     )>,
     req: Request,
@@ -213,6 +219,12 @@ async fn observe(
         }
     }
     let response = next.run(req).await;
+    let fail = response.status().is_success()
+        && fail_after.lock().unwrap().take_if(|w| *w == what).is_some();
+    if fail {
+        // Lakekeeper committed; the client is told it failed.
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     if response.status().is_success() {
         let armed = {
             let mut slot = on_commit.lock().unwrap();
@@ -342,12 +354,14 @@ async fn env_with_limit(limit: Duration) -> Option<Env> {
     let on_reach: OnReach = Arc::default();
     let rows_at_reach: RowsAtReach = Arc::default();
     let stall: Stall = Arc::default();
+    let fail_after_commit: FailAfterCommit = Arc::default();
     let inner = catalog_engine_router(state.clone()).layer(axum::middleware::from_fn_with_state(
         (
             on_commit.clone(),
             on_reach.clone(),
             rows_at_reach.clone(),
             stall.clone(),
+            fail_after_commit.clone(),
             db.clone(),
         ),
         observe,
@@ -379,6 +393,7 @@ async fn env_with_limit(limit: Duration) -> Option<Env> {
         on_reach,
         rows_at_reach,
         stall,
+        fail_after_commit,
         hook,
     };
     let (status, body) = env
@@ -3148,7 +3163,6 @@ async fn a_column_rename_keeps_the_rows_a_dropped_twin_needs() {
 /// finished, the write goes through.
 #[tokio::test]
 async fn a_catalog_tag_write_during_a_held_rename_is_refused() {
-    use axum::response::IntoResponse as _;
     let Some(env) = env().await else { return };
     let env = Arc::new(env);
     env.classified_orders().await;
@@ -3237,4 +3251,51 @@ async fn a_held_multi_table_commit_refuses_another_tables_ceiling() {
     );
     assert!(env.rows().await.contains(&row(b, "orders", "email")));
     assert!(!env.rows().await.iter().any(|r| r.3 == "mail"));
+}
+
+// ── Review fix 4: a non-2xx after the commit is not undone ──
+
+/// Review finding 4: lakekeeper commits the rename, then the answer becomes an
+/// error. The hook checks the catalog (the destination holds the source's
+/// table id) and finishes the move instead of undoing it, so the renamed
+/// table keeps its classifications.
+#[tokio::test]
+async fn an_error_after_a_committed_rename_finishes_the_move() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+    *env.fail_after_commit.lock().unwrap() = Some(format!("POST /{}/tables/rename", env.prefix));
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        env.source("orders_v2").await.is_some(),
+        "the rename committed"
+    );
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
+    );
+    assert_eq!(env.move_events("orders").await.len(), 1);
+}
+
+/// Review finding 4, column variant: the schema commit landed, then failed.
+#[tokio::test]
+async fn an_error_after_a_committed_column_rename_finishes_the_move() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+    *env.fail_after_commit.lock().unwrap() = Some(format!(
+        "POST /{}/namespaces/sales/tables/orders",
+        env.prefix
+    ));
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "mail")])
+    );
 }
