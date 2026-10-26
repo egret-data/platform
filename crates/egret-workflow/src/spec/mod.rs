@@ -5,6 +5,7 @@
 //! flattened, because it is meant to be read like a table, not called like a
 //! single function alongside `parse`/`validate`.
 
+pub(crate) mod keys;
 mod parse;
 pub(crate) mod path;
 mod properties;

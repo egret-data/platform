@@ -60,7 +60,7 @@ use serde_json::{json, Map, Value};
 use super::{
     wire_fields_of as fields_of, Measured, Treatment, FLOWABLE_TYPES, FLOW_ROW, TRIGGER_TYPES,
 };
-use crate::models::{self, Flow, TriggerKind};
+use crate::models::{Flow, TriggerKind};
 use crate::spec::{parse, registry, validate};
 use crate::worker::handlers as h;
 
@@ -105,81 +105,6 @@ fn task_model() -> BTreeSet<&'static str> {
         .iter()
         .copied()
         .collect()
-}
-
-/// The fields a core leaf task's handler deserializes, or `None` for a type
-/// with no such handler.
-fn leaf_handler_fields(t: &str) -> Option<Vec<&'static str>> {
-    use h::storage::items;
-    Some(match t {
-        h::log::TYPE_ID => fields_of::<h::log::Spec>(),
-        h::ret::TYPE_ID => fields_of::<h::ret::Spec>(),
-        h::fail::TYPE_ID => fields_of::<h::fail::Spec>(),
-        h::sleep::TYPE_ID => fields_of::<h::sleep::Spec>(),
-        // Group C1 Task 2.
-        h::output_values::TYPE_ID => fields_of::<h::output_values::Spec>(),
-        // Group C1 Task 3.
-        h::assert::TYPE_ID => fields_of::<h::assert::Spec>(),
-        // Group C1 Task 4.
-        h::purge_logs::TYPE_ID => fields_of::<h::purge_logs::Spec>(),
-        h::storage::WRITE => fields_of::<h::storage::WriteSpec>(),
-        h::storage::SIZE => fields_of::<h::storage::UriSpec>(),
-        h::storage::DELETE => fields_of::<h::storage::DeleteSpec>(),
-        // Reads no property: it purges the running execution's own files.
-        h::storage::PURGE_CURRENT_EXECUTION_FILES => Vec::new(),
-        h::storage::CONCAT => fields_of::<items::ConcatSpec>(),
-        h::storage::SPLIT => fields_of::<items::SplitSpec>(),
-        h::storage::REVERSE => fields_of::<items::ReverseSpec>(),
-        h::storage::DEDUPLICATE_ITEMS => fields_of::<items::DeduplicateSpec>(),
-        h::storage::FILTER_ITEMS => fields_of::<items::FilterSpec>(),
-        h::namespace::UPLOAD_FILES => fields_of::<h::namespace::UploadSpec>(),
-        h::namespace::DOWNLOAD_FILES => fields_of::<h::namespace::DownloadSpec>(),
-        h::namespace::DELETE_FILES => fields_of::<h::namespace::DeleteSpec>(),
-        h::namespace::PURGE_FILES => fields_of::<h::namespace::PurgeSpec>(),
-        h::kv::SET => fields_of::<h::kv::SetSpec>(),
-        h::kv::GET => fields_of::<h::kv::GetSpec>(),
-        h::kv::GET_KEYS => fields_of::<h::kv::GetKeysSpec>(),
-        h::kv::DELETE => fields_of::<h::kv::DeleteSpec>(),
-        h::kv::PUT => fields_of::<h::kv::PutSpec>(),
-        h::kv::PURGE_KV => fields_of::<h::kv::PurgeSpec>(),
-        // Kill-and-exit Task 3: no handler -- the executor runs it -- and
-        // `build_plan` reads its leaf spec through this struct.
-        crate::executor::exit::TYPE_ID => fields_of::<crate::executor::exit::Spec>(),
-        // Group C2 Task 5: executor-level as `Exit` is; the worker's render
-        // pass reads each leaf spec through these structs (`executor::update`).
-        crate::executor::update::SET_VARIABLES => fields_of::<crate::executor::update::SetSpec>(),
-        crate::executor::update::UNSET_VARIABLES => {
-            fields_of::<crate::executor::update::UnsetSpec>()
-        }
-        crate::executor::update::LABELS => fields_of::<crate::executor::update::LabelsSpec>(),
-        _ => return None,
-    })
-}
-
-fn flowable_fields(t: &str) -> Vec<&'static str> {
-    match t {
-        "io.kestra.plugin.core.flow.Sequential" => fields_of::<models::Sequential>(),
-        "io.kestra.plugin.core.flow.Parallel" => fields_of::<models::Parallel>(),
-        "io.kestra.plugin.core.flow.If" => fields_of::<models::If>(),
-        "io.kestra.plugin.core.flow.Switch" => fields_of::<models::Switch>(),
-        "io.kestra.plugin.core.flow.Dag" => fields_of::<models::Dag>(),
-        "io.kestra.plugin.core.flow.Loop" => fields_of::<models::Loop>(),
-        "io.kestra.plugin.core.flow.LoopUntil" => fields_of::<models::LoopUntil>(),
-        "io.kestra.plugin.core.flow.Subflow" => fields_of::<models::Subflow>(),
-        "io.kestra.plugin.core.flow.AllowFailure" => fields_of::<models::AllowFailure>(),
-        "io.kestra.plugin.core.flow.WorkingDirectory" => fields_of::<models::WorkingDirectory>(),
-        "io.kestra.plugin.core.flow.Pause" => fields_of::<models::Pause>(),
-        other => panic!("no typed model for flowable {other}"),
-    }
-}
-
-fn trigger_fields(t: &str) -> Vec<&'static str> {
-    match t {
-        "io.kestra.plugin.core.trigger.Schedule" => fields_of::<models::Schedule>(),
-        "io.kestra.plugin.core.trigger.Webhook" => fields_of::<models::Webhook>(),
-        "io.kestra.plugin.core.trigger.Flow" => fields_of::<models::FlowTrigger>(),
-        other => panic!("no typed model for trigger {other}"),
-    }
 }
 
 // ---------- stages ----------
@@ -804,7 +729,7 @@ fn sites() -> Vec<Site> {
         if let Some(kind) = crate::scripts::kind_of(row.r#type) {
             read.extend(kind.implemented_properties());
         } else {
-            let fields = leaf_handler_fields(row.r#type)
+            let fields = crate::spec::keys::leaf_keys(row.r#type)
                 .unwrap_or_else(|| panic!("{}: no handler field list", row.r#type));
             read.extend(fields);
         }
@@ -826,12 +751,12 @@ fn sites() -> Vec<Site> {
     }
     for (fqcn, _) in FLOWABLE_TYPES {
         let mut read = base.clone();
-        read.extend(flowable_fields(fqcn));
+        read.extend(crate::spec::keys::flowable_keys(fqcn));
         sites.push(task_site(fqcn, kestra_props(fqcn), read));
     }
     for (fqcn, _) in TRIGGER_TYPES {
         let mut read: BTreeSet<&str> = trigger_base_read(fqcn).into_iter().collect();
-        read.extend(trigger_fields(fqcn));
+        read.extend(crate::spec::keys::trigger_keys(fqcn));
         sites.push(trigger_site(fqcn, read));
     }
     sites.push(Site {
