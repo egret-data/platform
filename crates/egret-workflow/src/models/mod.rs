@@ -28,7 +28,7 @@ pub(crate) use task::canonical_flow_type;
 /// (spec §5.1), not only by the measurement.
 pub(crate) use task::WorkingDirectory;
 /// The flowables' typed structs, for `spec::keys`.
-pub(crate) use task::{AllowFailure, Dag, If, Loop, Parallel, Sequential, Switch};
+pub(crate) use task::{AllowFailure, Dag, DagNode, If, Loop, Parallel, Sequential, Switch};
 pub use task::{
     CheckFrequency, LoopUntil, Pause, Retry, RetryBehavior, RetryCommon, Subflow, Task, TaskKind,
 };

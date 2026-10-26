@@ -104,10 +104,13 @@ pub(crate) enum Site<'a> {
     Trigger(&'a str),
     /// An input of this `InputType` wire name ("STRING", ...).
     Input(&'a str),
+    /// An entry of the flow's `checks` list.
+    Check,
 }
 
 const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
 /// D15, measured: Kestra persists a source `deleted: true` as a tombstone row
 /// (`AbstractJdbcFlowRepository.save` writes the parsed `GenericFlow`, and the
 /// `deleted` column is generated from the stored JSON, `baseline-postgres.sql:117`).
@@ -202,7 +205,59 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             ("REUSABLE_INPUTS", "ref" | "namespace" | "revision") => Some(Enterprise),
             _ => None,
         },
+        Site::Check => match key {
+            // `Check.setCondition` (`k/core/models/flows/check/Check.java:64-67`,
+            // deprecated since 2.0.0) sets `when`: Jackson accepts the name.
+            "condition" => Some(Package(16)),
+            _ => None,
+        },
     }
+}
+
+// ---------- the nested beans (spec 3.7) ----------
+//
+// `Retry` and `Sla` are internally tagged enums, which `wire_fields_of` cannot
+// read, so their key sets are written from Kestra's classes; a unit test
+// round-trips every listed key through the model (a key the model drops, or
+// reads and the list omits, is red). The other beans are derived structs.
+
+/// `AbstractRetry`'s fields (`k/core/models/tasks/retrys/AbstractRetry.java`:
+/// `maxDuration` :31, `maxAttempts` :34, `warningOnRetry` :37, `behavior` :40)
+/// and the `type` each subclass declares (`Constant.java:26`,
+/// `Exponential.java:27`, `Random.java:27`).
+const RETRY_COMMON_KEYS: &[&str] = &[
+    "type",
+    "maxDuration",
+    "maxAttempts",
+    "warningOnRetry",
+    "behavior",
+];
+
+/// What a `retry:` of this `type` has: [`RETRY_COMMON_KEYS`] plus the subclass's
+/// own (`Constant.java:29` `interval`; `Exponential.java:30,33,35` `interval`,
+/// `maxInterval`, `delayFactor`; `Random.java:30,33` `minInterval`,
+/// `maxInterval`). `None` for a `type` Kestra has no retry for.
+pub(crate) fn retry_keys(ty: &str) -> Option<Vec<&'static str>> {
+    let own: &[&str] = match ty {
+        "constant" => &["interval"],
+        "exponential" => &["interval", "maxInterval", "delayFactor"],
+        "random" => &["minInterval", "maxInterval"],
+        _ => return None,
+    };
+    Some(RETRY_COMMON_KEYS.iter().chain(own).copied().collect())
+}
+
+/// What an `sla:` entry of this `type` has: `SLA.java`'s `id` :42, `type` :45,
+/// `behavior` :48, `labels` :53, plus `MaxDurationSLA.java:25` `duration` or
+/// `ExecutionAssertionSLA.java:27-28` `assert` (`@JsonProperty("assert")`).
+/// `None` for a `type` Kestra has no SLA for.
+pub(crate) fn sla_keys(ty: &str) -> Option<Vec<&'static str>> {
+    let own = match ty {
+        "MAX_DURATION" => "duration",
+        "EXECUTION_ASSERTION" => "assert",
+        _ => return None,
+    };
+    Some(vec!["id", "type", "behavior", "labels", own])
 }
 
 /// The 20 `InputType` wire names (`models/input.rs:19-41`), the `type:`
@@ -393,10 +448,28 @@ pub(crate) fn findings(source: &str, model: &Flow, report: &mut ValidationReport
     };
     Walk {
         report,
+        seen: Seen::default(),
         flow: model,
         reached: Vec::new(),
     }
     .flow(&flow);
+}
+
+/// What the walk of `source` examined (the corpus test's floors).
+#[cfg(test)]
+pub(crate) fn seen(source: &str, flow: &Flow) -> Seen {
+    let Ok(Value::Object(doc)) = serde_norway::from_str::<Value>(source) else {
+        return Seen::default();
+    };
+    let mut scratch = ValidationReport::default();
+    let mut walk = Walk {
+        report: &mut scratch,
+        seen: Seen::default(),
+        flow,
+        reached: Vec::new(),
+    };
+    walk.flow(&doc);
+    walk.seen
 }
 
 /// The path of every model task that the raw walk of `source` does not reach
@@ -412,6 +485,7 @@ pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
     let mut scratch = ValidationReport::default();
     let mut walk = Walk {
         report: &mut scratch,
+        seen: Seen::default(),
         flow,
         reached: Vec::new(),
     };
@@ -473,8 +547,22 @@ fn newer_than_the_pin(site: Option<Site<'_>>, key: &str) -> bool {
     ) && key == "onChildFailure"
 }
 
+/// What a walk examined, for the corpus test's floors: a walk that visits
+/// nothing finds nothing, and a count says it was not vacuous.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Seen {
+    pub triggers: usize,
+    pub inputs: usize,
+    pub outputs: usize,
+    /// Nested beans checked: retries, concurrency, SLAs, checks,
+    /// `checkFrequency`, Dag nodes and the two `dependsOn` kinds.
+    pub beans: usize,
+}
+
 struct Walk<'a> {
     report: &'a mut ValidationReport,
+    /// What the walk examined so far.
+    seen: Seen,
     /// The parsed model of the same source, for the predicates that read it
     /// (`webhook::declared_unsupported`).
     flow: &'a Flow,
@@ -488,6 +576,7 @@ impl Walk<'_> {
         if let Some(retry) = flow.get("retry") {
             self.retry(retry, "retry");
         }
+        self.flow_beans(flow);
         for list in ROOT_LISTS {
             if let Some(Value::Array(tasks)) = flow.get(*list) {
                 for task in tasks {
@@ -504,6 +593,7 @@ impl Walk<'_> {
                     continue;
                 };
                 if let Some(row) = t.get("type").and_then(Value::as_str).and_then(trigger_row) {
+                    self.seen.triggers += 1;
                     self.trigger(row, id, t);
                 }
             }
@@ -516,8 +606,14 @@ impl Walk<'_> {
                         continue;
                     };
                     match kind {
-                        Kind::Input => self.input(id, o),
-                        Kind::Output => self.output(id, o),
+                        Kind::Input => {
+                            self.seen.inputs += 1;
+                            self.input(id, o);
+                        }
+                        Kind::Output => {
+                            self.seen.outputs += 1;
+                            self.output(id, o);
+                        }
                     }
                 }
             }
@@ -579,6 +675,23 @@ impl Walk<'_> {
         }
         if row == WEBHOOK {
             self.webhook_refusals(id, &path);
+        }
+        // A Flow trigger's `dependsOn` entries are `Flow.Dependency`
+        // (`k/core/plugin/core/trigger/Flow.java:364-386`); `flowRef` is
+        // egret's own, filled at publish, and not a key Kestra has. `window`
+        // is `deny_unknown_fields` already and is left to it.
+        if row == FLOW_TRIGGER {
+            if let Some(Value::Array(deps)) = t.get("dependsOn") {
+                let read: Vec<&str> = wire_fields_of::<models::Dependency>()
+                    .into_iter()
+                    .filter(|k| *k != "flowRef")
+                    .collect();
+                for (i, dep) in deps.iter().enumerate() {
+                    let Some(o) = dep.as_object() else { continue };
+                    let at = format!("{path}.dependsOn[{i}]");
+                    self.bean(&format!("trigger '{id}': dependsOn[{i}]"), &at, o, &read, None);
+                }
+            }
         }
     }
 
@@ -661,6 +774,12 @@ impl Walk<'_> {
         else {
             return;
         };
+        // `dependsOn` is `DependsOn(inputs, condition)` (`k/core/models/flows/DependsOn.java:15-17`).
+        if let Some(Value::Object(dep)) = input.get("dependsOn") {
+            let read = wire_fields_of::<models::DependsOn>();
+            let at = format!("inputs.{id}.dependsOn");
+            self.bean(&format!("input '{id}': dependsOn"), &at, dep, &read, None);
+        }
         let read = input_keys(ty);
         for key in input.keys().map(String::as_str) {
             if read.contains(&key) {
@@ -725,13 +844,40 @@ impl Walk<'_> {
         }
         self.reached.push(path.clone());
         let Some(row) = row else { return };
+        // `LoopUntil.CheckFrequency` (`LoopUntil.java:245-264`).
+        if row == "io.kestra.plugin.core.flow.LoopUntil" {
+            if let Some(Value::Object(freq)) = t.get("checkFrequency") {
+                let read = wire_fields_of::<models::CheckFrequency>();
+                let at = format!("{path}.checkFrequency");
+                self.bean(&format!("task '{id}': checkFrequency"), &at, freq, &read, None);
+            }
+        }
         for key in child_lists(row) {
             match t.get(*key) {
                 Some(Value::Array(children)) => {
-                    for child in children {
-                        // A `Dag` node holds its task under `task`.
+                    for (i, child) in children.iter().enumerate() {
+                        // A `Dag` node holds its task under `task`
+                        // (`Dag.DagTask`, `Dag.java:259-272`) and is a bean of
+                        // its own, pathed as `validate` paths it
+                        // (`{dag}.tasks[{i}]`).
                         match child.get("task") {
-                            Some(inner) if child.get("type").is_none() => self.task(inner, &path),
+                            Some(inner) if child.get("type").is_none() => {
+                                if let (true, Some(node)) = (
+                                    row == "io.kestra.plugin.core.flow.Dag",
+                                    child.as_object(),
+                                ) {
+                                    let read = wire_fields_of::<models::DagNode>();
+                                    let at = format!("{path}.{key}[{i}]");
+                                    self.bean(
+                                        &format!("task '{id}': dag node #{i}"),
+                                        &at,
+                                        node,
+                                        &read,
+                                        None,
+                                    );
+                                }
+                                self.task(inner, &path)
+                            }
                             _ => self.task(child, &path),
                         }
                     }
@@ -794,47 +940,24 @@ impl Walk<'_> {
         }
     }
 
+    /// A `retry` (task or flow), checked against the keys of its `type`
+    /// ([`retry_keys`]). `warningOnRetry` is Kestra's (`AbstractRetry.java:37`):
+    /// `true` ends a retried task that succeeds WARNING, which egret does not;
+    /// `false` is the default, which egret's behaviour already is. Said once,
+    /// in its own words.
     fn retry(&mut self, retry: &Value, path: &str) {
         let Some(r) = retry.as_object() else { return };
-        let row = match r.get("type").and_then(Value::as_str) {
-            Some("constant") => "io.kestra.core.models.tasks.retrys.Constant-2",
-            Some("exponential") => "io.kestra.core.models.tasks.retrys.Exponential-2",
-            Some("random") => "io.kestra.core.models.tasks.retrys.Random-2",
-            _ => return,
-        };
-        // A retry has no `Site`: no lift row names its keys yet (Tasks 3, 6).
-        self.check_with(row, None, "the retry", r, path);
-    }
-
-    fn check(
-        &mut self,
-        row: &str,
-        site: Site<'_>,
-        what: &str,
-        object: &serde_json::Map<String, Value>,
-        path: &str,
-    ) {
-        self.check_with(row, Some(site), what, object, path);
-    }
-
-    /// One object against its row.
-    fn check_with(
-        &mut self,
-        row: &str,
-        site: Option<Site<'_>>,
-        what: &str,
-        object: &serde_json::Map<String, Value>,
-        path: &str,
-    ) {
-        let Some(props) = property_treatment().get(row) else {
+        let Some(read) = r
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(retry_keys)
+        else {
             return;
         };
-        for key in object.keys() {
-            // Kestra's `warningOnRetry` (`Retry.java`): `true` ends a retried
-            // task that succeeds WARNING. Said once, in its own words; `false`
-            // is the default, which egret's behaviour already is.
-            if site.is_none() && key == "warningOnRetry" {
-                if object.get(key) == Some(&Value::Bool(true)) {
+        self.seen.beans += 1;
+        for (key, value) in r {
+            if key == "warningOnRetry" {
+                if *value == Value::Bool(true) {
                     self.report.warnings.push(Finding {
                         code: "not_honoured",
                         message: format!(
@@ -846,6 +969,101 @@ impl Walk<'_> {
                 }
                 continue;
             }
+            self.key_of(&read, "the retry", path, key, None);
+        }
+    }
+
+    /// One nested bean: every key of `object` that `read` does not list is
+    /// reported by [`Self::key_of`].
+    fn bean(
+        &mut self,
+        what: &str,
+        path: &str,
+        object: &serde_json::Map<String, Value>,
+        read: &[&str],
+        site: Option<Site<'_>>,
+    ) {
+        self.seen.beans += 1;
+        for key in object.keys() {
+            self.key_of(read, what, path, key, site);
+        }
+    }
+
+    /// `key` of a nested bean: read (silent), accepted by Kestra and not acted
+    /// on (`lift_of` names the package: `not_honoured`), or unknown to both
+    /// (`unknown_property`, as Kestra's Jackson refuses it). Both messages are
+    /// egret's own and name the key, never a value (D10).
+    fn key_of(
+        &mut self,
+        read: &[&str],
+        what: &str,
+        path: &str,
+        key: &str,
+        site: Option<Site<'_>>,
+    ) {
+        if read.contains(&key) {
+            return;
+        }
+        let at = format!("{path}.{key}");
+        match site.and_then(|s| lift_of(s, key)) {
+            Some(lift) => self.report.warnings.push(Finding {
+                code: "not_honoured",
+                message: format!(
+                    "{what}: property '{key}' is accepted by Kestra but egret does not act on it yet; {}",
+                    lift.sentence()
+                ),
+                path: at,
+            }),
+            None => self.report.errors.push(Finding {
+                code: "unknown_property",
+                message: format!(
+                    "{what}: unknown property '{key}': neither Kestra nor egret accepts it"
+                ),
+                path: at,
+            }),
+        }
+    }
+
+    /// The flow's `concurrency`, each `sla` and each `checks` entry
+    /// (spec 3.7); `quotas` is skipped (an Enterprise warning already, and
+    /// Kestra OSS does not read it).
+    fn flow_beans(&mut self, flow: &serde_json::Map<String, Value>) {
+        if let Some(Value::Object(c)) = flow.get("concurrency") {
+            let read = wire_fields_of::<models::Concurrency>();
+            self.bean("concurrency", "concurrency", c, &read, None);
+        }
+        if let Some(Value::Array(slas)) = flow.get("sla") {
+            for (i, sla) in slas.iter().enumerate() {
+                let Some(o) = sla.as_object() else { continue };
+                let Some(read) = o.get("type").and_then(Value::as_str).and_then(sla_keys) else {
+                    continue;
+                };
+                self.bean(&format!("sla[{i}]"), &format!("sla[{i}]"), o, &read, None);
+            }
+        }
+        if let Some(Value::Array(checks)) = flow.get("checks") {
+            let read = wire_fields_of::<models::Check>();
+            for (i, check) in checks.iter().enumerate() {
+                let Some(o) = check.as_object() else { continue };
+                let path = format!("checks[{i}]");
+                self.bean(&path.clone(), &path, o, &read, Some(Site::Check));
+            }
+        }
+    }
+
+    fn check(
+        &mut self,
+        row: &str,
+        site: Site<'_>,
+        what: &str,
+        object: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        let site = Some(site);
+        let Some(props) = property_treatment().get(row) else {
+            return;
+        };
+        for key in object.keys() {
             let at = if path.is_empty() {
                 key.clone()
             } else {
@@ -1790,6 +2008,242 @@ mod tests {
         );
         assert!(w.is_empty(), "{w:?}");
     }
+
+    // ---------- Task 6: the nested beans (spec 3.7) ----------
+
+    const HEAD: &str = "id: f\nnamespace: a.b\n";
+
+    /// One finding, at `path`, with `code`: the shape every nested-bean test asserts.
+    fn only(src: &str, path: &str, code: &'static str) {
+        let w = census(src);
+        assert_eq!(w, vec![(path.to_string(), code)], "{src}");
+    }
+
+    fn silent_census(src: &str) {
+        let w = census(src);
+        assert!(w.is_empty(), "{w:?}\n{src}");
+    }
+
+    #[test]
+    fn a_typo_in_a_task_retry_is_refused_at_its_path() {
+        only(
+            &format!("{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempt: 3\n"),
+            "tasks.t.retry.maxAttempt",
+            "unknown_property",
+        );
+    }
+
+    #[test]
+    fn each_retry_type_accepts_its_own_keys_and_refuses_another_types() {
+        let task = |retry: &str| {
+            format!("{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n{retry}")
+        };
+        let common = "      maxAttempts: 2\n      maxDuration: PT1M\n      behavior: RETRY_FAILED_TASK\n      warningOnRetry: false\n";
+        silent_census(&task(&format!("      type: constant\n      interval: PT1S\n{common}")));
+        silent_census(&task(&format!(
+            "      type: exponential\n      interval: PT1S\n      maxInterval: PT9S\n      delayFactor: 2.0\n{common}"
+        )));
+        silent_census(&task(&format!(
+            "      type: random\n      minInterval: PT1S\n      maxInterval: PT9S\n{common}"
+        )));
+        // A key of another retry type is as unknown as a typo.
+        only(
+            &task("      type: constant\n      interval: PT1S\n      delayFactor: 2.0\n"),
+            "tasks.t.retry.delayFactor",
+            "unknown_property",
+        );
+        only(
+            &task("      type: random\n      minInterval: PT1S\n      maxInterval: PT9S\n      interval: PT1S\n"),
+            "tasks.t.retry.interval",
+            "unknown_property",
+        );
+        only(
+            &task("      type: exponential\n      interval: PT1S\n      maxInterval: PT9S\n      minInterval: PT1S\n"),
+            "tasks.t.retry.minInterval",
+            "unknown_property",
+        );
+    }
+
+    #[test]
+    fn a_flow_retry_is_checked_per_type_too() {
+        only(
+            &format!("{HEAD}retry:\n  type: exponential\n  interval: PT1S\n  maxInterval: PT9S\n  delayFactr: 2\n{LOG}"),
+            "retry.delayFactr",
+            "unknown_property",
+        );
+    }
+
+    #[test]
+    fn a_retry_key_has_one_finding_not_two() {
+        let r = report(&format!("{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n      type: constant\n      interval: PT1S\n      oops: 1\n"));
+        assert_eq!(at(&r, "tasks.t.retry.oops").len(), 1, "{r:?}");
+    }
+
+    #[test]
+    fn concurrency_keys_are_checked() {
+        only(
+            &format!("{HEAD}concurrency:\n  limit: 1\n  limt: 2\n{LOG}"),
+            "concurrency.limt",
+            "unknown_property",
+        );
+        silent_census(&format!("{HEAD}concurrency:\n  limit: 1\n  behavior: QUEUE\n{LOG}"));
+    }
+
+    #[test]
+    fn each_sla_is_checked_against_its_type() {
+        silent_census(&format!(
+            "{HEAD}sla:\n  - id: a\n    type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1H\n    labels:\n      k: v\n  - id: b\n    type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{{{ true }}}}\"\n{LOG}"
+        ));
+        only(
+            &format!("{HEAD}sla:\n  - id: a\n    type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1H\n    assert: x\n{LOG}"),
+            "sla[0].assert",
+            "unknown_property",
+        );
+        only(
+            &format!("{HEAD}sla:\n  - id: a\n    type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1H\n  - id: b\n    type: EXECUTION_ASSERTION\n    behavior: FAIL\n    assert: x\n    duration: PT1H\n{LOG}"),
+            "sla[1].duration",
+            "unknown_property",
+        );
+    }
+
+    #[test]
+    fn each_check_is_checked() {
+        silent_census(&format!(
+            "{HEAD}checks:\n  - when: \"{{{{ true }}}}\"\n    message: m\n    style: ERROR\n    behavior: FAIL_EXECUTION\n{LOG}"
+        ));
+        only(
+            &format!("{HEAD}checks:\n  - when: x\n  - when: y\n    mesage: m\n{LOG}"),
+            "checks[1].mesage",
+            "unknown_property",
+        );
+    }
+
+    /// Kestra's `Check.setCondition` (`Check.java:64-67`, deprecated) makes
+    /// `condition` an accepted name that sets `when`; egret reads `when` only.
+    #[test]
+    fn the_deprecated_check_condition_warns_with_its_package() {
+        let r = report(&format!("{HEAD}checks:\n  - condition: x\n    message: m\n{LOG}"));
+        let f = at(&r, "checks[0].condition");
+        assert_eq!(f.len(), 1, "{r:?}");
+        assert_eq!(f[0].code, "not_honoured");
+        assert!(f[0].message.contains("roadmap package #16"), "{}", f[0].message);
+    }
+
+    #[test]
+    fn check_frequency_keys_are_checked() {
+        let loop_until = |freq: &str| {
+            format!("{HEAD}tasks:\n  - id: w\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{{{ true }}}}\"\n    checkFrequency:\n{freq}    tasks:\n      - id: t\n        type: core.log\n        message: hi\n")
+        };
+        only(
+            &loop_until("      interval: PT1S\n      interva: PT1S\n"),
+            "tasks.w.checkFrequency.interva",
+            "unknown_property",
+        );
+        silent_census(&loop_until(
+            "      interval: PT1S\n      maxIterations: 3\n      maxDuration: PT1H\n",
+        ));
+    }
+
+    #[test]
+    fn a_dag_node_is_checked() {
+        let dag = |second: &str| {
+            format!("{HEAD}tasks:\n  - id: d\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: a\n          type: core.log\n          message: hi\n      - task:\n          id: b\n          type: core.log\n          message: hi\n{second}")
+        };
+        only(&dag("        dependOn: [a]\n"), "tasks.d.tasks[1].dependOn", "unknown_property");
+        silent_census(&dag("        dependsOn: [a]\n"));
+    }
+
+    #[test]
+    fn an_input_depends_on_is_checked() {
+        let input = |dep: &str| {
+            format!("{HEAD}inputs:\n  - id: a\n    type: STRING\n  - id: i\n    type: STRING\n    dependsOn:\n{dep}{LOG}")
+        };
+        only(
+            &input("      inputs: [a]\n      inpts: [a]\n"),
+            "inputs.i.dependsOn.inpts",
+            "unknown_property",
+        );
+        silent_census(&input("      inputs: [a]\n      condition: \"{{ true }}\"\n"));
+    }
+
+    #[test]
+    fn a_flow_trigger_depends_on_entry_is_checked() {
+        let trig = |entry: &str| {
+            format!("{HEAD}{LOG}triggers:\n  - id: l\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: a.b\n        flowId: g\n{entry}")
+        };
+        only(
+            &trig("      - namespace: a.b\n        flowid: h\n"),
+            "triggers.l.dependsOn[1].flowid",
+            "unknown_property",
+        );
+        silent_census(&trig(
+            "      - namespace: a.b\n        flowId: h\n        states: [SUCCESS]\n        labels:\n          k: v\n        when: \"{{ true }}\"\n",
+        ));
+    }
+
+    /// `flowRef` is egret's own, filled at publish; Kestra's `Dependency` has no
+    /// such key, so an author writing it is refused as Kestra would.
+    #[test]
+    fn an_authored_flow_ref_on_a_dependency_is_unknown() {
+        only(
+            &format!("{HEAD}{LOG}triggers:\n  - id: l\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: a.b\n        flowId: g\n        flowRef: 00000000-0000-0000-0000-000000000000\n"),
+            "triggers.l.dependsOn[0].flowRef",
+            "unknown_property",
+        );
+    }
+
+    /// `quotas` is an Enterprise warning already and Kestra OSS does not read it (spec 3.7).
+    #[test]
+    fn quotas_are_not_walked() {
+        let w = census(&format!("{HEAD}quotas:\n  - bogus: 1\n{LOG}"));
+        assert!(w.iter().all(|(p, _)| !p.starts_with("quotas")), "{w:?}");
+    }
+
+    /// Each hand-written key set lists exactly what the model reads: a key the
+    /// const lists but the model drops would let a typo-shaped key through
+    /// silently, and a key the model reads but the const omits would be a
+    /// false refusal. Both are caught by round-tripping every listed key.
+    fn round_trip(model_yaml: &str, listed: &[&str], serialised_as: fn(&Value) -> Value) {
+        let v: Value = serde_norway::from_str(model_yaml).unwrap();
+        let out = serialised_as(&v);
+        let Value::Object(o) = out else { panic!("{out:?}") };
+        let mut got: Vec<&str> = o.keys().map(String::as_str).collect();
+        let mut want: Vec<&str> = listed.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn every_listed_retry_key_deserializes_into_the_model() {
+        let as_retry = |v: &Value| {
+            serde_json::to_value(serde_json::from_value::<models::Retry>(v.clone()).unwrap()).unwrap()
+        };
+        for (ty, yaml) in [
+            ("constant", "type: constant\ninterval: PT1S\nmaxDuration: PT1M\nmaxAttempts: 2\nwarningOnRetry: true\nbehavior: CREATE_NEW_EXECUTION\n"),
+            ("exponential", "type: exponential\ninterval: PT1S\nmaxInterval: PT9S\ndelayFactor: 2.0\nmaxDuration: PT1M\nmaxAttempts: 2\nwarningOnRetry: true\nbehavior: CREATE_NEW_EXECUTION\n"),
+            ("random", "type: random\nminInterval: PT1S\nmaxInterval: PT9S\nmaxDuration: PT1M\nmaxAttempts: 2\nwarningOnRetry: true\nbehavior: CREATE_NEW_EXECUTION\n"),
+        ] {
+            round_trip(yaml, &retry_keys(ty).unwrap(), as_retry);
+        }
+    }
+
+    #[test]
+    fn every_listed_sla_key_deserializes_into_the_model() {
+        let as_sla = |v: &Value| {
+            serde_json::to_value(serde_json::from_value::<models::Sla>(v.clone()).unwrap()).unwrap()
+        };
+        round_trip(
+            "type: MAX_DURATION\nid: a\nbehavior: FAIL\nlabels:\n  - key: k\n    value: v\nduration: PT1H\n",
+            &sla_keys("MAX_DURATION").unwrap(),
+            as_sla,
+        );
+        round_trip(
+            "type: EXECUTION_ASSERTION\nid: a\nbehavior: FAIL\nlabels:\n  - key: k\n    value: v\nassert: x\n",
+            &sla_keys("EXECUTION_ASSERTION").unwrap(),
+            as_sla,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1803,29 +2257,58 @@ mod corpus {
     /// 0 unknown, 45 ignored (all keys the table measures `ignored`).
     #[test]
     fn no_valid_kestra_flow_has_an_unknown_property() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/corpus/valids");
-        let mut checked = 0;
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/corpus");
         let mut unknown = Vec::new();
-        for entry in std::fs::read_dir(dir).expect("the corpus") {
-            let path = entry.expect("an entry").path();
-            let src = std::fs::read_to_string(&path).expect("a flow");
-            checked += 1;
-            // A corpus flow egret's model cannot parse has no model to pair
-            // with; the census fails open on it, as in production.
-            let Ok(flow) = crate::spec::parse(&src) else {
-                continue;
-            };
-            let mut report = ValidationReport::default();
-            findings(&src, &flow, &mut report);
-            for f in report
-                .errors
-                .iter()
-                .filter(|f| f.code == "unknown_property")
-            {
-                unknown.push(format!("{}: {}", path.display(), f.message));
+        // What was read, parsed and examined, per directory: a count of files
+        // alone passes when every parse fails, so each floor is on what the
+        // walk visited.
+        let mut files = [0usize; 2];
+        let mut parsed = [0usize; 2];
+        let mut seen = [Seen::default(); 2];
+        for (n, dir) in ["valids", "invalids"].into_iter().enumerate() {
+            for entry in std::fs::read_dir(format!("{root}/{dir}")).expect("the corpus") {
+                let path = entry.expect("an entry").path();
+                let src = std::fs::read_to_string(&path).expect("a flow");
+                files[n] += 1;
+                // A corpus flow egret's model cannot parse has no model to pair
+                // with; the census fails open on it, as in production.
+                let Ok(flow) = crate::spec::parse(&src) else {
+                    continue;
+                };
+                parsed[n] += 1;
+                let s = super::seen(&src, &flow);
+                seen[n].triggers += s.triggers;
+                seen[n].inputs += s.inputs;
+                seen[n].outputs += s.outputs;
+                seen[n].beans += s.beans;
+                // Only the valid flows must draw no refusal; an invalid one
+                // may (Kestra refuses it too).
+                if dir == "valids" {
+                    let mut report = ValidationReport::default();
+                    findings(&src, &flow, &mut report);
+                    for f in report
+                        .errors
+                        .iter()
+                        .filter(|f| f.code == "unknown_property")
+                    {
+                        unknown.push(format!("{}: {}", path.display(), f.message));
+                    }
+                }
             }
         }
-        assert!(checked > 300, "the corpus is where it was: {checked} files");
+        eprintln!("corpus files {files:?} parsed {parsed:?} seen {seen:?}");
         assert!(unknown.is_empty(), "{unknown:#?}");
+        // Measured 2026-10-26 (Task 6): valids 323 files, 322 parsed, 39
+        // triggers, 106 inputs, 20 outputs, 94 nested beans; invalids 28
+        // files, 23 parsed, 4 / 18 / 1 / 13. Each floor sits a little under.
+        assert!(files[0] > 300 && files[1] >= 25, "files {files:?}");
+        assert!(parsed[0] >= 315 && parsed[1] >= 20, "parsed {parsed:?}");
+        let v = seen[0];
+        assert!(v.triggers >= 35, "valids triggers {v:?}");
+        assert!(v.inputs >= 100, "valids inputs {v:?}");
+        assert!(v.outputs >= 18, "valids outputs {v:?}");
+        assert!(v.beans >= 85, "valids nested beans {v:?}");
+        let i = seen[1];
+        assert!(i.triggers >= 3 && i.inputs >= 15 && i.beans >= 10, "invalids {i:?}");
     }
 }
