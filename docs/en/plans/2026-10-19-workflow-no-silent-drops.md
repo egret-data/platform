@@ -37,6 +37,15 @@ Paths are relative to `crates/egret-workflow/src/` unless another root is given.
 - **Baseline on main:** ratchet 301 golden, 73 mismatching, 73 baselined, 0 broken; `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21; `PUBLISHED_BUT_REFUSED` 6.
 - **Corpus hits** (census scan, `scratchpad/nodrops/hits.json`): leaf unknown key 1 (`invalids/invalid-property`); `logLevel` 1, `logToFile` 1, `taskCache` 1; `warningOnRetry` 4; Subflow `labels` 4, `inheritLabels` 6; `Pause` `onResume` 3; `Loop` `outputs` 8 hits in 6 flows, `fetchType` 1; flow `draft` 2, `revision` 2; Webhook `labels` 1; input `values` 7, `validator` 3, `jsonSchema` 1, `min`/`max`/`after`/`before` in `valids/inputs`. Not scanned: cross-type input keys, nested beans.
 
+## Addendum 2026-10-26: rebased onto main `28fb8693` (spec D17)
+
+Main moved 56 commits. #747 shipped `spec/properties.rs` (`property_warnings`) and `validate.rs` `schedule_findings`. Read spec D17 first. Changes to the tasks below:
+- **Task 2** also deletes `spec/properties.rs`, removes `pub use properties::property_warnings` and replaces the three `validate(..)` + `property_warnings(..)` pairs (`publish.rs:311-317`, `routes.rs:527-533`, `routes.rs:1021-1027`) with `validate_source`. The tests in `properties.rs` move to `keys.rs` with the new codes (`unknown_property` error, `not_honoured` warning). Update the doc text in `spec/schema/README.md:143` and `spec/schema/mod.rs:142`.
+- **Task 3 and Task 6** (`warningOnRetry`): `NO_EFFECT` already marks it `ignored` in `measure.rs`; the `not_honoured` warning names #13. `the_committed_property_treatment_is_what_egret_does_today` must stay green.
+- **Task 5**: Schedule `lateMaximumDelay` / `when` are covered by `schedule_not_resolvable`; reword that message to name #11 and add no second warning.
+- Every `file:line` anchor in the plan is from `309405b1`: re-grep before editing.
+- Commit trailer: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` (replaces the one in Global Constraints).
+
 ## Global Constraints
 
 - **The private stack only.** Every cargo command runs with exactly:
