@@ -17,7 +17,8 @@ drop purges its rows; stale rows are reported.
 - The column source overlay marks the moving source as `leaving`, so the copy's compile counts it once.
 - `egret-policy` gains a policy-version wait beside the tag-version wait.
 - `ViewReach` moves from `egret-bi` to `egret-perm-compile`, so the move re-tags dependent views like a tag write.
-- Two governance events (`tag:move`, `tag:purge`), two Overview findings and a `state` on "Where used" rows.
+- Two governance events (`tag:move`, `tag:purge`) whose actor is the Iceberg caller (the guard passes the token
+  subject to the hook), three Overview findings, and a `state` and `missingColumns` on "Where used" rows.
 
 **Tech stack:** Rust (axum 0.8, sqlx 0.9, utoipa), embedded Lakekeeper, Ranger plugin ledger, React 18 + orval
 client, Vitest.
@@ -67,7 +68,7 @@ client, Vitest.
 |---|---|---|
 | `crates/egret-policy/src/plugin_downloads.rs` | `plugins_hold_policy_version`, `wait_for_versions` | 1 |
 | `crates/egret-policy/tests/plugin_downloads_db.rs` | wait tests through the download routes | 1 |
-| `crates/egret-perm-compile/src/table_columns.rs` | `top_level_fields`, `current_fields_via`, `leaving`, `table_states_via` | 2, 9 |
+| `crates/egret-perm-compile/src/table_columns.rs` | `top_level_fields`, `current_fields_via`, `leaving`, `table_states_via`, `missing_columns_via` | 2, 9, 10 |
 | `crates/egret-perm-compile/src/{clearance,rules,trigger}.rs` | ceilings skip leaving coordinates | 2 |
 | `crates/egret-perm-compile/src/view_tags.rs`, `Cargo.toml` | `ViewReach` (moved, public) | 3 |
 | `crates/egret-bi/src/catalog_tags.rs` | uses the moved `ViewReach` | 3 |
@@ -75,12 +76,13 @@ client, Vitest.
 | `crates/egret-catalog-engine/src/view_hold.rs` | `uncancellable`, `trino_tag_versions`, `delete_inserted_rows` `pub(crate)` | 3 |
 | `crates/egret-catalog-engine/tests/common/plugins.rs` (new) | fake Trino tag plugin (moved from `view_hold_db.rs`), fake StarRocks policy plugin | 3, 4 |
 | `crates/egret-catalog-engine/tests/table_hook_db.rs` | move tests; Trino profile in `env()` | 3-9 |
-| `crates/egret-audit/src/governance.rs` | `tag:move`, `tag:purge`, `record_system_change` | 7 |
-| `crates/egret-controlplane/src/governance_changes.rs` | two sentences | 7 |
-| `crates/egret-controlplane/src/governance_overview.rs` | two sources | 9 |
-| `crates/egret-controlplane/src/governance_tag_usage.rs` | `TableUsage.state` | 10 |
-| `openapi.json`, `frontend/src/api/generated/**` | regenerated | 10 |
-| `frontend/src/routes/governance/overview/AttentionSection.tsx`, `classifications/tabs/WhereUsedTab.tsx` and their `__tests__` | `CHECKS`, badge | 11 |
+| `crates/egret-audit/src/governance.rs` | `tag:move`, `tag:purge`, `Actor`, `record_change_by` | 7 |
+| `crates/egret-catalog-engine/src/mount.rs`, `crates/egret-bin/src/main.rs` | `CatalogCaller` from the guard into the request extensions | 7 |
+| `crates/egret-controlplane/src/governance_changes.rs` | two sentences, `detail.actor` phrase | 7 |
+| `crates/egret-controlplane/src/governance_overview.rs` | three sources | 9, 10 |
+| `crates/egret-controlplane/src/governance_tag_usage.rs` | `TableUsage.state`, `TableUsage.missing_columns` | 11 |
+| `openapi.json`, `frontend/src/api/generated/**` | regenerated | 11 |
+| `frontend/src/routes/governance/overview/AttentionSection.tsx`, `classifications/tabs/WhereUsedTab.tsx` and their `__tests__` | `CHECKS`, badges | 12 |
 
 ## Step 0: Re-verify the evidence on the then-current main
 
@@ -99,6 +101,8 @@ client, Vitest.
 | E20 | `egret-table-hook\u{1e}` keyspace and `COMMIT_LOCK_WAIT` in `table_hook.rs` |
 | E23, E24 | `kind = 'tags'` in `plugins_hold_tag_version`; `DownloadKind::Policies` recorded in `download_policies` (`download.rs`) |
 | E27 | `record_change` binds `c.principal.user_id.0`; `None => "egret".to_string()` in `governance_changes.rs` |
+| E33 | `EgretCatalogGuard::check` returns `Ok(())` after reading `claims`; `claims.insert("sub".into(), vc.client_id…)` in `egret-machine-idp`'s `mint` |
+| E35 | `if !recursive` refusal with `child_tabulars_deleted` in Lakekeeper's `lakekeeper-storage-postgres/src/namespace.rs` (git checkout at the pinned rev) |
 | E32 | `ls migrations \| tail -1` (expect `0209`); `gh pr list --state open` and each PR's migrations |
 | test | `a_rename_of_a_classified_table_is_dry_run_and_commits` in `table_hook_db.rs` still asserts the classification stays on the old name (Task 3 inverts it) |
 
@@ -199,7 +203,7 @@ client, Vitest.
   - guard `a_rename_with_no_trino_bound_moves_without_a_trino_wait` — Trino engine detached, StarRocks plugin
     running → 2xx, rows moved, no Trino wait (no `NO_PLUGIN_POLLED` refusal), the reach after the StarRocks report.
     Mutation: make an empty Trino list a timeout (the view hold's rule) → red.
-  - `a_rename_no_plugin_confirms_is_refused_and_undone` — Trino bound, no plugin running, `with_limit(2 s)` → 409
+  - `a_rename_no_plugin_confirms_is_refused_and_undone` (R5) — Trino bound, no plugin running, `with_limit(2 s)` → 409
     "engines did not confirm the moved classifications within 2 s: <no plugin has polled>"; no row on `orders_v2`;
     Lakekeeper still has `orders`.
   - `a_rename_with_nothing_bound_moves_at_once` — no engine bound at all → 2xx within 1 s, rows moved.
@@ -265,23 +269,40 @@ client, Vitest.
 - [ ] **Checks:** as Task 3.
 - [ ] Commit `fix(catalog): move a column's classifications with it on rename`.
 
-## Task 7: Governance events (C6, spec §5.7)
+## Task 7: Governance events with the real caller (C6, C6a, R7, spec §5.7)
 
-**Files:** `crates/egret-audit/src/governance.rs`; `table_hook.rs`; `crates/egret-controlplane/src/governance_changes.rs`;
-tests `table_hook_db.rs`, `crates/egret-controlplane/tests/governance_changes.rs` (or the existing feed test binary).
+**Files:** `crates/egret-catalog-engine/src/mount.rs` (`CatalogCaller`, `CatalogGuard::check` return type,
+`guard_then_inject_metadata`); `crates/egret-bin/src/main.rs` (`EgretCatalogGuard::check` returns the verified
+`sub`/`aud`); `crates/egret-audit/src/governance.rs`; `table_hook.rs`; `crates/egret-controlplane/src/governance_changes.rs`;
+tests `table_hook_db.rs`, `crates/egret-bin` guard unit tests (beside the existing `wrong audience` ones,
+`main.rs:3150-3240`), the controlplane feed test binary.
 
 - [ ] **Red:**
-  - `a_completed_move_records_one_tag_move_event` (table_hook_db) — after Task 3's rename: one `audit.audit_log` row
-    `action = 'tag:move'`, `resource_type = 'catalog'`, `actor_user_id IS NULL`, summary `before`/`after`/`tags`/
-    `rows`; after Task 5's union case `kept` lists C. Today: none.
+  - guard unit test `the_catalog_guard_returns_the_token_subject` — a token signed for `aud = "catalog"`, `sub =
+    "cat1"` → `check` returns `CatalogCaller { subject: "cat1", audience: "catalog" }`. Expected on the base: compile
+    error (the trait returns `()`); then, with the trait changed but the guard returning an empty subject, red.
+  - `a_completed_move_records_one_tag_move_event_by_its_caller` (table_hook_db) — the test mounts a guard stub that
+    returns `CatalogCaller { subject: <client_id of a catalog.catalog_clients row "trino-main"> }`; after Task 3's
+    rename: one `audit.audit_log` row `action = 'tag:move'`, `resource_type = 'catalog'`, `actor_user_id IS NULL`,
+    `detail.actor = {kind: catalog_client, id, client_id, name: "trino-main", consumer_type: "engine"}`, and
+    `before`/`after`/`tags`/`rows`; after Task 5's union case `kept` lists C. Today: no event (red).
+  - `a_move_by_a_deleted_client_keeps_its_client_id` — the client row deleted before the rename → `detail.actor.id`
+    and `name` null, `client_id` kept.
+  - `a_move_with_no_guard_is_by_egret` — no guard mounted → `detail.actor` absent, `actor_user_id` NULL.
   - `a_refused_or_undone_move_records_nothing` — the 409 and the failed-rename cases leave no `tag:move` row.
-  - feed route test: `GET /api/control-plane/governance/changes` for a reader with `tag:read` returns "egret moved
-    classification *A* from `sales.orders` to `sales.orders_v2` (table renamed)" (and the column variant); a reader
-    with only `policy:read` does not see it (family Tag).
-- [ ] **Fix:** spec §5.7; `record_system_change`; the event in `finish`'s transaction.
-- [ ] **Checks:** fmt; clippy `-p egret-audit -p egret-catalog-engine -p egret-controlplane`; `cargo test -p
-  egret-audit`; `cargo test -p egret-catalog-engine --test table_hook_db`; the controlplane feed test binary.
-- [ ] Commit `feat(governance): record classification moves in the governance feed`.
+  - feed route test: `GET /api/control-plane/governance/changes` for a `tag:read` reader returns "Catalog client
+    *trino-main* moved classification *A* from `sales.orders` to `sales.orders_v2` (table renamed)" (and the column
+    variant); a deleted client reads "Catalog client `<client_id>` (deleted)"; a reader with only `policy:read` does
+    not see it (family Tag).
+- [ ] **Fix:** spec §5.7: `CatalogCaller` read by the guard from its verified claims and put in the extensions by
+  `guard_then_inject_metadata`; the hook carries it into `finish` and resolves it there; `Actor`,
+  `record_change_by` (`record_change` delegates to it, its callers unchanged); the feed's actor phrase reads
+  `detail.actor`.
+- [ ] **Checks:** fmt; clippy `-p egret-audit -p egret-catalog-engine -p egret-bin -p egret-controlplane`; `cargo test
+  -p egret-audit`; `cargo test -p egret-bin` (guard tests); `cargo test -p egret-catalog-engine --test table_hook_db
+  --test view_hold_db --test warehouse_admin_routes` (every test guard compiles against the new trait); the
+  controlplane feed test binary.
+- [ ] Commit `feat(governance): record classification moves by the catalog client that made them`.
 
 ## Task 8: Drops (R2, C13, spec §5.6)
 
@@ -291,9 +312,14 @@ tests `table_hook_db.rs`, `crates/egret-controlplane/tests/governance_changes.rs
   - `a_recursive_namespace_drop_deletes_its_classifications` — memory (hard-delete) warehouse; rows on two tables and
     a column in `sales`, a classified view in `sales` with lineage, a view in `other` reading `sales.orders`; `DELETE
     …/namespaces/sales?recursive=true` → 2xx; no row with schema `sales` in any spelling; the `sales` view's lineage
-    gone; the `other` view re-tagged (its derived rows gone); one `tag:purge` event; `tag_version` bumped. Today:
-    rows stay (red).
-  - `a_plain_namespace_drop_keeps_rows` — an empty namespace with a pre-placed row, non-recursive drop → the row stays.
+    gone; the `other` view re-tagged (its derived rows gone); one `tag:purge` event whose `detail.actor` is the
+    guard stub's catalog client; `tag_version` bumped. Today: rows stay (red).
+  - guard `a_plain_namespace_drop_keeps_rows` — an empty namespace with a pre-placed row, non-recursive drop → the
+    row stays.
+  - guard `a_plain_drop_of_a_namespace_with_a_dropped_table_is_refused` (R9, E35) — soft-delete warehouse, drop the
+    namespace's only table, then a plain namespace drop → Lakekeeper's 409 `NamespaceNotEmpty` passes through; the
+    dropped table's rows stay. Pins the premise that makes R9's purge unnecessary; if it ever passes, R9 must be
+    built.
   - guard `a_dropped_table_keeps_its_rows_and_an_undrop_restores_them` — soft-delete warehouse; drop `orders` → rows
     stay; `TableHook::undrop` by its `tabular_id` → Trino serves the tags on `orders`, StarRocks masks back.
 - [ ] **Fix:** spec §5.6.
@@ -321,35 +347,61 @@ it with its doc naming the drift test as its guard).
   egret-controlplane --test governance_attention`; `cargo test -p egret-catalog-engine --test table_hook_db`.
 - [ ] Commit `feat(governance): report classifications on missing and dropped tables`.
 
-## Task 10: "Where used" carries each table's state; OpenAPI (C15, spec §8)
+## Task 10: Columns that are not in their table (R8, spec §5.8 missing columns)
+
+**Files:** `table_columns.rs` (`missing_columns_via`, `MissingColumn`); `governance_overview.rs`; tests
+`table_hook_db.rs` (drift), `governance_attention.rs` (stub `lakekeeper` with several `table_schema` rows).
+
+- [ ] **Red (drift, real Lakekeeper):** `missing_columns_follow_the_schema_history` — `orders(id 1, email 2,
+  region 3)`; through the REST router rename `email`→`mail` and drop `region`; then write rows on `email`, `region`,
+  `ghost` and `ID` directly (rows as a pre-fix rename left them) → `email` missing with `renamed_to = "mail"`;
+  `region` missing with `renamed_to = None` (id 3 gone); `ghost` missing, `None`; `ID` not missing (case only). Then
+  add a new `region` (id 4) and rename it to `area` → `region` now gets `renamed_to = "area"`: the rule (spec §5.8
+  step 3) takes the latest field that carried the name, which is a suggestion a steward confirms, never applied;
+  the test pins that behaviour. Expected on the base: compile error; with a stub returning nothing, red.
+- [ ] **Red (route, real handler):** `columns_not_in_their_table_are_a_finding` — `GET /governance/attention` for a
+  `tag:read` reader has `classifications_on_missing_columns` (warning) whose samples read
+  `lake.sales.orders.email` "renamed to `mail`" and `lake.sales.orders.ghost` "not in the table"; a column row on a
+  dropped or missing table is not counted here (those tables are Task 9's findings). Today: no such kind (red).
+- [ ] **Fix:** spec §5.8 missing columns; one query over the live tables' column rows; the sentence with
+  singular/plural and the renamed/not-renamed split (FE-COPY-4).
+- [ ] **Checks:** fmt; clippy `-p egret-perm-compile -p egret-controlplane`; `cargo test -p egret-controlplane --test
+  governance_attention`; `cargo test -p egret-catalog-engine --test table_hook_db`.
+- [ ] Commit `feat(governance): report classified columns that are not in their table`.
+
+## Task 11: "Where used" carries each table's state and missing columns; OpenAPI (C15, R8, spec §8)
 
 **Files:** `crates/egret-controlplane/src/governance_tag_usage.rs`; `openapi.json`; `frontend/src/api/generated/**`;
 tests `crates/egret-controlplane/tests/governance_tag_usage.rs`.
 
 - [ ] **Red (route):** `where_used_says_which_tables_are_missing_or_dropped` — the Task 9 fixture → `GET
   /classifications/{id}/usage` rows carry `state` `missing`, `dropped`, `live`; a row whose warehouse has no
-  Lakekeeper warehouse carries no `state` key. Today: no `state` (red).
-- [ ] **Fix:** one `table_states_via` call per request over the tag's tables; `TableState` registered in the OpenAPI
-  components; regenerate `openapi.json` and the client (`npm run gen:api`).
+  Lakekeeper warehouse carries no `state` key. `where_used_lists_missing_columns_with_their_new_name` — the Task 10
+  fixture → the live `orders` row carries `missingColumns: [{column: "email", renamedTo: "mail"}, {column: "ghost",
+  renamedTo: null}]`; a table with none carries no key. Today: neither (red).
+- [ ] **Fix:** one `table_states_via` and one `missing_columns_via` call per request over the tag's tables;
+  `TableState` and `MissingColumn` registered in the OpenAPI components; regenerate `openapi.json` and the client
+  (`npm run gen:api`).
 - [ ] **Checks:** fmt; clippy `-p egret-controlplane`; `cargo test -p egret-controlplane --test governance_tag_usage`;
   `cargo test -p egret-server committed_openapi_json_is_current generated_client_was_emitted_from_the_committed_spec`.
 - [ ] Commit `feat(governance): say which classified tables are missing or dropped`.
 
-## Task 11: Frontend (spec §5.8)
+## Task 12: Frontend (spec §5.8)
 
 **Files:** `frontend/src/routes/governance/overview/AttentionSection.tsx`,
 `frontend/src/routes/governance/classifications/tabs/WhereUsedTab.tsx`; their `__tests__`.
 
-- [ ] **Red (Vitest):** `AttentionSection.test.tsx` — the "Not checked for you" lines for the two kinds read
-  "classifications on tables that do not exist" and "classifications on dropped tables" (today: the raw kind);
-  `WhereUsedTab.test.tsx` — a `missing` row shows a status badge with the text "Not in the catalog", a `dropped` row
-  "Dropped", a `live` row and a row without `state` none (FE-COPY-3, FE-A11Y-4).
-- [ ] **Fix:** two `CHECKS` entries; `StatusBadge` beside the table name (FE-VISUAL-8), tone from tokens
-  (FE-VISUAL-1), no layout change otherwise.
+- [ ] **Red (Vitest):** `AttentionSection.test.tsx` — the "Not checked for you" lines for the three kinds read
+  "classifications on tables that do not exist", "classifications on dropped tables" and "classifications on columns
+  that do not exist" (today: the raw kind); `WhereUsedTab.test.tsx` — a `missing` row shows a status badge with the
+  text "Not in the catalog", a `dropped` row "Dropped", a `live` row and a row without `state` none; a missing column
+  shows "Renamed to mail" or "Not in the table" beside its name (FE-COPY-3, FE-A11Y-4).
+- [ ] **Fix:** three `CHECKS` entries; `StatusBadge` beside the table name and beside each missing column
+  (FE-VISUAL-8), tone from tokens (FE-VISUAL-1), no layout change otherwise.
 - [ ] **Checks:** `npm run lint`; `npx tsc -b`; `npx vitest run src/routes/governance`; the governance bundle tests.
 - [ ] Commit `feat(governance): show stale classified tables in Where used and the Overview`.
 
-## Task 12: Final gate
+## Task 13: Final gate
 
 - [ ] **Backend** (one command at a time; `pgrep -x cargo` empty first):
 
@@ -370,7 +422,7 @@ cargo run -q -p egret-bin --bin egret -- openapi > openapi.json && git diff --ex
 
 Expected: every command exits 0; the skip grep prints `0`. Read the full log, not the tail, before calling it green.
 
-## Task 13: Live check (own compose project `egret-tblmove`, port 18680; never 18080)
+## Task 14: Live check (own compose project `egret-tblmove`, port 18680; never 18080)
 
 Compose override in the scratchpad (`-p egret-tblmove`, `DEMO_PORT=18680`; confirm free with `lsof -i :18680`), with
 a real Trino (Ranger plugin 2.5.0) and a real StarRocks (Ranger plugin 2.8/2.9) on one egret Iceberg catalog, the
@@ -398,30 +450,34 @@ mismatch between egret's state and what an engine returns is a defect, not a not
    `classifications_on_dropped_tables`); undrop from the recovery page → on both engines the restored table is
    classified again on its first read (refused/NULL for `granted-u`, hashed for `cleared-u`).
 6. **Stale report:** pre-place `tm-pii` on `sales.ghost` → `classifications_on_missing_tables` names it; Where used
-   shows "Not in the catalog".
+   shows "Not in the catalog". Then rename `region`→`area` from Trino (unclassified, so not held) and insert a row on
+   `sales.orders_v2.region` directly in SQL, as a pre-fix rename left rows → `classifications_on_missing_columns`
+   reads "renamed to `area`"; Where used shows it beside the column.
 7. **Silent engine:** stop the StarRocks FE, wait 100 s, rename a classified table → 409 after 90 s naming the
    StarRocks plugin (or `<no plugin has polled>`); restart; the rename then succeeds. Record the measured behaviour for
    spec §13 Q1.
 8. **Recursive namespace drop** (a throwaway namespace `tm_drop` with a classified table, `force=true`): rows gone,
-   one `tag:purge` event in Governance > Changes.
-9. **UI:** the Overview findings, the Where used badges, the Changes feed sentences for `tag:move` and `tag:purge`;
+   one `tag:purge` event in Governance > Changes naming the catalog client that sent it. Step 2's `tag:move` event
+   names Trino's catalog client.
+9. **UI:** the three Overview findings, the Where used badges (tables and columns), the Changes feed sentences for `tag:move` and `tag:purge`;
    1440 and 390 px, light and dark.
 
-## Task 14: Pull request
+## Task 15: Pull request
 
 - [ ] Push only after the user says so. Title `fix(catalog): classifications follow a table or column rename`. Body:
-  spec link, R1-R4, C1-C20 (marked as defaults the user may revisit), gate output, live results (with the window loop
+  spec link, R1-R9, C1-C20 and C6a (marked as defaults the user may revisit), gate output, live results (with the window loop
   timings), the release note of spec §9, the Docs box naming the follow-up docs PR and its KI rows (spec C20, §11),
   non-goals, related defects, open questions. Append a dated note to the StarRocks table-level classification spec §14
   saying §11 item 1 is fixed by this package (append-only). End with the attribution line from the session reminder.
 
 ## Self-review
 
-- **Spec coverage:** §5.5 → T1; §5.4 → T2, T9; §5.1-§5.3 → T3, T4, T5; §5.2 column plan → T6; §5.7 → T7; §5.6 → T8;
-  §5.8 → T9, T10, T11; §8 → T10; §10 risks → T13 (client hold, silent engine, StarRocks ledger).
+- **Spec coverage:** §5.5 → T1; §5.4 → T2, T9, T10; §5.1-§5.3 → T3, T4, T5; §5.2 column plan → T6; §5.7 → T7; §5.6 →
+  T8; §5.8 → T9, T10, T11, T12; §8 → T11; §10 risks → T14 (client hold, silent engine, StarRocks ledger).
 - **Ordering:** each task ends green. T3 needs T1 (the wait) and T2 (the overlay); T4-T6 need T3; T7 needs T3 (and
-  T5's union fixture); T8 needs T7 (`tag:purge`); T10 needs T9; T11 needs T10; T12 after T11; T13 after T12.
-- **User decisions:** R1 → T3, T4; R2 → T8, T9; R3 → T6; R4 → nothing moved but classification rows (T3's fixture
-  asserts a path grant on `orders` stays on `orders`, documented as §11 item 1).
-- **Open questions:** spec §13 (silent engines, holding column adds, the event actor, non-recursive drops over
-  soft-deleted tables, stale column rows).
+  T5's union fixture); T8 needs T7 (`tag:purge`, the caller); T10 needs T9; T11 needs T10; T12 needs T11; T13 after
+  T12; T14 after T13.
+- **User decisions:** R1 → T3, T4; R2 → T8, T9; R3 → T6; R4 → nothing moved but classification rows (T3's guard);
+  R5 → T4 (`a_rename_no_plugin_confirms_is_refused_and_undone`), T14 step 7; R6 → nothing built for column adds,
+  T1's wait is generic; R7 → T7; R8 → T10, T11, T12; R9 → T8's guard pins that it cannot happen.
+- **Open questions:** none (spec §13).
