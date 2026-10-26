@@ -968,3 +968,102 @@ async fn a_user_delete_event_is_read_with_user_read_only() {
         "{entry}"
     );
 }
+
+/// Rename spec §5.7: a classification move or purge reads with the catalog
+/// client that made it, to a `tag:read` reader only. A client deleted since
+/// is named by its `client_id`.
+#[tokio::test]
+async fn classification_moves_read_with_their_catalog_client() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let tag = |name: &str| json!({"id": Uuid::new_v4(), "name": name});
+    let client = |id: Option<Uuid>, name: Option<&str>| {
+        json!({"kind": "catalog_client", "id": id, "client_id": "trino-main-7f3a",
+               "name": name, "consumer_type": "engine"})
+    };
+    let at = |table: &str, column: Option<&str>| json!({"schema": "sales", "table": table, "column": column});
+    let rid = format!("{}:sales.orders", Uuid::new_v4());
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    let events = [
+        (
+            action::CATALOG_TAG_MOVE,
+            json!({"before": at("orders", None), "after": at("orders_v2", None),
+                   "tags": [tag("PII")], "rows": 2, "kept": [], "trigger": "iceberg_rename",
+                   "actor": client(Some(Uuid::new_v4()), Some("trino-main"))}),
+        ),
+        (
+            action::CATALOG_TAG_MOVE,
+            json!({"before": at("orders", Some("email")), "after": at("orders", Some("mail")),
+                   "tags": [tag("PII"), tag("Finance")], "rows": 2, "kept": [],
+                   "trigger": "iceberg_column_rename", "actor": client(None, None)}),
+        ),
+        (
+            action::CATALOG_TAG_PURGE,
+            json!({"schema": "sales", "rows": 12, "views": 1,
+                   "trigger": "iceberg_drop_namespace",
+                   "actor": client(Some(Uuid::new_v4()), Some("spark-etl"))}),
+        ),
+    ];
+    for (a, detail) in events {
+        sqlx::query(
+            "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+             VALUES ('mutation', $1, 'catalog', $2, $3)",
+        )
+        .bind(a)
+        .bind(&rid)
+        .bind(detail)
+        .execute(&mut *conn)
+        .await
+        .expect("event");
+    }
+
+    // Sessions first: the PDP reads role grants when it is built.
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f, None).await;
+    let (status, body) = changes(&st, &tag_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sentences: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["sentence"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sentences,
+        vec![
+            "Catalog client spark-etl removed 12 classification assignments with namespace \
+             sales (namespace dropped)",
+            "Catalog client trino-main-7f3a (deleted) moved classifications PII and Finance \
+             from sales.orders.email to sales.orders.mail (column renamed)",
+            "Catalog client trino-main moved classification PII from sales.orders to \
+             sales.orders_v2 (table renamed)",
+        ]
+    );
+
+    // Live check F6: the Who column names the catalog client too, not
+    // "egret" (`actor` stays null: a client is no user).
+    let clients: Vec<&Value> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["actorClient"])
+        .collect();
+    assert_eq!(
+        clients,
+        vec![
+            &json!({"clientId": "trino-main-7f3a", "label": "spark-etl"}),
+            &json!({"clientId": "trino-main-7f3a", "label": null}),
+            &json!({"clientId": "trino-main-7f3a", "label": "trino-main"}),
+        ]
+    );
+    assert!(body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["actor"].is_null()));
+
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(actions(&body).is_empty(), "family Tag: {body}");
+}

@@ -5,6 +5,8 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { MissingColumn } from './missingColumn';
+import type { TableState } from './tableState';
 
 /**
  * One table of an egret catalog carrying the tag, on the table and/or on
@@ -24,4 +26,7 @@ export interface TableUsage {
   onTable: boolean;
   /** Tagged columns, sorted. */
   columns: string[];
+  state?: null | TableState;
+  /** Tagged columns a live table does not have, sorted; absent when none. */
+  missingColumns?: MissingColumn[];
 }

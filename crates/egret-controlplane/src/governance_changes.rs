@@ -43,12 +43,26 @@ pub struct Party {
     pub label: Option<String>,
 }
 
+/// A catalog client that acted (rename spec C6a: an Iceberg caller is no
+/// user). `label` is its name, `null` when it has been deleted since (the
+/// `client_id` is kept).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientParty {
+    pub client_id: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeEntry {
     pub id: i64,
     pub at: DateTime<Utc>,
     pub actor: Option<Party>,
+    /// Set when the actor was a catalog client, not a user (`actor` is then
+    /// `null`): the Iceberg caller of a classification move or purge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_client: Option<ClientParty>,
     /// Set when an administrator acted as `actor`.
     pub impersonator: Option<Party>,
     pub action: String,
@@ -77,7 +91,10 @@ pub(crate) fn router() -> Router<CpState> {
 }
 
 #[derive(utoipa::OpenApi)]
-#[openapi(paths(changes), components(schemas(ChangesPage, ChangeEntry, Party)))]
+#[openapi(
+    paths(changes),
+    components(schemas(ChangesPage, ChangeEntry, Party, ClientParty))
+)]
 pub(crate) struct ControlPlaneGovernanceChangesApi;
 
 fn parse_cursor(s: &str) -> Option<(DateTime<Utc>, i64)> {
@@ -255,6 +272,19 @@ fn names(list: &[String]) -> String {
     }
 }
 
+/// `classification PII`, `classifications PII and Finance`, `classifications
+/// A, B and C`, `4 classifications`.
+fn classifications(names: &[String]) -> String {
+    match names {
+        [] => "classifications".to_string(),
+        [one] => format!("classification {one}"),
+        [rest @ .., last] if names.len() <= 3 => {
+            format!("classifications {} and {last}", rest.join(", "))
+        }
+        _ => format!("{} classifications", names.len()),
+    }
+}
+
 /// What an action did, with no detail: for an event whose summary was too
 /// large to keep.
 fn truncated_phrase(action: &str) -> &'static str {
@@ -279,6 +309,8 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::ENGINE_GRANT_UPDATE => "changed an engine grant",
         action::ENGINE_GRANT_DELETE => "deleted an engine grant",
         action::USER_DELETE => "deleted a user",
+        action::CATALOG_TAG_MOVE => "moved classifications with a renamed table",
+        action::CATALOG_TAG_PURGE => "removed classifications with a dropped namespace",
         _ => "made a change",
     }
 }
@@ -286,10 +318,31 @@ fn truncated_phrase(action: &str) -> &'static str {
 async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx::Error> {
     let actor = party(c, row.actor_user_id).await?;
     let impersonator = party(c, row.impersonator).await?;
-    let who = |p: &Option<Party>| match p {
-        Some(Party { label: Some(l), .. }) => l.clone(),
-        Some(_) => "A deleted user".to_string(),
-        None => "egret".to_string(),
+    // An Iceberg caller that is a catalog client, not a user, is named in
+    // the event's `detail.actor` (rename spec C6a).
+    let client = row
+        .detail
+        .get("actor")
+        .filter(|a| s(a, "kind") == "catalog_client");
+    let actor_client = match (&actor, client) {
+        (None, Some(c)) => Some(ClientParty {
+            client_id: s(c, "client_id").to_string(),
+            label: c
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|_| !c["id"].is_null())
+                .map(str::to_string),
+        }),
+        _ => None,
+    };
+    let who = |p: &Option<Party>| match (p, client) {
+        (Some(Party { label: Some(l), .. }), _) => l.clone(),
+        (Some(_), _) => "A deleted user".to_string(),
+        (None, Some(c)) => match c.get("name").and_then(Value::as_str) {
+            Some(name) if !c["id"].is_null() => format!("Catalog client {name}"),
+            _ => format!("Catalog client {} (deleted)", s(c, "client_id")),
+        },
+        (None, None) => "egret".to_string(),
     };
     let a = match &impersonator {
         Some(_) => format!("{} as {}", who(&impersonator), who(&actor)),
@@ -546,6 +599,75 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
             let live = live && target.is_some();
             (sentence, target, live)
         }
+        action::CATALOG_TAG_MOVE => {
+            let mut tags = Vec::new();
+            for t in d
+                .get("tags")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let current: Option<String> =
+                    sqlx::query_scalar("SELECT name FROM tags WHERE id::text = $1")
+                        .bind(s(t, "id"))
+                        .fetch_optional(&mut *c)
+                        .await?;
+                tags.push(current.unwrap_or_else(|| s(t, "name").to_string()));
+            }
+            let at = |v: &Value| {
+                let mut path = format!("{}.{}", s(v, "schema"), s(v, "table"));
+                if let Some(column) = v.get("column").and_then(Value::as_str) {
+                    path.push('.');
+                    path.push_str(column);
+                }
+                path
+            };
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let what = if s(d, "trigger") == "iceberg_column_rename" {
+                "column renamed"
+            } else {
+                "table renamed"
+            };
+            let warehouse = id.split_once(':').map_or("", |(w, _)| w);
+            let catalog: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM registry.catalogs WHERE warehouse_id::text = $1",
+            )
+            .bind(warehouse)
+            .fetch_optional(&mut *c)
+            .await?;
+            let target = catalog.map(|catalog| Ref::Object {
+                catalog,
+                schema: s(after, "schema").to_string(),
+                object: s(after, "table").to_string(),
+            });
+            let live = target.is_some();
+            (
+                format!(
+                    "{a} moved {} from {} to {} ({what})",
+                    classifications(&tags),
+                    at(before),
+                    at(after)
+                ),
+                target,
+                live,
+            )
+        }
+        action::CATALOG_TAG_PURGE => {
+            let rows = d.get("rows").and_then(Value::as_i64).unwrap_or(0);
+            (
+                format!(
+                    "{a} removed {rows} classification assignment{} with namespace {} \
+                     (namespace dropped)",
+                    if rows == 1 { "" } else { "s" },
+                    s(d, "schema")
+                ),
+                None,
+                false,
+            )
+        }
         action::USER_DELETE => {
             let before = d.get("before").unwrap_or(&Value::Null);
             let who = [s(before, "username"), s(before, "email")]
@@ -571,6 +693,7 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
         id: row.id,
         at: row.ts,
         actor,
+        actor_client,
         impersonator,
         action: row.action,
         sentence,

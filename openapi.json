@@ -3781,7 +3781,7 @@
           "control-plane-governance"
         ],
         "summary": "Where a classification is used.",
-        "description": "The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Requires tag:read or policy:read.",
+        "description": "The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Each table of an embedded catalog says whether the catalog has it (`state`: live, dropped or missing) and which of its tagged columns it lacks, with the column's likely new name (`missingColumns`). Requires tag:read or policy:read.",
         "operationId": "tag_usage",
         "parameters": [
           {
@@ -40296,6 +40296,17 @@
               }
             ]
           },
+          "actorClient": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ClientParty",
+                "description": "Set when the actor was a catalog client, not a user (`actor` is then\n`null`): the Iceberg caller of a classification move or purge."
+              }
+            ]
+          },
           "impersonator": {
             "oneOf": [
               {
@@ -40813,6 +40824,24 @@
           },
           "clientId": {
             "type": "string"
+          }
+        }
+      },
+      "ClientParty": {
+        "type": "object",
+        "description": "A catalog client that acted (rename spec C6a: an Iceberg caller is no\nuser). `label` is its name, `null` when it has been deleted since (the\n`client_id` is kept).",
+        "required": [
+          "clientId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -49000,6 +49029,25 @@
           }
         }
       },
+      "MissingColumn": {
+        "type": "object",
+        "description": "A tagged column its live table does not have (rename spec R8).",
+        "required": [
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "renamedTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The current name of the field that last carried this name, when it is\nstill in the table: a candidate a steward confirms, never applied."
+          }
+        }
+      },
       "ModelledRangerPluginDto": {
         "type": "object",
         "description": "One modelled (engine type, Ranger plugin version) pair.",
@@ -55560,6 +55608,15 @@
           }
         }
       },
+      "TableState": {
+        "type": "string",
+        "description": "What the catalog holds under a classified table's name (rename spec C14):\na live table or view (`Live`; a view's rows are the view hold's), only\nsoft-deleted tabulars (`Dropped`, an undrop brings one back), or nothing\n(`Missing`: renamed away, purged, or classified before it was created,\nwhich cannot be told apart).",
+        "enum": [
+          "live",
+          "dropped",
+          "missing"
+        ]
+      },
       "TableUsage": {
         "type": "object",
         "description": "One table of an egret catalog carrying the tag, on the table and/or on\nsome of its columns.",
@@ -55601,6 +55658,24 @@
               "type": "string"
             },
             "description": "Tagged columns, sorted."
+          },
+          "state": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TableState",
+                "description": "What the embedded catalog holds under the table's name (rename spec\nC15): `live`, `dropped` (only soft-deleted, an undrop restores it) or\n`missing` (renamed away, purged, or classified before it existed).\nAbsent when the warehouse is not an embedded catalog."
+              }
+            ]
+          },
+          "missingColumns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MissingColumn"
+            },
+            "description": "Tagged columns a live table does not have, sorted; absent when none."
           }
         }
       },

@@ -5,7 +5,7 @@ import {
   controlPlaneGovernanceChanges,
   useControlPlaneGovernanceChanges,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
-import type { ChangeEntry, Party } from "@/api/generated/model";
+import type { ChangeEntry, ClientParty, Party } from "@/api/generated/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -22,8 +22,13 @@ const PAGE = 25;
 
 const name = (p: Party | null | undefined) => (p ? (p.label ?? "A deleted user") : "egret");
 
-/** "Ana", "Admin as Ana", or "A deleted user". */
+/** A catalog client, as the server's sentence names it (rename spec C6a). */
+const clientName = (c: ClientParty) =>
+  c.label ? `Catalog client ${c.label}` : `Catalog client ${c.clientId} (deleted)`;
+
+/** "Ana", "Admin as Ana", "A deleted user", or "Catalog client trino-main". */
 export function who(e: ChangeEntry): string {
+  if (!e.actor && e.actorClient) return clientName(e.actorClient);
   return e.impersonator ? `${name(e.impersonator)} as ${name(e.actor)}` : name(e.actor);
 }
 

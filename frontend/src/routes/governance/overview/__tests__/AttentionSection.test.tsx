@@ -263,6 +263,31 @@ describe("Needs attention", () => {
     expect(within(row).getByRole("link", { name: "bob" })).toHaveAttribute("href", "/governance/grants/g-bob");
   });
 
+  // Classifications follow a rename (spec 2026-10-26 §5.8, C15, R10).
+  it("names the stale classification checks for a reader without tag:read", async () => {
+    serve(
+      ok(
+        response({
+          notChecked: [
+            { kind: "classifications_on_missing_tables", requires: ["tag:read"], any: false },
+            { kind: "classifications_on_dropped_tables", requires: ["tag:read"], any: false },
+            { kind: "classifications_on_missing_columns", requires: ["tag:read"], any: false },
+            { kind: "renamed_names_reused", requires: ["tag:read"], any: false },
+          ],
+        }),
+      ),
+    );
+    openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });
+    for (const what of [
+      "classifications on tables that do not exist",
+      "classifications on dropped tables",
+      "classifications on columns that do not exist",
+      "table names a rename left unclassified under a new table",
+    ]) {
+      expect(await screen.findByText(`Not checked for you: ${what} (needs \`tag:read\`).`)).toBeInTheDocument();
+    }
+  });
+
   it("names the reused-username check for a reader who is not a platform admin", async () => {
     serve(ok(response({ notChecked: [{ kind: "username_reuse", requires: ["platform_admin"], any: false }] })));
     openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });

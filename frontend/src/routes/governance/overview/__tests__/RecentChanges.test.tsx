@@ -64,6 +64,35 @@ describe("Recent changes", () => {
     expect(within(t).getByText("A deleted user", { selector: "td" })).toBeInTheDocument();
   });
 
+  // Live check F6 (rename spec C6a): a classification move by a catalog client says so in
+  // Who too, as its sentence does; a deleted client is named by its client id.
+  it("names a catalog client that acted, and a deleted one by its client id", async () => {
+    serve(attentionOk, () => ({
+      status: 200,
+      body: page([
+        entry(5, {
+          actor: null,
+          actorClient: { clientId: "egret_85852f", label: "engine-tmtrino" },
+          action: "tag:move",
+          sentence: "Catalog client engine-tmtrino moved classification PII from sales.orders to sales.orders_v2",
+          target: null,
+        }),
+        entry(6, {
+          actor: null,
+          actorClient: { clientId: "egret_0ld", label: null },
+          action: "tag:purge",
+          sentence: "Catalog client egret_0ld (deleted) removed 2 classification assignments",
+          target: null,
+        }),
+      ]),
+    }));
+    openOverview();
+    const t = await table();
+    expect(within(t).getByText("Catalog client engine-tmtrino", { selector: "td" })).toBeInTheDocument();
+    expect(within(t).getByText("Catalog client egret_0ld (deleted)", { selector: "td" })).toBeInTheDocument();
+    expect(within(t).queryByText("egret", { selector: "td" })).not.toBeInTheDocument();
+  });
+
   it("marks a deleted target and links nowhere", async () => {
     serve(attentionOk, () => ({ status: 200, body: page([entry(4, { targetExists: false })]) }));
     openOverview();

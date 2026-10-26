@@ -240,7 +240,7 @@ export const getControlPlaneGovernanceTagUsageUrl = (id: string,) => {
 }
 
 /**
- * The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Requires tag:read or policy:read.
+ * The tables and columns of egret catalogs carrying the classification (grouped by table; assignments in a warehouse no catalog names are counted as `orphaned`), and the BI objects carrying it: each is checked with the caller's read permission, in workspace, kind, id order, up to 500 per request; readable ones are listed, unreadable ones only counted (no name, no workspace), the rest reported as `remaining`, and assignments to deleted objects counted. Each table of an embedded catalog says whether the catalog has it (`state`: live, dropped or missing) and which of its tagged columns it lacks, with the column's likely new name (`missingColumns`). Requires tag:read or policy:read.
  * @summary Where a classification is used.
  */
 export const controlPlaneGovernanceTagUsage = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceTagUsageResponse> => {

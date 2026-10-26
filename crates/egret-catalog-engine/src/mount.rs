@@ -243,14 +243,26 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
-    /// `Ok(())` → allowed; `Err((status, message))` → rejected (e.g. 401/403).
+    /// `Ok(caller)` → allowed, by the principal the verified token names;
+    /// `Err((status, message))` → rejected (e.g. 401/403).
     async fn check(
         &self,
         method: &str,
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
-    ) -> Result<(), (axum::http::StatusCode, String)>;
+    ) -> Result<CatalogCaller, (axum::http::StatusCode, String)>;
+}
+
+/// Who sent an allowed Iceberg request: the verified token's `sub` and `aud`.
+/// [`CatalogGuard::check`] returns it and the mount puts it in the request's
+/// extensions, so a layer behind the guard can name the caller (the table
+/// hook's governance events, rename spec R7). Today every catalog token is
+/// minted for a catalog client (`sub` = its `client_id`, `aud = "catalog"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogCaller {
+    pub subject: String,
+    pub audience: String,
 }
 
 /// Assemble the catalog engine router, fronted by egret's [`CatalogGuard`] (when
@@ -341,11 +353,14 @@ async fn guard_then_inject_metadata(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::to_string);
-        if let Err((status, msg)) = g
+        match g
             .check(&method, &path, query.as_deref(), bearer.as_deref())
             .await
         {
-            return (status, msg).into_response();
+            Ok(caller) => {
+                req.extensions_mut().insert(caller);
+            }
+            Err((status, msg)) => return (status, msg).into_response(),
         }
     }
     req.extensions_mut()

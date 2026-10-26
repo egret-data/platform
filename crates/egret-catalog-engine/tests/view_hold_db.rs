@@ -12,6 +12,9 @@
 //!   DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 //!     cargo test -p egret-catalog-engine --test view_hold_db
 
+#[path = "common/plugins.rs"]
+mod plugins;
+
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,14 +34,14 @@ use egret_metastore::Db;
 use egret_perm_compile::lineage::{
     recorded_lineage, ExplainRunner, RecordedLineage, ViewRef, EMPTY_LINEAGE_REASON,
 };
-use egret_policy::{ranger_router, PolicyStore, RangerState, NO_PLUGIN_POLLED};
+use egret_policy::{PolicyStore, NO_PLUGIN_POLLED};
 use http_body_util::BodyExt as _;
+use plugins::Plugin;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
 const SYSTEM_USER: &str = "egret-system";
-const RANGER_TOKEN: &str = "devtoken";
 /// The hold limit of every test that expects a confirmation.
 const LIMIT: Duration = Duration::from_secs(20);
 /// How often the fake plugin polls. Long enough that a commit that did not
@@ -569,88 +572,9 @@ impl Env {
     }
 
     /// The fake Trino plugin: polls `download_tags` every [`POLL`], reporting
-    /// the version its last 200 carried. Each poll is recorded as (when, the
-    /// `lastKnownVersion` it reported).
+    /// the version its last 200 carried.
     fn start_plugin(&self) -> Plugin {
-        let polls: Arc<Mutex<Vec<(Instant, i64)>>> = Arc::default();
-        let router = ranger_router(RangerState {
-            store: self.policy.clone(),
-            auth_token: Arc::from(RANGER_TOKEN),
-            mode: egret_policy::ranger::AuthMode::Required,
-            verifier: None,
-        });
-        let service = self.profile_name.clone();
-        let log = polls.clone();
-        let task = tokio::spawn(async move {
-            let mut held: i64 = -1;
-            loop {
-                let uri = format!(
-                    "/tags/download/{service}?pluginId=trino@vh-coordinator-abc12-x9z8q-{service}\
-                     &lastKnownVersion={held}"
-                );
-                let req = axum::http::Request::builder()
-                    .uri(uri)
-                    .header("authorization", format!("Bearer {RANGER_TOKEN}"))
-                    .body(Body::empty())
-                    .unwrap();
-                let at = Instant::now();
-                let resp = router.clone().oneshot(req).await.unwrap();
-                log.lock().unwrap().push((at, held));
-                if resp.status() == StatusCode::OK {
-                    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                    let tags: Value = serde_json::from_slice(&bytes).unwrap();
-                    held = tags["tagVersion"].as_i64().expect("tagVersion");
-                }
-                tokio::time::sleep(POLL).await;
-            }
-        });
-        Plugin { polls, task }
-    }
-}
-
-struct Plugin {
-    polls: Arc<Mutex<Vec<(Instant, i64)>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Plugin {
-    /// The first poll that reported at least `version`.
-    fn first_report_of(&self, version: i64) -> Option<Instant> {
-        self.polls
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, held)| *held >= version)
-            .map(|(t, _)| *t)
-    }
-
-    /// The first poll that reported at least `version`, waiting up to 5 s for
-    /// it: a commit that did not wait reaches lakekeeper before it exists.
-    async fn report_of(&self, version: i64) -> Instant {
-        for _ in 0..250 {
-            if let Some(t) = self.first_report_of(version) {
-                return t;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the plugin never reported version {version}");
-    }
-
-    /// Wait until the plugin has polled once, so the ledger knows it.
-    async fn polled(&self) {
-        for _ in 0..100 {
-            if !self.polls.lock().unwrap().is_empty() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the fake plugin never polled");
-    }
-}
-
-impl Drop for Plugin {
-    fn drop(&mut self) {
-        self.task.abort();
+        plugins::start_trino(self.policy.clone(), self.profile_name.clone(), POLL)
     }
 }
 

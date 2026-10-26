@@ -23,6 +23,10 @@ const CHECKS: Record<string, string> = {
   tags_without_clearance: "classification clearances",
   catalogs_without_engine: "catalogs without an engine",
   username_reuse: "engine usernames reused after a delete",
+  classifications_on_missing_tables: "classifications on tables that do not exist",
+  classifications_on_dropped_tables: "classifications on dropped tables",
+  classifications_on_missing_columns: "classifications on columns that do not exist",
+  renamed_names_reused: "table names a rename left unclassified under a new table",
 };
 
 /** One line per check the reader may not run; checks sharing a sentence share a line. */

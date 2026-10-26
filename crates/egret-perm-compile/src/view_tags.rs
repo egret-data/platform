@@ -69,6 +69,48 @@ pub async fn lock_view_tags_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), s
     Ok(())
 }
 
+/// The advisory-lock key of one table or view NAME of a Lakekeeper warehouse
+/// (`prefix`): the view hold's and the table hook's name locks, and the
+/// catalog-tag write's try-lock, all use it (rename spec C17, review findings
+/// 2 and 6). Folded, as Lakekeeper's names are case-insensitive, so `Orders`
+/// and `orders` are one lock.
+pub fn name_lock_key(prefix: &str, ns: &str, name: &str) -> String {
+    // A NUL cannot be sent as Postgres text; `\u{1e}` occurs in no name Trino
+    // sends.
+    format!(
+        "egret-view-hold\u{1e}{}\u{1e}{}\u{1e}{}",
+        prefix.to_lowercase(),
+        ns.to_lowercase(),
+        name.to_lowercase()
+    )
+}
+
+/// Try, on the caller's transaction, the name lock of `schema.table` in
+/// `warehouse_id` ([`name_lock_key`]), released at commit or rollback. `false`
+/// while a hold (a table move or a view hold) holds the name; `true` when it
+/// is free or the warehouse is not an embedded catalog. A catalog-tag write
+/// takes it so a write made while a rename of the table is held does not land
+/// on a name the move is about to leave (review finding 2).
+pub async fn try_name_lock_in_tx(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+) -> Result<bool, sqlx::Error> {
+    let prefix: Option<Option<String>> =
+        sqlx::query_scalar("SELECT lakekeeper_warehouse_id FROM catalog.warehouses WHERE id = $1")
+            .bind(warehouse_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(prefix) = prefix.flatten() else {
+        return Ok(true);
+    };
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(name_lock_key(&prefix, schema, table))
+        .fetch_one(&mut *conn)
+        .await
+}
+
 /// The `LISTEN` channel a classification write notifies after it commits
 /// (`egret_catalog_engine::spawn_classification_sweeps`).
 pub const CLASSIFICATION_CHANNEL: &str = "egret_view_lineage_sweep";
@@ -377,4 +419,140 @@ pub async fn retag_views_in_tx(
         }
     }
     Ok(summary)
+}
+
+/// Why [`ViewReach`] refused, typed so each caller keeps its own mapping (the
+/// catalog-tag routes answer a database error, a compile refusal and a view
+/// that changed underneath differently).
+#[derive(Debug, thiserror::Error)]
+pub enum ViewReachError {
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error(transparent)]
+    Compile(#[from] CompileError),
+    /// A re-tag touched a warehouse the reach did not lock.
+    #[error("a view in warehouse {0} changed while this tag write ran; retry")]
+    ViewChanged(Uuid),
+}
+
+/// What a catalog-tag write on some tables of one warehouse reaches (view
+/// governance B3): the written warehouse, the views whose lineage reads those
+/// tables and their warehouses, and the services bound to any of them.
+/// Computed ONCE, before the write and after [`lock_view_tags_in_tx`], so no
+/// lineage can commit in between (Task 9 fix round 1, I2), and the overlap
+/// snapshot covers every profile the write can recompile. Shared by the
+/// catalog-tag write (`egret_bi::CatalogTagRepo`) and the table hook's move
+/// (`egret_catalog_engine::table_hook`), so the lock order is spelled once.
+pub struct ViewReach {
+    pub warehouse_id: Uuid,
+    pub views: Vec<ViewRef>,
+    pub warehouses: Vec<Uuid>,
+    pub services: Vec<i64>,
+}
+
+impl ViewReach {
+    /// [`Self::of_tables`] for one table.
+    pub async fn of(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        warehouse_id: Uuid,
+        schema: &str,
+        table: &str,
+    ) -> Result<Self, ViewReachError> {
+        Self::of_tables(tx, warehouse_id, &[(schema.to_string(), table.to_string())]).await
+    }
+
+    /// Takes the view-tag lock, so call it FIRST in the transaction.
+    pub async fn of_tables(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        warehouse_id: Uuid,
+        tables: &[(String, String)],
+    ) -> Result<Self, ViewReachError> {
+        lock_view_tags_in_tx(tx).await?;
+        let mut lineage_tables = Vec::new();
+        for (schema, table) in tables {
+            lineage_tables.extend(tables_of_warehouse(tx, warehouse_id, schema, table).await?);
+        }
+        let views = dependent_views(tx, &lineage_tables).await?;
+        let mut warehouses = warehouses_of_views(tx, &views).await?;
+        warehouses.push(warehouse_id);
+        warehouses.sort();
+        warehouses.dedup();
+        let services =
+            egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &warehouses).await?;
+        // Before the base write, whose `assigned_by` holds `FOR KEY SHARE` on
+        // the assigning user: the profile locks, then the compile-mint lock
+        // the recompile mints under. Taken after that write, a concurrent
+        // compile minting the same user would wait on this transaction while
+        // it waited on that compile (`crate::lock_compile_mints_in_tx`).
+        // The recompile's own set is a subset of `services` (its warehouses
+        // are, `retag_bump_and_recompile` refuses otherwise), so it re-takes
+        // only locks already held.
+        if !services.is_empty() {
+            crate::lock_services_in_tx(tx, &services).await?;
+            crate::lock_compile_mints_in_tx(tx).await?;
+        }
+        Ok(Self {
+            warehouse_id,
+            views,
+            warehouses,
+            services,
+        })
+    }
+
+    /// After the base write: re-tag the dependent views, then ONE bump over
+    /// the written warehouse and the warehouses the re-tag actually changed,
+    /// one recompile of their services, and a request, delivered at commit,
+    /// for the sweep of the views that have no computed lineage yet.
+    pub async fn retag_bump_and_recompile(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), ViewReachError> {
+        let summary = retag_views_in_tx(tx, &self.views).await?;
+        let mut touched: Vec<Uuid> = summary.warehouses.into_iter().collect();
+        // The lock keeps the views from changing since `of`, so the re-tag
+        // stays inside the snapshot. Refuse rather than leave a write the
+        // snapshot and the bump did not cover.
+        if let Some(outside) = touched.iter().find(|w| !self.warehouses.contains(w)) {
+            return Err(ViewReachError::ViewChanged(*outside));
+        }
+        touched.push(self.warehouse_id);
+        touched.sort();
+        touched.dedup();
+        let services =
+            egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &touched).await?;
+        egret_catalog_registry::bump_tag_versions_for_warehouses(tx, &touched).await?;
+        recompile_bound_services_in_tx(tx, &touched, &services).await?;
+        notify_classification_in_tx(tx, &[self.warehouse_id]).await?;
+        Ok(())
+    }
+}
+
+/// Recompile every policy profile the written warehouses' engines are bound
+/// through, INSIDE the tag write's own transaction (SP4a Task 7, D5; fix round
+/// 1): a catalog-tag write can add or remove a column from a StarRocks tag
+/// rule's compile-time enumeration, StarRocks has no tag service to resolve
+/// that itself, and a recompile FAILURE rolls the write back with it. A skip
+/// is not a failure; it is logged once more per service with the warehouses,
+/// since only the write knows which one triggered it.
+async fn recompile_bound_services_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    warehouse_ids: &[Uuid],
+    service_ids: &[i64],
+) -> Result<(), CompileError> {
+    // SP4a Task 11, defect 2: a recompile also locks and writes the profile's
+    // TAG service, whose id can be lower than the profile's. Take the whole
+    // expanded lock set ascending up front (`lock_services_in_tx`).
+    crate::lock_services_in_tx(tx, service_ids).await?;
+    for &service_id in service_ids {
+        let summary = crate::recompile_service_in_tx(tx, service_id).await?;
+        if !summary.skipped.is_empty() {
+            tracing::warn!(
+                warehouse_ids = ?warehouse_ids,
+                service_id,
+                skipped_count = summary.skipped.len(),
+                "catalog-tag write's recompile skipped some grants/rules for this service"
+            );
+        }
+    }
+    Ok(())
 }

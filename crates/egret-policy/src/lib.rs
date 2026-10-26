@@ -30,8 +30,8 @@ pub use auth_failures::{auth_failures_via, AuthFailure, DOWNLOAD_WINDOW, FAILURE
 pub use egret_policy_api::infra_names;
 pub use error::PolicyStoreError;
 pub use plugin_downloads::{
-    plugins_hold_tag_version, wait_for_tag_version, DownloadKind, HoldState, WaitError,
-    NO_PLUGIN_POLLED,
+    plugins_hold_policy_version, plugins_hold_tag_version, wait_for_tag_version, wait_for_versions,
+    DownloadKind, HoldState, WaitError, NO_PLUGIN_POLLED,
 };
 pub use ranger::{ranger_router, ranger_surface, RangerState};
 pub use service_def::{

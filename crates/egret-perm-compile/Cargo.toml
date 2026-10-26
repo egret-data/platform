@@ -26,6 +26,10 @@ egret-perm.workspace = true
 # `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
 async-trait.workspace = true
 egret-policy.workspace = true
+# Rename spec C11: `view_tags::ViewReach` (moved from `egret-bi`) resolves the
+# services bound to the warehouses a tag write reaches. That crate does not
+# depend on this one.
+egret-catalog-registry.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 # SP4d-3 Task 7 fix round 1 (I-2): content hashes of what a migration

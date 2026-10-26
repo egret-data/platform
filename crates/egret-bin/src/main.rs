@@ -515,7 +515,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
-    ) -> Result<(), (axum::http::StatusCode, String)> {
+    ) -> Result<egret_catalog_engine::CatalogCaller, (axum::http::StatusCode, String)> {
         use axum::http::StatusCode;
         let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
         // authN: a valid, unexpired egret JWT is required on every catalog request.
@@ -545,6 +545,16 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         if claims.get("aud").and_then(|v| v.as_str()) != Some(CATALOG_AUDIENCE) {
             return Err((StatusCode::UNAUTHORIZED, "wrong audience".to_string()));
         }
+        // Who sent it (rename spec R7): a layer behind the guard names the
+        // caller from this, not from a claim it would have to verify again.
+        let caller = egret_catalog_engine::CatalogCaller {
+            subject: claims
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            audience: CATALOG_AUDIENCE.to_string(),
+        };
         let token_warehouse = claims
             .get("warehouse")
             .and_then(|v| v.as_str())
@@ -566,7 +576,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                     ));
                 }
             }
-            return Ok(());
+            return Ok(caller);
         }
 
         // authZ, data-plane (`/{prefix}/namespaces/{ns}/tables/{table}` …): the
@@ -634,7 +644,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 ));
             }
         }
-        Ok(())
+        Ok(caller)
     }
 }
 
@@ -3184,6 +3194,36 @@ mod catalog_guard_audience_tests {
             .await
             .expect_err("a data-api token must not reach the catalog");
         assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
+    }
+
+    /// Rename spec R7: the guard returns who the verified token names, so the
+    /// table hook can record the caller of a classification move.
+    #[tokio::test]
+    async fn the_catalog_guard_returns_the_token_subject() {
+        let Some(g) = guard().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let km = g.keys.active().await.expect("active key");
+        let token = egret_machine_idp::sign_claims(
+            &km,
+            &serde_json::json!({
+                "sub": "cat1", "aud": CATALOG_AUDIENCE,
+                "exp": chrono::Utc::now().timestamp() + 600,
+            }),
+        )
+        .expect("sign");
+        let caller = g
+            .check("GET", "/config", None, Some(&token))
+            .await
+            .expect("a catalog token passes /config");
+        assert_eq!(
+            caller,
+            egret_catalog_engine::CatalogCaller {
+                subject: "cat1".into(),
+                audience: CATALOG_AUDIENCE.into(),
+            }
+        );
     }
 
     /// Final review M-7: the view hold passes an unknown prefix through

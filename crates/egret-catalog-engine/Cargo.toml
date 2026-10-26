@@ -70,6 +70,9 @@ egret-secrets = { workspace = true }
 # stays free of the engine; the engine depends on it (downstream direction).
 egret-workspace = { workspace = true }
 egret-core = { workspace = true, features = ["http"] }
+# Rename spec §5.7: a completed classification move records its governance
+# event (`tag:move`, `tag:purge`) in the move's own transaction.
+egret-audit = { workspace = true }
 # OpenAPI emit (E0·P4b-4): `#[utoipa::path]` on the warehouse-admin router's
 # handlers + a per-module `#[derive(utoipa::OpenApi)]` doc struct merged into the
 # top-level doc via `egret_catalog_engine::openapi()`. Uses the shared

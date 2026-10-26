@@ -166,7 +166,7 @@ use crate::grants::{level, PolicyTarget};
 use crate::rules::{
     column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
 };
-use crate::table_columns::{current_columns_batch_via, TableColumns, TableKey};
+use crate::table_columns::{current_columns_batch_via, Leaving, TableColumns, TableKey};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
@@ -234,6 +234,7 @@ pub(crate) async fn compile_clearance(
     service_id: i64,
     service: &str,
     tag_service: Option<&str>,
+    leaving: &Leaving,
 ) -> Result<Clearances, CompileError> {
     let gates: Vec<GateRow> = sqlx::query_as(
         "SELECT cp.tag_id, t.name AS tag_name, t.key AS tag_key, cp.required_roles, \
@@ -380,7 +381,8 @@ pub(crate) async fn compile_clearance(
 
     if engine == EngineType::StarRocks {
         let mv_cleared =
-            compile_starrocks_gates(conn, service, &starrocks, &accesses, &mut out).await?;
+            compile_starrocks_gates(conn, service, &starrocks, &accesses, leaving, &mut out)
+                .await?;
         for (name, input) in mv_deny_inputs(&mv_cleared, service) {
             out.policies.push((
                 name,
@@ -415,6 +417,7 @@ async fn compile_starrocks_gates(
     service: &str,
     gates: &[StarRocksGate<'_>],
     accesses: &[String],
+    leaving: &Leaving,
     out: &mut Clearances,
 ) -> Result<Vec<Vec<String>>, CompileError> {
     use egret_ranger_eval::resource::fold_identifier as fold;
@@ -446,26 +449,34 @@ async fn compile_starrocks_gates(
     for g in gates {
         // C9: a whole-table attachment costs its `*` deny and one mask per
         // known column; a column-level one its per-column denies (column
-        // masks stay uncounted per tag, as before D2).
+        // masks stay uncounted per tag, as before D2). A held rename's
+        // leaving table or column costs nothing (rename spec C8).
         let mut per_column_denies = 0;
+        let mut whole_table_cost = 0;
         let mut tables: Vec<TableCount> = Vec::new();
         for t in &g.targets {
+            let counts =
+                |c: Option<&str>| leaving.counts_toward_ceiling(&t.catalog, &t.schema, &t.table, c);
             if t.table_level {
                 let (schema, table, columns) = match catalog_of(t) {
-                    Some(c) => (c.schema.as_str(), c.table.as_str(), c.columns.len()),
-                    None => (t.schema.as_str(), t.table.as_str(), 0),
+                    Some(c) => (c.schema.as_str(), c.table.as_str(), c.columns.as_slice()),
+                    None => (t.schema.as_str(), t.table.as_str(), &[][..]),
                 };
+                if counts(None) {
+                    whole_table_cost +=
+                        1 + columns.iter().filter(|c| counts(Some(c.as_str()))).count();
+                }
                 let name = format!("{}.{schema}.{table}", t.catalog);
-                whole_tables.insert(name.clone(), columns);
+                whole_tables.insert(name.clone(), columns.len());
                 tables.push(TableCount {
                     table: name,
-                    columns,
+                    columns: columns.len(),
                 });
             } else {
-                per_column_denies += t.columns.len();
+                per_column_denies += t.columns.iter().filter(|c| counts(Some(c))).count();
             }
         }
-        let count = per_column_denies + tables.iter().map(|t| 1 + t.columns).sum::<usize>();
+        let count = per_column_denies + whole_table_cost;
         // **Refuse, never truncate.** A truncated clearance withholds SOME of
         // the columns it claims to, and the ones silently dropped are readable
         // by exactly the people the classification exists to keep out. The

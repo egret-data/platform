@@ -1516,3 +1516,264 @@ async fn a_boot_pass_refusal_names_and_links_the_two_rules() {
         "{body}"
     );
 }
+
+// ── Classifications follow a rename, Task 9: stale rows (R2, C14, C15) ──
+
+#[path = "support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
+
+/// An egret warehouse over a stub Lakekeeper warehouse, with registry catalog
+/// `catalog` over it: `(warehouse id, Lakekeeper warehouse id)`.
+async fn stub_warehouse(f: &Fixture, catalog: &str) -> (Uuid, Uuid) {
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'S') RETURNING id")
+            .bind(unique("stale-ws"))
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','b','AK') RETURNING id",
+    )
+    .bind(unique("stale-sc"))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let warehouse: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("stale_wh"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', '{}'::jsonb, $2)",
+    )
+    .bind(catalog)
+    .bind(warehouse)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let lk = lakekeeper_stub::link_warehouse(&f.db, warehouse).await;
+    (warehouse, lk)
+}
+
+async fn classify(f: &Fixture, tag: Uuid, warehouse: Uuid, table: &str, column: &str) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales',$3,$4)",
+    )
+    .bind(tag)
+    .bind(warehouse)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// C15: rows on a name with no tabular are a warning, rows on a name with
+/// only soft-deleted tabulars are info; a live table is in neither; a reader
+/// without `tag:read` gets both as not checked.
+#[tokio::test]
+async fn classifications_on_missing_and_dropped_tables_are_findings() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email"]).await;
+    let gone = lakekeeper_stub::add_table(&f.db, lk, &["sales"], "gone", &["id"]).await;
+    lakekeeper_stub::soft_drop(&f.db, lk, gone).await;
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for (table, column) in [
+        ("ghost", ""),
+        ("gone", ""),
+        ("orders", ""),
+        ("orders", "email"),
+    ] {
+        classify(&f, pii, warehouse, table, column).await;
+    }
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let missing = finding(&body, "classifications_on_missing_tables").expect("missing");
+    assert_eq!(missing["severity"], "warning");
+    assert_eq!(missing["count"], 1);
+    assert_eq!(
+        missing["sentence"],
+        "1 table carries classifications but does not exist in its catalog: renamed before \
+         egret moved classifications, purged, or classified before it was created."
+    );
+    assert_eq!(
+        missing["sample"],
+        json!([{"label": "lake.sales.ghost", "detail": "PII",
+                "ref": {"type": "tag", "id": pii, "name": "PII"}}])
+    );
+    assert_eq!(missing["ref"], json!({"type": "tags"}));
+    let dropped = finding(&body, "classifications_on_dropped_tables").expect("dropped");
+    assert_eq!(dropped["severity"], "info");
+    assert_eq!(dropped["count"], 1);
+    assert_eq!(dropped["sample"][0]["label"], "lake.sales.gone");
+    assert_eq!(
+        dropped["sentence"],
+        "1 dropped table keeps its classifications, which apply again if it is restored."
+    );
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let nc = not_checked(&body);
+    for kind in [
+        "classifications_on_missing_tables",
+        "classifications_on_dropped_tables",
+    ] {
+        assert!(
+            nc.contains(&(kind.to_string(), json!(["tag:read"]))),
+            "{kind}: {body}"
+        );
+    }
+}
+
+/// R8: classified columns a live table lacks are a warning, each sample
+/// naming the rename candidate or saying it is not in the table; a column of
+/// a dropped or missing table is not counted here (its table is).
+#[tokio::test]
+async fn columns_not_in_their_table_are_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    let orders =
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], "orders", &["id", "email"]).await;
+    // `email` (field 2) renamed to `mail`.
+    lakekeeper_stub::set_schema(
+        &f.db,
+        lk,
+        orders,
+        1,
+        json!({"type": "struct", "schema-id": 1, "fields": [
+            {"id": 1, "name": "id", "type": "string", "required": false},
+            {"id": 2, "name": "mail", "type": "string", "required": false},
+        ]}),
+    )
+    .await;
+    let gone = lakekeeper_stub::add_table(&f.db, lk, &["sales"], "gone", &["id"]).await;
+    lakekeeper_stub::soft_drop(&f.db, lk, gone).await;
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for (table, column) in [
+        ("orders", "email"),
+        ("orders", "ghost"),
+        ("orders", "ID"),
+        ("gone", "nothing"),
+        ("ghost", "nothing"),
+    ] {
+        classify(&f, pii, warehouse, table, column).await;
+    }
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let missing = finding(&body, "classifications_on_missing_columns").expect("missing columns");
+    assert_eq!(missing["severity"], "warning");
+    assert_eq!(missing["count"], 2);
+    assert_eq!(
+        missing["sentence"],
+        "2 classified columns are not in their table: 1 was renamed (egret names the new \
+         column), 1 was dropped or never existed."
+    );
+    let tag_ref = json!({"type": "tag", "id": pii, "name": "PII"});
+    assert_eq!(
+        missing["sample"],
+        json!([
+            {"label": "lake.sales.orders.email", "detail": "renamed to mail", "ref": tag_ref},
+            {"label": "lake.sales.orders.ghost", "detail": "not in the table", "ref": tag_ref},
+        ])
+    );
+}
+
+/// One `tag:move` event of a table rename, as the table hook stores it.
+async fn moved_event(f: &Fixture, warehouse: Uuid, from: &str, to: &str, tag: Uuid, name: &str) {
+    sqlx::query(
+        "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+         VALUES ('mutation', 'tag:move', 'catalog', $1, $2)",
+    )
+    .bind(format!("{warehouse}:sales.{from}"))
+    .bind(json!({
+        "before": {"schema": "sales", "table": from, "column": null},
+        "after": {"schema": "sales", "table": to, "column": null},
+        "tags": [{"id": tag, "name": name}], "rows": 1, "kept": [],
+        "source_kept": false, "trigger": "iceberg_rename",
+    }))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// R10: after `orders -> orders_old` moved PII and a new `orders` took the
+/// name without it, the Overview says so and links the renamed table. A
+/// renamed-away name with no live table (the missing-tables finding's case)
+/// and a name whose new table carries the classification again are not
+/// reported.
+#[tokio::test]
+async fn a_name_a_rename_left_unclassified_under_a_new_table_is_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["orders", "orders_old", "events", "events_old", "gone_old"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let pii: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ('k_pii', 'PII') RETURNING id")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    for table in ["orders_old", "events_old", "events", "gone_old"] {
+        classify(&f, pii, warehouse, table, "").await;
+    }
+    moved_event(&f, warehouse, "orders", "orders_old", pii, "PII").await;
+    moved_event(&f, warehouse, "events", "events_old", pii, "PII").await;
+    moved_event(&f, warehouse, "gone", "gone_old", pii, "PII").await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reused = finding(&body, "renamed_names_reused").expect("renamed_names_reused");
+    assert_eq!(reused["severity"], "warning");
+    assert_eq!(reused["count"], 1);
+    assert_eq!(
+        reused["sentence"],
+        "1 table name lost its classifications when its table was renamed, and a new table now \
+         holds the name without them: check whether it needs the classifications of the renamed \
+         table."
+    );
+    assert_eq!(
+        reused["sample"],
+        json!([{"label": "lake.sales.orders",
+                "detail": "PII moved to lake.sales.orders_old by a rename",
+                "ref": {"type": "object", "catalog": "lake", "schema": "sales",
+                        "object": "orders_old"}}])
+    );
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(not_checked(&body).contains(&("renamed_names_reused".to_string(), json!(["tag:read"]))));
+}
