@@ -369,8 +369,13 @@ impl Walk<'_> {
             return;
         };
         let path = crate::spec::path::task_path(prefix, id);
-        if let Some(row) = t.get("type").and_then(Value::as_str).and_then(task_row) {
-            self.check(row, Site::Task(row), &format!("task '{id}'"), t, &path);
+        match t.get("type").and_then(Value::as_str).and_then(task_row) {
+            // A core leaf is checked against the keys its handler reads (spec
+            // 3.2), which say more than the committed table: a refined finding
+            // replaces the table's for the same key, never a second one.
+            Some(row) if leaf_keys(row).is_some() => self.core_leaf(row, id, t, &path),
+            Some(row) => self.check(row, Site::Task(row), &format!("task '{id}'"), t, &path),
+            None => {}
         }
         if let Some(retry) = t.get("retry") {
             self.retry(retry, &format!("{path}.retry"));
@@ -394,6 +399,50 @@ impl Walk<'_> {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// A core leaf task's keys (spec 3.2): the handler's own and the task
+    /// model's are read; `Task.java`'s are accepted by Kestra and not acted on
+    /// (a warning naming the package that lifts them); any other key, `null`
+    /// included, is a name neither Kestra nor egret has (an error, as Kestra's
+    /// `Unrecognized field`, `YamlParser.java:144-157`). Both messages are
+    /// egret's own.
+    fn core_leaf(
+        &mut self,
+        canonical: &str,
+        id: &str,
+        task: &serde_json::Map<String, Value>,
+        path: &str,
+    ) {
+        let Some(read) = leaf_keys(canonical) else {
+            return;
+        };
+        for key in task.keys().map(String::as_str) {
+            if read.contains(&key) || TASK_MODEL_KEYS.contains(&key) {
+                continue;
+            }
+            let at = format!("{path}.{key}");
+            if TASK_JAVA_UNREAD.contains(&key) {
+                let lift = lift_of(Site::Task(canonical), key)
+                    .expect("every TASK_JAVA_UNREAD key has a lift row");
+                self.report.warnings.push(Finding {
+                    code: "not_honoured",
+                    message: format!(
+                        "task '{id}': property '{key}' is accepted by Kestra on {canonical} but egret does not act on it yet; {}",
+                        lift.sentence()
+                    ),
+                    path: at,
+                });
+            } else {
+                self.report.errors.push(Finding {
+                    code: "unknown_property",
+                    message: format!(
+                        "task '{id}': unknown property '{key}' on {canonical}: neither Kestra nor egret accepts it"
+                    ),
+                    path: at,
+                });
             }
         }
     }
@@ -434,6 +483,22 @@ impl Walk<'_> {
             return;
         };
         for key in object.keys() {
+            // Kestra's `warningOnRetry` (`Retry.java`): `true` ends a retried
+            // task that succeeds WARNING. Said once, in its own words; `false`
+            // is the default, which egret's behaviour already is.
+            if site.is_none() && key == "warningOnRetry" {
+                if object.get(key) == Some(&Value::Bool(true)) {
+                    self.report.warnings.push(Finding {
+                        code: "not_honoured",
+                        message: format!(
+                            "`retry.warningOnRetry` is accepted by Kestra but egret does not act on it yet: a retried task that succeeds ends SUCCESS, not WARNING; {}",
+                            Lift::Package(13).sentence()
+                        ),
+                        path: format!("{path}.{key}"),
+                    });
+                }
+                continue;
+            }
             let at = if path.is_empty() {
                 key.clone()
             } else {
@@ -706,8 +771,7 @@ mod tests {
 
     /// A key Kestra accepts and egret ignores is a warning that names who
     /// lifts it (D2, D12): `onResume` is #9's, `logLevel` #13's.
-    /// `warningOnRetry` has no `lift_of` row yet (Tasks 3 and 6), so it says
-    /// only that egret does not act on it.
+    /// `warningOnRetry` is #13's too (Task 3).
     #[test]
     fn a_key_kestra_accepts_and_egret_ignores_is_not_honoured_and_names_its_package() {
         let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    logLevel: INFO\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n      warningOnRetry: true\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    onResume:\n      - id: ok\n        type: BOOLEAN\n";
@@ -727,9 +791,120 @@ mod tests {
         };
         assert!(at("tasks.t.logLevel").contains("roadmap package #13 lifts it"));
         assert!(at("tasks.gate.onResume").contains("roadmap package #9 lifts it"));
-        assert!(at("tasks.t.retry.warningOnRetry").contains("`warningOnRetry`"));
+        assert!(at("tasks.t.retry.warningOnRetry").contains("roadmap package #13 lifts it"));
         assert_eq!(got.len(), 3, "{got:#?}");
         assert!(report.warnings.iter().all(|w| w.code != "ignored_property"));
+    }
+
+    /// The save-time report every test below reads (spec D11).
+    fn report(src: &str) -> ValidationReport {
+        crate::spec::validate_source(src, &crate::spec::parse(src).unwrap())
+    }
+
+    /// `invalids/invalid-property`, Kestra's `Unrecognized field "invalid"`
+    /// (`YamlParser.java:144-157`): refused at save, by name, at its path.
+    #[test]
+    fn an_unknown_key_on_a_core_task_is_refused() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n    invalid: x\n");
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "unknown_property")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(e.path, "tasks.t.invalid");
+        assert_eq!(e.message, "task 't': unknown property 'invalid' on io.kestra.plugin.core.debug.Return: neither Kestra nor egret accepts it");
+        assert_eq!(r.errors.len(), 1, "one finding per key: {r:?}");
+    }
+
+    /// The alias spelling is checked against the canonical row, and a typo of a
+    /// real key (`mesage`) is the case the check exists for.
+    #[test]
+    fn a_typo_on_an_aliased_log_is_refused() {
+        let r = report(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    mesage: hi\n",
+        );
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "unknown_property" && e.path == "tasks.t.mesage")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            e.message.contains("on io.kestra.plugin.core.log.Log"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// `null` is not a known key either (spec 3.2).
+    #[test]
+    fn a_null_key_is_unknown_not_skipped() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    ~: x\n");
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "tasks.t.~"),
+            "{r:?}"
+        );
+    }
+
+    /// Kestra accepts `logLevel` (`Task.java:77`); egret does not act on it, so
+    /// it is a warning naming #13 and the flow still publishes.
+    #[test]
+    fn a_task_java_key_on_a_core_task_is_warned_with_its_package() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    logLevel: INFO\n");
+        assert!(r.errors.is_empty(), "{r:?}");
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.code == "not_honoured")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(w.path, "tasks.t.logLevel");
+        assert_eq!(w.message, "task 't': property 'logLevel' is accepted by Kestra on io.kestra.plugin.core.log.Log but egret does not act on it yet; roadmap package #13 lifts it");
+        assert_eq!(r.warnings.len(), 1, "one finding per key: {r:?}");
+    }
+
+    /// An unknown key is refused at SAVE only: the run gate still plans it, so a
+    /// version published before #1 keeps running (spec D1).
+    #[test]
+    fn an_unknown_key_does_not_stop_the_run_gate() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n    invalid: x\n";
+        assert!(crate::executor::build_plan(src).is_ok());
+    }
+
+    #[test]
+    fn warning_on_retry_is_warned_on_a_task_and_on_the_flow() {
+        let r = report("id: f\nnamespace: a.b\nretry:\n  type: constant\n  interval: PT1S\n  warningOnRetry: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n      type: constant\n      interval: PT1S\n      warningOnRetry: true\n");
+        let got: std::collections::BTreeMap<_, _> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| (w.path.as_str(), w.message.as_str()))
+            .collect();
+        assert_eq!(got.len(), 2, "{r:?}");
+        for path in ["retry.warningOnRetry", "tasks.t.retry.warningOnRetry"] {
+            assert_eq!(got[path], "`retry.warningOnRetry` is accepted by Kestra but egret does not act on it yet: a retried task that succeeds ends SUCCESS, not WARNING; roadmap package #13 lifts it");
+        }
+    }
+
+    /// `warningOnRetry: false` is Kestra's default: egret's behaviour is the
+    /// same, so there is nothing to warn about.
+    #[test]
+    fn warning_on_retry_false_is_silent() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    retry:\n      type: constant\n      interval: PT1S\n      warningOnRetry: false\n");
+        assert!(r.warnings.iter().all(|w| w.code != "not_honoured"), "{r:?}");
+    }
+
+    /// An authored `flowRef` on a Subflow is not a Kestra property (the model
+    /// field is internal): `unknown_property`, DB-free (Task 2 review).
+    #[test]
+    fn an_authored_flow_ref_on_a_subflow_is_unknown() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: a.b\n    flowId: g\n    flowRef: 00000000-0000-0000-0000-000000000001\n");
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "tasks.s.flowRef"),
+            "{r:?}"
+        );
     }
 
     #[test]

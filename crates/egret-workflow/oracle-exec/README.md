@@ -3548,7 +3548,14 @@ direction.
   `STILL_OVER_ACCEPTED` to a refusal group. The 44 Kestra-published flows the
   same error refuses are named in `executor::PUBLISHED_BUT_REFUSED`.
 - `invalids/invalid-property` — `Unrecognized field "invalid"`. W1 models a
-  task's plugin properties as an opaque `Leaf { spec }` on purpose.
+  task's plugin properties as an opaque `Leaf { spec }` on purpose. **Since
+  2026-10-26 (no-silent-drops Task 3) publish refuses it**: `keys::findings`
+  checks a core task's keys against the keys its handler reads, and `invalid` is
+  an `unknown_property` error. It stays here because the run gate still plans it
+  (a version published before the check keeps running; spec D1) and because the
+  corpus cannot file it: it shares `id: duplicate` with `invalids/duplicate`,
+  loses the name (a `name-contested loser`), so `LIVE` and `VALIDATE_REFUSED`
+  did not move (measured: 295 live, unchanged).
 - `invalids/dag-invalid-subtask` — `tasks[task1].tasks[task1].task.message: must
   not be null`, a `@NotNull` on `Log.message`. Bean validation of a plugin's own
   property; same gap.

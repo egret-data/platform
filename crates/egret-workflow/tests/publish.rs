@@ -1093,3 +1093,48 @@ async fn a_subflow_inside_an_allow_failure_finally_is_resolved_and_warned() {
         ]),
     );
 }
+
+/// **No silent drops, Task 3.** `invalids/invalid-property`: Kestra refuses
+/// `Unrecognized field "invalid"`, so does publish, by name and path.
+#[tokio::test]
+async fn an_unknown_property_on_a_core_task_is_refused_by_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n    invalid: x\n";
+    let f = common::draft(&repo, ws, user, source).await;
+
+    let err = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect_err("an unknown property is refused");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("task 't': unknown property 'invalid' on io.kestra.plugin.core.debug.Return: neither Kestra nor egret accepts it"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A `Task.java` key Kestra accepts and egret does not act on publishes, with
+/// the warning naming the package in the snapshot.
+#[tokio::test]
+async fn a_task_java_key_on_a_core_task_publishes_with_the_warning() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n    logLevel: INFO\n";
+    let f = common::draft(&repo, ws, user, source).await;
+
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect("publishes");
+    assert_eq!(
+        v.snapshot["warnings"],
+        serde_json::json!([{
+            "code": "not_honoured",
+            "message": "task 't': property 'logLevel' is accepted by Kestra on io.kestra.plugin.core.log.Log but egret does not act on it yet; roadmap package #13 lifts it",
+            "path": "tasks.t.logLevel",
+        }]),
+    );
+}

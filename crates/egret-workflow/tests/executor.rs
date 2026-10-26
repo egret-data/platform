@@ -6648,9 +6648,12 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
 const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[
     (
         "invalids/invalid-property",
-        "`Unrecognized field \"invalid\" (class ...debug.Return)` — needs the plugin's own \
-         property schema. W1 models a task's plugin properties as an opaque `Leaf { spec }` \
-         on purpose. Owner: the same plugin-schema gap.",
+        "`Unrecognized field \"invalid\" (class ...debug.Return)` — refused at SAVE since \
+         no-silent-drops Task 3 (2026-10-26: `keys::findings`, `unknown_property`, an error), \
+         but the run gate still plans it on purpose (spec D1: a version published before the \
+         check keeps running), and the corpus cannot file it: it shares `id: duplicate` with \
+         `invalids/duplicate` and loses the name, so the publish census does not see the \
+         refusal. Owner: none; accepted at run time by design.",
     ),
     (
         "invalids/dag-invalid-subtask",
@@ -7091,7 +7094,7 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "invalids/invalid-property",
-            "over-accepted: an unrecognised plugin property",
+            "over-accepted at run time: refused at save since 2026-10-26 (no-silent-drops Task 3), the run gate plans it by design",
         ),
         (
             "valids/dag",
