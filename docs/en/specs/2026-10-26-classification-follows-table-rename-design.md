@@ -806,3 +806,38 @@ Deviations the code forces are recorded here, per task, as they happen.
 - The plan's Task 14 step 6 called the `region`→`area` rename "unclassified, so not held". It is held, as C12
   specifies: the table carries a whole-table classification and a StarRocks engine is bound (StarRocks masks per
   column name). The live run measured it held for 36 s. The plan text is corrected.
+
+### Review fix 9: LOW items
+
+- Finding 6 (case-folded lock keys) landed with fix 2; `view_hold_db` covers the view hold's side.
+- Finding 9: `Leaving::counts_body` reads every value at the catalog, schema, table and column levels and leaves a
+  body uncounted only when every coordinate it names is leaving (unit test
+  `a_body_counts_unless_every_coordinate_it_names_is_leaving`). Today's compiled bodies name one table each, so the
+  served output does not change.
+- Finding 7 is pinned, not changed (`a_column_renamed_onto_a_dropped_fields_name_carries_both`): a dropped field's
+  dormant rows stay on its name, so a field renamed onto that name carries them too (over-tag, never under-tag).
+- Cancellation is pinned (`a_client_that_cancels_mid_hold_does_not_stop_the_move`).
+- Not cheap, recorded in §11 below: findings 8 (an unrelated recompile during the hold drops the overlay), 10 (no
+  durable journal of a hold) and 11 (one hold serializes every schema change of the warehouse for up to 90 s).
+
+### §11 additions (2026-10-26, after review and live check; append-only, so recorded here)
+
+9. **An unrelated recompile during a hold drops the overlay** (review finding 8): a perm or admin recompile of a
+   StarRocks profile between the copy and `finish` compiles the destination without its per-column masks (the `*`
+   deny stays), so a view over the new name may read real values for that interval; KI-305's class. A fix: recompiles
+   take a shared `egret-table-hook` lock, or the overlay is stored for the hold's lifetime.
+10. **No durable journal of a hold** (review finding 10): a crash between copy and forward leaves the copied rows on
+    the destination (over-tag, shown as `missing`); a crash between Lakekeeper's 2xx and `finish` leaves both names
+    classified. Never a leak.
+11. **One hold serializes the warehouse's schema changes** (review finding 11): the hold takes every bound profile's
+    `egret-table-hook` lock for up to 90 s, so a concurrent #755 schema commit or undrop waits up to 30 s, then is
+    refused 409.
+12. **After an undrop, a StarRocks view reads real values until the next policy poll** (live check F2, measured 23 s):
+    undrop rewrites the masks before it returns but is not held. Same class as KI-305 (item 6), kept out by R6; the
+    wait built here (§5.5) could hold undrop too.
+
+### §10 addition: measured (live check F3)
+
+- The StarRocks plugin reports a policy version in `lastKnownVersion` on the poll AFTER the one that downloaded it,
+  so a held rename on a warehouse with StarRocks bound costs about two policy polls: 56 s, 50 s and 36 s measured
+  with a 30 s poll. The 90 s deadline covers it.

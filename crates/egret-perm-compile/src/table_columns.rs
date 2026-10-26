@@ -105,25 +105,39 @@ impl Leaving {
         }
     }
 
-    /// [`Self::counts_toward_ceiling`] for a compiled body, read from its
-    /// first value at each of `levels` (catalog, schema, table, column). A
-    /// body that names no table (a tag policy) always counts.
+    /// [`Self::counts_toward_ceiling`] for a compiled body, read from every
+    /// value at each of `levels` (catalog, schema, table, column): the body
+    /// is uncounted only when every coordinate it names is leaving (review
+    /// finding 9). A body that names no table (a tag policy) always counts.
     pub fn counts_body(&self, body: &Value, levels: &[&str]) -> bool {
-        let value = |level: &str| {
-            body.get("resources")?
-                .get(level)?
-                .get("values")?
-                .as_array()?
-                .first()?
-                .as_str()
+        let values = |level: &str| -> Vec<&str> {
+            body.get("resources")
+                .and_then(|r| r.get(level))
+                .and_then(|l| l.get("values"))
+                .and_then(Value::as_array)
+                .map(|vs| vs.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default()
         };
         let [catalog, schema, table, column, ..] = levels else {
             return true;
         };
-        match (value(catalog), value(schema), value(table)) {
-            (Some(c), Some(s), Some(t)) => self.counts_toward_ceiling(c, s, t, value(column)),
-            _ => true,
+        let (catalogs, schemas, tables) = (values(catalog), values(schema), values(table));
+        if catalogs.is_empty() || schemas.is_empty() || tables.is_empty() {
+            return true;
         }
+        let columns: Vec<Option<&str>> = match values(column) {
+            cs if cs.is_empty() => vec![None],
+            cs => cs.into_iter().map(Some).collect(),
+        };
+        catalogs.iter().any(|c| {
+            schemas.iter().any(|s| {
+                tables.iter().any(|t| {
+                    columns
+                        .iter()
+                        .any(|col| self.counts_toward_ceiling(c, s, t, *col))
+                })
+            })
+        })
     }
 }
 
@@ -696,6 +710,25 @@ mod tests {
             ]
         );
         assert_eq!(top_level_columns(&schema), vec!["Email", "region"]);
+    }
+
+    #[test]
+    fn a_body_counts_unless_every_coordinate_it_names_is_leaving() {
+        let mut leaving = Leaving::default();
+        leaving
+            .tables
+            .insert(("lake".into(), "sales".into(), "orders".into()));
+        let levels = ["catalog", "database", "table", "column"];
+        let body = |tables: &[&str]| {
+            json!({"resources": {
+                "catalog": {"values": ["lake"]}, "database": {"values": ["sales"]},
+                "table": {"values": tables}, "column": {"values": ["*"]}}})
+        };
+        assert!(!leaving.counts_body(&body(&["orders"]), &levels));
+        assert!(!leaving.counts_body(&body(&["Orders"]), &levels));
+        assert!(leaving.counts_body(&body(&["orders", "events"]), &levels));
+        assert!(leaving.counts_body(&body(&["events", "orders"]), &levels));
+        assert!(leaving.counts_body(&json!({"resources": {"tag": {"values": ["pii"]}}}), &levels));
     }
 
     #[test]

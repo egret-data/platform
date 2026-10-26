@@ -3345,3 +3345,64 @@ async fn a_classified_rename_onto_a_dropped_tables_name_is_refused_at_once() {
     );
     assert_eq!(env.tag_version().await, tag_version);
 }
+
+// ── Review fix 9: LOW-list tests ──
+
+/// Review finding 7 (documented, over-tag): one commit drops field 3 (`b`) and
+/// renames field 2 (`a`) to `b`. `a`'s rows follow field 2 to `b`; `b`'s rows
+/// stay on the name `b` (R3 keeps a dropped field's rows dormant, by name), so
+/// field 2 now carries both. Over-tags, never under-tags.
+#[tokio::test]
+async fn a_column_renamed_onto_a_dropped_fields_name_carries_both() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    let on_a = env.classify_column("orders", "a").await;
+    let on_b = env.classify_column("orders", "b").await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.commit_schema("orders", 1, &[(1, "id"), (2, "b")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(on_a, "orders", "b"), row(on_b, "orders", "b")])
+    );
+}
+
+/// The hold's work runs uncancellable: a client that goes away mid-hold does
+/// not stop the wait, the forward or `finish`. The rename lands and the rows
+/// end on the new name only.
+#[tokio::test]
+async fn a_client_that_cancels_mid_hold_does_not_stop_the_move() {
+    let Some(env) = env().await else { return };
+    let env = Arc::new(env);
+    let (a, b) = env.classified_orders().await;
+    let trino = env.start_trino_plugin();
+    let starrocks = env.start_starrocks_plugin(POLL * 5);
+    trino.polled().await;
+    starrocks.polled().await;
+
+    let rename = {
+        let env = env.clone();
+        tokio::spawn(async move { env.rename("orders", "orders_v2").await })
+    };
+    for _ in 0..200 {
+        if env.rows().await.iter().any(|r| r.2 == "orders_v2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!rename.is_finished(), "the rename is still held");
+    rename.abort();
+
+    let moved = sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")]);
+    for _ in 0..100 {
+        if env.rows().await == moved {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(env.rows().await, moved);
+    assert!(env.source("orders_v2").await.is_some(), "the rename landed");
+}
