@@ -6,9 +6,6 @@
 //! `spec::schema::measure` imports these instead of keeping its own copies,
 //! so the instrument and the check read one table.
 
-// Some tables are read only by the later tasks' walkers (plan Tasks 3-7).
-#![allow(dead_code)]
-
 use serde_json::Value;
 
 use crate::models::{self, Flow};
@@ -364,6 +361,8 @@ pub(crate) fn leaf_keys(t: &str) -> Option<Vec<&'static str>> {
     })
 }
 
+/// Read only by the measuring instrument (`schema::measure`, test-only).
+#[cfg(test)]
 pub(crate) fn flowable_keys(t: &str) -> Vec<&'static str> {
     match t {
         "io.kestra.plugin.core.flow.Sequential" => wire_fields_of::<models::Sequential>(),
@@ -474,7 +473,9 @@ pub(crate) fn seen(source: &str, flow: &Flow) -> Seen {
 
 /// The path of every model task that the raw walk of `source` does not reach
 /// (a raw entry missing, or a different `id` at that place). The walk fails
-/// open there, so this must be empty for every corpus flow.
+/// open there, so this must be empty for every corpus flow. Read only by the
+/// corpus test.
+#[cfg(test)]
 pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
     let Ok(Value::Object(doc)) = serde_norway::from_str::<Value>(source) else {
         return crate::spec::path::every_task(flow)
@@ -555,10 +556,11 @@ fn is_non_runnable(canonical: &str) -> bool {
 /// are #2's (spec Rule 1); a `Pause` `tasks:` is `executor::pause_gap`'s
 /// (D14), so it is not reported a second time; `revision`, `updated` and
 /// `tenantId` are server-managed and Kestra ignores what an author writes
-/// (D15).
+/// (D15). `pluginDefaults` keeps its own `removed_plugin_defaults`
+/// (`validate::save_only_findings`, spec 3.1).
 fn silent(site: Option<Site<'_>>, key: &str) -> bool {
     match site {
-        Some(Site::Flow) => matches!(key, "revision" | "updated" | "tenantId"),
+        Some(Site::Flow) => matches!(key, "revision" | "updated" | "tenantId" | "pluginDefaults"),
         Some(Site::Task(t)) if FLOWABLE_TYPES.iter().any(|(c, _)| *c == t) => {
             matches!(key, "finally" | "errors" | "taskCache" | "workerSelector")
                 || (t == "io.kestra.plugin.core.flow.Pause" && key == "tasks")
@@ -903,7 +905,9 @@ impl Walk<'_> {
             return;
         };
         let path = crate::spec::path::task_path(prefix, id);
-        let row = t.get("type").and_then(Value::as_str).and_then(task_row);
+        let ty = t.get("type").and_then(Value::as_str);
+        let row = ty.and_then(task_row);
+        let is_plugin = ty.is_some_and(|ty| ty.starts_with(crate::plugins::PREFIX));
         match row {
             // A core leaf is checked against the keys its handler reads (spec
             // 3.2), which say more than the committed table: a refined finding
@@ -911,7 +915,7 @@ impl Walk<'_> {
             Some(row) if leaf_keys(row).is_some() => self.core_leaf(row, id, t, &path),
             // Script and plugin tasks keep their own gates
             // (`script_property_unknown`, `plugin_property_unknown`; spec D13).
-            Some(row) if crate::scripts::kind_of(row).is_some() => {}
+            Some(row) if crate::scripts::kind_of(row).is_some() || is_plugin => {}
             Some(row) => self.check(row, Site::Task(row), &format!("task '{id}'"), t, &path),
             None => {}
         }
@@ -1515,6 +1519,35 @@ mod tests {
                 "{ty}: {r:?}"
             );
         }
+    }
+
+    /// A catalog plugin task has a property-treatment row, so the walker would
+    /// resolve it; its typo and `taskRunner` belong to `plugin_property_unknown`
+    /// and `plugin_property_not_implemented` (D13, `tests/plugins_gate.rs`).
+    #[test]
+    fn a_catalog_plugin_task_is_left_to_its_own_gate() {
+        let ty = "kestra.io.kestra.plugin.jdbc.postgresql.Query";
+        for key in [
+            "urll: x",
+            "taskRunner: {type: io.kestra.plugin.scripts.runner.docker.Docker}",
+        ] {
+            let src =
+                format!("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: {ty}\n    {key}\n");
+            let r = report(&src);
+            assert!(
+                r.errors.iter().all(|e| e.code != "unknown_property"),
+                "{key}: {r:?}"
+            );
+        }
+    }
+
+    /// `pluginDefaults:` is refused once, as `removed_plugin_defaults`
+    /// (spec 3.1), not also as an unknown flow property.
+    #[test]
+    fn plugin_defaults_is_refused_exactly_once() {
+        let r = report("id: f\nnamespace: a.b\npluginDefaults: []\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n");
+        assert_eq!(r.errors.len(), 1, "{r:?}");
+        assert_eq!(r.errors[0].code, "removed_plugin_defaults", "{r:?}");
     }
 
     /// Kestra's `Log` has no `format` and its `Return` has no `message`

@@ -24,11 +24,13 @@ pub use input::{DependsOn, Input, InputType};
 pub use property::Property;
 pub use state::State;
 pub(crate) use task::canonical_flow_type;
+pub(crate) use task::DagNode;
 /// A `WorkingDirectory` block's definition, read by the worker's block claims
 /// (spec §5.1), not only by the measurement.
 pub(crate) use task::WorkingDirectory;
-/// The flowables' typed structs, for `spec::keys`.
-pub(crate) use task::{AllowFailure, Dag, DagNode, If, Loop, Parallel, Sequential, Switch};
+/// The flowables' typed structs, for `spec::keys::flowable_keys` (test-only).
+#[cfg(test)]
+pub(crate) use task::{AllowFailure, Dag, If, Loop, Parallel, Sequential, Switch};
 pub use task::{
     CheckFrequency, LoopUntil, Pause, Retry, RetryBehavior, RetryCommon, Subflow, Task, TaskKind,
 };
